@@ -1,0 +1,9 @@
+[package]
+name = "gertie-core"
+description = "gertie's headless agent core: loop, sessions, permissions, checkpoints"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]

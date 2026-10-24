@@ -1,0 +1,22 @@
+[workspace]
+resolver = "3"
+members = ["gertie", "gertie-core", "gertie-providers", "gertie-tools"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.97"
+license = "MIT"
+
+[workspace.dependencies]
+gertie-core = { path = "gertie-core" }
+gertie-providers = { path = "gertie-providers" }
+gertie-tools = { path = "gertie-tools" }
+
+[profile.dev.package."*"]
+opt-level = 2
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+debug = "line-tables-only"

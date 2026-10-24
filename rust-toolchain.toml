@@ -1,0 +1,6 @@
+# gpui-kit's GPUI family (gpui-pre) tracks Zed's toolchain; keep in sync with
+# the toolchain gpui-kit 0.7 / gpui-pre 0.3.x was built against.
+[toolchain]
+channel = "1.97.1"
+profile = "minimal"
+components = ["rustfmt", "clippy"]

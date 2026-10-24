@@ -1,0 +1,14 @@
+[package]
+name = "gertie-providers"
+description = "Provider trait and implementations for gertie (OpenAI-compatible first)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+gertie-core = { workspace = true }
+futures-core = { version = "0.3", features = ["alloc"] }
+
+[dev-dependencies]
+futures-util = { version = "0.3", default-features = false, features = ["alloc"] }

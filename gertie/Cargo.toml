@@ -1,0 +1,17 @@
+[package]
+name = "gertie"
+description = "gertie: a fast, native agent harness"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "gertie"
+path = "src/main.rs"
+
+[dependencies]
+gertie-core = { workspace = true }
+# Pinned: the gpui-kit 0.7.x line moves fast (0.7.3 already broke the API
+# riddim's proven 0.7.0 combo was verified against). Bump deliberately.
+gpui-kit = "=0.7.0"
