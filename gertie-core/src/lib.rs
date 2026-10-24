@@ -119,6 +119,10 @@ pub struct Message {
 pub struct SessionSummary {
     pub id: SessionId,
     pub title: String,
+    /// Cumulative token totals, persisted from usage events. A resumed
+    /// session shows what it spent before, not just since reopen.
+    pub input_tokens: u64,
+    pub output_tokens: u64,
 }
 
 /// One full-text search hit: which session, what role, and a marked
@@ -217,7 +221,12 @@ impl SessionStore {
             let rows = statement.query_map([], |row| row.get::<_, String>(1))?;
             rows.collect::<Result<Vec<_>, _>>()?
         };
-        for (column, definition) in [("parent_id", "INTEGER"), ("kind", "TEXT DEFAULT 'chat'")] {
+        for (column, definition) in [
+            ("parent_id", "INTEGER"),
+            ("kind", "TEXT DEFAULT 'chat'"),
+            ("input_tokens", "INTEGER DEFAULT 0"),
+            ("output_tokens", "INTEGER DEFAULT 0"),
+        ] {
             if !session_columns.contains(&column.to_string()) {
                 connection.execute(
                     &format!("ALTER TABLE sessions ADD COLUMN {column} {definition}"),
@@ -266,12 +275,14 @@ impl SessionStore {
     ) -> Result<Vec<SessionSummary>, rusqlite::Error> {
         let connection = self.connection.lock().unwrap();
         let mut statement = connection
-            .prepare("SELECT id, title FROM sessions WHERE parent_id = ?1 ORDER BY id")?;
+            .prepare("SELECT id, title, input_tokens, output_tokens FROM sessions WHERE parent_id = ?1 ORDER BY id")?;
         let rows = statement
             .query_map([parent.0 as i64], |row| {
                 Ok(SessionSummary {
                     id: SessionId(row.get::<_, i64>(0)? as u64),
                     title: row.get(1)?,
+                    input_tokens: row.get::<_, i64>(2)?.max(0) as u64,
+                    output_tokens: row.get::<_, i64>(3)?.max(0) as u64,
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -288,15 +299,59 @@ impl SessionStore {
             .is_ok()
     }
 
+    /// Adds a request's usage to the session's running totals. One call
+    /// per Usage event — a single UPDATE, not a per-token write.
+    pub fn add_usage(
+        &self,
+        session: SessionId,
+        input_tokens: u64,
+        output_tokens: u64,
+    ) -> Result<(), rusqlite::Error> {
+        let connection = self.connection.lock().unwrap();
+        connection
+            .prepare(
+                "UPDATE sessions SET input_tokens = input_tokens + ?2,
+                       output_tokens = output_tokens + ?3 WHERE id = ?1",
+            )?
+            .execute(rusqlite::params![
+                session.0 as i64,
+                input_tokens as i64,
+                output_tokens as i64
+            ])?;
+        Ok(())
+    }
+
+    /// Token totals across every session — chats and worker runs. The
+    /// settings panel's bottom line: what gertie has cost, in tokens.
+    pub fn total_usage(&self) -> (u64, u64) {
+        let connection = self.connection.lock().unwrap();
+        connection
+            .query_row(
+                "SELECT COALESCE(SUM(input_tokens), 0), COALESCE(SUM(output_tokens), 0)
+                 FROM sessions",
+                [],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?.max(0) as u64,
+                        row.get::<_, i64>(1)?.max(0) as u64,
+                    ))
+                },
+            )
+            .unwrap_or((0, 0))
+    }
+
     /// Newest session first, for the sidebar.
     pub fn list_sessions(&self) -> Result<Vec<SessionSummary>, rusqlite::Error> {
         let connection = self.connection.lock().unwrap();
-        let mut statement = connection
-            .prepare("SELECT id, title FROM sessions WHERE kind = 'chat' ORDER BY id DESC")?;
+        let mut statement = connection.prepare(
+            "SELECT id, title, input_tokens, output_tokens FROM sessions WHERE kind = 'chat' ORDER BY id DESC",
+        )?;
         let rows = statement.query_map([], |row| {
             Ok(SessionSummary {
                 id: SessionId(row.get::<_, i64>(0)? as u64),
                 title: row.get(1)?,
+                input_tokens: row.get::<_, i64>(2)?.max(0) as u64,
+                output_tokens: row.get::<_, i64>(3)?.max(0) as u64,
             })
         })?;
         rows.collect()
@@ -545,6 +600,24 @@ mod tests {
 
     fn memory_store() -> SessionStore {
         SessionStore::open(Path::new(":memory:")).expect("open in-memory store")
+    }
+
+    #[test]
+    fn usage_persists_per_session_and_sums_across_all() {
+        let store = memory_store();
+        let chat = store.create_session("chat").unwrap();
+        let worker = store.create_worker_run(Some(chat), "worker").unwrap();
+
+        store.add_usage(chat, 100, 10).unwrap();
+        store.add_usage(chat, 40, 5).unwrap();
+        store.add_usage(worker, 200, 30).unwrap();
+
+        let chats = store.list_sessions().unwrap();
+        let chat_row = chats.iter().find(|summary| summary.id == chat).unwrap();
+        assert_eq!((chat_row.input_tokens, chat_row.output_tokens), (140, 15));
+        // The all-sessions total includes worker runs too — that's the
+        // real cost.
+        assert_eq!(store.total_usage(), (340, 45));
     }
 
     #[test]

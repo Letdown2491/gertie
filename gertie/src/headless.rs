@@ -243,6 +243,9 @@ pub(crate) fn pump(
                     input_tokens,
                     output_tokens,
                 } => {
+                    // Persist against the session so its totals survive
+                    // the run — same ledger the GUI reads on resume.
+                    let _ = store.add_usage(session, input_tokens, output_tokens);
                     eprintln!("· tokens — {input_tokens} in / {output_tokens} out (this request)");
                 }
                 LoopEvent::Compacted { kept, total } => {

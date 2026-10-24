@@ -74,9 +74,12 @@ pub struct ChatView {
     /// What the agent is up to right now, for the status line — the loop
     /// goes quiet between streaming rounds, and silence reads as a hang.
     activity: String,
-    /// Session token totals from the provider's usage events (in, out).
-    /// In-memory for now; a persisted per-session ledger is M3 scope.
+    /// Session token totals from the provider's usage events — persisted
+    /// per session, so a resumed chat shows what it spent before too.
     usage: (u64, u64),
+    /// Token totals across all sessions, for the settings panel.
+    /// Refreshed when the panel opens, never per render.
+    total_usage: (u64, u64),
     /// Shared approval registry: leader and worker asks, one answer path.
     broker: Arc<PermissionBroker>,
     /// The front's current session, read by subagent dispatch to link
@@ -159,6 +162,12 @@ impl ChatView {
         };
         session_scope.set(session_id);
 
+        let session_usage = session_id
+            .and_then(|id| sessions.iter().find(|summary| summary.id == id))
+            .map(|summary| (summary.input_tokens, summary.output_tokens))
+            .unwrap_or((0, 0));
+        let total_usage = store.total_usage();
+
         let mut view = Self {
             store,
             provider,
@@ -173,7 +182,8 @@ impl ChatView {
             streaming_assistant: None,
             last_db_id: None,
             activity: "starting…".into(),
-            usage: (0, 0),
+            usage: session_usage,
+            total_usage,
             broker,
             session_scope,
             input,
@@ -295,6 +305,12 @@ impl ChatView {
         }
         self.session_id = Some(session_id);
         self.session_scope.set(Some(session_id));
+        self.usage = self
+            .sessions
+            .iter()
+            .find(|summary| summary.id == session_id)
+            .map(|summary| (summary.input_tokens, summary.output_tokens))
+            .unwrap_or((0, 0));
         self.refresh_agent_runs(cx);
         self.reload_session(cx);
         window.focus(&self.input.read(cx).focus_handle(cx), cx);
@@ -328,6 +344,7 @@ impl ChatView {
         } else {
             Panel::Settings
         };
+        self.total_usage = self.store.total_usage();
         cx.notify();
     }
 
@@ -535,6 +552,14 @@ impl ChatView {
                         let _ = this.update(cx, |this, cx| {
                             this.usage.0 += input_tokens;
                             this.usage.1 += output_tokens;
+                            // The ledger outlives the view: persist per
+                            // request so a resumed session shows its
+                            // whole spend, not just since reopen.
+                            if let Some(session) = this.session_id {
+                                let _ = this
+                                    .store
+                                    .add_usage(session, input_tokens, output_tokens);
+                            }
                             cx.notify();
                         });
                     }
@@ -1135,6 +1160,15 @@ impl ChatView {
                     } else {
                         self.settings.agents.join(", ")
                     },
+                    false,
+                ),
+                row(
+                    "tokens, all sessions".into(),
+                    format!(
+                        "in {} · out {}",
+                        human_tokens(self.total_usage.0),
+                        human_tokens(self.total_usage.1)
+                    ),
                     false,
                 ),
             ])
