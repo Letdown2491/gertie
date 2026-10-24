@@ -191,6 +191,30 @@ impl EndpointConfig {
                 .unwrap_or_default(),
         }
     }
+
+    /// Where the key comes from, for `gertie doctor`:
+    /// ("env", "PPQ_API_KEY") means the named variable; None means
+    /// nothing resolved.
+    pub fn key_source(&self) -> Option<(&'static str, String)> {
+        if let Some(name) = &self.api_key_env
+            && std::env::var(name).is_ok_and(|value| !value.is_empty())
+        {
+            return Some(("env", name.clone()));
+        }
+        let conventional = format!("GERTIE_{}_API_KEY", self.env_name());
+        if std::env::var(&conventional).is_ok_and(|value| !value.is_empty()) {
+            return Some(("env", conventional));
+        }
+        if self.api_key.is_some() {
+            return Some(("config", self.name.clone()));
+        }
+        None
+    }
+
+    /// The env-var-friendly endpoint name: `my-endpoint` → `MY_ENDPOINT`.
+    pub(crate) fn env_name(&self) -> String {
+        self.name.to_uppercase().replace([' ', '-'], "_")
+    }
 }
 
 impl Config {
@@ -290,22 +314,134 @@ impl Config {
             {
                 warnings.push(format!(
                     "endpoint {}: unknown wire {:?} — speaking openai; \
-                     valid wires are openai | anthropic",
+                 valid wires are openai | anthropic",
                     endpoint.name, wire
                 ));
             }
         }
         // A key that resolves to nothing means a guaranteed 401 on the
-        // first request — say so up front, with the fix, not after.
-        if let Some(endpoint) = self.selected_endpoint()
-            && endpoint.api_key.is_none()
+        // first request — say so up front, with the exact fix, not after.
+        if let Some(selected) = self.selected_endpoint_config()
+            && selected.resolve().api_key.is_none()
         {
+            let variable = selected
+                .api_key_env
+                .clone()
+                .unwrap_or_else(|| format!("GERTIE_{}_API_KEY", selected.env_name()));
             warnings.push(format!(
-                "endpoint {}: no API key resolved — set the api_key_env variable \
-                 in your environment, or api_key in config.toml",
-                endpoint.name
+                "endpoint {}: no API key resolved — export {variable}=<your key> and restart",
+                selected.name
             ));
         }
         warnings
+    }
+
+    /// The endpoint the provider talks to, pre-resolution.
+    pub(crate) fn selected_endpoint_config(&self) -> Option<&EndpointConfig> {
+        self.default_endpoint
+            .as_ref()
+            .and_then(|name| {
+                self.endpoints
+                    .iter()
+                    .find(|endpoint| &endpoint.name == name)
+            })
+            .or_else(|| self.endpoints.first())
+    }
+
+    /// First-run experience: if the default config file does not
+    /// exist, write a working starter (a real endpoint entry that
+    /// needs only an API key) and return the message to surface in the
+    /// status line. Never called for an explicit `--config` path — an
+    /// override pointing at nothing means the user knows what they're
+    /// doing.
+    pub fn ensure_skeleton(path: &std::path::Path) -> Option<String> {
+        if path.exists() {
+            return None;
+        }
+        let skeleton = r#"# gertie's config. Full options live in the docs' config.example.toml:
+# endpoints (wire, fallbacks), MCP servers (stdio or HTTP), agents,
+# search backends, sandboxing. Keys resolve from api_key_env first.
+[[endpoints]]
+name = "ppq"
+base_url = "https://api.ppq.ai/v1"
+model = "glm-5.3-flash"
+api_key_env = "PPQ_API_KEY"
+
+# Any OpenAI-compatible endpoint works (OpenRouter, Ollama, vLLM...):
+# [[endpoints]]
+# name = "local"
+# base_url = "http://127.0.0.1:11434/v1"
+# model = "qwen3-coder"
+
+# Anthropic-native endpoints speak a different wire:
+# wire = "anthropic"
+
+default_endpoint = "ppq"
+"#;
+        if let Some(parent) = path.parent()
+            && let Err(error) = std::fs::create_dir_all(parent)
+        {
+            return Some(format!(
+                "could not create starter config: {error} — config dir {}",
+                parent.display()
+            ));
+        }
+        match std::fs::write(path, skeleton) {
+            Ok(()) => Some(format!(
+                "starter config created at {} — set PPQ_API_KEY or edit it",
+                path.display()
+            )),
+            Err(error) => Some(format!("could not write starter config: {error}")),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn skeleton_is_created_once_and_never_overwritten() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+
+        // First run: a starter lands, and it parses as a real config.
+        let note = Config::ensure_skeleton(&path).expect("created");
+        assert!(note.contains("starter config created"));
+        let config = Config::load_from(&path).expect("skeleton parses");
+        assert_eq!(config.selected_endpoint().expect("endpoint").name, "ppq");
+
+        // Second run: silence — the user's edits are untouchable.
+        std::fs::write(&path, "[[endpoints]]\nname = \"mine\"").unwrap();
+        assert!(Config::ensure_skeleton(&path).is_none());
+        let raw = std::fs::read_to_string(&path).unwrap();
+        assert!(raw.contains("mine"), "skeleton must not overwrite");
+    }
+
+    #[test]
+    fn missing_key_warning_names_the_variable() {
+        let mut config = Config::default();
+        config.endpoints.push(EndpointConfig {
+            name: "ppq".into(),
+            base_url: "https://api.ppq.ai/v1".into(),
+            model: "glm-5.3-flash".into(),
+            wire: None,
+            api_key: None,
+            api_key_env: Some("GERTIE_TEST_UNSET_KEY_8347".into()),
+            context_window: None,
+        });
+        config.default_endpoint = Some("ppq".into());
+        // No env mutation (unsafe under edition 2024) — the variable is
+        // simply too improbable for anything to set it.
+
+        let warnings = config.key_warnings();
+        let warning = warnings
+            .iter()
+            .find(|warning| warning.contains("no API key resolved"))
+            .expect("warning present");
+        assert!(
+            warning.contains("export GERTIE_TEST_UNSET_KEY_8347="),
+            "the warning names the fix: {warning}"
+        );
     }
 }

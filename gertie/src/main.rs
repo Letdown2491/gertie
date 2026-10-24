@@ -9,6 +9,9 @@ fn main() {
             yes,
             config,
         }) => std::process::exit(gertie::headless::run(prompt, yes, config)),
+        Ok(gertie::cli::Command::Doctor { config }) => {
+            std::process::exit(gertie::doctor::run(config))
+        }
         Err(error) => {
             eprintln!("error: {}\n\n{}", error.0, gertie::cli::usage());
             std::process::exit(2);

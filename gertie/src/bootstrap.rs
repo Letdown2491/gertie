@@ -44,6 +44,15 @@ impl Bootstrap {
     /// except for the one non-negotiable (no session store): callers
     /// decide what their surface does with warnings.
     pub fn load(config_path: Option<&Path>) -> Self {
+        // First run with the default path: no config file yet means
+        // gertie writes a working starter (one endpoint, env key) and
+        // says so — the user edits instead of staring at a blank wall.
+        // An explicit --config override never gets one written.
+        let skeleton_note = match config_path {
+            None => crate::config::Config::path()
+                .and_then(|path| crate::config::Config::ensure_skeleton(&path)),
+            Some(_) => None,
+        };
         // A config that fails to parse is reported, not silent.
         let loaded = match config_path {
             Some(path) => crate::config::Config::load_from(path).map(Some),
@@ -57,6 +66,8 @@ impl Bootstrap {
         let endpoint = config.selected_endpoint();
         let mut label = if let Some(error) = &config_error {
             format!("config error — {error}")
+        } else if let Some(note) = &skeleton_note {
+            note.clone()
         } else {
             endpoint
                 .as_ref()

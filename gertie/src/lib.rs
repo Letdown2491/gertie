@@ -2,6 +2,7 @@ pub mod app;
 pub mod chat;
 pub mod cli;
 pub mod config;
+pub mod doctor;
 pub mod headless;
 pub mod settings;
 pub mod tabs;

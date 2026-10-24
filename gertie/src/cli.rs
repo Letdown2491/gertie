@@ -13,6 +13,8 @@ USAGE:
     gertie run [OPTIONS] [PROMPT]    run one turn headlessly; the answer
                                      goes to stdout, activity to stderr,
                                      and the session is saved
+    gertie doctor                    check the setup: config, endpoint,
+                                     key resolution, MCP, sessions
 
 OPTIONS:
     --config <PATH>    config file (default: the standard config dir)
@@ -35,6 +37,8 @@ pub enum Command {
         yes: bool,
         config: Option<PathBuf>,
     },
+    /// The setup diagnostic.
+    Doctor { config: Option<PathBuf> },
     /// Print usage and exit 0.
     Help,
     /// Print version and exit 0.
@@ -50,6 +54,7 @@ pub fn parse(arguments: &[String]) -> Result<Command, UsageError> {
     let mut yes = false;
     let mut positional: Vec<String> = Vec::new();
     let mut run = false;
+    let mut doctor = false;
 
     let mut index = 0;
     while index < arguments.len() {
@@ -58,6 +63,7 @@ pub fn parse(arguments: &[String]) -> Result<Command, UsageError> {
             "-h" | "--help" => return Ok(Command::Help),
             "-V" | "--version" => return Ok(Command::Version),
             "-y" | "--yes" => yes = true,
+            "doctor" if positional.is_empty() && !run && !doctor => doctor = true,
             "--config" => {
                 index += 1;
                 let Some(value) = arguments.get(index) else {
@@ -79,6 +85,16 @@ pub fn parse(arguments: &[String]) -> Result<Command, UsageError> {
             _ => positional.push(argument.to_string()),
         }
         index += 1;
+    }
+
+    if doctor {
+        if !positional.is_empty() {
+            return Err(UsageError(format!(
+                "unexpected argument: {} (doctor takes no prompt)",
+                positional[0]
+            )));
+        }
+        return Ok(Command::Doctor { config });
     }
 
     if !run {
@@ -176,6 +192,19 @@ mod tests {
         assert!(parse_arguments(&["--wat"]).is_err());
         assert!(parse_arguments(&["--config"]).is_err());
         assert!(parse_arguments(&["--config="]).is_err());
+    }
+
+    #[test]
+    fn doctor_takes_config_overrides() {
+        let command = parse_arguments(&["doctor"]).unwrap();
+        assert_eq!(command, Command::Doctor { config: None });
+        let command = parse_arguments(&["doctor", "--config", "/tmp/x.toml"]).unwrap();
+        assert_eq!(
+            command,
+            Command::Doctor {
+                config: Some("/tmp/x.toml".into())
+            }
+        );
     }
 
     #[test]

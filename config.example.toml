@@ -18,7 +18,8 @@ api_key_env = "PPQ_API_KEY"
 # model = "qwen3-coder"
 # context_window = 32768
 
-# MCP servers (stdio). Every MCP tool call prompts — third-party tools
+# MCP servers — either a spawned process (stdio) or a remote URL
+# (Streamable HTTP). Every MCP tool call prompts — third-party tools
 # are untrusted by default.
 # [[mcp_servers]]
 # name = "filesystem"
@@ -26,6 +27,10 @@ api_key_env = "PPQ_API_KEY"
 # args = ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
 # [mcp_servers.env]
 # NODE_ENV = "production"
+#
+# [[mcp_servers]]
+# name = "remote"
+# url = "https://mcp.example.com/mcp"
 
 # Security posture. sandbox_bash = true Landlock-isolates bash children:
 # system read-only, writes limited to the workspace and /tmp. Opt-in;
