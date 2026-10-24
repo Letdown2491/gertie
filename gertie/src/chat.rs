@@ -9,7 +9,7 @@ use gertie_core::{
 };
 use gertie_providers::AnyProvider;
 use gpui_kit::component::ThemeMode;
-use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::component::button::{Button, ButtonCustomVariant, ButtonVariants as _};
 use gpui_kit::component::input::{Input, InputEvent, InputState, Textarea, TextareaState};
 use gpui_kit::component::spinner::Spinner;
 use gpui_kit::component::{ActiveTheme, Sizable as _, h_flex, v_flex};
@@ -923,6 +923,7 @@ impl ChatView {
                                     .label("Approve")
                                     .small()
                                     .primary()
+                                    .tooltip("Run it")
                                     .on_click(cx.listener(move |this, _, _, cx| {
                                         this.decide_tool(index, PermissionDecision::Approve, cx)
                                     })),
@@ -931,6 +932,8 @@ impl ChatView {
                                 Button::new(SharedString::from(format!("deny-{index}")))
                                     .label("Deny")
                                     .small()
+                                    .outline()
+                                    .tooltip("Refuse this call")
                                     .on_click(cx.listener(move |this, _, _, cx| {
                                         this.decide_tool(index, PermissionDecision::Deny, cx)
                                     })),
@@ -1005,7 +1008,9 @@ impl ChatView {
             .flex_shrink_0()
             .border_l_1()
             .border_color(theme.border)
-            .p_2()
+            .pt_3()
+            .px_3()
+            .pb_3()
             .gap_1()
             .overflow_y_scroll()
             .child(
@@ -1067,7 +1072,8 @@ impl ChatView {
         };
         let section = |title: &'static str| {
             div()
-                .mt_2()
+                .mt_3()
+                .mb_0p5()
                 .text_size(px(11.))
                 .text_color(theme.muted_foreground)
                 .child(title)
@@ -1105,7 +1111,9 @@ impl ChatView {
             .flex_shrink_0()
             .border_l_1()
             .border_color(theme.border)
-            .p_2()
+            .pt_3()
+            .px_3()
+            .pb_3()
             .gap_1()
             .overflow_y_scroll()
             .child(section("APPEARANCE"))
@@ -1307,13 +1315,14 @@ impl Render for ChatView {
                     )
                     .child(
                         h_flex()
-                            .gap_2()
+                            .gap_3()
                             .items_center()
                             .child(
                                 Button::new("toggle-agents")
                                     .label("agents")
                                     .small()
                                     .ghost()
+                                    .tooltip("Worker runs dispatched from this chat")
                                     .on_click(cx.listener(Self::toggle_agents)),
                             )
                             .child(
@@ -1321,6 +1330,7 @@ impl Render for ChatView {
                                     .label("settings")
                                     .small()
                                     .ghost()
+                                    .tooltip("Configuration, theme, and token totals")
                                     .on_click(cx.listener(Self::toggle_settings)),
                             )
                             .when(busy, |row| {
@@ -1342,7 +1352,7 @@ impl Render for ChatView {
                                         .text_size(px(12.))
                                         .text_color(cx.theme().muted_foreground)
                                         .child(format!(
-                                            "in {} · out {}",
+                                            "{} in · {} out",
                                             human_tokens(self.usage.0),
                                             human_tokens(self.usage.1),
                                         )),
@@ -1359,18 +1369,28 @@ impl Render for ChatView {
                         // Session sidebar.
                         v_flex()
                             .id("session-sidebar")
-                            .w(px(220.))
+                            .w(px(230.))
                             .h_full()
                             .flex_shrink_0()
                             .border_r_1()
                             .border_color(cx.theme().border)
-                            .p_2()
+                            .pt_3()
+                            .px_2()
+                            .pb_2()
                             .gap_1()
                             .overflow_y_scroll()
+                            .child(
+                                div()
+                                    .px_2()
+                                    .text_size(px(11.))
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child("SESSIONS"),
+                            )
                             .child(
                                 Button::new("new-chat")
                                     .label("New chat")
                                     .small()
+                                    .tooltip("Start a new conversation in this tab")
                                     .on_click(cx.listener(Self::new_session)),
                             )
                             .children(self.sessions.iter().map(|summary| {
@@ -1384,13 +1404,19 @@ impl Render for ChatView {
                                 }
                                 let confirming = self.confirming_delete == Some(session_id);
                                 let delete_label = if confirming { "sure?" } else { "✕" };
+                                let is_active = self.session_id == Some(session_id);
                                 let delete_button = Button::new(SharedString::from(format!(
                                     "delete-{}",
                                     session_id.0
                                 )))
                                 .label(delete_label)
                                 .xsmall()
-                                .ghost();
+                                .ghost()
+                                .tooltip(if confirming {
+                                    "Click again to delete permanently"
+                                } else {
+                                    "Delete this conversation"
+                                });
                                 let delete_button = if confirming {
                                     delete_button.danger()
                                 } else {
@@ -1409,6 +1435,19 @@ impl Render for ChatView {
                                         .small()
                                         .flex_1()
                                         .min_w_0()
+                                        .when(is_active, |button| {
+                                            // The open conversation is
+                                            // tinted, not loud — the
+                                            // accent at conversation
+                                            // weight.
+                                            button.custom(
+                                                ButtonCustomVariant::new(cx)
+                                                    .color(cx.theme().accent.opacity(0.14))
+                                                    .hover(cx.theme().accent.opacity(0.2))
+                                                    .active(cx.theme().accent.opacity(0.24)),
+                                            )
+                                        })
+                                        .tooltip(summary.title.clone())
                                         .on_click(
                                             cx.listener(move |this, _, window, cx| {
                                                 this.switch_to_session(session_id, window, cx);
@@ -1423,6 +1462,7 @@ impl Render for ChatView {
                                         .label("✎")
                                         .xsmall()
                                         .ghost()
+                                        .tooltip("Rename this conversation")
                                         .on_click(
                                             cx.listener(move |this, _, window, cx| {
                                                 this.start_rename(session_id, window, cx);
@@ -1451,7 +1491,9 @@ impl Render for ChatView {
                                 .flex_1()
                                 .min_h_0()
                                 .overflow_hidden()
-                                .px_4(),
+                                .pt_3()
+                                .px_4()
+                                .pb_4(),
                             )
                             // Empty state: the transcript is quiet until
                             // it isn't — say so, quietly.
@@ -1464,10 +1506,23 @@ impl Render for ChatView {
                                         .items_center()
                                         .justify_center()
                                         .child(
-                                            div()
-                                                .text_size(px(14.))
-                                                .text_color(cx.theme().muted_foreground)
-                                                .child("Ready. Ask, paste, or point me at a file."),
+                                            v_flex()
+                                                .items_center()
+                                                .gap_1()
+                                                .child(
+                                                    div()
+                                                        .text_size(px(14.))
+                                                        .text_color(cx.theme().foreground)
+                                                        .child("Ready."),
+                                                )
+                                                .child(
+                                                    div()
+                                                        .text_size(px(12.))
+                                                        .text_color(cx.theme().muted_foreground)
+                                                        .child(
+                                                            "Ask, paste, or point me at a file.",
+                                                        ),
+                                                ),
                                         ),
                                 )
                             }),
@@ -1482,7 +1537,7 @@ impl Render for ChatView {
             )
             .child(
                 h_flex()
-                    .px_3()
+                    .px_4()
                     .py_3()
                     .border_t_1()
                     .border_color(cx.theme().border)
@@ -1490,13 +1545,14 @@ impl Render for ChatView {
                         // Multi-line: Enter sends, Shift+Enter
                         // is a newline. Capped so a long paste
                         // can't eat the transcript.
-                        Textarea::new(&self.input).h(px(96.)),
+                        Textarea::new(&self.input).h(px(88.)),
                     )),
             )
     }
 }
 
-const NO_ENDPOINT_NOTICE: &str = "No endpoint configured. Create ~/.config/gertie/config.toml:\n\n\
+const NO_ENDPOINT_NOTICE: &str = "No endpoint configured. Run `gertie doctor` to check the setup, or create \
+    ~/.config/gertie/config.toml:\n\n\
     [[endpoints]]\n\
     name = \"ppq\"\n\
     base_url = \"https://api.ppq.ai/v1\"\n\

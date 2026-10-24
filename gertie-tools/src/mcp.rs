@@ -702,7 +702,8 @@ mod tests {
                             .lines()
                             .any(|line| line.eq_ignore_ascii_case("mcp-session-id: sess-42"));
                         if !has_session {
-                            let response = "HTTP/1.1 400 Bad Request\r\ncontent-length: 0\r\n\r\n";
+                            let response =
+                                "HTTP/1.1 400 Bad Request\r\ncontent-length: 0\r\nconnection: close\r\n\r\n";
                             stream.write_all(response.as_bytes()).unwrap();
                             continue;
                         }
@@ -714,8 +715,14 @@ mod tests {
                         )
                     } else if body.contains("notifications/initialized") {
                         // A notification: acknowledged, no body.
+                        // `connection: close` matters — without it the
+                        // client may pool the socket this test server
+                        // is about to drop, and the next request dies
+                        // with a reset (the flake).
                         stream
-                            .write_all(b"HTTP/1.1 202 Accepted\r\ncontent-length: 0\r\n\r\n")
+                            .write_all(
+                                b"HTTP/1.1 202 Accepted\r\ncontent-length: 0\r\nconnection: close\r\n\r\n",
+                            )
                             .unwrap();
                         continue;
                     } else if body.contains("\"method\":\"tools/list\"") {

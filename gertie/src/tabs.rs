@@ -156,6 +156,7 @@ impl Render for WorkspaceView {
                     .label("+")
                     .xsmall()
                     .ghost()
+                    .tooltip("New tab — parallel chat, shared workspace")
                     .on_click(cx.listener(|this, _, window, cx| {
                         this.add_tab(window, cx);
                     })),
@@ -165,6 +166,7 @@ impl Render for WorkspaceView {
                     .label("⎇")
                     .xsmall()
                     .ghost()
+                    .tooltip("New worktree tab — its own git checkout of this repo")
                     .on_click(cx.listener(|this, _, window, cx| {
                         this.add_worktree_tab(window, cx);
                     })),
