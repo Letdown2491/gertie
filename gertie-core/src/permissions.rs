@@ -36,10 +36,9 @@ pub struct PendingAsk {
 
 pub struct PermissionBroker {
     state: Arc<Mutex<BrokerState>>,
-    /// Worker asks also flow out here for the UI's subscription.
-    tx: tokio::sync::mpsc::UnboundedSender<PendingAsk>,
-    /// Handed out once; the UI is the only subscriber.
-    subscription: Mutex<Option<tokio::sync::mpsc::UnboundedReceiver<PendingAsk>>>,
+    /// Worker asks fan out to every subscriber — one per surface
+    /// (multiple tabs, a panel, a headless monitor).
+    subscribers: Mutex<Vec<tokio::sync::mpsc::UnboundedSender<PendingAsk>>>,
 }
 
 struct BrokerState {
@@ -55,19 +54,17 @@ impl Default for PermissionBroker {
 
 impl PermissionBroker {
     pub fn new() -> Self {
-        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
         Self {
             state: Arc::new(Mutex::new(BrokerState {
                 next_id: 1,
                 pending: Vec::new(),
             })),
-            tx,
-            subscription: Mutex::new(Some(rx)),
+            subscribers: Mutex::new(Vec::new()),
         }
     }
 
     /// Registers an ask and returns its id plus the receiver the loop
-    /// awaits. Worker asks are also published to the subscription.
+    /// awaits. Worker asks are also published to every subscription.
     pub fn request(
         &self,
         call: ToolCall,
@@ -82,7 +79,18 @@ impl PermissionBroker {
             id
         };
         if source == PromptSource::Worker {
-            let _ = self.tx.send(PendingAsk { id, call, source });
+            let mut subscribers = self.subscribers.lock().unwrap();
+            // Retain only live subscribers; a surface that went away
+            // takes its ask cards with it.
+            subscribers.retain(|subscriber| {
+                subscriber
+                    .send(PendingAsk {
+                        id,
+                        call: call.clone(),
+                        source,
+                    })
+                    .is_ok()
+            });
         }
         (id, answer)
     }
@@ -101,9 +109,13 @@ impl PermissionBroker {
         sender.send(decision).is_ok()
     }
 
-    /// Take the UI's subscription stream. Second call returns None.
-    pub fn take_subscription(&self) -> Option<tokio::sync::mpsc::UnboundedReceiver<PendingAsk>> {
-        self.subscription.lock().unwrap().take()
+    /// A stream of worker asks. Any number of surfaces subscribe; each
+    /// sees every worker ask. No backlog by design: the registry holds
+    /// the pending ones, and a surface answers the cards it has.
+    pub fn subscribe(&self) -> tokio::sync::mpsc::UnboundedReceiver<PendingAsk> {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        self.subscribers.lock().unwrap().push(tx);
+        rx
     }
 }
 
@@ -133,20 +145,34 @@ mod tests {
     #[test]
     fn worker_asks_publish_to_the_subscription() {
         let broker = PermissionBroker::new();
-        let mut rx = broker.take_subscription().expect("subscription once");
+        let mut rx = broker.subscribe();
         let (id, _answer) = broker.request(call(), PromptSource::Worker);
 
         let ask = rx.blocking_recv().expect("published");
         assert_eq!(ask.id, id);
         assert_eq!(ask.source, PromptSource::Worker);
-        // The subscription is single-use.
-        assert!(broker.take_subscription().is_none());
+    }
+
+    #[test]
+    fn every_surface_subscribes_and_sees_every_ask() {
+        let broker = PermissionBroker::new();
+        let mut first = broker.subscribe();
+        let mut second = broker.subscribe();
+        let (id, _answer) = broker.request(call(), PromptSource::Worker);
+
+        assert_eq!(first.blocking_recv().unwrap().id, id);
+        assert_eq!(second.blocking_recv().unwrap().id, id);
+        // Dropping a surface doesn't break the others: the broker
+        // prunes dead subscribers on publish.
+        drop(first);
+        let (id2, _answer2) = broker.request(call(), PromptSource::Worker);
+        assert_eq!(second.blocking_recv().unwrap().id, id2);
     }
 
     #[test]
     fn leader_asks_stay_off_the_subscription() {
         let broker = PermissionBroker::new();
-        let mut rx = broker.take_subscription().unwrap();
+        let mut rx = broker.subscribe();
         let (id, answer) = broker.request(call(), PromptSource::Leader);
         broker.respond(id, PermissionDecision::Deny);
         // The loop-side receiver still resolves.

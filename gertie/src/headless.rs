@@ -100,7 +100,7 @@ pub fn run(prompt: Option<String>, yes: bool, config_path: Option<PathBuf>) -> i
         prompt_source: gertie_core::PromptSource::Leader,
         system_prompt: boot.system_prompt.clone(),
     });
-    let worker_asks = boot.broker.take_subscription();
+    let worker_asks = boot.broker.subscribe();
 
     let interactive = std::io::stdin().is_terminal();
     let mut decide = |_call: &gertie_core::ToolCall| -> PermissionDecision {
@@ -162,7 +162,7 @@ pub(crate) enum Outcome {
 /// provider tests rely on.
 pub(crate) fn pump(
     mut stream: futures_util::stream::BoxStream<'static, LoopEvent>,
-    mut worker_asks: Option<tokio::sync::mpsc::UnboundedReceiver<gertie_core::PendingAsk>>,
+    mut worker_asks: tokio::sync::mpsc::UnboundedReceiver<gertie_core::PendingAsk>,
     broker: &Arc<PermissionBroker>,
     store: &Arc<SessionStore>,
     session: SessionId,
@@ -187,7 +187,7 @@ pub(crate) fn pump(
         // Worker asks first: a worker's loop parks inside its tool, so
         // its asks only surface here, never on the leader stream. A
         // disconnected channel just ends the loop — no more asks.
-        while let Some(ask) = worker_asks.as_mut().and_then(|r| r.try_recv().ok()) {
+        while let Some(ask) = worker_asks.try_recv().ok() {
             recorder.flush();
             calls.insert(
                 ask.call.id.clone(),
@@ -457,7 +457,7 @@ mod tests {
         let mut approvals = 0;
         let (outcome, text) = pump(
             stream,
-            broker.take_subscription(),
+            broker.subscribe(),
             &broker,
             &store,
             session,
@@ -529,7 +529,7 @@ mod tests {
         let mut approvals = 0;
         let (outcome, _) = pump(
             stream,
-            broker.take_subscription(),
+            broker.subscribe(),
             &broker,
             &store,
             session,

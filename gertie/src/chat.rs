@@ -439,7 +439,7 @@ impl ChatView {
         });
         // Subagent asks arrive here, not on the leader's stream — a
         // worker's loop runs inside a tool, so nobody drains its events.
-        let mut worker_asks = self.broker.take_subscription();
+        let mut worker_asks = self.broker.subscribe();
 
         self.streaming = true;
         self.streaming_assistant = None;
@@ -494,12 +494,7 @@ impl ChatView {
                     LoopEvent::Done => break,
                         }
                     }
-                    ask = async {
-                        match &mut worker_asks {
-                            Some(receiver) => receiver.recv().await,
-                            None => std::future::pending().await,
-                        }
-                    } => {
+                    ask = worker_asks.recv() => {
                         if let Some(ask) = ask {
                             let _ = this.update(cx, |this, cx| {
                                 this.on_worker_ask(ask.id, ask.call, cx)
