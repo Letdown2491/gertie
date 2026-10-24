@@ -863,7 +863,7 @@ impl ChatView {
                     } else {
                         cx.theme().foreground
                     })
-                    .child(text.to_string())
+                    .children(markdownish(text, cx))
                     .into_any_element()
             }
         }
@@ -1202,6 +1202,90 @@ enum Panel {
     None,
     Agents,
     Settings,
+}
+
+/// Minimal markdown: fenced code blocks render as mono blocks with a
+/// subtle background, prose renders as before. Deliberately not a
+/// markdown engine — for a coding agent, the fence is 90% of the
+/// visual value and costs none of a dependency's weight. Streaming
+/// safe: an unclosed fence renders its tail as code (mid-stream that's
+/// exactly what it is).
+fn markdownish(text: &str, cx: &App) -> Vec<AnyElement> {
+    let mut elements: Vec<AnyElement> = Vec::new();
+    let mut prose = String::new();
+    let mut code: Option<(Option<String>, String)> = None;
+
+    for line in text.lines() {
+        match (&mut code, line.trim_start().starts_with("```")) {
+            (None, true) => {
+                // Fence opened: flush prose, remember the language tag.
+                if !prose.is_empty() {
+                    elements.push(div().child(prose.clone()).into_any_element());
+                    prose.clear();
+                }
+                code = Some((
+                    line.trim_start()
+                        .strip_prefix("```")
+                        .map(str::trim)
+                        .filter(|tag| !tag.is_empty())
+                        .map(String::from),
+                    String::new(),
+                ));
+            }
+            (Some(_), true) => {
+                // Fence closed: flush the block.
+                if let Some((lang, body)) = code.take() {
+                    elements.push(code_block(&lang, &body, cx));
+                }
+            }
+            (Some((_, body)), false) => {
+                body.push_str(line);
+                body.push('\n');
+            }
+            (None, false) => {
+                prose.push_str(line);
+                prose.push('\n');
+            }
+        }
+    }
+    // Unclosed fence (mid-stream): the tail is still code.
+    if let Some((lang, body)) = code {
+        if !body.is_empty() {
+            elements.push(code_block(&lang, &body, cx));
+        }
+    } else if !prose.is_empty() {
+        elements.push(div().child(prose).into_any_element());
+    }
+    elements
+}
+
+fn code_block(language: &Option<String>, body: &str, cx: &App) -> AnyElement {
+    v_flex()
+        .my_1()
+        .rounded_md()
+        .border_1()
+        .border_color(cx.theme().border)
+        .bg(cx.theme().muted)
+        .overflow_hidden()
+        .when_some(language.clone(), |block, lang| {
+            block.child(
+                div()
+                    .px_2()
+                    .pt_1()
+                    .text_size(px(10.5))
+                    .text_color(cx.theme().muted_foreground)
+                    .child(lang),
+            )
+        })
+        .child(
+            div()
+                .px_2()
+                .py_1p5()
+                .font_family(cx.theme().mono_font_family.clone())
+                .text_size(cx.theme().mono_font_size)
+                .child(body.to_string()),
+        )
+        .into_any_element()
 }
 
 /// One-line summary of what the call targets, for the card header.
