@@ -80,6 +80,10 @@ pub struct ChatView {
     input: Entity<TextareaState>,
     list_state: ListState,
     streaming: bool,
+    /// Bytes of the streaming assistant row already written to the
+    /// store. Deltas persist in coarse steps (a write per token would
+    /// dominate the render loop); transitions flush the rest.
+    stream_persisted: usize,
 }
 
 impl ChatView {
@@ -137,6 +141,7 @@ impl ChatView {
                 state
             },
             streaming: false,
+            stream_persisted: 0,
         };
         view.reload_session(cx);
         window.focus(&view.input.read(cx).focus_handle(cx), cx);
@@ -368,6 +373,7 @@ impl ChatView {
                     .await;
             }
             let _ = this.update(cx, |this, cx| {
+                this.flush_stream(cx);
                 this.streaming = false;
                 this.streaming_assistant = None;
                 this.sessions = this.store.list_sessions().unwrap_or_default();
@@ -399,6 +405,7 @@ impl ChatView {
                 });
                 let index = self.turns.len() - 1;
                 self.streaming_assistant = Some(index);
+                self.stream_persisted = 0;
                 // The list's item count is stale the moment a turn is
                 // added — without a reset, scroll_to_end targets the old
                 // end and the new turn renders below the viewport (the
@@ -408,18 +415,34 @@ impl ChatView {
             }
         };
 
-        // Tail mode: the list follows new content while pinned to the
-        // bottom, and politely stops when the user scrolls up to read —
-        // re-engaging when they return. No per-delta scroll_to_end here:
-        // it used to yank the viewport on every token.
-        let persisted = if let Some(Turn::Message { text, db_id, .. }) = self.turns.get_mut(index) {
+        // Tail mode handles following (no per-delta scroll_to_end — it
+        // used to yank the viewport on every token). Persistence is
+        // throttled: a SQLite write per delta would dominate streaming.
+        if let Some(Turn::Message { text, db_id, .. }) = self.turns.get_mut(index) {
             text.push_str(delta);
-            db_id.map(|db_id| (db_id, text.clone()))
-        } else {
-            None
-        };
-        if let Some((db_id, text)) = persisted {
-            let _ = self.store.update_message(db_id, &text);
+            if text.len() - self.stream_persisted >= 2048
+                && let Some(db_id) = *db_id
+            {
+                let _ = self.store.update_message(db_id, text);
+                self.stream_persisted = text.len();
+            }
+        }
+        cx.notify();
+    }
+
+    /// Writes the streaming row's unsaved tail to the store. Called when
+    /// the stream changes shape — a tool starts, a prompt appears, the
+    /// turn ends — so a reload always sees the full text.
+    fn flush_stream(&mut self, cx: &mut Context<Self>) {
+        if let Some(index) = self.streaming_assistant
+            && let Some(Turn::Message { text, db_id, .. }) = self.turns.get_mut(index)
+        {
+            if text.len() > self.stream_persisted
+                && let Some(db_id) = *db_id
+            {
+                let _ = self.store.update_message(db_id, text);
+            }
+            self.stream_persisted = text.len();
         }
         cx.notify();
     }
@@ -428,6 +451,7 @@ impl ChatView {
     /// quiet parts of a turn still look alive.
     fn on_tool_started(&mut self, call: ToolCall, cx: &mut Context<Self>) {
         self.activity = format!("running {}…", call.name);
+        self.flush_stream(cx);
         self.streaming_assistant = None;
         self.turns.push(Turn::Tool {
             call,
@@ -442,6 +466,7 @@ impl ChatView {
     /// until the human answers through the broker.
     fn on_tool_requested(&mut self, id: u64, call: ToolCall, cx: &mut Context<Self>) {
         self.activity = "waiting for approval".into();
+        self.flush_stream(cx);
         self.streaming_assistant = None;
         self.turns.push(Turn::Tool {
             call,
@@ -456,6 +481,7 @@ impl ChatView {
     /// card, labeled.
     fn on_worker_ask(&mut self, id: u64, call: ToolCall, cx: &mut Context<Self>) {
         self.activity = "worker waiting for approval".into();
+        self.flush_stream(cx);
         self.streaming_assistant = None;
         self.turns.push(Turn::Tool {
             call,
@@ -524,6 +550,7 @@ impl ChatView {
     }
 
     fn on_error(&mut self, message: &str, cx: &mut Context<Self>) {
+        self.flush_stream(cx);
         let rendered = format!("[error] {message}");
         self.activity = "error".into();
         match self.streaming_assistant {
