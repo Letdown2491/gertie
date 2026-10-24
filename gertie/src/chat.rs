@@ -68,6 +68,9 @@ pub struct ChatView {
     /// What the agent is up to right now, for the status line — the loop
     /// goes quiet between streaming rounds, and silence reads as a hang.
     activity: String,
+    /// Session token totals from the provider's usage events (in, out).
+    /// In-memory for now; a persisted per-session ledger is M3 scope.
+    usage: (u64, u64),
     input: Entity<InputState>,
     list_state: ListState,
     streaming: bool,
@@ -109,6 +112,7 @@ impl ChatView {
             streaming_assistant: None,
             last_db_id: None,
             activity: "starting…".into(),
+            usage: (0, 0),
             input,
             list_state: ListState::new(0, ListAlignment::Bottom, px(256.)),
             streaming: false,
@@ -252,6 +256,7 @@ impl ChatView {
             return;
         };
 
+        let context_window = provider.context_window();
         let provider: Arc<dyn gertie_core::Provider> = provider;
         let stream = run_turn(
             provider,
@@ -259,6 +264,7 @@ impl ChatView {
             self.history.clone(),
             user_text,
             self.snapshots.clone(),
+            context_window,
         );
 
         self.streaming = true;
@@ -290,7 +296,19 @@ impl ChatView {
                             this.on_tool_result(&call_id, &name, &result, cx)
                         });
                     }
-                    LoopEvent::Usage { .. } => {} // M3: cost accounting
+                    LoopEvent::Usage {
+                        input_tokens,
+                        output_tokens,
+                    } => {
+                        let _ = this.update(cx, |this, cx| {
+                            this.usage.0 += input_tokens;
+                            this.usage.1 += output_tokens;
+                            cx.notify();
+                        });
+                    }
+                    LoopEvent::Compacted { kept, total } => {
+                        let _ = this.update(cx, |this, cx| this.on_compacted(kept, total, cx));
+                    }
                     LoopEvent::Error { message } => {
                         let _ = this.update(cx, |this, cx| this.on_error(&message, cx));
                     }
@@ -425,6 +443,22 @@ impl ChatView {
 
     /// Loop-level failures (provider exhausted retries, round budget hit)
     /// surface in the transcript like any other turn.
+    /// History shrank mid-turn: tell the user honestly — a muted notice
+    /// card, not hidden magic. Not persisted: DB rows stay whole, the
+    /// compaction is the in-memory view (a reload restores full history
+    /// and the loop re-compacts if the threshold trips again).
+    fn on_compacted(&mut self, kept: usize, total: usize, cx: &mut Context<Self>) {
+        self.activity = "compacted".into();
+        self.turns.push(Turn::Message {
+            role: Role::System,
+            text: format!(
+                "⟳ context compacted — {kept} of {total} messages kept, earlier history summarized"
+            ),
+            db_id: None,
+        });
+        self.sync_list(cx);
+    }
+
     fn on_error(&mut self, message: &str, cx: &mut Context<Self>) {
         let rendered = format!("[error] {message}");
         self.activity = "error".into();
@@ -742,7 +776,19 @@ impl Render for ChatView {
                                         cx.theme().muted_foreground
                                     })
                                     .child(status.to_string()),
-                            ),
+                            )
+                            .when(self.usage.0 + self.usage.1 > 0, |row| {
+                                row.child(
+                                    div()
+                                        .text_size(px(12.))
+                                        .text_color(cx.theme().muted_foreground)
+                                        .child(format!(
+                                            "in {} · out {}",
+                                            human_tokens(self.usage.0),
+                                            human_tokens(self.usage.1),
+                                        )),
+                                )
+                            }),
                     ),
             )
             .child(
@@ -809,3 +855,14 @@ const NO_ENDPOINT_NOTICE: &str = "No endpoint configured. Create ~/.config/gerti
     model = \"glm-5.3-flash\"\n\
     api_key_env = \"PPQ_API_KEY\"\n\n\
     …set PPQ_API_KEY in your environment, then restart gertie.";
+
+/// `1234` → "1.2k" — token counts in the status line stay scannable.
+fn human_tokens(count: u64) -> String {
+    if count >= 10_000 {
+        format!("{:.0}k", count as f64 / 1000.)
+    } else if count >= 1_000 {
+        format!("{:.1}k", count as f64 / 1000.)
+    } else {
+        format!("{count}")
+    }
+}

@@ -26,6 +26,10 @@ pub struct EndpointConfig {
     /// Env var to read the key from, e.g. `PPQ_API_KEY`.
     #[serde(default)]
     pub api_key_env: Option<String>,
+    /// Model context window in tokens. Unset means compaction stays
+    /// disabled — gertie doesn't guess windows it doesn't know.
+    #[serde(default)]
+    pub context_window: Option<u64>,
 }
 
 impl Config {
@@ -89,6 +93,7 @@ impl Config {
             base_url: chosen.base_url.clone(),
             model: chosen.model.clone(),
             api_key,
+            context_window: chosen.context_window,
         })
     }
 

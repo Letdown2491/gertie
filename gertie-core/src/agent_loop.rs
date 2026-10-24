@@ -1,6 +1,7 @@
 //! The agent loop: request the model, execute its tool calls under the
 //! permission policy, feed results back, repeat — bounded.
 
+use crate::Role;
 use crate::request::{Request, ToolCall, ToolSpec, WireMessage};
 use crate::snapshot::SnapshotStore;
 use crate::tool::Tool;
@@ -42,6 +43,13 @@ pub enum LoopEvent {
     Usage {
         input_tokens: u64,
         output_tokens: u64,
+    },
+    /// History was compacted in place: `kept` of `total` messages remain
+    /// (a summary plus a safe tail). DB rows are not rewritten — the
+    /// compaction is the in-memory view.
+    Compacted {
+        kept: usize,
+        total: usize,
     },
     Error {
         message: String,
@@ -86,12 +94,17 @@ use std::collections::BTreeMap;
 /// When `snapshots` is set, every mutating tool whose arguments name a
 /// `path` gets a checkpoint of the file's prior content first —
 /// record-before-write, uniformly, including tools added later.
+///
+/// When `context_window` is set, the loop compacts: once a round's
+/// observed prompt size crosses 80% of the window, history is replaced
+/// by a structured summary plus a safe tail before the next request.
 pub fn run_turn(
     provider: Arc<dyn crate::provider::Provider>,
     tools: ToolRegistry,
     history: SharedHistory,
     user_message: String,
     snapshots: Option<Arc<SnapshotStore>>,
+    context_window: Option<u64>,
 ) -> BoxStream<'static, LoopEvent> {
     let specs = tool_specs(&tools);
     Box::pin(async_stream::stream! {
@@ -102,7 +115,43 @@ pub fn run_turn(
 
         history.lock().await.push(WireMessage::user(user_message));
 
+        // Observed prompt size from the last request's usage events, if
+        // the provider reported any; the chars/4 estimate covers the rest.
+        let mut last_input_tokens: Option<u64> = None;
+
         for round in 1..=MAX_TOOL_ROUNDS {
+            // Compaction check happens at round start, before the
+            // request is built — the point is to shrink what we're
+            // about to send.
+            {
+                let prompt_tokens = match last_input_tokens {
+                    Some(observed) => observed,
+                    None => estimate_tokens(&history.lock().await),
+                };
+                let threshold = context_window.map(|window| window * 80 / 100);
+                if let Some(threshold) = threshold
+                    && prompt_tokens > threshold
+                {
+                    let transcript = render_transcript(&history.lock().await);
+                    let total = history.lock().await.len();
+                    // Fail-open: if the summarization request fails, this
+                    // round just runs long — compaction is an
+                    // optimization, not a correctness step.
+                    if let Ok(summary) = summarize(provider.clone(), &transcript).await {
+                        let mut current = history.lock().await;
+                        let tail_start = safe_tail_start(&current, KEEP_TAIL);
+                        let tail: Vec<WireMessage> = current.drain(tail_start..).collect();
+                        *current = vec![summary_message(&summary)];
+                        current.extend(tail);
+                        let kept = current.len();
+                        drop(current);
+                        // The old observation describes the pre-compact
+                        // prompt; don't let it re-trigger.
+                        last_input_tokens = None;
+                        yield LoopEvent::Compacted { kept, total };
+                    }
+                }
+            }
             request.messages = history.lock().await.clone();
 
             let mut stream = provider.stream(request.clone());
@@ -120,6 +169,7 @@ pub fn run_turn(
                         calls.push(ToolCall { id, name, arguments });
                     }
                     crate::Event::Usage { input_tokens, output_tokens } => {
+                        last_input_tokens = Some(input_tokens);
                         yield LoopEvent::Usage { input_tokens, output_tokens };
                     }
                     crate::Event::Done => {}
@@ -151,27 +201,25 @@ pub fn run_turn(
                 let result = match tools.get(&call.name) {
                     None => Err(format!("unknown tool: {}", call.name)),
                     Some(tool) => {
-                        // Mutating tools face the permission prompt first;
-                        // the yield reaches the UI and the loop resumes on
+                        // Hard policy first: a vet failure never reaches
+                        // the prompt — there is nothing to approve.
+                        if let Err(blocked) = tool.vet(&call.arguments) {
+                            Err(format!("blocked by policy: {blocked}"))
+                        }
+                        // Mutating tools face the permission prompt; the
+                        // yield reaches the UI and the loop resumes on
                         // the answer.
-                        let permitted = if tool.mutates() {
+                        else if tool.mutates() {
                             let (respond, answer) = oneshot::channel();
                             yield LoopEvent::ToolCallRequested {
                                 call: call.clone(),
                                 respond,
                             };
-                            matches!(answer.await, Ok(PermissionDecision::Approve))
-                        } else {
-                            yield LoopEvent::ToolCallStarted { call: call.clone() };
-                            true
-                        };
-                        match permitted {
-                            false => Err("denied by user".to_string()),
-                            true => {
-                                // Checkpoint the file's prior state before
-                                // anything mutates it.
-                                if tool.mutates()
-                                    && let (Some(store), Some(path)) =
+                            match answer.await {
+                                Ok(PermissionDecision::Approve) => {
+                                    // Checkpoint the file's prior state
+                                    // before anything mutates it.
+                                    if let (Some(store), Some(path)) =
                                         (&snapshots, argument_path(&call.arguments))
                                         && let Err(error) = store.record_file(None, &path)
                                     {
@@ -183,8 +231,17 @@ pub fn run_turn(
                                         };
                                         return;
                                     }
-                                tool.run(&call.arguments).await
+                                    tool.run(&call.arguments).await
+                                }
+                                // A dropped responder (UI went away)
+                                // denies too: doing nothing is safe.
+                                Ok(PermissionDecision::Deny) | Err(_) => {
+                                    Err("denied by user".to_string())
+                                }
                             }
+                        } else {
+                            yield LoopEvent::ToolCallStarted { call: call.clone() };
+                            tool.run(&call.arguments).await
                         }
                     }
                 };
@@ -212,6 +269,113 @@ pub fn run_turn(
             }
         }
     })
+}
+
+/// Messages kept verbatim after a compaction, roughly two tool rounds.
+const KEEP_TAIL: usize = 8;
+
+/// Structured-summary marker: the replacement history opens with this
+/// system message, and later compactions summarize it like anything else.
+fn summary_message(summary: &str) -> WireMessage {
+    WireMessage {
+        role: Role::System,
+        content: Some(format!(
+            "### Conversation summary\n\n\
+             {summary}\n\n\
+             This summary replaced earlier history; continue the task from NEXT."
+        )),
+        ..WireMessage::default()
+    }
+}
+
+/// chars/4: the boring token estimate, used only when the provider
+/// hasn't reported usage yet.
+fn estimate_tokens(history: &[WireMessage]) -> u64 {
+    let chars: usize = history
+        .iter()
+        .map(|message| {
+            message.content.as_deref().unwrap_or("").len()
+                + message
+                    .tool_calls
+                    .iter()
+                    .map(|call| call.arguments.len())
+                    .sum::<usize>()
+        })
+        .sum();
+    (chars as u64) / 4
+}
+
+/// Flattens history to text for the summarizer — the summarizer sees the
+/// conversation the way the transcript would read, tool calls included.
+fn render_transcript(history: &[WireMessage]) -> String {
+    let mut lines = Vec::new();
+    for message in history {
+        let role = match message.role {
+            Role::System => "system",
+            Role::User => "user",
+            Role::Assistant => "assistant",
+            Role::Tool => "tool",
+        };
+        if let Some(content) = message.content.as_deref()
+            && !content.trim().is_empty()
+        {
+            lines.push(format!("[{role}] {content}"));
+        }
+        for call in &message.tool_calls {
+            lines.push(format!(
+                "[assistant calls {}] {}",
+                call.name, call.arguments
+            ));
+        }
+    }
+    lines.join("\n")
+}
+
+/// Compaction prompt: preserve the ledger discipline — what was the
+/// goal, what's true now, what's decided, what's next.
+const SUMMARY_PROMPT: &str = "Summarize the conversation below for a continuation agent that will carry the work forward with no other context. Respond in exactly this structure:\n\
+     OBJECTIVE: the user's goal, one sentence.\n\
+     STATE: what has been done — files touched, commands run, results that matter.\n\
+     RULINGS: decisions made, user denials or corrections, constraints discovered.\n\
+     NEXT: the immediate next action.\n\
+     Be terse. Keep file paths and identifiers exact.\n\n\
+     --- conversation ---\n";
+
+async fn summarize(
+    provider: Arc<dyn crate::provider::Provider>,
+    transcript: &str,
+) -> Result<String, String> {
+    let request = Request {
+        messages: vec![WireMessage::user(format!("{SUMMARY_PROMPT}\n{transcript}"))],
+        tools: Vec::new(),
+        max_output_tokens: None,
+    };
+    let mut stream = provider.stream(request);
+    let mut summary = String::new();
+    while let Some(event) = stream.next().await {
+        match event {
+            crate::Event::Token { delta } => summary.push_str(&delta),
+            crate::Event::Error { message } => return Err(message),
+            _ => {}
+        }
+    }
+    if summary.trim().is_empty() {
+        Err("summarizer produced nothing".into())
+    } else {
+        Ok(summary)
+    }
+}
+
+/// Where a verbatim tail of `keep` messages may start without tearing a
+/// tool round: tool results must follow the assistant call that produced
+/// them. Orphan results (their call would be summarized away) are skipped
+/// forward — a slice that opens on a tool result is not a legal request.
+fn safe_tail_start(history: &[WireMessage], keep: usize) -> usize {
+    let mut start = history.len().saturating_sub(keep);
+    while start < history.len() && history[start].role == Role::Tool {
+        start += 1;
+    }
+    start
 }
 
 /// Extracts the file a mutating call targets, if its arguments name one.
@@ -355,6 +519,7 @@ mod tests {
                 history.clone(),
                 "hello".into(),
                 None,
+                None,
             ),
             |_| unreachable!("no tools to prompt for"),
         );
@@ -399,6 +564,7 @@ mod tests {
                 registry(&[peek]),
                 history.clone(),
                 "look".into(),
+                None,
                 None,
             ),
             |_| panic!("read-only tools must not prompt"),
@@ -450,6 +616,7 @@ mod tests {
                     history.clone(),
                     "go".into(),
                     None,
+                    None,
                 ),
                 |call| {
                     assert_eq!(call.name, "write_file");
@@ -495,6 +662,7 @@ mod tests {
                 Arc::new(tokio::sync::Mutex::new(Vec::new())),
                 String::new(),
                 Some(snapshots.clone()),
+                None,
             ),
             |_| PermissionDecision::Approve,
         );
@@ -524,10 +692,198 @@ mod tests {
         });
         let history: SharedHistory = Arc::new(tokio::sync::Mutex::new(Vec::new()));
         let events = drain(
-            run_turn(provider, registry(&[]), history.clone(), "go".into(), None),
+            run_turn(
+                provider,
+                registry(&[]),
+                history.clone(),
+                "go".into(),
+                None,
+                None,
+            ),
             |_| panic!("nothing to prompt for"),
         );
 
         assert!(tool_result(&events, "mystery").starts_with("error: unknown tool"));
+    }
+
+    #[test]
+    fn hard_blocked_calls_never_reach_the_prompt() {
+        let provider = Arc::new(ScriptedProvider {
+            scripts: std::sync::Mutex::new(vec![
+                vec![
+                    Event::ToolCall {
+                        id: "c1".into(),
+                        name: "bash".into(),
+                        arguments: r#"{"command": "rm -rf /"}"#.into(),
+                    },
+                    Event::Done,
+                ],
+                vec![Event::Done],
+            ]),
+        });
+        let events = drain(
+            run_turn(
+                provider,
+                registry(&[Arc::new(BlockedTool)]),
+                Arc::new(tokio::sync::Mutex::new(Vec::new())),
+                "go".into(),
+                None,
+                None,
+            ),
+            |_| panic!("a vet failure must not prompt — there is nothing to approve"),
+        );
+
+        assert!(tool_result(&events, "bash").contains("blocked by policy"));
+    }
+
+    #[test]
+    fn history_compacts_when_usage_crosses_the_window() {
+        // Round 1 reports 90% of a 100k window; the loop should compact
+        // (script 2 is the summarizer's answer) before round 3 finishes.
+        let provider = Arc::new(ScriptedProvider {
+            scripts: std::sync::Mutex::new(vec![
+                vec![
+                    Event::Usage {
+                        input_tokens: 90_000,
+                        output_tokens: 10,
+                    },
+                    Event::ToolCall {
+                        id: "c1".into(),
+                        name: "peek".into(),
+                        arguments: "{}".into(),
+                    },
+                    Event::Done,
+                ],
+                vec![
+                    Event::Token {
+                        delta: "OBJECTIVE: test compaction".into(),
+                    },
+                    Event::Done,
+                ],
+                vec![
+                    Event::Token {
+                        delta: "all done".into(),
+                    },
+                    Event::Done,
+                ],
+            ]),
+        });
+        let peek: Arc<dyn Tool> = Arc::new(StubTool::new("peek", false, "peeked"));
+        let history: SharedHistory = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let events = drain(
+            run_turn(
+                provider,
+                registry(&[peek]),
+                history.clone(),
+                "go".into(),
+                None,
+                Some(100_000),
+            ),
+            |_| panic!("read-only tools must not prompt"),
+        );
+
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, LoopEvent::Compacted { total: 3, .. }))
+        );
+        let history = history.blocking_lock();
+        let summary = history
+            .iter()
+            .find(|message| message.role == Role::System)
+            .expect("compacted history opens with the summary");
+        assert!(summary.content.as_deref().unwrap().contains("OBJECTIVE"));
+        assert!(history.iter().any(|message| message.role == Role::Assistant
+            && message.content.as_deref() == Some("all done")));
+    }
+
+    #[test]
+    fn below_the_window_history_is_untouched() {
+        let provider = Arc::new(ScriptedProvider {
+            scripts: std::sync::Mutex::new(vec![vec![Event::Done]]),
+        });
+        let history: SharedHistory = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let events = drain(
+            run_turn(
+                provider,
+                registry(&[]),
+                history.clone(),
+                "go".into(),
+                None,
+                Some(100_000),
+            ),
+            |_| panic!("nothing to prompt for"),
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, LoopEvent::Compacted { .. }))
+        );
+        assert!(
+            !history
+                .blocking_lock()
+                .iter()
+                .any(|message| message.role == Role::System)
+        );
+    }
+
+    #[test]
+    fn safe_tail_never_opens_on_an_orphan_tool_result() {
+        let history = vec![
+            WireMessage::user("go"),
+            WireMessage::assistant_with_tool_calls(
+                None,
+                vec![ToolCall {
+                    id: "c1".into(),
+                    name: "peek".into(),
+                    arguments: "{}".into(),
+                }],
+            ),
+            WireMessage::tool_result(
+                &ToolCall {
+                    id: "c1".into(),
+                    name: "peek".into(),
+                    arguments: "{}".into(),
+                },
+                "peeked",
+            ),
+        ];
+        // A tail of 2 would start on the orphan result; it must slide
+        // forward to include the call that produced it.
+        assert_eq!(safe_tail_start(&history, 2), 1);
+        assert_eq!(safe_tail_start(&history, 3), 0);
+    }
+
+    /// Mutating, so it would prompt if the vet were consulted in the
+    /// wrong order.
+    struct BlockedTool;
+
+    impl Tool for BlockedTool {
+        fn name(&self) -> &'static str {
+            "bash"
+        }
+
+        fn description(&self) -> String {
+            "stub".into()
+        }
+
+        fn parameters(&self) -> serde_json::Value {
+            serde_json::json!({"type": "object"})
+        }
+
+        fn mutates(&self) -> bool {
+            true
+        }
+
+        fn vet(&self, _arguments: &str) -> Result<(), String> {
+            Err("always blocked".into())
+        }
+
+        fn run<'a>(
+            &'a self,
+            _arguments: &'a str,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ToolResult> + Send + 'a>> {
+            Box::pin(async { Ok("ran".into()) })
+        }
     }
 }

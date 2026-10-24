@@ -5,6 +5,8 @@
 //! All paths are workspace-root-relative and may not escape the root —
 //! one sandbox rule, applied identically by every tool.
 
+pub mod shape;
+
 use gertie_core::{Tool, ToolResult};
 use serde::Deserialize;
 use std::future::Future;
@@ -128,6 +130,27 @@ struct EditArgs {
 pub struct Bash {
     root: PathBuf,
 }
+
+/// Hard-blocked command shapes, checked before the approval card. The
+/// bar: a pattern must be something *no* legitimate workspace command
+/// matches — a false positive here is worse than one more click, because
+/// the vet result never reaches a human. Anything debatable stays in the
+/// prompt tier.
+const DENY_PATTERNS: &[(&str, &str)] = &[
+    // `rm -rf /`, `rm -fr /*`, and spaced-flag variants aimed at the root.
+    (
+        r"\brm\s+(-[a-zA-Z]+\s+)*-[a-zA-Z]*[rf][a-zA-Z]*\s+(/|/\*)\s*(;|$)",
+        "recursive delete at the filesystem root",
+    ),
+    (r"\bmkfs(\.\w+)?\b", "filesystem formatting"),
+    (r"\bdd\b[^|;]*\bof=/dev/", "raw block-device write"),
+    (r":\(\)\s*\{\s*:\s*\|\s*:\s*&\s*\}\s*;", "fork bomb"),
+    (r"chmod\s+(-R\s+)?777\s+/\s*(;|$)", "world-writable root"),
+    (
+        r">\s*/dev/(sd[a-z]|nvme\d+n\d+|hd[a-z])\b",
+        "block-device clobber",
+    ),
+];
 
 #[derive(Deserialize)]
 struct BashArgs {
@@ -372,6 +395,27 @@ impl Tool for Bash {
         true
     }
 
+    fn vet(&self, arguments: &str) -> Result<(), String> {
+        let command = serde_json::from_str::<serde_json::Value>(arguments)
+            .ok()
+            .and_then(|value| {
+                value
+                    .get("command")
+                    .and_then(|c| c.as_str())
+                    .map(String::from)
+            })
+            .unwrap_or_default();
+        for (pattern, reason) in DENY_PATTERNS {
+            if regex::Regex::new(pattern)
+                .map(|re| re.is_match(&command))
+                .unwrap_or(false)
+            {
+                return Err(format!("command matches a hard-blocked pattern ({reason})"));
+            }
+        }
+        Ok(())
+    }
+
     fn run<'a>(
         &'a self,
         arguments: &'a str,
@@ -400,7 +444,9 @@ impl Tool for Bash {
                         if let Some(mut stderr) = child.stderr.take() {
                             let _ = stderr.read_to_string(&mut output);
                         }
-                        let summary = limit(output.trim_end().to_string());
+                        // Shape once, here: the model-visible string and
+                        // the persisted string are the same string.
+                        let summary = limit(shape::shape(&args.command, output.trim_end()));
                         if !status.success() {
                             return Ok(format!("exit {status}:\n{summary}"));
                         }
@@ -537,6 +583,9 @@ impl Tool for Grep {
                 }
                 for (index, line) in content.lines().enumerate() {
                     if pattern.is_match(line) {
+                        // A single minified line would eat the context
+                        // window; cap each match.
+                        let line: String = line.trim_end().chars().take(200).collect();
                         matches.push(format!(
                             "{}:{}: {}",
                             entry
@@ -545,7 +594,7 @@ impl Tool for Grep {
                                 .unwrap_or(entry.path())
                                 .display(),
                             index + 1,
-                            line.trim_end()
+                            line
                         ));
                         if matches.len() >= 200 {
                             return Ok(limit(format!(
@@ -666,6 +715,36 @@ mod tests {
         let tool = Bash::new(dir.path().into());
         let result = await_sync(tool.run(r#"{"command": "sleep 5", "timeout": 1}"#));
         assert!(result.unwrap_err().contains("timed out"));
+    }
+
+    #[test]
+    fn destructive_commands_are_hard_blocked_before_any_prompt() {
+        let tool = Bash::new("/tmp".into());
+        for command in [
+            r#"{"command": "rm -rf /"}"#,
+            r#"{"command": "cd /tmp && rm -fr /*"}"#,
+            r#"{"command": "mkfs.ext4 /dev/sda1"}"#,
+            r#"{"command": "dd if=zero of=/dev/sda"}"#,
+            r#"{"command": ":(){ :|:& };:"}"#,
+            r#"{"command": "chmod -R 777 /"}"#,
+        ] {
+            let blocked = tool.vet(command).unwrap_err();
+            assert!(blocked.contains("hard-blocked"), "{command}: {blocked}");
+        }
+    }
+
+    #[test]
+    fn legitimate_commands_pass_the_vet() {
+        let tool = Bash::new("/tmp".into());
+        for command in [
+            r#"{"command": "rm -rf ./build"}"#,
+            r#"{"command": "cat README.md | grep reboot"}"#,
+            r#"{"command": "ls -la && cargo test"}"#,
+            r#"{"command": "echo shutdown hooks in src/main.rs"}"#,
+        ] {
+            tool.vet(command)
+                .unwrap_or_else(|e| panic!("{command}: {e}"));
+        }
     }
 
     #[test]

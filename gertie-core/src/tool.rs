@@ -29,6 +29,15 @@ pub trait Tool: Send + Sync {
         false
     }
 
+    /// Hard policy vet, consulted *before* the permission prompt: an Err
+    /// blocks the call outright — no approve button exists for it. This is
+    /// for things no user should have to see a card for (fork bombs,
+    /// `rm -rf /`, wiping block devices); anything debatable belongs in
+    /// the prompt, not here.
+    fn vet(&self, _arguments: &str) -> Result<(), String> {
+        Ok(())
+    }
+
     /// Runs the tool with the model's JSON arguments.
     fn run<'a>(
         &'a self,

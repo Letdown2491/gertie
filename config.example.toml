@@ -9,11 +9,13 @@ base_url = "https://api.ppq.ai/v1"
 model = "glm-5.3-flash"
 api_key_env = "PPQ_API_KEY"
 # api_key = "sk-your-key"   # or inline, if you must
+# context_window = 131072   # tokens; unset = compaction disabled
 
 # A local model needs no key:
 # [[endpoints]]
 # name = "ollama"
 # base_url = "http://127.0.0.1:11434/v1"
 # model = "qwen3-coder"
+# context_window = 32768
 
 default_endpoint = "ppq"

@@ -26,6 +26,8 @@ pub struct Endpoint {
     pub base_url: String,
     pub model: String,
     pub api_key: Option<String>,
+    /// Model context window in tokens; None disables compaction.
+    pub context_window: Option<u64>,
 }
 
 /// Retry policy per DESIGN.md: auto-retry transient failures with
@@ -42,6 +44,13 @@ pub struct OpenAICompatible {
     /// any caller entering the runtime (the UI polls the returned stream
     /// on gpui's executor instead).
     runtime: tokio::runtime::Runtime,
+}
+
+impl OpenAICompatible {
+    /// Configured context window, for the loop's compaction trigger.
+    pub fn context_window(&self) -> Option<u64> {
+        self.endpoint.context_window
+    }
 }
 
 /// Per-request state: reqwest clients are cheap Arc handles; the endpoint
@@ -455,6 +464,7 @@ mod tests {
                 base_url: format!("http://{}/v1", self.address),
                 model: "fake-model".into(),
                 api_key: Some("fake-key".into()),
+                context_window: None,
             }
         }
     }
