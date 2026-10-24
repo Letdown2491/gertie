@@ -204,19 +204,19 @@ impl Bootstrap {
         }
 
         // Constructing the provider spins up its tokio runtime; do it
-        // once. The endpoint is kept for agent-type model overrides.
-        let (provider, agent_endpoint) = match endpoint {
-            Some(endpoint) => {
-                let for_agents = endpoint.clone();
-                (
-                    OpenAICompatible::new(endpoint)
-                        .map(Arc::new)
-                        .map_err(|error| eprintln!("warning: endpoint setup failed: {error}"))
-                        .ok(),
-                    Some(for_agents),
-                )
-            }
-            None => (None, None),
+        // once. Every configured endpoint rides the provider — the
+        // selected one first, the rest as fallbacks when an endpoint
+        // dies before producing content. The first endpoint is kept
+        // for agent-type model overrides (model names don't translate
+        // across providers).
+        let all_endpoints = config.resolved_endpoints();
+        let agent_endpoint = all_endpoints.first().cloned();
+        let provider = match all_endpoints.first() {
+            Some(_) => OpenAICompatible::with_endpoints(all_endpoints)
+                .map(Arc::new)
+                .map_err(|error| eprintln!("warning: endpoint setup failed: {error}"))
+                .ok(),
+            None => None,
         };
 
         let broker = Arc::new(gertie_core::PermissionBroker::new());

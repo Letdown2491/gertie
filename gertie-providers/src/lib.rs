@@ -36,9 +36,13 @@ const MAX_ATTEMPTS: u32 = 3;
 const INITIAL_BACKOFF: Duration = Duration::from_millis(500);
 
 /// Any OpenAI-compatible chat/completions endpoint (ppq.ai, OpenRouter,
-/// Ollama's OpenAI mode, LM Studio, vLLM, …).
+/// Ollama's OpenAI mode, LM Studio, vLLM, …), plus optional fallbacks.
 pub struct OpenAICompatible {
-    endpoint: Endpoint,
+    /// Ordered: [0] is preferred; the rest are tried in sequence when an
+    /// endpoint dies before producing any content. Once an endpoint
+    /// streams content the turn is committed to it — a model switch
+    /// mid-reply would orphan what the user already saw.
+    endpoints: Vec<Endpoint>,
     client: reqwest::Client,
     /// Own multi-thread runtime: spawned tasks must make progress without
     /// any caller entering the runtime (the UI polls the returned stream
@@ -47,9 +51,12 @@ pub struct OpenAICompatible {
 }
 
 impl OpenAICompatible {
-    /// Configured context window, for the loop's compaction trigger.
+    /// Configured context window (the preferred endpoint's), for the
+    /// loop's compaction trigger.
     pub fn context_window(&self) -> Option<u64> {
-        self.endpoint.context_window
+        self.endpoints
+            .first()
+            .and_then(|endpoint| endpoint.context_window)
     }
 }
 
@@ -83,6 +90,16 @@ struct PartialToolCall {
 
 impl OpenAICompatible {
     pub fn new(endpoint: Endpoint) -> Result<Self, reqwest::Error> {
+        Self::with_endpoints(vec![endpoint])
+    }
+
+    /// Preferred endpoint plus fallbacks. When an endpoint fails before
+    /// producing any content — auth rejected, connection refused, 5xx
+    /// after retries — the next endpoint is tried, invisibly: an
+    /// Event::Error is terminal for the turn (the loop stops on the
+    /// first one), so nothing is emitted until every endpoint is
+    /// exhausted.
+    pub fn with_endpoints(endpoints: Vec<Endpoint>) -> Result<Self, reqwest::Error> {
         let client = reqwest::Client::builder().build()?;
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
@@ -90,7 +107,7 @@ impl OpenAICompatible {
             .build()
             .expect("tokio runtime");
         Ok(Self {
-            endpoint,
+            endpoints,
             client,
             runtime,
         })
@@ -100,40 +117,87 @@ impl OpenAICompatible {
 impl Provider for OpenAICompatible {
     fn stream(&self, request: Request) -> BoxStream<'static, Event> {
         let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
-        let scoped = RequestScoped {
-            endpoint: self.endpoint.clone(),
-            client: self.client.clone(),
-        };
+        let endpoints = self.endpoints.clone();
+        let client = self.client.clone();
         self.runtime.spawn(async move {
-            let mut attempt = 0u32;
-            loop {
-                attempt += 1;
-                let _ = sender.send(Event::Started);
-                match scoped.attempt_once(&request, &sender).await {
-                    Outcome::Done => return,
-                    Outcome::Fatal(message) => {
-                        let _ = sender.send(Event::Error { message });
+            let mut last_error: Option<String> = None;
+            for endpoint in endpoints {
+                let scoped = RequestScoped {
+                    endpoint,
+                    client: client.clone(),
+                };
+                let (proxy, mut proxy_rx) = tokio::sync::mpsc::unbounded_channel();
+                let request = request.clone();
+                let driver =
+                    tokio::spawn(async move { run_with_retries(&scoped, &request, &proxy).await });
+                // Forward live, but hold everything back until this
+                // endpoint has produced content — pre-content, the only
+                // events are Started (the loop ignores it), Done (which
+                // would end the turn early), and errors (held for the
+                // fallback decision).
+                let mut produced = false;
+                while let Some(event) = proxy_rx.recv().await {
+                    match &event {
+                        Event::Token { .. } | Event::ToolCall { .. } | Event::Usage { .. } => {
+                            produced = true
+                        }
+                        _ if !produced => continue,
+                        _ => {}
+                    }
+                    let _ = sender.send(event);
+                }
+                if produced {
+                    // Committed to this endpoint; its whole stream —
+                    // errors after content included — already passed.
+                    return;
+                }
+                let outcome = driver
+                    .await
+                    .unwrap_or_else(|_| Err("stream driver failed".into()));
+                match outcome {
+                    // Clean end with no content: the server chose to
+                    // send nothing. Report Done, don't fall back.
+                    Ok(()) => {
+                        let _ = sender.send(Event::Done);
                         return;
                     }
-                    Outcome::Transient(message) => {
-                        if attempt >= MAX_ATTEMPTS {
-                            let _ = sender.send(Event::Error {
-                                message: format!("{message} (after {attempt} attempts)"),
-                            });
-                            return;
-                        }
-                        let _ = sender.send(Event::Error {
-                            message: format!(
-                                "{message} — retrying (attempt {}/{MAX_ATTEMPTS})",
-                                attempt + 1
-                            ),
-                        });
-                        tokio::time::sleep(backoff(attempt)).await;
-                    }
+                    Err(message) => last_error = Some(message),
                 }
             }
+            let detail = last_error.unwrap_or_else(|| "no endpoints configured".into());
+            let _ = sender.send(Event::Error {
+                message: format!("all endpoints failed — {detail}"),
+            });
         });
         Box::pin(UnboundedReceiverStream::new(receiver))
+    }
+}
+
+/// One endpoint's full retry policy. Returns the terminal outcome: Ok
+/// when the stream completed, Err with the reason once retries are
+/// exhausted (auth/config errors return immediately). Retry delays are
+/// silent — an Event::Error is terminal for the turn (the loop stops
+/// on the first one), so a "retrying" note would kill the turn it was
+/// trying to save.
+async fn run_with_retries(
+    scoped: &RequestScoped,
+    request: &Request,
+    sender: &tokio::sync::mpsc::UnboundedSender<Event>,
+) -> Result<(), String> {
+    let mut attempt = 0;
+    loop {
+        attempt += 1;
+        let _ = sender.send(Event::Started);
+        match scoped.attempt_once(request, sender).await {
+            Outcome::Done => return Ok(()),
+            Outcome::Fatal(message) => return Err(message),
+            Outcome::Transient(message) => {
+                if attempt >= MAX_ATTEMPTS {
+                    return Err(format!("{message} (after {attempt} attempts)"));
+                }
+                tokio::time::sleep(backoff(attempt)).await;
+            }
+        }
     }
 }
 
@@ -535,7 +599,6 @@ mod tests {
         assert_eq!(
             events,
             vec![
-                Event::Started,
                 Event::ToolCall {
                     id: "call_1".into(),
                     name: "read_file".into(),
@@ -547,15 +610,17 @@ mod tests {
     }
 
     #[test]
-    fn auth_errors_are_fatal_not_retried() {
+    fn auth_errors_are_terminal_in_one_message() {
         let server = FakeServer::with_status("401 Unauthorized", "{}");
         let provider = OpenAICompatible::new(server.endpoint()).unwrap();
         let events = drain(provider.stream(user_request()));
 
-        assert_eq!(events.len(), 2);
-        assert!(matches!(events[0], Event::Started));
+        // One error, not a Started + Error progression: the loop stops
+        // on the first error, so anything before the last would be
+        // noise the user never gets to act on.
+        assert_eq!(events.len(), 1);
         assert!(
-            matches!(&events[1], Event::Error { message } if message.contains("auth rejected"))
+            matches!(&events[0], Event::Error { message } if message.contains("auth rejected"))
         );
     }
 
@@ -574,5 +639,64 @@ mod tests {
             .collect();
         assert!(!errors.is_empty());
         assert!(errors.last().unwrap().contains("after 3 attempts"));
+    }
+
+    #[test]
+    fn a_dead_endpoint_falls_back_to_the_next() {
+        let bad = FakeServer::with_status("401 Unauthorized", "{}");
+        let good = FakeServer::start(
+            "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\ndata: [DONE]\n\n",
+        );
+        let provider =
+            OpenAICompatible::with_endpoints(vec![bad.endpoint(), good.endpoint()]).unwrap();
+        let events = drain(provider.stream(user_request()));
+
+        assert!(
+            matches!(events[0], Event::Token { .. }),
+            "content flows from the fallback"
+        );
+        assert_eq!(events.last(), Some(&Event::Done));
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, Event::Error { .. })),
+            "the dead endpoint's 401 never reaches the turn"
+        );
+    }
+
+    #[test]
+    fn all_endpoints_failing_reports_once() {
+        let first = FakeServer::with_status("401 Unauthorized", "{}");
+        let second = FakeServer::with_status("401 Unauthorized", "{}");
+        let provider =
+            OpenAICompatible::with_endpoints(vec![first.endpoint(), second.endpoint()]).unwrap();
+        let events = drain(provider.stream(user_request()));
+
+        assert_eq!(events.len(), 1);
+        assert!(matches!(&events[0], Event::Error { message }
+                if message.contains("all endpoints failed") && message.contains("auth rejected")));
+    }
+
+    #[test]
+    fn once_content_flows_the_turn_is_committed() {
+        // A token, then an in-stream server error: the error passes
+        // through — no silent model switch after the user has seen a
+        // reply already forming.
+        let server = FakeServer::start(
+            "data: {\"choices\":[{\"delta\":{\"content\":\"partial\"}}]}\n\n\
+             data: {\"error\":{\"message\":\"overloaded mid-stream\"}}\n\n",
+        );
+        let provider = OpenAICompatible::new(server.endpoint()).unwrap();
+        let events = drain(provider.stream(user_request()));
+
+        assert!(events.contains(&Event::Token {
+            delta: "partial".into()
+        }));
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, Event::Error { message }
+                    if message.contains("overloaded mid-stream")))
+        );
     }
 }

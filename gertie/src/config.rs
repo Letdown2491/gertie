@@ -144,6 +144,41 @@ pub struct EndpointConfig {
     pub context_window: Option<u64>,
 }
 
+impl EndpointConfig {
+    /// The endpoint with its key resolved: `api_key_env`, then the
+    /// conventional `GERTIE_<NAME>_API_KEY` / `<NAME>_API_KEY`
+    /// variables, then the literal config value.
+    pub fn resolve(&self) -> gertie_providers::Endpoint {
+        let api_key = self
+            .api_key_env
+            .as_deref()
+            .and_then(|name| std::env::var(name).ok())
+            .or_else(|| {
+                std::env::var(format!(
+                    "GERTIE_{}_API_KEY",
+                    self.name.to_uppercase().replace([' ', '-'], "_")
+                ))
+                .ok()
+            })
+            .or_else(|| {
+                std::env::var(format!(
+                    "{}_API_KEY",
+                    self.name.to_uppercase().replace([' ', '-'], "_")
+                ))
+                .ok()
+            })
+            .or_else(|| self.api_key.clone());
+
+        gertie_providers::Endpoint {
+            name: self.name.clone(),
+            base_url: self.base_url.clone(),
+            model: self.model.clone(),
+            api_key,
+            context_window: self.context_window,
+        }
+    }
+}
+
 impl Config {
     pub fn path() -> Option<PathBuf> {
         directories::ProjectDirs::from("dev", "gertie", "gertie")
@@ -187,33 +222,28 @@ impl Config {
             })
             .or_else(|| self.endpoints.first())?;
 
-        let api_key = chosen
-            .api_key_env
-            .as_deref()
-            .and_then(|name| std::env::var(name).ok())
-            .or_else(|| {
-                std::env::var(format!(
-                    "GERTIE_{}_API_KEY",
-                    chosen.name.to_uppercase().replace([' ', '-'], "_")
-                ))
-                .ok()
-            })
-            .or_else(|| {
-                std::env::var(format!(
-                    "{}_API_KEY",
-                    chosen.name.to_uppercase().replace([' ', '-'], "_")
-                ))
-                .ok()
-            })
-            .or_else(|| chosen.api_key.clone());
+        Some(chosen.resolve())
+    }
 
-        Some(gertie_providers::Endpoint {
-            name: chosen.name.clone(),
-            base_url: chosen.base_url.clone(),
-            model: chosen.model.clone(),
-            api_key,
-            context_window: chosen.context_window,
-        })
+    /// Every configured endpoint, keys resolved, in fallback order: the
+    /// selected one first, then the rest in listed order. When an
+    /// endpoint dies before producing content, the provider walks this
+    /// list.
+    pub fn resolved_endpoints(&self) -> Vec<gertie_providers::Endpoint> {
+        let mut ordered = Vec::new();
+        if let Some(first) = self.selected_endpoint() {
+            ordered.push(first);
+        }
+        for endpoint in &self.endpoints {
+            let resolved = endpoint.resolve();
+            if !ordered
+                .iter()
+                .any(|existing| existing.name == resolved.name)
+            {
+                ordered.push(resolved);
+            }
+        }
+        ordered
     }
 
     /// Keys sitting in plaintext config are allowed but get called out,
