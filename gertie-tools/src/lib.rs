@@ -6,6 +6,7 @@
 //! one sandbox rule, applied identically by every tool.
 
 pub mod mcp;
+pub mod sandbox;
 pub mod shape;
 pub mod skills;
 pub mod web;
@@ -92,7 +93,16 @@ macro_rules! rooted {
     };
 }
 
-rooted!(ReadFile, WriteFile, EditFile, Bash, Glob, Grep);
+rooted!(ReadFile, WriteFile, EditFile, Glob, Grep);
+
+impl Bash {
+    pub fn new(root: PathBuf) -> Self {
+        Self {
+            root,
+            sandbox: None,
+        }
+    }
+}
 
 pub struct ReadFile {
     root: PathBuf,
@@ -132,6 +142,9 @@ struct EditArgs {
 
 pub struct Bash {
     root: PathBuf,
+    /// Kernel sandbox (Landlock) for children; None = unsandboxed (the
+    /// default — the permission gate is the safety net).
+    sandbox: Option<Arc<sandbox::Sandbox>>,
 }
 
 /// Hard-blocked command shapes, checked before the approval card. The
@@ -186,11 +199,22 @@ struct GrepArgs {
 
 /// Builds the six local tools against one workspace root.
 pub fn builtin_tools(root: &Path) -> gertie_core::ToolRegistry {
+    builtin_tools_with(root, None)
+}
+
+/// Same, with an optional bash sandbox (opt-in Landlock isolation).
+pub fn builtin_tools_with(
+    root: &Path,
+    sandbox: Option<Arc<sandbox::Sandbox>>,
+) -> gertie_core::ToolRegistry {
     let tools: Vec<Arc<dyn Tool>> = vec![
         Arc::new(ReadFile { root: root.into() }),
         Arc::new(WriteFile { root: root.into() }),
         Arc::new(EditFile { root: root.into() }),
-        Arc::new(Bash { root: root.into() }),
+        Arc::new(Bash {
+            root: root.into(),
+            sandbox,
+        }),
         Arc::new(Glob { root: root.into() }),
         Arc::new(Grep { root: root.into() }),
     ];
@@ -427,14 +451,19 @@ impl Tool for Bash {
             let args: BashArgs = parse(arguments, "bash")?;
             let timeout = std::time::Duration::from_secs(args.timeout.unwrap_or(30).clamp(1, 300));
 
-            let mut child = std::process::Command::new("sh")
-                .arg("-c")
-                .arg(&args.command)
-                .current_dir(&self.root)
-                .stdout(std::process::Stdio::piped())
-                .stderr(std::process::Stdio::piped())
-                .spawn()
-                .map_err(|error| format!("bash: {error}"))?;
+            let mut child = {
+                let mut command = std::process::Command::new("sh");
+                command
+                    .arg("-c")
+                    .arg(&args.command)
+                    .current_dir(&self.root)
+                    .stdout(std::process::Stdio::piped())
+                    .stderr(std::process::Stdio::piped());
+                if let Some(sandbox) = &self.sandbox {
+                    sandbox.apply(&mut command)?;
+                }
+                command.spawn().map_err(|error| format!("bash: {error}"))?
+            };
 
             let start = std::time::Instant::now();
             loop {

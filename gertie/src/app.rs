@@ -65,7 +65,12 @@ pub fn run() {
                 }
             },
         );
-    let mut tools = gertie_tools::builtin_tools(&workspace_root);
+    // Sandbox: opt-in Landlock isolation for bash children.
+    let sandbox = config
+        .security
+        .sandbox_bash
+        .then(|| std::sync::Arc::new(gertie_tools::sandbox::Sandbox::new(workspace_root.clone())));
+    let mut tools = gertie_tools::builtin_tools_with(&workspace_root, sandbox);
 
     // Skills: user dir + project dir (project overrides by name), loaded
     // on demand through load_skill; only the index rides the system

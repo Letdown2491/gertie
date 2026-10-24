@@ -23,6 +23,27 @@ pub struct Config {
     /// it instead of failing mysteriously.
     #[serde(default)]
     pub search: Option<SearchConfig>,
+    /// Security posture. Absent = defaults (sandbox off).
+    #[serde(default)]
+    pub security: SecurityConfig,
+}
+
+#[derive(Deserialize, Debug, Clone)]
+pub struct SecurityConfig {
+    /// Landlock-isolate bash children: system reads, workspace//tmp
+    /// writes only. Opt-in; when the kernel can't enforce it, sandboxed
+    /// commands fail instead of running free.
+    #[serde(default)]
+    pub sandbox_bash: bool,
+}
+
+#[allow(clippy::derivable_impls)]
+impl Default for SecurityConfig {
+    fn default() -> Self {
+        Self {
+            sandbox_bash: false, // opt-in: the permission gate is the base layer
+        }
+    }
 }
 
 #[derive(Deserialize, Debug, Clone)]

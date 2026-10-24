@@ -27,6 +27,13 @@ api_key_env = "PPQ_API_KEY"
 # [mcp_servers.env]
 # NODE_ENV = "production"
 
+# Security posture. sandbox_bash = true Landlock-isolates bash children:
+# system read-only, writes limited to the workspace and /tmp. Opt-in;
+# when the kernel can't enforce it, sandboxed commands fail rather than
+# run free.
+# [security]
+# sandbox_bash = true
+
 # Web search: web_search explains itself until a backend is configured.
 # [search]
 # backend = "brave"          # or "searxng"
