@@ -187,7 +187,7 @@ pub(crate) fn pump(
         // Worker asks first: a worker's loop parks inside its tool, so
         // its asks only surface here, never on the leader stream. A
         // disconnected channel just ends the loop — no more asks.
-        while let Some(ask) = worker_asks.try_recv().ok() {
+        while let Ok(Some(ask)) = worker_asks.try_recv() {
             recorder.flush();
             calls.insert(
                 ask.call.id.clone(),
