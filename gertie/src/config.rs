@@ -118,10 +118,16 @@ pub enum Invocation {
 pub struct McpServerConfig {
     /// Provenance label; tool names become `mcp_{name}_{tool}`.
     pub name: String,
-    pub command: String,
+    /// stdio transport: the process to spawn. Absent when `url` is set.
+    #[serde(default)]
+    pub command: Option<String>,
+    /// Streamable HTTP transport: the server's MCP endpoint URL. One
+    /// of `url` or `command` is required; `url` wins if both appear.
+    #[serde(default)]
+    pub url: Option<String>,
     #[serde(default)]
     pub args: Vec<String>,
-    /// Extra environment for the server process.
+    /// Extra environment for the server process (stdio only).
     #[serde(default)]
     pub env: std::collections::BTreeMap<String, String>,
 }

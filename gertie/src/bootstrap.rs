@@ -179,16 +179,31 @@ impl Bootstrap {
         if !config.mcp_servers.is_empty() {
             let map = Arc::get_mut(&mut tools).expect("registry not yet shared");
             for server in &config.mcp_servers {
-                match gertie_tools::mcp::McpClient::connect(
-                    &server.name,
-                    &server.command,
-                    &server.args,
-                    &server
-                        .env
-                        .iter()
-                        .map(|(key, value)| (key.clone(), value.clone()))
-                        .collect::<Vec<_>>(),
-                ) {
+                // Streamable HTTP when a URL is configured; stdio
+                // (spawned process) otherwise.
+                let connection = match &server.url {
+                    Some(url) => gertie_tools::mcp::McpClient::connect_url(&server.name, url),
+                    None => match &server.command {
+                        Some(command) => gertie_tools::mcp::McpClient::connect(
+                            &server.name,
+                            command,
+                            &server.args,
+                            &server
+                                .env
+                                .iter()
+                                .map(|(key, value)| (key.clone(), value.clone()))
+                                .collect::<Vec<_>>(),
+                        ),
+                        None => {
+                            label.push_str(&format!(
+                                " — ⚠ mcp {}: needs a url or a command",
+                                server.name
+                            ));
+                            continue;
+                        }
+                    },
+                };
+                match connection {
                     Ok(client) => match Arc::new(client).list_tools() {
                         Ok(mcp_tools) => {
                             let count = mcp_tools.len();

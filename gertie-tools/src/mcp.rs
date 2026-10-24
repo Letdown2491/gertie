@@ -1,9 +1,19 @@
-//! MCP (Model Context Protocol) stdio client, tools-only.
+//! MCP (Model Context Protocol) client, tools-only — stdio and
+//! Streamable HTTP transports.
 //!
-//! A server is an external process gertie spawns and speaks JSON-RPC to
-//! over stdin/stdout (line-delimited JSON — MCP's stdio transport). At
-//! connect time gertie performs the `initialize` handshake and lists the
-//! server's tools; each becomes an [`McpTool`] in the registry.
+//! **stdio**: a server is an external process gertie spawns and speaks
+//! JSON-RPC to over stdin/stdout (line-delimited JSON — MCP's original
+//! transport). At connect time gertie performs the `initialize`
+//! handshake and lists the server's tools; each becomes an [`McpTool`]
+//! in the registry.
+//!
+//! **Streamable HTTP** (the 2025-03-26 transport): the server is a URL.
+//! Every message is a POST of one JSON-RPC body to that single
+//! endpoint; the answer comes back either as `application/json` (one
+//! response) or `text/event-stream` (messages wrapped in `data:`
+//! lines). The `initialize` response may carry an `Mcp-Session-Id`
+//! header, which gertie echoes on every later request, alongside
+//! `MCP-Protocol-Version`.
 //!
 //! Trust posture (from the M3 research): an MCP server is third-party
 //! code talking to the model. Its tool descriptions are *untrusted
@@ -13,10 +23,11 @@
 //! mutates; the user is the capability system).
 //!
 //! Boring choices for v1: requests are serialized (one at a time — MCP
-//! allows concurrency, but correctness first), each request waits at
-//! most `RESPONSE_TIMEOUT` on a reader thread (a hung server must not
-//! hang the UI), and stderr is discarded rather than interleaved into
-//! model-visible output.
+//! allows concurrency, but correctness first), each stdio request waits
+//! at most `RESPONSE_TIMEOUT` on a reader thread (a hung server must
+//! not hang the UI), HTTP requests carry the same timeout, and stdio
+//! stderr is discarded rather than interleaved into model-visible
+//! output.
 
 use crate::{Tool, ToolResult, blocking};
 use serde_json::{Value, json};
@@ -57,13 +68,29 @@ fn sanitize_name(raw: &str) -> String {
 pub struct McpClient {
     server_name: String,
     inner: Arc<std::sync::Mutex<Inner>>,
-    child: Arc<std::sync::Mutex<std::process::Child>>,
+    /// stdio only — the spawned server process, killed on drop. None
+    /// for HTTP (nothing to reap; the server outlives the client).
+    child: Option<Arc<std::sync::Mutex<std::process::Child>>>,
 }
 
 struct Inner {
-    stdin: std::process::ChildStdin,
-    responses: Receiver<String>,
+    transport: Transport,
     next_id: u64,
+}
+
+enum Transport {
+    Stdio {
+        stdin: std::process::ChildStdin,
+        /// Lines from the reader thread.
+        responses: Receiver<String>,
+    },
+    Http {
+        url: String,
+        client: reqwest::blocking::Client,
+        /// Echoed from the initialize response's `Mcp-Session-Id`
+        /// header, when the server issues one.
+        session_id: Option<String>,
+    },
 }
 
 /// A server's tool, bridged into gertie's Tool trait.
@@ -138,11 +165,13 @@ impl McpClient {
         let client = Self {
             server_name: server_name.to_string(),
             inner: Arc::new(std::sync::Mutex::new(Inner {
-                stdin,
-                responses: rx,
+                transport: Transport::Stdio {
+                    stdin,
+                    responses: rx,
+                },
                 next_id: 1,
             })),
-            child: Arc::new(std::sync::Mutex::new(child)),
+            child: Some(Arc::new(std::sync::Mutex::new(child))),
         };
 
         client.request(
@@ -156,6 +185,37 @@ impl McpClient {
         // Notification: no id, no response expected.
         client.notify("notifications/initialized")?;
         Ok(client)
+    }
+
+    /// Connects to a Streamable HTTP server at `url` (the MCP endpoint,
+    /// not the server's root). Same handshake, no child process.
+    pub fn connect_url(server_name: &str, url: &str) -> Result<Self, String> {
+        let client = reqwest::blocking::Client::builder()
+            .timeout(RESPONSE_TIMEOUT)
+            .build()
+            .map_err(|error| format!("mcp `{server_name}`: {error}"))?;
+        let this = Self {
+            server_name: server_name.to_string(),
+            inner: Arc::new(std::sync::Mutex::new(Inner {
+                transport: Transport::Http {
+                    url: url.trim_end_matches('/').to_string(),
+                    client,
+                    session_id: None,
+                },
+                next_id: 1,
+            })),
+            child: None,
+        };
+        this.request(
+            "initialize",
+            Some(json!({
+                "protocolVersion": PROTOCOL_VERSION,
+                "capabilities": {},
+                "clientInfo": {"name": "gertie", "version": env!("CARGO_PKG_VERSION")}
+            })),
+        )?;
+        this.notify("notifications/initialized")?;
+        Ok(this)
     }
 
     /// The server's advertised tools, as bridgable gertie tools.
@@ -197,42 +257,184 @@ impl McpClient {
     }
 
     fn notify(&self, method: &str) -> Result<(), String> {
-        let line = json!({
-            "jsonrpc": "2.0",
-            "method": method,
-        });
+        let notification = json!({"jsonrpc": "2.0", "method": method});
         let mut inner = self.inner.lock().unwrap();
-        writeln!(inner.stdin, "{line}")
-            .map_err(|error| format!("mcp `{}`: {error}", self.server_name))
+        match &mut inner.transport {
+            Transport::Stdio { stdin, .. } => writeln!(stdin, "{notification}")
+                .map_err(|error| format!("mcp `{}`: {error}", self.server_name)),
+            Transport::Http {
+                url,
+                client,
+                session_id,
+            } => {
+                // A notification has no id and expects no response —
+                // 202 Accepted or an empty body both count.
+                let mut request = client
+                    .post(url.as_str())
+                    .header("Accept", "application/json, text/event-stream")
+                    .header("MCP-Protocol-Version", PROTOCOL_VERSION)
+                    .json(&notification);
+                if let Some(id) = &session_id {
+                    request = request.header("Mcp-Session-Id", id);
+                }
+                request
+                    .send()
+                    .map(drop)
+                    .map_err(|error| format!("mcp `{}`: {error}", self.server_name))
+            }
+        }
     }
 
     fn request(&self, method: &str, params: Option<Value>) -> Result<Value, String> {
-        let (id, line) = {
+        let id = {
             let mut inner = self.inner.lock().unwrap();
             let id = inner.next_id;
             inner.next_id += 1;
-            let mut line = json!({"jsonrpc": "2.0", "id": id, "method": method});
-            if let Some(params) = params {
-                line["params"] = params;
-            }
-            (id, line)
+            id
         };
-        {
-            let mut inner = self.inner.lock().unwrap();
-            writeln!(inner.stdin, "{line}")
-                .map_err(|error| format!("mcp `{}`: {error}", self.server_name))?;
+        let mut message = json!({"jsonrpc": "2.0", "id": id, "method": method});
+        if let Some(params) = params {
+            message["params"] = params;
         }
-        self.await_response(id)
+        // The lock guards the send and session-id state only — the
+        // stdio wait re-locks per line, so it must run lock-free. The
+        // HTTP round trip is self-contained (no re-lock), so it can
+        // finish under the guard; requests are serialized either way.
+        enum Pending {
+            Stdio,
+            Done(Result<Value, String>),
+        }
+        let sent = {
+            let mut inner = self.inner.lock().unwrap();
+            match &mut inner.transport {
+                Transport::Stdio { stdin, .. } => {
+                    writeln!(stdin, "{message}")
+                        .map_err(|error| format!("mcp `{}`: {error}", self.server_name))?;
+                    Pending::Stdio
+                }
+                Transport::Http {
+                    url,
+                    client,
+                    session_id,
+                } => {
+                    let (result, issued) = Self::http_round_trip(
+                        &self.server_name,
+                        url,
+                        client,
+                        session_id.as_deref(),
+                        id,
+                        &message,
+                    );
+                    // The initialize response may issue a session id;
+                    // every later request echoes it.
+                    if issued.is_some() {
+                        *session_id = issued;
+                    }
+                    Pending::Done(result)
+                }
+            }
+        };
+        match sent {
+            Pending::Stdio => self.await_response_stdio(id),
+            Pending::Done(result) => result,
+        }
     }
 
-    /// Reads buffered lines until the response with `id` arrives. Server
-    /// notifications and stale lines are skipped; timeout or EOF is an
-    /// error carrying the server's last words if any.
-    fn await_response(&self, id: u64) -> Result<Value, String> {
+    /// One Streamable HTTP round trip: POST the message, read the
+    /// answer as JSON or as an SSE stream, and report any session id
+    /// the server issued. Lock-free by contract (no re-lock inside).
+    fn http_round_trip(
+        server_name: &str,
+        url: &str,
+        client: &reqwest::blocking::Client,
+        session_id: Option<&str>,
+        id: u64,
+        message: &Value,
+    ) -> (Result<Value, String>, Option<String>) {
+        let mut request = client
+            .post(url)
+            .header("Accept", "application/json, text/event-stream")
+            .header("MCP-Protocol-Version", PROTOCOL_VERSION)
+            .json(message);
+        if let Some(session) = session_id {
+            request = request.header("Mcp-Session-Id", session);
+        }
+        let response = match request.send() {
+            Ok(response) => response,
+            Err(error) => return (Err(format!("mcp `{server_name}`: {error}")), None),
+        };
+        let issued = response
+            .headers()
+            .get("Mcp-Session-Id")
+            .and_then(|value| value.to_str().ok().map(str::to_string));
+        (Self::finish_http(server_name, id, response), issued)
+    }
+
+    /// The answer side, shared by every HTTP status: success is either
+    /// a JSON body or an SSE stream wrapping the same JSON-RPC
+    /// response; the rest of the protocol is identical either way.
+    fn finish_http(
+        server_name: &str,
+        id: u64,
+        response: reqwest::blocking::Response,
+    ) -> Result<Value, String> {
+        let status = response.status();
+        if !status.is_success() {
+            return Err(format!("mcp `{server_name}`: {status}"));
+        }
+        let content_type = response
+            .headers()
+            .get("content-type")
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or_default()
+            .to_string();
+        let body = response
+            .text()
+            .map_err(|error| format!("mcp `{server_name}`: {error}"))?;
+        let payload = if content_type.contains("text/event-stream") {
+            body.lines()
+                .filter_map(|line| line.strip_prefix("data:"))
+                .find_map(|data| serde_json::from_str::<Value>(data.trim()).ok())
+                .ok_or_else(|| format!("mcp `{server_name}`: no response in SSE stream"))?
+        } else {
+            serde_json::from_str::<Value>(&body)
+                .map_err(|error| format!("mcp `{server_name}`: not JSON-RPC: {error}"))?
+        };
+        Self::rpc_result(server_name, id, &payload)
+    }
+
+    /// Shared by both transports: a parsed JSON-RPC response object is
+    /// either a `result` or an `error`.
+    fn rpc_result(server_name: &str, id: u64, value: &Value) -> Result<Value, String> {
+        if value.get("id").and_then(Value::as_u64) != Some(id) {
+            return Err(format!(
+                "mcp `{server_name}`: response id mismatch (wanted {id})"
+            ));
+        }
+        if let Some(error) = value.get("error") {
+            return Err(format!(
+                "mcp `{server_name}`: {}",
+                error
+                    .get("message")
+                    .and_then(Value::as_str)
+                    .unwrap_or("protocol error")
+            ));
+        }
+        Ok(value.get("result").cloned().unwrap_or(Value::Null))
+    }
+
+    /// stdio: reads buffered lines until the response with `id`
+    /// arrives. Server notifications and stale lines are skipped;
+    /// timeout or EOF is an error carrying the server's last words if
+    /// any.
+    fn await_response_stdio(&self, id: u64) -> Result<Value, String> {
         loop {
             let line = {
-                let inner = self.inner.lock().unwrap();
-                match inner.responses.recv_timeout(RESPONSE_TIMEOUT) {
+                let mut inner = self.inner.lock().unwrap();
+                let Transport::Stdio { responses, .. } = &mut inner.transport else {
+                    unreachable!("await_response_stdio outside the stdio transport");
+                };
+                match responses.recv_timeout(RESPONSE_TIMEOUT) {
                     Ok(line) => line,
                     Err(RecvTimeoutError::Timeout) => {
                         return Err(format!(
@@ -254,27 +456,18 @@ impl McpClient {
                 Err(_) => continue, // not JSON — skip (server noise)
             };
             if value.get("id").and_then(Value::as_u64) == Some(id) {
-                if let Some(error) = value.get("error") {
-                    return Err(format!(
-                        "mcp `{}`: {}",
-                        self.server_name,
-                        error
-                            .get("message")
-                            .and_then(Value::as_str)
-                            .unwrap_or("protocol error")
-                    ));
-                }
-                return Ok(value.get("result").cloned().unwrap_or(Value::Null));
+                return Self::rpc_result(&self.server_name, id, &value);
             }
             // Any other line (notifications, responses to nothing we're
             // waiting on) is dropped: model-visible output stays clean.
         }
     }
 }
-
 impl Drop for McpClient {
     fn drop(&mut self) {
-        let _ = self.child.lock().unwrap().kill();
+        if let Some(child) = &self.child {
+            let _ = child.lock().unwrap().kill();
+        }
     }
 }
 
@@ -432,5 +625,178 @@ mod tests {
     fn names_keep_to_the_registry_charset() {
         assert_eq!(sanitize_name("my-tool.v2"), "my_tool_v2");
         assert_eq!(sanitize_name("plain"), "plain");
+    }
+
+    /// A fake Streamable HTTP MCP server: accepts repeated connections,
+    /// answers initialize / notifications/initialized / tools/list /
+    /// tools/call in request order, records the `Mcp-Session-Id` header
+    /// of every request. Real HTTP over a real socket — the parts worth
+    /// testing (framing, session echo, SSE wrapping) are exactly the
+    /// parts a mock wouldn't cover.
+    struct FakeHttpServer {
+        url: String,
+        seen_sessions: Arc<std::sync::Mutex<Vec<Option<String>>>>,
+    }
+
+    impl FakeHttpServer {
+        fn start(list_content_type: &'static str) -> Self {
+            Self::start_with(list_content_type, false)
+        }
+
+        fn start_with(list_content_type: &'static str, require_session: bool) -> Self {
+            use std::io::Read as _;
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+            let address = listener.local_addr().expect("addr").to_string();
+            let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let seen_for_thread = seen.clone();
+            std::thread::spawn(move || {
+                for stream in listener.incoming() {
+                    let mut stream = match stream {
+                        Ok(stream) => stream,
+                        Err(_) => break,
+                    };
+                    // Headers, then exactly content-length more bytes.
+                    let mut buffer = Vec::new();
+                    let mut chunk = [0u8; 1024];
+                    loop {
+                        match stream.read(&mut chunk) {
+                            Ok(0) | Err(_) => break,
+                            Ok(n) => buffer.extend_from_slice(&chunk[..n]),
+                        }
+                        let header_end = buffer
+                            .windows(4)
+                            .position(|window| window == b"\r\n\r\n")
+                            .map(|position| position + 4);
+                        let Some(header_end) = header_end else {
+                            continue;
+                        };
+                        let content_length = String::from_utf8_lossy(&buffer[..header_end])
+                            .lines()
+                            .find_map(|line| {
+                                line.to_ascii_lowercase()
+                                    .strip_prefix("content-length:")
+                                    .and_then(|value| value.trim().parse::<usize>().ok())
+                            })
+                            .unwrap_or(0);
+                        while buffer.len() < header_end + content_length {
+                            match stream.read(&mut chunk) {
+                                Ok(0) | Err(_) => break,
+                                Ok(n) => buffer.extend_from_slice(&chunk[..n]),
+                            }
+                        }
+                        break;
+                    }
+                    let raw = String::from_utf8_lossy(&buffer).to_string();
+                    let (headers, body) = match raw.split_once("\r\n\r\n") {
+                        Some(parts) => parts,
+                        None => continue,
+                    };
+                    seen_for_thread.lock().unwrap().push(
+                        headers
+                            .lines()
+                            .find(|line| line.to_ascii_lowercase().starts_with("mcp-session-id:"))
+                            .map(str::to_string),
+                    );
+                    if require_session && body.contains("\"method\":\"tools/list\"") {
+                        let has_session = headers
+                            .lines()
+                            .any(|line| line.eq_ignore_ascii_case("mcp-session-id: sess-42"));
+                        if !has_session {
+                            let response = "HTTP/1.1 400 Bad Request\r\ncontent-length: 0\r\n\r\n";
+                            stream.write_all(response.as_bytes()).unwrap();
+                            continue;
+                        }
+                    }
+                    let (content_type, body) = if body.contains("\"method\":\"initialize\"") {
+                        (
+                            "application/json",
+                            r#"{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2024-11-05","capabilities":{"tools":{}},"serverInfo":{"name":"fake","version":"0"}}}"#,
+                        )
+                    } else if body.contains("notifications/initialized") {
+                        // A notification: acknowledged, no body.
+                        stream
+                            .write_all(b"HTTP/1.1 202 Accepted\r\ncontent-length: 0\r\n\r\n")
+                            .unwrap();
+                        continue;
+                    } else if body.contains("\"method\":\"tools/list\"") {
+                        (
+                            list_content_type,
+                            r#"{"jsonrpc":"2.0","id":2,"result":{"tools":[{"name":"echo","description":"Echoes its input","inputSchema":{"type":"object","properties":{"text":{"type":"string"}}},"required":["text"]}]}}"#,
+                        )
+                    } else if body.contains("\"method\":\"tools/call\"") {
+                        (
+                            "application/json",
+                            r#"{"jsonrpc":"2.0","id":3,"result":{"content":[{"type":"text","text":"echoed: hi"}]}}"#,
+                        )
+                    } else {
+                        (
+                            "application/json",
+                            r#"{"jsonrpc":"2.0","id":99,"error":{"code":-32601,"message":"method not found"}}"#,
+                        )
+                    };
+                    let payload = if content_type.contains("text/event-stream") {
+                        format!("data: {body}\n\n")
+                    } else {
+                        body.to_string()
+                    };
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\ncontent-type: {content_type}\r\n\
+                         mcp-session-id: sess-42\r\ncontent-length: {}\r\n\
+                         connection: close\r\n\r\n{payload}",
+                        payload.len()
+                    );
+                    stream.write_all(response.as_bytes()).unwrap();
+                }
+            });
+            Self {
+                url: format!("http://{address}/mcp"),
+                seen_sessions: seen,
+            }
+        }
+    }
+
+    #[test]
+    fn http_handshake_tools_and_calls_round_trip() {
+        let server = FakeHttpServer::start("application/json");
+        let client = Arc::new(McpClient::connect_url("fake", &server.url).expect("handshake"));
+        let tools = client.list_tools().expect("tools/list");
+
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0].name(), "mcp_fake_echo");
+        let result = futures_now(tools[0].run(r#"{"text": "hi"}"#));
+        assert_eq!(result.unwrap(), "echoed: hi");
+
+        // Session discipline: initialize carries no id, everything
+        // after echoes the one the server issued.
+        let seen = server.seen_sessions.lock().unwrap();
+        assert_eq!(seen.len(), 4, "initialize, notification, list, call");
+        assert_eq!(seen[0], None, "initialize has no session yet");
+        assert!(
+            seen[1..]
+                .iter()
+                .all(|header| header.as_deref() == Some("mcp-session-id: sess-42")),
+            "every later request echoes the session id: {seen:?}"
+        );
+    }
+
+    #[test]
+    fn http_server_refusing_sessionless_requests_is_survived() {
+        // A strict server (drops sessionless tools/list) proves gertie
+        // echoes the session id — the handshake succeeds only because
+        // of the echo.
+        let server = FakeHttpServer::start_with("application/json", true);
+        let client = Arc::new(McpClient::connect_url("fake", &server.url).expect("handshake"));
+        let tools = client.list_tools().expect("tools/list");
+        assert_eq!(tools.len(), 1);
+    }
+
+    #[test]
+    fn http_sse_wrapped_responses_parse() {
+        // Some servers answer every POST with text/event-stream; the
+        // client unwraps the data: line and carries on.
+        let server = FakeHttpServer::start("text/event-stream");
+        let client = Arc::new(McpClient::connect_url("fake", &server.url).expect("handshake"));
+        let tools = client.list_tools().expect("tools/list");
+        assert_eq!(tools[0].name(), "mcp_fake_echo");
     }
 }
