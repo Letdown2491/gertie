@@ -75,7 +75,7 @@ Shipped (M0–M5), in order:
   `kind` columns, brief + report as rows), and the agents panel (toggleable column listing
   the chat's worker runs with live report status).
 
-Deferred:
+The original "Deferred" row — every item shipped or decided:
 
 - Worktree tabs shipped (⎇ in the tab bar): a tab rooted at its own git worktree
   (`<repo>/.gertie/worktrees/tab-N`, branched from HEAD, excluded via the local exclude —
@@ -87,12 +87,22 @@ Deferred:
   setting (persisted outside config.toml). The config file remains the single source of
   truth; in-place TOML editing stays out on purpose (comment/unknown-key round-trip risk
   for zero capability the file doesn't already provide better).
-- *Native Anthropic wire*: the Provider trait's second adapter, and its vendor-neutrality
-  test. `wire = "anthropic"` on an endpoint selects the Messages API module — system text
-  top-level, `max_tokens` required, tool results as user-message blocks, `x-api-key`
-  headers, content-block SSE normalized to whole tool calls. Same envelope: silent
-  retries, same-wire fallback chain, commit on first content.
-- Cost dashboard (reduced to the token line), plugin surface.
+- *Token ledger*: sessions persist input/output token totals (one UPDATE per Usage
+  event). A resumed chat's header shows its whole spend, not just since reopen; the
+  settings panel shows the all-sessions total (chats + worker runs). Prices-per-model
+  stay out on purpose — they rot; tokens don't.
+- *Native Anthropic wire*: shipped — `wire = "anthropic"` per endpoint selects the
+  Messages API adapter (the Provider trait's second wire): system text top-level,
+  `max_tokens` required, tool results as user-message blocks, `x-api-key` headers,
+  content-block SSE normalized to whole tool calls.
+- *Plugin surface*: declared, not built — gertie's extension points are MCP servers
+  (external tools, stdio transport), TOML `[[agents]]` (custom subagents with pinned
+  models), and SKILL.md skills (runtime behavior). A second plugin mechanism would
+  duplicate MCP for no capability MCP doesn't already provide.
+- *Google/Gemini*: no native adapter — Gemini exposes an OpenAI-compatible endpoint
+  (`generativelanguage.googleapis.com/v1beta/openai/`); gertie speaks it today with
+  `wire = "openai"`. Anthropic's native wire shipped because its protocol genuinely
+  differs; Google's compat layer makes an adapter dead weight.
 
 ## Providers
 
@@ -229,8 +239,9 @@ runs, live report status. Parallel sessions shipped as tabs, including the workt
 the ⎇ button opens a chat rooted at its own git worktree with a re-rooted tool registry, so
 two agents can edit the same repo without colliding. The settings panel closed the UI
 scope: live config visible in-app, theme persisted. The native Anthropic wire shipped as
-the Provider trait's second adapter (`wire = "anthropic"` per endpoint). Remaining
-deferred: cost dashboard (reduced to the token line), plugin surface, Google's wire.)
+the Provider trait's second adapter (`wire = "anthropic"` per endpoint); the token ledger
+persists per-session spend. Nothing left open from the original row — see "The original
+'Deferred' row" above for what shipped and what was decided against, and why.)
 
 ## Distribution
 
