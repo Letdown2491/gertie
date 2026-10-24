@@ -161,10 +161,11 @@ configured**) · `search_history` (native, FTS5 over our own session DB).
 
 Explicitly out of v1: LSP, notebooks, native web browsing beyond fetch/search.
 
-**MCP**: stdio transport, **tools capability only**, config-defined servers (M3). Streamable
-HTTP and resource/prompt capabilities come later. Server tool descriptions are **untrusted
-input** (prompt-injection surface): sanitized, length-capped, prefixed `[mcp]` in the registry;
-every MCP call goes through the permission prompt — the user is the capability system.
+**MCP**: stdio **and Streamable HTTP** transports, **tools capability only**, config-defined
+servers (`[[mcp_servers]]` with `command` or `url`). Resource/prompt capabilities come later.
+Server tool descriptions are **untrusted input** (prompt-injection surface): sanitized,
+length-capped, prefixed `[mcp]` in the registry; every MCP call goes through the permission
+prompt — the user is the capability system.
 
 ## Context management
 
@@ -242,6 +243,15 @@ scope: live config visible in-app, theme persisted. The native Anthropic wire sh
 the Provider trait's second adapter (`wire = "anthropic"` per endpoint); the token ledger
 persists per-session spend. Nothing left open from the original row — see "The original
 'Deferred' row" above for what shipped and what was decided against, and why.)
+
+## Onboarding
+
+First run with the default path writes a working starter `config.toml` (one endpoint,
+env-var key) and says so in the status line — the user edits instead of staring at a blank
+wall; an explicit `--config` override never gets one written. `gertie doctor` prints the
+setup as gertie sees it: config parse state, endpoint + wire, the API key's resolution
+source (or the exact `export` to run), MCP servers by transport, sandbox, and all-time
+token totals. The missing-key warning names the variable. Exit 0 from doctor = ready.
 
 ## Distribution
 
