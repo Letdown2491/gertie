@@ -159,10 +159,17 @@ impl Config {
     /// that fails to parse is a *reported* error, never a silent fallback —
     /// the caller shows it in the UI.
     pub fn load() -> Result<Self, String> {
-        let Some(path) = Self::path() else {
-            return Ok(Self::default());
-        };
-        let raw = std::fs::read_to_string(&path)
+        match Self::path() {
+            Some(path) => Self::load_from(&path),
+            None => Ok(Self::default()),
+        }
+    }
+
+    /// Loads from an explicit path (the `--config` override). Same
+    /// contract as `load`: missing file is an error, parse failure is the
+    /// returned error.
+    pub fn load_from(path: &std::path::Path) -> Result<Self, String> {
+        let raw = std::fs::read_to_string(path)
             .map_err(|error| format!("could not read {}: {error}", path.display()))?;
         toml::from_str(&raw).map_err(|error| format!("could not parse {}: {error}", path.display()))
     }

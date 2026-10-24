@@ -33,7 +33,8 @@ gertie/            gpui-kit frontend binary
 Rules:
 
 - **`gertie-core` has zero UI dependencies** and is embeddable from a plain CLI. This is what
-  makes the "better than opencode by construction" claim real: one core, many shells.
+  makes the "better than opencode by construction" claim real: one core, many shells — and
+  `gertie run [PROMPT]` is the proof, a headless shell over the identical bootstrap.
 - The **Provider trait is the most important API in the project.** It is designed around a
   typed *event stream* (token, tool-call delta, usage, done, error), not around any vendor's
   JSON shape. OpenAI's wire format is an adapter, never the foundation.

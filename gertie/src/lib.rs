@@ -1,6 +1,10 @@
-mod app;
+pub mod app;
 pub mod chat;
-mod config;
+pub mod cli;
+pub mod config;
+pub mod headless;
+
+pub mod bootstrap;
 
 pub fn run() {
     app::run();
