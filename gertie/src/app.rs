@@ -171,6 +171,7 @@ pub fn run() {
     });
 }
 
+#[allow(clippy::too_many_arguments)]
 fn open_chat_window(
     store: Arc<gertie_core::SessionStore>,
     provider: Option<Arc<OpenAICompatible>>,

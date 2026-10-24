@@ -2,7 +2,6 @@
 //! permission policy, feed results back, repeat — bounded.
 
 use crate::Role;
-use crate::permissions::PermissionBroker;
 use crate::request::{Request, ToolCall, ToolSpec, WireMessage};
 use crate::snapshot::SnapshotStore;
 use crate::tool::Tool;
@@ -440,6 +439,7 @@ mod tests {
     use super::*;
     use crate::Event;
     use crate::ToolResult;
+    use crate::permissions::PermissionBroker;
     use futures_core::Stream;
     use std::task::{Context as TaskContext, Poll, Waker};
     use std::time::Duration;
