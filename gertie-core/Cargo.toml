@@ -7,3 +7,7 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
+rusqlite = { version = "0.40", features = ["bundled"] }
+
+[dev-dependencies]
+tempfile = "3"

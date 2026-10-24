@@ -12,6 +12,9 @@ path = "src/main.rs"
 
 [dependencies]
 gertie-core = { workspace = true }
-# Pinned: the gpui-kit 0.7.x line moves fast (0.7.3 already broke the API
-# riddim's proven 0.7.0 combo was verified against). Bump deliberately.
+gertie-providers = { workspace = true }
+directories = "6"
+futures-util = { version = "0.3", default-features = false, features = ["alloc"] }
 gpui-kit = "=0.7.0"
+serde = { version = "1", features = ["derive"] }
+toml = "0.9"

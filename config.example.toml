@@ -1,0 +1,15 @@
+# gertie config — copy to ~/.config/gertie/config.toml and edit.
+# Keys are read from the environment (preferred) or the `api_key` field.
+
+# [[endpoints]]
+# name = "ppq"
+# base_url = "https://api.ppq.ai/v1"
+# model = "glm-5.3-flash"
+# api_key_env = "PPQ_API_KEY"
+
+# [[endpoints]]
+# name = "ollama"
+# base_url = "http://127.0.0.1:11434/v1"
+# model = "qwen3-coder"
+
+# default_endpoint = "ppq"
