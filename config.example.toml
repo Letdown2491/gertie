@@ -45,6 +45,10 @@ api_key_env = "PPQ_API_KEY"
 # Dispatch is by brief file: the leader writes a self-contained brief
 # and passes its workspace path.
 #
+# Eight types ship built in (explore, plan, implement, test, debug,
+# review, research, librarian) and need no config. An entry below with
+# the same name replaces the built-in; extra names are added on top.
+#
 # [[agents]]
 # name = "reviewer"
 # description = "Use when code needs review before it ships. Read-only."

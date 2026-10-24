@@ -196,28 +196,19 @@ pub fn run() {
     // Construction order is safe either way — worker registries strip
     // every agent_* tool, so workers can never see each other.
     if let (Some(endpoint), Some(leader_provider)) = (&agent_endpoint, &provider) {
-        // Build first (borrowing `tools` immutably), insert after.
-        let mut additions: Vec<(String, Arc<dyn gertie_core::Tool>)> = Vec::new();
+        // The shipped registry first; a config `[[agents]]` entry with a
+        // matching name replaces the built-in (and may pin its own model),
+        // extras are added on top. Built-ins inherit the leader model.
+        let mut types: Vec<(gertie_core::AgentType, Option<String>)> =
+            gertie_core::builtin_agent_types()
+                .into_iter()
+                .map(|t| (t, None))
+                .collect();
         for agent in &config.agents {
             if agent.invocation == crate::config::Invocation::User {
                 // Registered later, when UI dispatch exists.
                 continue;
             }
-            let worker_provider: Arc<dyn gertie_core::Provider> = match &agent.model {
-                Some(model) => {
-                    match OpenAICompatible::new(gertie_providers::Endpoint {
-                        model: model.clone(),
-                        ..endpoint.clone()
-                    }) {
-                        Ok(provider) => Arc::new(provider),
-                        Err(error) => {
-                            endpoint_label.push_str(&format!(" — ⚠ agent {}: {error}", agent.name));
-                            continue;
-                        }
-                    }
-                }
-                None => leader_provider.clone(),
-            };
             let agent_type = gertie_core::AgentType {
                 name: agent.name.clone(),
                 description: agent.description.clone(),
@@ -230,8 +221,33 @@ pub fn run() {
                 }),
                 tools: agent.tools.clone(),
             };
+            let entry = (agent_type, agent.model.clone());
+            match types.iter_mut().find(|(t, _)| t.name == agent.name) {
+                Some(slot) => *slot = entry,
+                None => types.push(entry),
+            }
+        }
+        // Build first (borrowing `tools` immutably), insert after.
+        let mut additions: Vec<(String, Arc<dyn gertie_core::Tool>)> = Vec::new();
+        for (agent_type, model) in &types {
+            let worker_provider: Arc<dyn gertie_core::Provider> = match model {
+                Some(model) => {
+                    match OpenAICompatible::new(gertie_providers::Endpoint {
+                        model: model.clone(),
+                        ..endpoint.clone()
+                    }) {
+                        Ok(provider) => Arc::new(provider),
+                        Err(error) => {
+                            endpoint_label
+                                .push_str(&format!(" — ⚠ agent {}: {error}", agent_type.name));
+                            continue;
+                        }
+                    }
+                }
+                None => leader_provider.clone(),
+            };
             let tool = gertie_core::AgentTool::new(
-                agent_type,
+                agent_type.clone(),
                 worker_provider,
                 &tools,
                 snapshots.clone(),
@@ -239,7 +255,7 @@ pub fn run() {
                 endpoint.context_window,
                 workspace_root.clone(),
             );
-            endpoint_label.push_str(&format!(" · agent:{}", agent.name));
+            endpoint_label.push_str(&format!(" · agent:{}", agent_type.name));
             additions.push((tool.name().to_string(), Arc::new(tool)));
         }
         let map = Arc::get_mut(&mut tools).expect("registry not yet shared");

@@ -54,6 +54,136 @@ pub fn sanitize_untrusted(raw: &str, cap: usize) -> String {
     filtered.chars().take(cap).collect()
 }
 
+/// The registry shipped with gertie: one worker per distinct *posture*
+/// (what it may touch, what it answers for), not per vibe. A config
+/// `[[agents]]` entry with the same name replaces the built-in; extra
+/// entries are added on top.
+pub fn builtin_agent_types() -> Vec<AgentType> {
+    const READ: &[&str] = &["read_file", "glob", "grep", "search_history", "load_skill"];
+    vec![
+        AgentType {
+            name: "explore".into(),
+            description: "Use when a question needs broad reading — where is X, how does Y \
+                          work, what calls Z. Read-only; returns findings with file paths."
+                .into(),
+            system_prompt: "You are an exploration agent. Answer the brief by reading the \
+                            codebase — never by guessing. Cite file paths for every claim. \
+                            Say plainly what you could not find."
+                .into(),
+            tools: Some(
+                READ.iter()
+                    .copied()
+                    .chain(["web_fetch"])
+                    .map(String::from)
+                    .collect(),
+            ),
+        },
+        AgentType {
+            name: "plan".into(),
+            description: "Use to turn a fuzzy goal into a concrete step-by-step plan before \
+                          any code changes. Read-only; returns steps with rationale."
+                .into(),
+            system_prompt: "You are a planning agent. Read enough of the codebase to ground \
+                            the plan in reality, then return ordered steps: what, where \
+                            (file), why, and what could go wrong. You never touch code — \
+                            your only output is the plan."
+                .into(),
+            tools: Some(READ.iter().copied().map(String::from).collect()),
+        },
+        AgentType {
+            name: "implement".into(),
+            description: "Use for delegated code changes within a defined scope: implement \
+                          the brief exactly, run the relevant checks, report what changed."
+                .into(),
+            system_prompt: "You are an implementation agent. Do exactly what the brief asks \
+                            — no scope creep. Match surrounding code style. Verify with the \
+                            project's own checks where possible. Report what changed and \
+                            how you verified it."
+                .into(),
+            tools: None,
+        },
+        AgentType {
+            name: "test".into(),
+            description: "Use to run test suites, reproduce failures, and verify behavior. \
+                          Reports findings; does not fix code."
+                .into(),
+            system_prompt: "You are a testing agent. Reproduce, run, and observe — you do \
+                            not fix code. Report exact commands, exact output, and your \
+                            verdict on whether the behavior matches the brief."
+                .into(),
+            tools: Some(
+                ["bash", "read_file", "glob", "grep", "load_skill"]
+                    .iter()
+                    .copied()
+                    .map(String::from)
+                    .collect(),
+            ),
+        },
+        AgentType {
+            name: "review".into(),
+            description: "Use as a critique gate on written code: correctness first, then \
+                          security, then clarity. Read-only; every finding cites a location."
+                .into(),
+            system_prompt: "You are a review agent. Judge correctness first, then security, \
+                            then clarity. Every finding cites a file and line. Verify claims \
+                            by reading, never by assuming. Say what is good, too — briefly."
+                .into(),
+            tools: Some(READ.iter().copied().map(String::from).collect()),
+        },
+        AgentType {
+            name: "debug".into(),
+            description: "Use for root-cause diagnosis: reproduce, instrument, narrow down. \
+                          Returns evidence and a diagnosis, not patches."
+                .into(),
+            system_prompt: "You are a diagnosis agent. Reproduce the failure, gather \
+                            evidence, narrow the cause. You may run commands to observe, but \
+                            your deliverable is a diagnosis with evidence — not a patch."
+                .into(),
+            tools: Some(
+                ["bash", "read_file", "glob", "grep", "search_history"]
+                    .iter()
+                    .copied()
+                    .map(String::from)
+                    .collect(),
+            ),
+        },
+        AgentType {
+            name: "research".into(),
+            description: "Use for web research: current docs, releases, issue threads. \
+                          Returns findings with URLs."
+                .into(),
+            system_prompt: "You are a research agent. Use web_fetch and web_search; prefer \
+                            primary sources. Every finding carries its URL. Flag anything \
+                            you could not verify."
+                .into(),
+            tools: Some(
+                ["web_fetch", "web_search", "read_file", "glob", "grep"]
+                    .iter()
+                    .copied()
+                    .map(String::from)
+                    .collect(),
+            ),
+        },
+        AgentType {
+            name: "librarian".into(),
+            description: "Use to mine past gertie sessions — what we did before, what was \
+                          decided, what broke last time. Returns hits with session titles."
+                .into(),
+            system_prompt: "You are a memory agent. Search past sessions with search_history \
+                            and read the current workspace to connect the dots. Report what \
+                            was found, in which session, and what remains unknown."
+                .into(),
+            tools: Some(
+                ["search_history", "read_file", "glob", "grep"]
+                    .iter()
+                    .copied()
+                    .map(String::from)
+                    .collect(),
+            ),
+        },
+    ]
+}
+
 /// The worker's registry: allowlist applied, agent tools stripped —
 /// depth-1 enforced by what the map contains, not by prompt discipline.
 pub fn worker_registry(all: &ToolRegistry, allowlist: Option<&[String]>) -> ToolRegistry {
@@ -353,6 +483,44 @@ mod tests {
         assert!(worker.contains_key("read_file"));
         assert!(!worker.contains_key("write_file"));
         assert!(!worker.contains_key("bash"));
+    }
+
+    #[test]
+    fn builtin_types_have_unique_names_and_safe_allowlists() {
+        let builtins = builtin_agent_types();
+        assert!(
+            builtins.len() >= 6,
+            "registry collapsed: {}",
+            builtins.len()
+        );
+        let mut names: Vec<&str> = builtins.iter().map(|t| t.name.as_str()).collect();
+        names.sort_unstable();
+        let unique = names.len() == names.iter().collect::<std::collections::HashSet<_>>().len();
+        assert!(unique, "duplicate built-in names: {names:?}");
+        for t in &builtins {
+            // "implement" is the only full-toolset type; everything else
+            // is allowlisted, and no allowlist may reach agent_* tools —
+            // though depth-1 stripping makes that unreachable anyway.
+            if let Some(allow) = &t.tools {
+                assert!(
+                    !allow.iter().any(|n| n.starts_with("agent_")),
+                    "{} allowlists an agent tool",
+                    t.name
+                );
+            } else {
+                assert_eq!(t.name, "implement", "only implement ships unlisted");
+            }
+            assert!(
+                !t.description.trim().is_empty(),
+                "{}: no description — the leader chooses by description",
+                t.name
+            );
+            assert!(
+                !t.system_prompt.trim().is_empty(),
+                "{}: empty prompt",
+                t.name
+            );
+        }
     }
 
     #[test]

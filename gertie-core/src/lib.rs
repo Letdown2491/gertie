@@ -12,7 +12,7 @@ pub mod request;
 pub mod snapshot;
 pub mod tool;
 
-pub use agent::{AgentTool, AgentType, sanitize_untrusted, worker_registry};
+pub use agent::{AgentTool, AgentType, builtin_agent_types, sanitize_untrusted, worker_registry};
 pub use agent_loop::{
     LoopEvent, PermissionDecision, SharedHistory, ToolRegistry, TurnSpec, run_turn,
 };

@@ -166,20 +166,24 @@ Types are **data, not code**: a type = `system_prompt`, `tools` allow/deny, `mod
 The leader discovers types from the tool schema; description quality is type quality.
 Custom types are five-line TOML entries from day one.
 
-Built-in registry at launch:
+Built-in registry at launch (shipped — `builtin_agent_types()`; a `[[agents]]` entry with a
+matching name replaces the built-in, and may pin its own `model`):
 
 | Type | Toolset | Posture |
 |---|---|---|
-| `explore` | read-only + read-mode bash | auto-approvable research workhorse; cheap model |
+| `explore` | read-only + web_fetch | auto-approvable research workhorse; cheap model |
 | `plan` | read-only | turns fuzzy goals into step-by-step plans; never touches code |
 | `implement` | full | delegated code changes within leader-given scope |
 | `test` | bash + read-only | runs suites, reproduces, verifies; reports, doesn't fix |
-| `debug` | read-only + bash (no writes) | root-cause diagnosis with evidence, not patches |
-| `review` | read-only, diff-focused | critique gate on `implement` output |
-| `document` | full, doc-path-scoped writes | changelogs, READMEs, doc comments |
-| `ops` | bash + `gh` | CI log triage, release chores |
+| `debug` | bash + read-only + search_history | root-cause diagnosis with evidence, not patches |
+| `review` | read-only | critique gate on `implement` output |
 | `research` | web_fetch + web_search + read-only | web/docs research |
 | `librarian` | search_history + read-only | mines past sessions for context |
+
+Two from the original list did not ship as built-ins, deliberately: `document` wants
+doc-path-scoped *writes*, which the allowlist mechanism cannot enforce (a prompt alone is
+not a boundary), and `ops` presumes `gh` on the host. Both are one five-line `[[agents]]`
+entry away for whoever wants them.
 | `general` | full | unconstrained escape hatch |
 | *(internal)* `summarize` | none (context in, text out) | used by the compactor; not leader-spawnable |
 
