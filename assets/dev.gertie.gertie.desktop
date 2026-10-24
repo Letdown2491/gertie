@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=gertie
+Comment=Fast, native AI coding-agent harness
+Exec=gertie
+Terminal=false
+Categories=Development;
+Keywords=ai;agent;coding;llm;
+StartupWMClass=dev.gertie.gertie
