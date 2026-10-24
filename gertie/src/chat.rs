@@ -7,8 +7,8 @@ use gertie_core::Role;
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::{ActiveTheme, h_flex, v_flex};
 use gpui_kit::{
-    App, AnyElement, Context, Entity, IntoElement, ListAlignment, ListState, ParentElement,
-    Render, Styled, Window, div, list, prelude::*, px,
+    App, AnyElement, Context, Entity, Focusable, IntoElement, ListAlignment, ListState,
+    ParentElement, Render, Styled, Window, div, list, prelude::*, px,
 };
 
 const GREETING: &str = "gertie M0 — window and stream work. The agent loop and providers \
@@ -37,6 +37,7 @@ impl ChatView {
             _ => {}
         })
         .detach();
+        window.focus(&input.read(cx).focus_handle(cx), cx);
 
         let mut view = Self {
             messages: Vec::new(),
@@ -67,6 +68,7 @@ impl ChatView {
         }
         self.input
             .update(cx, |input, cx| input.set_value("", window, cx));
+        window.focus(&self.input.read(cx).focus_handle(cx), cx);
         self.messages.push(ChatMessage {
             role: Role::User,
             text,
