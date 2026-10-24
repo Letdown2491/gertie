@@ -9,6 +9,11 @@ license.workspace = true
 [dependencies]
 gertie-core = { workspace = true }
 futures-core = { version = "0.3", features = ["alloc"] }
+glob = "0.3"
+regex = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+walkdir = "2"
 
 [dev-dependencies]
-futures-util = { version = "0.3", default-features = false, features = ["alloc"] }
+tempfile = "3"

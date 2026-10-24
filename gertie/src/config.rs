@@ -35,7 +35,8 @@ impl Config {
     }
 
     pub fn data_dir() -> Option<PathBuf> {
-        directories::ProjectDirs::from("dev", "gertie", "gertie").map(|dirs| dirs.data_dir().to_owned())
+        directories::ProjectDirs::from("dev", "gertie", "gertie")
+            .map(|dirs| dirs.data_dir().to_owned())
     }
 
     /// Loads the user config. A missing file is an empty config; a file
@@ -45,11 +46,9 @@ impl Config {
         let Some(path) = Self::path() else {
             return Ok(Self::default());
         };
-        let raw = std::fs::read_to_string(&path).map_err(|error| {
-            format!("could not read {}: {error}", path.display())
-        })?;
-        toml::from_str(&raw)
-            .map_err(|error| format!("could not parse {}: {error}", path.display()))
+        let raw = std::fs::read_to_string(&path)
+            .map_err(|error| format!("could not read {}: {error}", path.display()))?;
+        toml::from_str(&raw).map_err(|error| format!("could not parse {}: {error}", path.display()))
     }
 
     /// The endpoint gertie talks to, with its key resolved from the
@@ -98,20 +97,23 @@ impl Config {
     /// 0600, never silently accept).
     pub fn key_warnings(&self) -> Vec<String> {
         let mut warnings = Vec::new();
-        if self.endpoints.iter().any(|endpoint| endpoint.api_key.is_some()) {
-            warnings.push(
-                "a literal API key is set in config.toml — prefer api_key_env".to_string(),
-            );
+        if self
+            .endpoints
+            .iter()
+            .any(|endpoint| endpoint.api_key.is_some())
+        {
+            warnings
+                .push("a literal API key is set in config.toml — prefer api_key_env".to_string());
         }
-        if let Some(path) = Self::path() {
-            if let Ok(metadata) = std::fs::metadata(&path) {
-                use std::os::unix::fs::PermissionsExt;
-                let mode = metadata.permissions().mode() & 0o777;
-                if mode & 0o077 != 0 {
-                    warnings.push(format!(
-                        "config.toml is readable by others (mode {mode:o}) — chmod 600 it"
-                    ));
-                }
+        if let Some(path) = Self::path()
+            && let Ok(metadata) = std::fs::metadata(&path)
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = metadata.permissions().mode() & 0o777;
+            if mode & 0o077 != 0 {
+                warnings.push(format!(
+                    "config.toml is readable by others (mode {mode:o}) — chmod 600 it"
+                ));
             }
         }
         warnings

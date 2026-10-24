@@ -8,8 +8,13 @@
 use futures_core::stream::BoxStream;
 use futures_util::StreamExt;
 use gertie_core::Event;
+use gertie_core::request::{Request, WireMessage};
 use std::time::Duration;
 use tokio_stream::wrappers::UnboundedReceiverStream;
+
+// The Provider trait and Request shape are core concepts (the loop drives
+// them directly); this crate only implements them.
+pub use gertie_core::{Provider, ToolCall, ToolSpec};
 
 /// One configured endpoint: where to POST, how to authenticate, what model
 /// to ask for. Keys resolve from config values or the environment at
@@ -21,26 +26,6 @@ pub struct Endpoint {
     pub base_url: String,
     pub model: String,
     pub api_key: Option<String>,
-}
-
-/// One model request. The loop fills this; providers translate it.
-#[derive(Clone, Debug, Default)]
-pub struct Request {
-    /// Canonical message path, oldest first.
-    pub messages: Vec<(gertie_core::Role, String)>,
-    /// Maximum output tokens the model should produce, when the provider
-    /// supports the knob.
-    pub max_output_tokens: Option<u64>,
-}
-
-/// A source of model completions. Implementations must own their retry
-/// policy (backoff + jitter on 429/5xx/connection errors, never on
-/// 401/403) and surface every retry to the event stream before failing.
-pub trait Provider {
-    /// Streams one response as a sequence of [`Event`]s. The stream always
-    /// ends with `Event::Done` or `Event::Error`. Dropping the stream
-    /// cancels the request.
-    fn stream(&self, request: Request) -> BoxStream<'static, Event>;
 }
 
 /// Retry policy per DESIGN.md: auto-retry transient failures with
@@ -151,19 +136,28 @@ impl RequestScoped {
     ) -> Outcome {
         let mut body = serde_json::json!({
             "model": self.endpoint.model,
-            "messages": request
-                .messages
-                .iter()
-                .map(|(role, content)| serde_json::json!({
-                    "role": wire_role(*role),
-                    "content": content,
-                }))
-                .collect::<Vec<_>>(),
+            "messages": wire_messages(&request.messages),
             "stream": true,
             "stream_options": { "include_usage": true },
         });
         if let Some(max) = request.max_output_tokens {
             body["max_tokens"] = serde_json::json!(max);
+        }
+        if !request.tools.is_empty() {
+            body["tools"] = serde_json::json!(
+                request
+                    .tools
+                    .iter()
+                    .map(|spec| serde_json::json!({
+                        "type": "function",
+                        "function": {
+                            "name": spec.name,
+                            "description": spec.description,
+                            "parameters": spec.parameters,
+                        },
+                    }))
+                    .collect::<Vec<_>>()
+            );
         }
 
         let mut request = self.client.post(endpoint_url(&self.endpoint)).json(&body);
@@ -229,16 +223,16 @@ async fn parse_sse(
                 return Outcome::Done;
             }
             emit_delta(&value, &mut tool_calls, sender);
-            if let Some(usage) = value.get("usage") {
-                if let (Some(input), Some(output)) = (
+            if let Some(usage) = value.get("usage")
+                && let (Some(input), Some(output)) = (
                     usage.get("prompt_tokens").and_then(count),
                     usage.get("completion_tokens").and_then(count),
-                ) {
-                    let _ = sender.send(Event::Usage {
-                        input_tokens: input,
-                        output_tokens: output,
-                    });
-                }
+                )
+            {
+                let _ = sender.send(Event::Usage {
+                    input_tokens: input,
+                    output_tokens: output,
+                });
             }
         }
     }
@@ -260,12 +254,12 @@ fn emit_delta(
     else {
         return;
     };
-    if let Some(content) = delta.get("content").and_then(|content| content.as_str()) {
-        if !content.is_empty() {
-            let _ = sender.send(Event::Token {
-                delta: content.to_string(),
-            });
-        }
+    if let Some(content) = delta.get("content").and_then(|content| content.as_str())
+        && !content.is_empty()
+    {
+        let _ = sender.send(Event::Token {
+            delta: content.to_string(),
+        });
     }
     if let Some(calls) = delta.get("tool_calls").and_then(|calls| calls.as_array()) {
         for call in calls {
@@ -316,6 +310,61 @@ fn wire_role(role: gertie_core::Role) -> &'static str {
     }
 }
 
+/// Canonical → OpenAI wire. Three shapes matter beyond plain turns:
+/// assistant-with-tool-calls (`tool_calls` array), tool results (keyed by
+/// `tool_call_id`), and the tool definitions themselves.
+fn wire_messages(messages: &[WireMessage]) -> Vec<serde_json::Value> {
+    messages
+        .iter()
+        .map(|message| {
+            let mut entry = serde_json::Map::new();
+            entry.insert("role".into(), serde_json::json!(wire_role(message.role)));
+            match message.role {
+                gertie_core::Role::Tool => {
+                    // The protocol answers one call id per tool message.
+                    entry.insert(
+                        "tool_call_id".into(),
+                        serde_json::json!(message.tool_call_id.clone().unwrap_or_default()),
+                    );
+                    if let Some(name) = &message.name {
+                        entry.insert("name".into(), serde_json::json!(name));
+                    }
+                    entry.insert(
+                        "content".into(),
+                        serde_json::json!(message.content.clone().unwrap_or_default()),
+                    );
+                }
+                role => {
+                    entry.insert(
+                        "content".into(),
+                        serde_json::json!(message.content.clone().unwrap_or_default()),
+                    );
+                    if role == gertie_core::Role::Assistant && !message.tool_calls.is_empty() {
+                        entry.insert(
+                            "tool_calls".into(),
+                            serde_json::json!(
+                                message
+                                    .tool_calls
+                                    .iter()
+                                    .map(|call| serde_json::json!({
+                                        "id": call.id,
+                                        "type": "function",
+                                        "function": {
+                                            "name": call.name,
+                                            "arguments": call.arguments,
+                                        },
+                                    }))
+                                    .collect::<Vec<_>>()
+                            ),
+                        );
+                    }
+                }
+            }
+            serde_json::Value::Object(entry)
+        })
+        .collect()
+}
+
 fn endpoint_url(endpoint: &Endpoint) -> String {
     let base = endpoint.base_url.trim_end_matches('/');
     format!("{base}/chat/completions")
@@ -335,7 +384,9 @@ fn backoff(attempt: u32) -> Duration {
 }
 
 fn count(value: &serde_json::Value) -> Option<u64> {
-    value.as_u64().or_else(|| value.as_i64().map(|n| n.max(0) as u64))
+    value
+        .as_u64()
+        .or_else(|| value.as_i64().map(|n| n.max(0) as u64))
 }
 
 fn truncate(text: &str, limit: usize) -> &str {
@@ -410,9 +461,33 @@ mod tests {
 
     fn user_request() -> Request {
         Request {
-            messages: vec![(gertie_core::Role::User, "hi".into())],
+            messages: vec![WireMessage::user("hi")],
+            tools: Vec::new(),
             max_output_tokens: None,
         }
+    }
+
+    #[test]
+    fn wire_translation_expresses_the_tool_protocol() {
+        let call = ToolCall {
+            id: "call_9".into(),
+            name: "edit_file".into(),
+            arguments: "{\"path\":\"x\"}".into(),
+        };
+        let messages = vec![
+            WireMessage::user("fix it"),
+            WireMessage::assistant_with_tool_calls(Some("on it".into()), vec![call.clone()]),
+            WireMessage::tool_result(&call, "done"),
+        ];
+
+        let wire = wire_messages(&messages);
+        assert_eq!(wire[0]["role"], "user");
+        assert_eq!(wire[1]["tool_calls"][0]["id"], "call_9");
+        assert_eq!(wire[1]["tool_calls"][0]["function"]["name"], "edit_file");
+        assert_eq!(wire[2]["role"], "tool");
+        assert_eq!(wire[2]["tool_call_id"], "call_9");
+        assert_eq!(wire[2]["name"], "edit_file");
+        assert_eq!(wire[2]["content"], "done");
     }
 
     #[test]
@@ -429,9 +504,7 @@ mod tests {
         assert!(events.contains(&Event::Token {
             delta: "Hel".into()
         }));
-        assert!(events.contains(&Event::Token {
-            delta: "lo".into()
-        }));
+        assert!(events.contains(&Event::Token { delta: "lo".into() }));
         assert!(events.contains(&Event::Usage {
             input_tokens: 7,
             output_tokens: 2,

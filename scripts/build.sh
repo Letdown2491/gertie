@@ -19,9 +19,10 @@ if ! podman image exists "$IMAGE"; then
 fi
 
 podman run --rm \
-  -v "$PWD":/work:Z -w /work \
-  -v gertie-cargo-home:/root/.cargo \
-  -v gertie-rustup-home:/root/.rustup \
+  -v "$PWD":/work:Z \
+  -v gertie-cargo-home:/root/.cargo:Z \
+  -v gertie-rustup-home:/root/.rustup:Z \
+  -w /work \
   --env RUSTFLAGS='-C link-arg=-Wl,-rpath,$ORIGIN/gertie-libs' \
   "$IMAGE" \
   bash -c '

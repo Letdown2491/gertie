@@ -7,7 +7,13 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
+async-stream = "0.3"
+futures-core = { version = "0.3", features = ["alloc"] }
+futures-util = { version = "0.3", default-features = false, features = ["alloc"] }
 rusqlite = { version = "0.40", features = ["bundled"] }
+serde_json = "1"
+sha2 = "0.10"
+tokio = { version = "1", features = ["sync"] }
 
 [dev-dependencies]
 tempfile = "3"

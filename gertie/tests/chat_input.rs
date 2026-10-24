@@ -7,8 +7,8 @@ use gertie_core::SessionStore;
 use gpui_kit::component::Root;
 use gpui_kit::test::TestWindowExt as _;
 use gpui_kit::{
-    AnyWindowHandle, AppContext, Entity, HeadlessAppContext, NoopTextSystem, WeakEntity,
-    WindowHandle, px, size,
+    AnyWindowHandle, AppContext, HeadlessAppContext, NoopTextSystem, WeakEntity, WindowHandle, px,
+    size,
 };
 use std::path::Path;
 use std::sync::Arc;
@@ -48,7 +48,15 @@ fn fixture() -> Fixture {
     let window = cx
         .open_window(size(px(900.), px(640.)), |window, cx| {
             let view = cx.new(|cx| {
-                ChatView::new(store.clone(), None, "no endpoint configured".into(), window, cx)
+                ChatView::new(
+                    store.clone(),
+                    None,
+                    None,
+                    gertie_tools::builtin_tools(Path::new(".")),
+                    "no endpoint configured".into(),
+                    window,
+                    cx,
+                )
             });
             view_entity = Some(view.downgrade());
             cx.new(|cx| Root::new(view, window, cx))

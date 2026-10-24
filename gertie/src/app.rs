@@ -1,7 +1,10 @@
 //! Bootstrap: config, session store, provider, the gpui application.
 
 use gertie_providers::OpenAICompatible;
-use gpui_kit::{App, Bounds, TitlebarOptions, WindowBounds, WindowOptions, application, open_window, prelude::*, px, size};
+use gpui_kit::{
+    App, Bounds, TitlebarOptions, WindowBounds, WindowOptions, application, open_window,
+    prelude::*, px, size,
+};
 use std::sync::Arc;
 
 /// The Wayland app_id / X11 WM_CLASS, matching the desktop entry.
@@ -47,6 +50,21 @@ pub fn run() {
         std::process::exit(1);
     };
 
+    // The workspace is wherever gertie was launched; tools resolve paths
+    // against it and checkpoints land beside the session store.
+    let workspace_root = std::env::current_dir().unwrap_or_else(|_| ".".into());
+    let snapshots =
+        crate::config::Config::data_dir().and_then(
+            |data_dir| match gertie_core::SnapshotStore::open(&data_dir.join("snapshots")) {
+                Ok(store) => Some(Arc::new(store)),
+                Err(error) => {
+                    eprintln!("warning: checkpoint store disabled: {error}");
+                    None
+                }
+            },
+        );
+    let tools = gertie_tools::builtin_tools(&workspace_root);
+
     // Constructing the provider spins up its tokio runtime; do it once.
     let provider = match endpoint {
         Some(endpoint) => OpenAICompatible::new(endpoint)
@@ -61,7 +79,14 @@ pub fn run() {
         gpui_kit::init(cx);
         // M1 dev default; M4 replaces this with a settings-driven theme.
         gpui_kit::component::Theme::change(gpui_kit::component::ThemeMode::Dark, None, cx);
-        open_chat_window(store.clone(), provider.clone(), endpoint_label.clone(), cx);
+        open_chat_window(
+            store.clone(),
+            provider.clone(),
+            snapshots.clone(),
+            tools.clone(),
+            endpoint_label.clone(),
+            cx,
+        );
         cx.activate(true);
     });
 }
@@ -69,6 +94,8 @@ pub fn run() {
 fn open_chat_window(
     store: Arc<gertie_core::SessionStore>,
     provider: Option<Arc<OpenAICompatible>>,
+    snapshots: Option<Arc<gertie_core::SnapshotStore>>,
+    tools: gertie_core::ToolRegistry,
     endpoint_label: String,
     cx: &mut App,
 ) {
@@ -86,7 +113,17 @@ fn open_chat_window(
         },
         cx,
         |window, cx| {
-            cx.new(|cx| crate::chat::ChatView::new(store, provider, endpoint_label, window, cx))
+            cx.new(|cx| {
+                crate::chat::ChatView::new(
+                    store,
+                    provider,
+                    snapshots,
+                    tools,
+                    endpoint_label,
+                    window,
+                    cx,
+                )
+            })
         },
     );
     if let Err(error) = opened {

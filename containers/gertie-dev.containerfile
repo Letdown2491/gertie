@@ -9,7 +9,11 @@
 
 FROM localhost/kuma-dev-gcc
 
-RUN dnf -y install \
+# The base locks /root down to r-x; cargo and rustup live on named
+# volumes mounted here, so the mountpoints must exist at build time.
+RUN chmod 755 /root \
+    && mkdir -p /root/.cargo /root/.rustup \
+    && dnf -y install \
         pkgconf-pkg-config \
         git \
         clang \

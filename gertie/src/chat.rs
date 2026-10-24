@@ -1,36 +1,66 @@
-//! The M1 chat: session sidebar + transcript + live provider streaming.
+//! The M2 chat: session sidebar + transcript + the agent loop, with tool
+//! cards that gate mutating calls behind approve/deny.
 
 use futures_util::StreamExt as _;
-use gertie_core::{Event, MessageId, Role, SessionId, SessionStore};
-use gertie_providers::{OpenAICompatible, Provider, Request};
+use gertie_core::{
+    LoopEvent, MessageId, PermissionDecision, Role, SessionId, SessionStore, SharedHistory,
+    SnapshotStore, ToolCall, ToolRegistry, run_turn,
+};
+use gertie_providers::OpenAICompatible;
 use gpui_kit::component::button::Button;
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::{ActiveTheme, Sizable as _, h_flex, v_flex};
 use gpui_kit::{
-    App, AnyElement, AppContext as _, Context, Entity, Focusable, IntoElement, ListAlignment,
+    AnyElement, App, AppContext as _, Context, Entity, Focusable, IntoElement, ListAlignment,
     ListState, ParentElement, Render, SharedString, StatefulInteractiveElement as _, Styled,
     Window, div, list, prelude::*, px,
 };
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::oneshot;
 
-/// One rendered turn in the transcript, with its row in the session store
-/// (so streaming updates land in SQLite without inserting a row per token).
-struct ChatMessage {
-    role: Role,
-    text: String,
-    db_id: Option<MessageId>,
+/// Where the transcript is in a tool call's life: waiting on the human,
+/// executing, or finished (with the result the model will also see).
+enum ToolStatus {
+    /// Holding the loop's responder; the human owes an answer.
+    Pending(oneshot::Sender<PermissionDecision>),
+    Running,
+    Done(String),
+}
+
+/// One rendered turn in the transcript. Plain messages keep their row in
+/// the session store (streaming updates land in SQLite without a row per
+/// token); tool turns are rendered as cards keyed by call id.
+enum Turn {
+    Message {
+        role: Role,
+        text: String,
+        db_id: Option<MessageId>,
+    },
+    Tool {
+        call: ToolCall,
+        status: ToolStatus,
+    },
 }
 
 pub struct ChatView {
     store: Arc<SessionStore>,
     provider: Option<Arc<OpenAICompatible>>,
+    snapshots: Option<Arc<SnapshotStore>>,
+    tools: ToolRegistry,
     endpoint_label: String,
     sessions: Vec<gertie_core::SessionSummary>,
     /// None until the first message — empty chats don't exist as rows, so
     /// the sidebar shows only real conversations.
     session_id: Option<SessionId>,
-    messages: Vec<ChatMessage>,
+    turns: Vec<Turn>,
+    /// Canonical conversation the loop reads and extends across turns.
+    history: SharedHistory,
+    /// Index of the assistant turn currently receiving deltas; None until
+    /// the first delta of a round (tool rounds each get their own row).
+    streaming_assistant: Option<usize>,
+    /// Last persisted row — the parent for whatever is appended next.
+    last_db_id: Option<MessageId>,
     input: Entity<InputState>,
     list_state: ListState,
     streaming: bool,
@@ -40,14 +70,17 @@ impl ChatView {
     pub fn new(
         store: Arc<SessionStore>,
         provider: Option<Arc<OpenAICompatible>>,
+        snapshots: Option<Arc<SnapshotStore>>,
+        tools: ToolRegistry,
         endpoint_label: String,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
         let input = cx.new(|cx| InputState::new(window, cx).placeholder("Message gertie…"));
-        cx.subscribe_in(&input, window, |this, _, event: &InputEvent, window, cx| match event {
-            InputEvent::PressEnter { .. } => this.send(window, cx),
-            _ => {}
+        cx.subscribe_in(&input, window, |this, _, event: &InputEvent, window, cx| {
+            if let InputEvent::PressEnter { .. } = event {
+                this.send(window, cx)
+            }
         })
         .detach();
 
@@ -59,10 +92,15 @@ impl ChatView {
         let mut view = Self {
             store,
             provider,
+            snapshots,
+            tools,
             endpoint_label,
             sessions,
             session_id,
-            messages: Vec::new(),
+            turns: Vec::new(),
+            history: Arc::new(tokio::sync::Mutex::new(Vec::new())),
+            streaming_assistant: None,
+            last_db_id: None,
             input,
             list_state: ListState::new(0, ListAlignment::Bottom, px(256.)),
             streaming: false,
@@ -77,40 +115,66 @@ impl ChatView {
         self.session_id
     }
 
-    /// Swaps the transcript for a session's stored messages.
+    /// Swaps the transcript for a session's stored messages and rebuilds
+    /// the canonical history the loop will extend.
     fn reload_session(&mut self, cx: &mut Context<Self>) {
-        self.messages = match self.session_id {
-            Some(session_id) => self
-                .store
-                .load_messages(session_id)
-                .unwrap_or_default()
-                .into_iter()
-                .map(|message| ChatMessage {
-                    role: message.role,
-                    text: message.content,
-                    db_id: Some(message.id),
-                })
-                .collect(),
-            None => Vec::new(),
+        let (turns, history, last_db_id) = match self.session_id {
+            Some(session_id) => {
+                let rows = self.store.load_messages(session_id).unwrap_or_default();
+                let turns = rows
+                    .iter()
+                    .map(|row| match row.role {
+                        Role::Tool => Turn::Tool {
+                            call: ToolCall {
+                                id: row.tool_call_id.clone().unwrap_or_default(),
+                                name: row.tool_name.clone().unwrap_or_default(),
+                                arguments: row.tool_arguments.clone().unwrap_or_default(),
+                            },
+                            status: ToolStatus::Done(row.content.clone()),
+                        },
+                        role => Turn::Message {
+                            role,
+                            text: row.content.clone(),
+                            db_id: Some(row.id),
+                        },
+                    })
+                    .collect();
+                let history = self.store.load_wire_history(session_id).unwrap_or_default();
+                let last_db_id = rows.last().map(|row| row.id);
+                (turns, history, last_db_id)
+            }
+            None => (Vec::new(), Vec::new(), None),
         };
+        self.turns = turns;
+        self.history = Arc::new(tokio::sync::Mutex::new(history));
+        self.last_db_id = last_db_id;
         self.streaming = false;
+        self.streaming_assistant = None;
         self.sync_list(cx);
     }
 
     fn sync_list(&mut self, cx: &mut Context<Self>) {
-        self.list_state.reset(self.messages.len());
+        self.list_state.reset(self.turns.len());
         self.list_state.scroll_to_end();
         cx.notify();
     }
 
-    fn new_session(&mut self, _event: &gpui_kit::ClickEvent, window: &mut Window, cx: &mut Context<Self>) {
+    fn new_session(
+        &mut self,
+        _event: &gpui_kit::ClickEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if self.streaming {
             return;
         }
         // Sessions are created lazily by the first message; "New chat" just
         // blanks the transcript until then.
         self.session_id = None;
-        self.messages.clear();
+        self.turns.clear();
+        self.last_db_id = None;
+        self.streaming_assistant = None;
+        self.history.blocking_lock().clear();
         self.sync_list(cx);
         window.focus(&self.input.read(cx).focus_handle(cx), cx);
     }
@@ -143,34 +207,34 @@ impl ChatView {
             Some(session_id) => session_id,
             None => {
                 let title: String = text.chars().take(48).collect();
-                let session_id = self
-                    .store
-                    .create_session(&title)
-                    .expect("create session");
+                let session_id = self.store.create_session(&title).expect("create session");
                 self.session_id = Some(session_id);
                 self.sessions = self.store.list_sessions().unwrap_or_default();
                 session_id
             }
         };
 
-        let parent = self.messages.last().and_then(|message| message.db_id);
         let db_id = self
             .store
-            .append_message(session_id, parent, Role::User, &text)
+            .append_message(session_id, self.last_db_id, Role::User, &text)
             .ok();
-        self.messages.push(ChatMessage {
+        if db_id.is_some() {
+            self.last_db_id = db_id;
+        }
+        self.turns.push(Turn::Message {
             role: Role::User,
-            text,
+            text: text.clone(),
             db_id,
         });
-        self.stream_reply(cx);
+        self.drive_turn(text, cx);
     }
 
-    /// Turns the transcript into a provider request and drives the event
-    /// stream into the last (assistant) message, persisting as it goes.
-    fn stream_reply(&mut self, cx: &mut Context<Self>) {
+    /// Hands the turn to the agent loop and renders its event stream:
+    /// deltas stream into an assistant row, tool calls become cards, and
+    /// results persist as tool rows the model also sees on reload.
+    fn drive_turn(&mut self, user_text: String, cx: &mut Context<Self>) {
         let Some(provider) = self.provider.clone() else {
-            self.messages.push(ChatMessage {
+            self.turns.push(Turn::Message {
                 role: Role::Assistant,
                 text: NO_ENDPOINT_NOTICE.into(),
                 db_id: None,
@@ -179,65 +243,44 @@ impl ChatView {
             return;
         };
 
-        let store = self.store.clone();
-        let parent = self.messages.last().and_then(|message| message.db_id);
-        let assistant_db = self
-            .session_id
-            .and_then(|session_id| store.append_message(session_id, parent, Role::Assistant, "").ok());
+        let provider: Arc<dyn gertie_core::Provider> = provider;
+        let stream = run_turn(
+            provider,
+            self.tools.clone(),
+            self.history.clone(),
+            user_text,
+            self.snapshots.clone(),
+        );
 
-        let request = Request {
-            messages: self
-                .messages
-                .iter()
-                .map(|message| (message.role, message.text.clone()))
-                .collect(),
-            max_output_tokens: None,
-        };
-        let stream = provider.stream(request);
-
-        self.messages.push(ChatMessage {
-            role: Role::Assistant,
-            text: String::new(),
-            db_id: assistant_db,
-        });
-        let reply_index = self.messages.len() - 1;
         self.streaming = true;
+        self.streaming_assistant = None;
         self.sync_list(cx);
 
         cx.spawn(async move |this, cx| {
             let mut stream = stream;
             while let Some(event) = stream.next().await {
                 match event {
-                    Event::Token { delta } => {
+                    LoopEvent::Delta { delta } => {
+                        let _ = this.update(cx, |this, cx| this.on_delta(&delta, cx));
+                    }
+                    LoopEvent::ToolCallRequested { call, respond } => {
+                        let _ =
+                            this.update(cx, |this, cx| this.on_tool_requested(call, respond, cx));
+                    }
+                    LoopEvent::ToolResult {
+                        call_id,
+                        name,
+                        result,
+                    } => {
                         let _ = this.update(cx, |this, cx| {
-                            if let Some(message) = this.messages.get_mut(reply_index) {
-                                message.text.push_str(&delta);
-                                if let Some(db_id) = message.db_id {
-                                    let _ = store.update_message(db_id, &message.text);
-                                }
-                            }
-                            this.list_state.scroll_to_end();
-                            cx.notify();
+                            this.on_tool_result(&call_id, &name, &result, cx)
                         });
                     }
-                    Event::Error { message } => {
-                        let _ = this.update(cx, |this, cx| {
-                            if let Some(message_at) = this.messages.get_mut(reply_index) {
-                                if !message_at.text.is_empty() {
-                                    message_at.text.push_str("\n\n");
-                                }
-                                message_at
-                                    .text
-                                    .push_str(&format!("[error] {message}"));
-                                if let Some(db_id) = message_at.db_id {
-                                    let _ = store.update_message(db_id, &message_at.text);
-                                }
-                            }
-                            cx.notify();
-                        });
+                    LoopEvent::Usage { .. } => {} // M3: cost accounting
+                    LoopEvent::Error { message } => {
+                        let _ = this.update(cx, |this, cx| this.on_error(&message, cx));
                     }
-                    Event::Done => break,
-                    _ => {}
+                    LoopEvent::Done => break,
                 }
                 cx.background_executor()
                     .timer(Duration::from_millis(1))
@@ -245,6 +288,7 @@ impl ChatView {
             }
             let _ = this.update(cx, |this, cx| {
                 this.streaming = false;
+                this.streaming_assistant = None;
                 this.sessions = this.store.list_sessions().unwrap_or_default();
                 cx.notify();
             });
@@ -252,9 +296,152 @@ impl ChatView {
         .detach();
     }
 
-    fn render_message(&self, index: usize, cx: &App) -> AnyElement {
-        let message = &self.messages[index];
-        match message.role {
+    /// Streams a delta into the round's assistant turn, creating its row
+    /// (and database row) on the first delta.
+    fn on_delta(&mut self, delta: &str, cx: &mut Context<Self>) {
+        let index = match self.streaming_assistant {
+            Some(index) => index,
+            None => {
+                let db_id = self.session_id.and_then(|session_id| {
+                    self.store
+                        .append_message(session_id, self.last_db_id, Role::Assistant, "")
+                        .ok()
+                });
+                if db_id.is_some() {
+                    self.last_db_id = db_id;
+                }
+                self.turns.push(Turn::Message {
+                    role: Role::Assistant,
+                    text: String::new(),
+                    db_id,
+                });
+                let index = self.turns.len() - 1;
+                self.streaming_assistant = Some(index);
+                index
+            }
+        };
+
+        let persisted = if let Some(Turn::Message { text, db_id, .. }) = self.turns.get_mut(index) {
+            text.push_str(delta);
+            db_id.map(|db_id| (db_id, text.clone()))
+        } else {
+            None
+        };
+        if let Some((db_id, text)) = persisted {
+            let _ = self.store.update_message(db_id, &text);
+        }
+        self.list_state.scroll_to_end();
+        cx.notify();
+    }
+
+    /// A mutating tool wants to run: park the loop's responder on the
+    /// card until the human answers.
+    fn on_tool_requested(
+        &mut self,
+        call: ToolCall,
+        respond: oneshot::Sender<PermissionDecision>,
+        cx: &mut Context<Self>,
+    ) {
+        self.streaming_assistant = None;
+        self.turns.push(Turn::Tool {
+            call,
+            status: ToolStatus::Pending(respond),
+        });
+        self.sync_list(cx);
+    }
+
+    /// The tool finished; show the outcome and persist the row so reloads
+    /// and the next request see the same thing the model did.
+    fn on_tool_result(&mut self, call_id: &str, name: &str, result: &str, cx: &mut Context<Self>) {
+        self.streaming_assistant = None;
+
+        let arguments = self
+            .turns
+            .iter()
+            .find_map(|turn| match turn {
+                Turn::Tool { call, .. } if call.id == call_id => Some(call.arguments.clone()),
+                _ => None,
+            })
+            .unwrap_or_default();
+
+        for turn in &mut self.turns {
+            if let Turn::Tool { call, status } = turn
+                && call.id == call_id
+            {
+                *status = ToolStatus::Done(result.to_string());
+            }
+        }
+
+        if let Some(session_id) = self.session_id
+            && let Ok(db_id) = self.store.append_tool_result(
+                session_id,
+                self.last_db_id,
+                call_id,
+                name,
+                &arguments,
+                result,
+            )
+        {
+            self.last_db_id = Some(db_id);
+        }
+        self.list_state.scroll_to_end();
+        cx.notify();
+    }
+
+    /// Loop-level failures (provider exhausted retries, round budget hit)
+    /// surface in the transcript like any other turn.
+    fn on_error(&mut self, message: &str, cx: &mut Context<Self>) {
+        let rendered = format!("[error] {message}");
+        match self.streaming_assistant {
+            Some(index) => {
+                let persisted =
+                    if let Some(Turn::Message { text, db_id, .. }) = self.turns.get_mut(index) {
+                        if !text.is_empty() {
+                            text.push_str("\n\n");
+                        }
+                        text.push_str(&rendered);
+                        db_id.map(|db_id| (db_id, text.clone()))
+                    } else {
+                        None
+                    };
+                if let Some((db_id, text)) = persisted {
+                    let _ = self.store.update_message(db_id, &text);
+                }
+            }
+            None => self.turns.push(Turn::Message {
+                role: Role::Assistant,
+                text: rendered,
+                db_id: None,
+            }),
+        }
+        self.list_state.scroll_to_end();
+        cx.notify();
+    }
+
+    /// Answers a pending permission card. A dropped responder (UI closed)
+    /// counts as a deny in the loop; here the human did answer.
+    fn decide_tool(&mut self, index: usize, decision: PermissionDecision, cx: &mut Context<Self>) {
+        if let Some(Turn::Tool { status, .. }) = self.turns.get_mut(index) {
+            match std::mem::replace(status, ToolStatus::Running) {
+                ToolStatus::Pending(respond) => {
+                    let _ = respond.send(decision);
+                }
+                // Not actually pending (double click): put it back.
+                other => *status = other,
+            }
+        }
+        cx.notify();
+    }
+
+    fn render_turn(&mut self, index: usize, cx: &mut Context<Self>) -> AnyElement {
+        match &self.turns[index] {
+            Turn::Message { role, text, .. } => self.render_message(role, text, cx),
+            Turn::Tool { call, status } => self.render_tool(index, call, status, cx),
+        }
+    }
+
+    fn render_message(&self, role: &Role, text: &str, cx: &App) -> AnyElement {
+        match role {
             Role::User => h_flex()
                 .w_full()
                 .justify_end()
@@ -266,11 +453,11 @@ impl ChatView {
                         .py_2()
                         .bg(cx.theme().primary)
                         .text_color(cx.theme().primary_foreground)
-                        .child(message.text.clone()),
+                        .child(text.to_string()),
                 )
                 .into_any_element(),
             _ => {
-                let is_error = message.text.contains("[error]");
+                let is_error = text.contains("[error]");
                 div()
                     .w_full()
                     .pr_16()
@@ -279,17 +466,191 @@ impl ChatView {
                     } else {
                         cx.theme().foreground
                     })
-                    .child(message.text.clone())
+                    .child(text.to_string())
                     .into_any_element()
             }
         }
     }
+
+    /// The tool card: what it wants to do, the diff for file changes, and
+    /// approve/deny while pending.
+    fn render_tool(
+        &self,
+        index: usize,
+        call: &ToolCall,
+        status: &ToolStatus,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let mut inner = v_flex().gap_2().child(
+            h_flex()
+                .gap_2()
+                .items_center()
+                .child(
+                    div()
+                        .text_size(px(13.))
+                        .text_color(cx.theme().accent)
+                        .child(format!("⚙ {}", call.name)),
+                )
+                .child(
+                    div()
+                        .text_size(px(12.))
+                        .text_color(cx.theme().muted_foreground)
+                        .child(argument_summary(call)),
+                ),
+        );
+
+        match status {
+            ToolStatus::Pending(_) => {
+                inner = inner
+                    .child(
+                        div()
+                            .text_size(px(12.))
+                            .text_color(cx.theme().warning)
+                            .child("wants to modify your workspace"),
+                    )
+                    .child(
+                        h_flex()
+                            .gap_2()
+                            .child(
+                                Button::new(SharedString::from(format!("approve-{index}")))
+                                    .label("Approve")
+                                    .small()
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.decide_tool(index, PermissionDecision::Approve, cx)
+                                    })),
+                            )
+                            .child(
+                                Button::new(SharedString::from(format!("deny-{index}")))
+                                    .label("Deny")
+                                    .small()
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.decide_tool(index, PermissionDecision::Deny, cx)
+                                    })),
+                            ),
+                    );
+            }
+            ToolStatus::Running => {
+                inner = inner.child(
+                    div()
+                        .text_size(px(12.))
+                        .text_color(cx.theme().muted_foreground)
+                        .child("running…"),
+                );
+            }
+            ToolStatus::Done(result) => {
+                if let Some(diff) = diff_lines(call, cx) {
+                    inner = inner.child(diff);
+                }
+                let preview: String = result.lines().take(12).collect::<Vec<_>>().join("\n");
+                inner = inner.child(
+                    div()
+                        .text_size(px(12.))
+                        .text_color(cx.theme().muted_foreground)
+                        .child(preview),
+                );
+            }
+        }
+
+        v_flex()
+            .w_full()
+            .pr_16()
+            .pb_2()
+            .child(
+                v_flex()
+                    .border_1()
+                    .border_color(cx.theme().border)
+                    .rounded_lg()
+                    .p_3()
+                    .child(inner),
+            )
+            .into_any_element()
+    }
+}
+
+/// One-line summary of what the call targets, for the card header.
+fn argument_summary(call: &ToolCall) -> String {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(&call.arguments) else {
+        return String::new();
+    };
+    let field = ["path", "pattern", "command", "url"]
+        .iter()
+        .find_map(|field| value.get(*field))
+        .and_then(|field| field.as_str());
+    match field {
+        Some(field) => field.to_string(),
+        None => String::new(),
+    }
+}
+
+/// For file-mutating calls, renders the change as +/- lines: edit shows
+/// old in red and new in green; write shows the content as additions.
+/// Returns None for tools without a natural diff.
+fn diff_lines(call: &ToolCall, cx: &App) -> Option<AnyElement> {
+    let value: serde_json::Value = serde_json::from_str(&call.arguments).ok()?;
+    let mut container = v_flex()
+        .rounded_md()
+        .border_1()
+        .border_color(cx.theme().border)
+        .text_size(px(12.))
+        .overflow_hidden();
+
+    let (add, remove): (Vec<&str>, Vec<&str>) = match call.name.as_str() {
+        "edit_file" => {
+            let old = value.get("old_text")?.as_str()?;
+            let new = value
+                .get("new_text")
+                .and_then(|text| text.as_str())
+                .unwrap_or("");
+            (
+                new.lines().take(24).collect(),
+                old.lines().take(24).collect(),
+            )
+        }
+        "write_file" => {
+            let content = value.get("content")?.as_str()?;
+            (content.lines().take(24).collect(), Vec::new())
+        }
+        _ => return None,
+    };
+
+    for line in remove {
+        container = container.child(
+            div()
+                .px_2()
+                .text_color(cx.theme().danger)
+                .child(format!("− {line}")),
+        );
+    }
+    for line in add {
+        container = container.child(
+            div()
+                .px_2()
+                .text_color(cx.theme().success)
+                .child(format!("+ {line}")),
+        );
+    }
+    Some(container.into_any_element())
 }
 
 impl Render for ChatView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let view = cx.entity().downgrade();
-        let status = if self.streaming { "streaming…" } else { "ready" };
+        let pending = self.turns.iter().any(|turn| {
+            matches!(
+                turn,
+                Turn::Tool {
+                    status: ToolStatus::Pending(_),
+                    ..
+                }
+            )
+        });
+        let status = if pending {
+            "approval needed"
+        } else if self.streaming {
+            "streaming…"
+        } else {
+            "ready"
+        };
 
         v_flex()
             .size_full()
@@ -317,7 +678,11 @@ impl Render for ChatView {
                     .child(
                         div()
                             .text_size(px(12.))
-                            .text_color(cx.theme().muted_foreground)
+                            .text_color(if pending {
+                                cx.theme().warning_foreground
+                            } else {
+                                cx.theme().muted_foreground
+                            })
                             .child(status),
                     ),
             )
@@ -346,22 +711,19 @@ impl Render for ChatView {
                             )
                             .children(self.sessions.iter().map(|summary| {
                                 let session_id = summary.id;
-                                Button::new(SharedString::from(format!(
-                                    "session-{}",
-                                    summary.id.0
-                                )))
-                                .label(summary.title.clone())
-                                .small()
-                                .on_click(cx.listener(move |this, _, window, cx| {
-                                    this.switch_to_session(session_id, window, cx);
-                                }))
+                                Button::new(SharedString::from(format!("session-{}", summary.id.0)))
+                                    .label(summary.title.clone())
+                                    .small()
+                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                        this.switch_to_session(session_id, window, cx);
+                                    }))
                             })),
                     )
                     .child(
                         // The transcript: flex sizing goes directly on the
                         // list element — a wrapper div collapses it.
                         list(self.list_state.clone(), move |index, _window, cx| {
-                            view.update(cx, |view, cx| view.render_message(index, cx))
+                            view.update(cx, |view, cx| view.render_turn(index, cx))
                                 .unwrap_or_else(|_| div().into_any_element())
                         })
                         .flex_1()

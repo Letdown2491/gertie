@@ -3,11 +3,18 @@
 //! This crate is the whole harness minus the UI. It must never depend on a
 //! GUI framework: it is embeddable from a CLI, a server, or an editor. The
 //! UI-facing `gertie` crate is one client of many.
-//!
-//! Currently ships the two foundations everything else hangs off: the
-//! tree-shaped message model with SQLite-backed sessions, and the typed
-//! provider event stream. The agent loop, permissions, checkpoints, and the
-//! `agent` tool land in M2.
+
+pub mod agent_loop;
+pub mod provider;
+pub mod request;
+pub mod snapshot;
+pub mod tool;
+
+pub use agent_loop::{LoopEvent, PermissionDecision, SharedHistory, ToolRegistry, run_turn};
+pub use provider::Provider;
+pub use request::{Request, ToolCall, ToolSpec, WireMessage};
+pub use snapshot::{Checkpoint, CheckpointId, SnapshotStore};
+pub use tool::{Tool, ToolResult};
 
 use rusqlite::Connection;
 use std::path::Path;
@@ -21,9 +28,10 @@ pub struct MessageId(pub u64);
 pub struct SessionId(pub u64);
 
 /// Who authored a message.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Role {
     System,
+    #[default]
     User,
     Assistant,
     /// Output produced by a tool invocation.
@@ -61,6 +69,12 @@ pub struct Message {
     pub parent_id: Option<MessageId>,
     pub role: Role,
     pub content: String,
+    /// Tool rows only: which call this answers.
+    pub tool_call_id: Option<String>,
+    /// Tool rows only: the tool's name.
+    pub tool_name: Option<String>,
+    /// Tool rows only: the arguments the model sent.
+    pub tool_arguments: Option<String>,
 }
 
 /// A summary row for a session, for sidebars and resumption menus.
@@ -71,9 +85,11 @@ pub struct SessionSummary {
 }
 
 /// SQLite-backed session persistence. Synchronous on purpose: writes are
-/// small, rare, and local; callers decide which thread to block.
+/// small, rare, and local; callers decide which thread to block. The
+/// connection is mutex-guarded so the store is `Sync` — persistence can
+/// then move to any thread (background writes arrive in M3).
 pub struct SessionStore {
-    connection: Connection,
+    connection: std::sync::Mutex<Connection>,
 }
 
 impl SessionStore {
@@ -93,28 +109,53 @@ impl SessionStore {
                  session_id INTEGER NOT NULL REFERENCES sessions(id),
                  parent_id INTEGER REFERENCES messages(id),
                  role TEXT NOT NULL,
-                 content TEXT NOT NULL
+                 content TEXT NOT NULL,
+                 tool_call_id TEXT,
+                 tool_name TEXT,
+                 tool_arguments TEXT
              );
              CREATE INDEX IF NOT EXISTS messages_by_session
                  ON messages(session_id, id);",
         )?;
-        Ok(Self { connection })
+        // Older stores predate the tool columns; add them in place rather
+        // than requiring a migration dump.
+        let columns: Vec<String> = {
+            let mut statement = connection.prepare("PRAGMA table_info(messages)")?;
+            let rows = statement.query_map([], |row| row.get::<_, String>(1))?;
+            rows.collect::<Result<Vec<_>, _>>()?
+        };
+        for (column, definition) in [
+            ("tool_call_id", "TEXT"),
+            ("tool_name", "TEXT"),
+            ("tool_arguments", "TEXT"),
+        ] {
+            if !columns.contains(&column.to_string()) {
+                connection.execute(
+                    &format!("ALTER TABLE messages ADD COLUMN {column} {definition}"),
+                    [],
+                )?;
+            }
+        }
+        Ok(Self {
+            connection: std::sync::Mutex::new(connection),
+        })
     }
 
     /// Creates a session titled from its first user message (callers may
     /// retitle later).
     pub fn create_session(&self, title: &str) -> Result<SessionId, rusqlite::Error> {
-        self.connection
+        let connection = self.connection.lock().unwrap();
+        connection
             .prepare("INSERT INTO sessions (title) VALUES (?1)")?
             .execute([title])?;
-        Ok(SessionId(self.connection.last_insert_rowid() as u64))
+        Ok(SessionId(connection.last_insert_rowid() as u64))
     }
 
     /// Newest session first, for the sidebar.
     pub fn list_sessions(&self) -> Result<Vec<SessionSummary>, rusqlite::Error> {
-        let mut statement = self
-            .connection
-            .prepare("SELECT id, title FROM sessions ORDER BY id DESC")?;
+        let connection = self.connection.lock().unwrap();
+        let mut statement =
+            connection.prepare("SELECT id, title FROM sessions ORDER BY id DESC")?;
         let rows = statement.query_map([], |row| {
             Ok(SessionSummary {
                 id: SessionId(row.get::<_, i64>(0)? as u64),
@@ -132,15 +173,45 @@ impl SessionStore {
         role: Role,
         content: &str,
     ) -> Result<MessageId, rusqlite::Error> {
-        self.connection
-            .prepare("INSERT INTO messages (session_id, parent_id, role, content) VALUES (?1, ?2, ?3, ?4)")?
+        let connection = self.connection.lock().unwrap();
+        connection
+            .prepare(
+                "INSERT INTO messages (session_id, parent_id, role, content) VALUES (?1, ?2, ?3, ?4)",
+            )?
             .execute(rusqlite::params![
                 session_id.0 as i64,
                 parent_id.map(|id| id.0 as i64),
                 role.as_str(),
                 content,
             ])?;
-        Ok(MessageId(self.connection.last_insert_rowid() as u64))
+        Ok(MessageId(connection.last_insert_rowid() as u64))
+    }
+
+    /// Appends a tool result — the row that answers one tool call.
+    pub fn append_tool_result(
+        &self,
+        session_id: SessionId,
+        parent_id: Option<MessageId>,
+        call_id: &str,
+        tool_name: &str,
+        arguments: &str,
+        content: &str,
+    ) -> Result<MessageId, rusqlite::Error> {
+        let connection = self.connection.lock().unwrap();
+        connection
+            .prepare(
+                "INSERT INTO messages (session_id, parent_id, role, content, tool_call_id, tool_name, tool_arguments)
+                 VALUES (?1, ?2, 'tool', ?3, ?4, ?5, ?6)",
+            )?
+            .execute(rusqlite::params![
+                session_id.0 as i64,
+                parent_id.map(|id| id.0 as i64),
+                content,
+                call_id,
+                tool_name,
+                arguments,
+            ])?;
+        Ok(MessageId(connection.last_insert_rowid() as u64))
     }
 
     /// Rewrites a message's content in place — this is how streaming turns
@@ -150,15 +221,21 @@ impl SessionStore {
         message_id: MessageId,
         content: &str,
     ) -> Result<(), rusqlite::Error> {
-        self.connection
+        let connection = self.connection.lock().unwrap();
+        connection
             .prepare("UPDATE messages SET content = ?1 WHERE id = ?2")?
             .execute(rusqlite::params![content, message_id.0 as i64])?;
         Ok(())
     }
 
     /// Retitles a session (e.g. from its first exchange).
-    pub fn retitle_session(&self, session_id: SessionId, title: &str) -> Result<(), rusqlite::Error> {
-        self.connection
+    pub fn retitle_session(
+        &self,
+        session_id: SessionId,
+        title: &str,
+    ) -> Result<(), rusqlite::Error> {
+        let connection = self.connection.lock().unwrap();
+        connection
             .prepare("UPDATE sessions SET title = ?1 WHERE id = ?2")?
             .execute(rusqlite::params![title, session_id.0 as i64])?;
         Ok(())
@@ -167,9 +244,10 @@ impl SessionStore {
     /// Loads a session's messages oldest-first. M1 renders the flat path;
     /// the tree walk arrives with forking.
     pub fn load_messages(&self, session_id: SessionId) -> Result<Vec<Message>, rusqlite::Error> {
-        let mut statement = self.connection.prepare(
-            "SELECT id, parent_id, role, content FROM messages
-             WHERE session_id = ?1 ORDER BY id",
+        let connection = self.connection.lock().unwrap();
+        let mut statement = connection.prepare(
+            "SELECT id, parent_id, role, content, tool_call_id, tool_name, tool_arguments
+             FROM messages WHERE session_id = ?1 ORDER BY id",
         )?;
         let rows = statement.query_map([session_id.0 as i64], |row| {
             Ok(Message {
@@ -177,9 +255,76 @@ impl SessionStore {
                 parent_id: row.get::<_, Option<i64>>(1)?.map(|id| MessageId(id as u64)),
                 role: Role::from_str(&row.get::<_, String>(2)?),
                 content: row.get(3)?,
+                tool_call_id: row.get(4)?,
+                tool_name: row.get(5)?,
+                tool_arguments: row.get(6)?,
             })
         })?;
         rows.collect()
+    }
+
+    /// Reconstructs the canonical wire history from stored rows: assistant
+    /// rows re-attach the tool calls their child tool rows answer, so a
+    /// resumed session requests with exactly what the model saw before.
+    pub fn load_wire_history(
+        &self,
+        session_id: SessionId,
+    ) -> Result<Vec<crate::request::WireMessage>, rusqlite::Error> {
+        use crate::request::{ToolCall, WireMessage};
+        let messages = self.load_messages(session_id)?;
+        let mut wire = Vec::new();
+        let mut index = 0;
+        while index < messages.len() {
+            let message = &messages[index];
+            match message.role {
+                Role::Assistant => {
+                    // Tool rows answering this assistant turn follow it.
+                    let mut calls = Vec::new();
+                    let mut next = index + 1;
+                    while next < messages.len()
+                        && messages[next].role == Role::Tool
+                        && messages[next].parent_id == Some(message.id)
+                    {
+                        let row = &messages[next];
+                        calls.push(ToolCall {
+                            id: row.tool_call_id.clone().unwrap_or_default(),
+                            name: row.tool_name.clone().unwrap_or_default(),
+                            arguments: row.tool_arguments.clone().unwrap_or_default(),
+                        });
+                        next += 1;
+                    }
+                    wire.push(WireMessage::assistant_with_tool_calls(
+                        (!message.content.is_empty()).then(|| message.content.clone()),
+                        calls,
+                    ));
+                    for row in &messages[index + 1..next] {
+                        wire.push(WireMessage::tool_result(
+                            &ToolCall {
+                                id: row.tool_call_id.clone().unwrap_or_default(),
+                                name: row.tool_name.clone().unwrap_or_default(),
+                                arguments: row.tool_arguments.clone().unwrap_or_default(),
+                            },
+                            &row.content,
+                        ));
+                    }
+                    index = next;
+                }
+                Role::User => {
+                    wire.push(WireMessage::user(&message.content));
+                    index += 1;
+                }
+                Role::System => {
+                    wire.push(WireMessage {
+                        role: Role::System,
+                        content: Some(message.content.clone()),
+                        ..WireMessage::default()
+                    });
+                    index += 1;
+                }
+                Role::Tool => index += 1, // orphan row: skip, don't guess
+            }
+        }
+        Ok(wire)
     }
 }
 
@@ -274,5 +419,40 @@ mod tests {
         let sessions = store.list_sessions().unwrap();
         assert_eq!(sessions[0].id, second);
         assert_eq!(sessions.last().unwrap().id, first);
+    }
+
+    #[test]
+    fn wire_history_rebuilds_assistant_tool_pairings() {
+        let store = memory_store();
+        let session = store.create_session("tools").unwrap();
+
+        let user = store
+            .append_message(session, None, Role::User, "fix it")
+            .unwrap();
+        let assistant = store
+            .append_message(session, Some(user), Role::Assistant, "on it")
+            .unwrap();
+        store
+            .append_tool_result(
+                session,
+                Some(assistant),
+                "call_1",
+                "edit_file",
+                r#"{"path":"x"}"#,
+                "edited x",
+            )
+            .unwrap();
+        let assistant_2 = store
+            .append_message(session, Some(assistant), Role::Assistant, "done")
+            .unwrap();
+
+        let history = store.load_wire_history(session).unwrap();
+        assert_eq!(history.len(), 4); // user, assistant+call, tool result, assistant
+        assert_eq!(history[0], WireMessage::user("fix it"));
+        assert_eq!(history[1].tool_calls.len(), 1);
+        assert_eq!(history[1].tool_calls[0].name, "edit_file");
+        assert_eq!(history[2].tool_call_id.as_deref(), Some("call_1"));
+        assert_eq!(history[3], WireMessage::assistant("done"));
+        let _ = assistant_2;
     }
 }
