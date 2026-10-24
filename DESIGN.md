@@ -87,9 +87,12 @@ Deferred:
   setting (persisted outside config.toml). The config file remains the single source of
   truth; in-place TOML editing stays out on purpose (comment/unknown-key round-trip risk
   for zero capability the file doesn't already provide better).
-- Cost dashboard (reduced to the token line), plugin surface, native Anthropic/Google
-  providers.
-- Settings UI, cost dashboard, plugin surface, native Anthropic/Google providers.
+- *Native Anthropic wire*: the Provider trait's second adapter, and its vendor-neutrality
+  test. `wire = "anthropic"` on an endpoint selects the Messages API module — system text
+  top-level, `max_tokens` required, tool results as user-message blocks, `x-api-key`
+  headers, content-block SSE normalized to whole tool calls. Same envelope: silent
+  retries, same-wire fallback chain, commit on first content.
+- Cost dashboard (reduced to the token line), plugin surface.
 
 ## Providers
 
@@ -225,8 +228,9 @@ Each type earns existence via distinct toolset or safety posture, not just a dif
 runs, live report status. Parallel sessions shipped as tabs, including the worktree half:
 the ⎇ button opens a chat rooted at its own git worktree with a re-rooted tool registry, so
 two agents can edit the same repo without colliding. The settings panel closed the UI
-scope: live config visible in-app, theme persisted. Remaining deferred: cost dashboard
-(reduced to the token line), plugin surface, native Anthropic/Google providers.)
+scope: live config visible in-app, theme persisted. The native Anthropic wire shipped as
+the Provider trait's second adapter (`wire = "anthropic"` per endpoint). Remaining
+deferred: cost dashboard (reduced to the token line), plugin surface, Google's wire.)
 
 ## Distribution
 
