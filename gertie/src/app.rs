@@ -78,7 +78,7 @@ fn open_chat_window(
         cx,
         |window, cx| {
             cx.new(|cx| {
-                crate::chat::ChatView::new(
+                crate::tabs::WorkspaceView::new(
                     store,
                     provider,
                     snapshots,

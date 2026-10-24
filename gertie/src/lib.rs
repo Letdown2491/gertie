@@ -3,6 +3,7 @@ pub mod chat;
 pub mod cli;
 pub mod config;
 pub mod headless;
+pub mod tabs;
 
 pub mod bootstrap;
 

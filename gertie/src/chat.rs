@@ -114,6 +114,9 @@ impl ChatView {
         system_prompt: Option<String>,
         broker: Arc<PermissionBroker>,
         session_scope: gertie_core::SessionScope,
+        // Resume the newest stored session (window open), or start
+        // blank (a new tab — two views on one session would diverge).
+        resume: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -143,7 +146,11 @@ impl ChatView {
         let sessions = store.list_sessions().unwrap_or_default();
         // Resume the newest session if there is one; otherwise the first
         // message creates the session (lazy, so no empty rows accumulate).
-        let session_id = sessions.first().map(|summary| summary.id);
+        let session_id = if resume {
+            sessions.first().map(|summary| summary.id)
+        } else {
+            None
+        };
         session_scope.set(session_id);
 
         let mut view = Self {
@@ -187,6 +194,17 @@ impl ChatView {
     /// The session the transcript is bound to, for tests and tooling.
     pub fn session_id(&self) -> Option<SessionId> {
         self.session_id
+    }
+
+    /// The open session's title, for the tab bar. Blank chats say so.
+    pub fn tab_title(&self) -> SharedString {
+        match self
+            .session_id
+            .and_then(|id| self.sessions.iter().find(|summary| summary.id == id))
+        {
+            Some(summary) => summary.title.clone().into(),
+            None => "new chat".into(),
+        }
     }
 
     /// Swaps the transcript for a session's stored messages and rebuilds

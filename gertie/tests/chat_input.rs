@@ -57,6 +57,7 @@ fn fixture() -> Fixture {
                     None,
                     Arc::new(gertie_core::PermissionBroker::new()),
                     gertie_core::SessionScope::new(),
+                    true,
                     window,
                     cx,
                 )
