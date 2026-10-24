@@ -28,6 +28,13 @@ pub struct Bootstrap {
     /// Human-readable status line: endpoint, warnings, capability counts.
     pub label: String,
     pub workspace_root: PathBuf,
+    /// Tool names that don't capture the workspace root (web, history,
+    /// MCP, skills) — a re-rooted registry carries these over as-is
+    /// instead of rebuilding or reconnecting them.
+    root_independent: Vec<String>,
+    /// The skills index prompt section, shared by every registry's
+    /// system prompt (skills are repo content, identical per worktree).
+    skill_index: String,
 }
 
 impl Bootstrap {
@@ -105,6 +112,7 @@ impl Bootstrap {
             std::sync::Arc::new(gertie_tools::sandbox::Sandbox::new(workspace_root.clone()))
         });
         let mut tools = gertie_tools::builtin_tools_with(&workspace_root, sandbox);
+        let mut root_independent: Vec<String> = Vec::new();
 
         // Skills: user dir + project dir (project overrides by name),
         // loaded on demand through load_skill; only the index rides the
@@ -119,6 +127,7 @@ impl Bootstrap {
         let skills_project = workspace_root.join(".gertie/skills");
         let (skills, skill_warnings) =
             gertie_tools::skills::discover(&skills_user, &skills_project);
+        let skill_index = gertie_tools::skills::index_prompt(&skills);
         if !skills.is_empty() {
             let count = skills.len();
             Arc::get_mut(&mut tools)
@@ -128,6 +137,7 @@ impl Bootstrap {
                     Arc::new(gertie_tools::skills::LoadSkill::new(&skills)),
                 );
             label.push_str(&format!(" · skills×{count}"));
+            root_independent.push("load_skill".into());
         }
         for warning in &skill_warnings {
             label.push_str(&format!(" — ⚠ {warning}"));
@@ -136,26 +146,13 @@ impl Bootstrap {
         // The system prompt: identity, the one policy paragraph the model
         // must know, the skill index. Terse by the two-loads rule — every
         // line is context paid on every turn.
-        let system_prompt = {
-            let mut prompt = format!(
-                "You are gertie, a coding agent working in {}.\n\
-                 Read-only tools run without asking; anything that changes the \
-                 world shows the user a card and waits. Write code, run the \
-                 tests, report plainly.",
-                workspace_root.display()
-            );
-            let index = gertie_tools::skills::index_prompt(&skills);
-            if !index.is_empty() {
-                prompt.push_str("\n\n");
-                prompt.push_str(&index);
-            }
-            Some(prompt)
-        };
+        let system_prompt = system_prompt_for(&workspace_root, &skill_index);
 
         // Web tools: fetch always; search gracefully-disabled unless a
         // backend resolves; history search rides the session store.
         let map = Arc::get_mut(&mut tools).expect("registry not yet shared");
         map.insert("web_fetch".into(), Arc::new(gertie_tools::web::WebFetch));
+        root_independent.push("web_fetch".into());
         let search_tool = match &config.search {
             Some(search) => match search.to_backend() {
                 Ok(backend) => backend,
@@ -167,10 +164,12 @@ impl Bootstrap {
             None => gertie_tools::web::WebSearch::unconfigured(),
         };
         map.insert("web_search".into(), Arc::new(search_tool));
+        root_independent.push("web_search".into());
         map.insert(
             "search_history".into(),
             Arc::new(gertie_tools::web::SearchHistory::new(store.clone())),
         );
+        root_independent.push("search_history".into());
 
         // MCP servers connect at startup; a server that won't start is a
         // status-line warning, never a failed launch — gertie's local
@@ -192,6 +191,7 @@ impl Bootstrap {
                         Ok(mcp_tools) => {
                             let count = mcp_tools.len();
                             for tool in mcp_tools {
+                                root_independent.push(tool.name().to_string());
                                 map.insert(tool.name().to_string(), Arc::new(tool));
                             }
                             label.push_str(&format!(" · mcp:{}×{count}", server.name));
@@ -230,34 +230,7 @@ impl Bootstrap {
             // a matching name replaces the built-in (and may pin its own
             // model), extras are added on top. Built-ins inherit the
             // leader model.
-            let mut types: Vec<(gertie_core::AgentType, Option<String>)> =
-                gertie_core::builtin_agent_types()
-                    .into_iter()
-                    .map(|t| (t, None))
-                    .collect();
-            for agent in &config.agents {
-                if agent.invocation == crate::config::Invocation::User {
-                    // Registered later, when UI dispatch exists.
-                    continue;
-                }
-                let agent_type = gertie_core::AgentType {
-                    name: agent.name.clone(),
-                    description: agent.description.clone(),
-                    system_prompt: agent.prompt.clone().unwrap_or_else(|| {
-                        "You are a focused subagent. You have your own tools \
-                         and context; the leader sees only your final report. \
-                         Work exactly within the brief, verify what you build, \
-                         and report honestly."
-                            .into()
-                    }),
-                    tools: agent.tools.clone(),
-                };
-                let entry = (agent_type, agent.model.clone());
-                match types.iter_mut().find(|(t, _)| t.name == agent.name) {
-                    Some(slot) => *slot = entry,
-                    None => types.push(entry),
-                }
-            }
+            let types = agent_types(&config);
             // Build first (borrowing `tools` immutably), insert after.
             let mut additions: Vec<(String, Arc<dyn gertie_core::Tool>)> = Vec::new();
             for (agent_type, model) in &types {
@@ -309,6 +282,119 @@ impl Bootstrap {
             system_prompt,
             label,
             workspace_root,
+            root_independent,
+            skill_index,
         }
     }
+
+    /// A registry re-rooted at `root`, plus its system prompt: the
+    /// built-ins are rebuilt (they capture the workspace root), agent
+    /// tools are rebuilt against the new base (a worker dispatched from
+    /// this registry works in the same tree), and root-independent
+    /// tools — web, history, MCP connections, skills — are carried over
+    /// as-is rather than duplicated. Shared infrastructure (broker,
+    /// store, snapshots) is untouched: one approval queue, one history.
+    pub fn registry_for_root(&self, root: &Path) -> (gertie_core::ToolRegistry, Option<String>) {
+        let sandbox =
+            self.config.security.sandbox_bash.then(|| {
+                std::sync::Arc::new(gertie_tools::sandbox::Sandbox::new(root.to_path_buf()))
+            });
+        let mut tools = gertie_tools::builtin_tools_with(root, sandbox);
+        {
+            let map = Arc::get_mut(&mut tools).expect("registry not yet shared");
+            for name in &self.root_independent {
+                if let Some(tool) = self.tools.get(name) {
+                    map.insert(name.clone(), tool.clone());
+                }
+            }
+        }
+        if let (Some(endpoint), Some(leader_provider)) = (&self.agent_endpoint, &self.provider) {
+            let types = agent_types(&self.config);
+            let mut additions: Vec<(String, Arc<dyn gertie_core::Tool>)> = Vec::new();
+            for (agent_type, model) in &types {
+                let worker_provider: Arc<dyn gertie_core::Provider> = match model {
+                    Some(model) => {
+                        match OpenAICompatible::new(gertie_providers::Endpoint {
+                            model: model.clone(),
+                            ..endpoint.clone()
+                        }) {
+                            Ok(provider) => Arc::new(provider),
+                            Err(_) => continue,
+                        }
+                    }
+                    None => leader_provider.clone(),
+                };
+                let tool = gertie_core::AgentTool::new(
+                    agent_type.clone(),
+                    worker_provider,
+                    &tools,
+                    self.snapshots.clone(),
+                    self.broker.clone(),
+                    endpoint.context_window,
+                    root.to_path_buf(),
+                    Some(self.store.clone()),
+                    self.session_scope.clone(),
+                );
+                additions.push((tool.name().to_string(), Arc::new(tool)));
+            }
+            let map = Arc::get_mut(&mut tools).expect("registry not yet shared");
+            for (name, tool) in additions {
+                map.insert(name, tool);
+            }
+        }
+        (tools, system_prompt_for(root, &self.skill_index))
+    }
+}
+
+/// The shipped agent types first; a config `[[agents]]` entry with a
+/// matching name replaces the built-in (and may pin its own model),
+/// extras are added on top. Built-ins inherit the leader model.
+fn agent_types(config: &crate::config::Config) -> Vec<(gertie_core::AgentType, Option<String>)> {
+    let mut types: Vec<(gertie_core::AgentType, Option<String>)> =
+        gertie_core::builtin_agent_types()
+            .into_iter()
+            .map(|t| (t, None))
+            .collect();
+    for agent in &config.agents {
+        if agent.invocation == crate::config::Invocation::User {
+            // Registered later, when UI dispatch exists.
+            continue;
+        }
+        let agent_type = gertie_core::AgentType {
+            name: agent.name.clone(),
+            description: agent.description.clone(),
+            system_prompt: agent.prompt.clone().unwrap_or_else(|| {
+                "You are a focused subagent. You have your own tools \
+                 and context; the leader sees only your final report. \
+                 Work exactly within the brief, verify what you build, \
+                 and report honestly."
+                    .into()
+            }),
+            tools: agent.tools.clone(),
+        };
+        let entry = (agent_type, agent.model.clone());
+        match types.iter_mut().find(|(t, _)| t.name == agent.name) {
+            Some(slot) => *slot = entry,
+            None => types.push(entry),
+        }
+    }
+    types
+}
+
+/// The system prompt: identity, the one policy paragraph the model
+/// must know, the skill index. Terse by the two-loads rule — every
+/// line is context paid on every turn.
+fn system_prompt_for(root: &Path, skill_index: &str) -> Option<String> {
+    let mut prompt = format!(
+        "You are gertie, a coding agent working in {}.\n\
+         Read-only tools run without asking; anything that changes the \
+         world shows the user a card and waits. Write code, run the \
+         tests, report plainly.",
+        root.display()
+    );
+    if !skill_index.is_empty() {
+        prompt.push_str("\n\n");
+        prompt.push_str(skill_index);
+    }
+    Some(prompt)
 }
