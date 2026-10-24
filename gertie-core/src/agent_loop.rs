@@ -33,6 +33,12 @@ pub enum LoopEvent {
         name: String,
         result: String,
     },
+    /// A read-only tool started executing (mutating calls surface through
+    /// `ToolCallRequested` instead). Exists so the UI can show activity
+    /// for the tools that never prompt — silent reads read as a hang.
+    ToolCallStarted {
+        call: ToolCall,
+    },
     Usage {
         input_tokens: u64,
         output_tokens: u64,
@@ -156,6 +162,7 @@ pub fn run_turn(
                             };
                             matches!(answer.await, Ok(PermissionDecision::Approve))
                         } else {
+                            yield LoopEvent::ToolCallStarted { call: call.clone() };
                             true
                         };
                         match permitted {
@@ -398,6 +405,17 @@ mod tests {
         );
 
         assert_eq!(tool_result(&events, "peek"), "peeked");
+        // The read's start is announced before its result — silent reads
+        // would read as a hang in the UI.
+        let started = events
+            .iter()
+            .position(|event| matches!(event, LoopEvent::ToolCallStarted { .. }))
+            .expect("read-only tool announces itself");
+        let finished = events
+            .iter()
+            .position(|event| matches!(event, LoopEvent::ToolResult { .. }))
+            .expect("tool result");
+        assert!(started < finished);
         assert!(events.iter().any(|event| matches!(event, LoopEvent::Done)));
         let history = history.blocking_lock();
         assert_eq!(history.len(), 4); // user, assistant+call, tool result, assistant

@@ -9,6 +9,7 @@ use gertie_core::{
 use gertie_providers::OpenAICompatible;
 use gpui_kit::component::button::Button;
 use gpui_kit::component::input::{Input, InputEvent, InputState};
+use gpui_kit::component::spinner::Spinner;
 use gpui_kit::component::{ActiveTheme, Sizable as _, h_flex, v_flex};
 use gpui_kit::{
     AnyElement, App, AppContext as _, Context, Entity, Focusable, IntoElement, ListAlignment,
@@ -40,6 +41,9 @@ enum Turn {
     Tool {
         call: ToolCall,
         status: ToolStatus,
+        /// Read-only tools never prompted; the card says so instead of
+        /// showing buttons the human never needed to click.
+        auto_approved: bool,
     },
 }
 
@@ -61,6 +65,9 @@ pub struct ChatView {
     streaming_assistant: Option<usize>,
     /// Last persisted row — the parent for whatever is appended next.
     last_db_id: Option<MessageId>,
+    /// What the agent is up to right now, for the status line — the loop
+    /// goes quiet between streaming rounds, and silence reads as a hang.
+    activity: String,
     input: Entity<InputState>,
     list_state: ListState,
     streaming: bool,
@@ -101,6 +108,7 @@ impl ChatView {
             history: Arc::new(tokio::sync::Mutex::new(Vec::new())),
             streaming_assistant: None,
             last_db_id: None,
+            activity: "starting…".into(),
             input,
             list_state: ListState::new(0, ListAlignment::Bottom, px(256.)),
             streaming: false,
@@ -131,6 +139,7 @@ impl ChatView {
                                 arguments: row.tool_arguments.clone().unwrap_or_default(),
                             },
                             status: ToolStatus::Done(row.content.clone()),
+                            auto_approved: false,
                         },
                         role => Turn::Message {
                             role,
@@ -264,8 +273,13 @@ impl ChatView {
                         let _ = this.update(cx, |this, cx| this.on_delta(&delta, cx));
                     }
                     LoopEvent::ToolCallRequested { call, respond } => {
-                        let _ =
-                            this.update(cx, |this, cx| this.on_tool_requested(call, respond, cx));
+                        let _ = this.update(cx, |this, cx| {
+                            this.activity = "waiting for approval".into();
+                            this.on_tool_requested(call, respond, cx)
+                        });
+                    }
+                    LoopEvent::ToolCallStarted { call } => {
+                        let _ = this.update(cx, |this, cx| this.on_tool_started(call, cx));
                     }
                     LoopEvent::ToolResult {
                         call_id,
@@ -299,6 +313,7 @@ impl ChatView {
     /// Streams a delta into the round's assistant turn, creating its row
     /// (and database row) on the first delta.
     fn on_delta(&mut self, delta: &str, cx: &mut Context<Self>) {
+        self.activity = "streaming…".into();
         let index = match self.streaming_assistant {
             Some(index) => index,
             None => {
@@ -317,6 +332,11 @@ impl ChatView {
                 });
                 let index = self.turns.len() - 1;
                 self.streaming_assistant = Some(index);
+                // The list's item count is stale the moment a turn is
+                // added — without a reset, scroll_to_end targets the old
+                // end and the new turn renders below the viewport (the
+                // "reply appeared only after I typed again" bug).
+                self.list_state.reset(self.turns.len());
                 index
             }
         };
@@ -334,6 +354,19 @@ impl ChatView {
         cx.notify();
     }
 
+    /// A read-only tool started executing: give it a running card so the
+    /// quiet parts of a turn still look alive.
+    fn on_tool_started(&mut self, call: ToolCall, cx: &mut Context<Self>) {
+        self.activity = format!("running {}…", call.name);
+        self.streaming_assistant = None;
+        self.turns.push(Turn::Tool {
+            call,
+            status: ToolStatus::Running,
+            auto_approved: true,
+        });
+        self.sync_list(cx);
+    }
+
     /// A mutating tool wants to run: park the loop's responder on the
     /// card until the human answers.
     fn on_tool_requested(
@@ -346,6 +379,7 @@ impl ChatView {
         self.turns.push(Turn::Tool {
             call,
             status: ToolStatus::Pending(respond),
+            auto_approved: false,
         });
         self.sync_list(cx);
     }
@@ -353,6 +387,7 @@ impl ChatView {
     /// The tool finished; show the outcome and persist the row so reloads
     /// and the next request see the same thing the model did.
     fn on_tool_result(&mut self, call_id: &str, name: &str, result: &str, cx: &mut Context<Self>) {
+        self.activity = "thinking…".into();
         self.streaming_assistant = None;
 
         let arguments = self
@@ -365,7 +400,7 @@ impl ChatView {
             .unwrap_or_default();
 
         for turn in &mut self.turns {
-            if let Turn::Tool { call, status } = turn
+            if let Turn::Tool { call, status, .. } = turn
                 && call.id == call_id
             {
                 *status = ToolStatus::Done(result.to_string());
@@ -392,6 +427,7 @@ impl ChatView {
     /// surface in the transcript like any other turn.
     fn on_error(&mut self, message: &str, cx: &mut Context<Self>) {
         let rendered = format!("[error] {message}");
+        self.activity = "error".into();
         match self.streaming_assistant {
             Some(index) => {
                 let persisted =
@@ -414,6 +450,7 @@ impl ChatView {
                 db_id: None,
             }),
         }
+        self.list_state.reset(self.turns.len());
         self.list_state.scroll_to_end();
         cx.notify();
     }
@@ -436,7 +473,11 @@ impl ChatView {
     fn render_turn(&mut self, index: usize, cx: &mut Context<Self>) -> AnyElement {
         match &self.turns[index] {
             Turn::Message { role, text, .. } => self.render_message(role, text, cx),
-            Turn::Tool { call, status } => self.render_tool(index, call, status, cx),
+            Turn::Tool {
+                call,
+                status,
+                auto_approved,
+            } => self.render_tool(index, call, status, *auto_approved, cx),
         }
     }
 
@@ -479,6 +520,7 @@ impl ChatView {
         index: usize,
         call: &ToolCall,
         status: &ToolStatus,
+        auto_approved: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let mut inner = v_flex().gap_2().child(
@@ -531,10 +573,20 @@ impl ChatView {
             }
             ToolStatus::Running => {
                 inner = inner.child(
-                    div()
-                        .text_size(px(12.))
-                        .text_color(cx.theme().muted_foreground)
-                        .child("running…"),
+                    h_flex()
+                        .gap_2()
+                        .items_center()
+                        .child(Spinner::new().small())
+                        .child(
+                            div()
+                                .text_size(px(12.))
+                                .text_color(cx.theme().muted_foreground)
+                                .child(if auto_approved {
+                                    "running (read-only, auto-approved)"
+                                } else {
+                                    "running…"
+                                }),
+                        ),
                 );
             }
             ToolStatus::Done(result) => {
@@ -646,11 +698,10 @@ impl Render for ChatView {
         });
         let status = if pending {
             "approval needed"
-        } else if self.streaming {
-            "streaming…"
         } else {
-            "ready"
+            &self.activity
         };
+        let busy = pending || self.streaming;
 
         v_flex()
             .size_full()
@@ -676,14 +727,22 @@ impl Render for ChatView {
                             ),
                     )
                     .child(
-                        div()
-                            .text_size(px(12.))
-                            .text_color(if pending {
-                                cx.theme().warning_foreground
-                            } else {
-                                cx.theme().muted_foreground
+                        h_flex()
+                            .gap_2()
+                            .items_center()
+                            .when(busy, |row| {
+                                row.child(Spinner::new().small().color(cx.theme().accent))
                             })
-                            .child(status),
+                            .child(
+                                div()
+                                    .text_size(px(12.))
+                                    .text_color(if pending {
+                                        cx.theme().warning_foreground
+                                    } else {
+                                        cx.theme().muted_foreground
+                                    })
+                                    .child(status.to_string()),
+                            ),
                     ),
             )
             .child(
