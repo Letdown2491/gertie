@@ -37,12 +37,9 @@ const PROTOCOL_VERSION: &str = "2024-11-05";
 
 /// Descriptions from servers are untrusted: strip control characters
 /// (terminal-escape and prompt-injection hygiene) and cap the length.
+/// Delegates to the core sanitizer so the rule lives in one place.
 pub(crate) fn sanitize_description(raw: &str, cap: usize) -> String {
-    let filtered: String = raw
-        .chars()
-        .filter(|c| !(c.is_control() && !c.is_whitespace()))
-        .collect();
-    filtered.chars().take(cap).collect()
+    gertie_core::sanitize_untrusted(raw, cap)
 }
 
 fn sanitize_name(raw: &str) -> String {

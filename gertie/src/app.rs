@@ -39,6 +39,13 @@ pub fn run() {
                 eprintln!("warning: could not create {}: {error}", data_dir.display());
                 None
             } else {
+                // Conversation history is private: keep the directory to
+                // the owner regardless of umask.
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    let _ =
+                        std::fs::set_permissions(&data_dir, std::fs::Permissions::from_mode(0o700));
+                }
                 gertie_core::SessionStore::open(&data_dir.join("sessions.db"))
                     .map(Arc::new)
                     .map_err(|error| eprintln!("warning: could not open session store: {error}"))

@@ -52,7 +52,37 @@ fn resolve(root: &Path, path: &str) -> Result<PathBuf, String> {
             return Err(format!("path escapes the workspace: {path}"));
         }
     }
-    Ok(joined)
+    // Symlink hardening: lexical containment is not enough. A symlink
+    // inside the workspace pointing out of it would turn an auto-approved
+    // read — worse, an unapproved write — into filesystem access the
+    // permission gate never saw. Whatever exists must canonicalize back
+    // into the root. New files take their (canonicalized) parent's place.
+    let canonical_root = root
+        .canonicalize()
+        .map_err(|error| format!("workspace root: {error}"))?;
+    let within = |target: &Path| -> Result<PathBuf, String> {
+        if !target.starts_with(&canonical_root) {
+            return Err(format!("path escapes the workspace: {path}"));
+        }
+        Ok(target.to_path_buf())
+    };
+    if let Ok(resolved) = joined.canonicalize() {
+        return within(&resolved);
+    }
+    match joined.parent() {
+        Some(parent) if parent.exists() => {
+            let resolved_parent = parent
+                .canonicalize()
+                .map_err(|error| format!("{}: {error}", parent.display()))?;
+            let file_name = joined
+                .file_name()
+                .ok_or_else(|| format!("unsupported path: {path}"))?;
+            within(&resolved_parent.join(file_name))
+        }
+        // Parent missing too: nothing exists to traverse through; the
+        // caller's own error (and create_dir_all) handles it.
+        _ => Ok(joined),
+    }
 }
 
 fn parse<T: for<'de> Deserialize<'de>>(arguments: &str, tool: &str) -> Result<T, String> {
@@ -157,6 +187,20 @@ const DENY_PATTERNS: &[(&str, &str)] = &[
     (
         r"\brm\s+(-[a-zA-Z]+\s+)*-[a-zA-Z]*[rf][a-zA-Z]*\s+(/|/\*)\s*(;|$)",
         "recursive delete at the filesystem root",
+    ),
+    // The home directory and the workspace root deserve the same guard:
+    // `rm -rf ~`, `rm -rf .`, `rm -rf ..`, bare `rm -rf *`.
+    (
+        r"\brm\s+(-[a-zA-Z]+\s+)*-[a-zA-Z]*[rf][a-zA-Z]*\s+~?/?\s*(;|$|&&|\|\|)",
+        "recursive delete of the home directory",
+    ),
+    (
+        r"\brm\s+(-[a-zA-Z]+\s+)*-[a-zA-Z]*[rf][a-zA-Z]*\s+\.{1,2}/?\s*(;|$|&&|\|\|)",
+        "recursive delete of the current directory",
+    ),
+    (
+        r"\brm\s+(-[a-zA-Z]+\s+)*-[a-zA-Z]*[rf][a-zA-Z]*\s+\*\s*(;|$)",
+        "bare recursive delete of the workspace",
     ),
     (r"\bmkfs(\.\w+)?\b", "filesystem formatting"),
     (r"\bdd\b[^|;]*\bof=/dev/", "raw block-device write"),
@@ -704,6 +748,27 @@ mod tests {
     }
 
     #[test]
+    fn symlinks_may_not_smuggle_paths_out_of_the_workspace() {
+        let dir = workspace();
+        let root = dir.path().to_path_buf();
+        std::os::unix::fs::symlink("/etc", dir.path().join("escape")).unwrap();
+        // Read through the symlink: refused even though the lexical path
+        // never leaves the root.
+        let reader = ReadFile::new(root.clone());
+        let result = await_sync(reader.run(r#"{"path": "escape/passwd"}"#));
+        assert!(result.unwrap_err().contains("escapes the workspace"));
+
+        // A symlinked *file* equally.
+        std::os::unix::fs::symlink("/etc/hostname", dir.path().join("host")).unwrap();
+        let result = await_sync(reader.run(r#"{"path": "host"}"#));
+        assert!(result.unwrap_err().contains("escapes the workspace"));
+
+        // And the canonical view of the root itself stays readable.
+        std::fs::write(dir.path().join("real.txt"), "here").unwrap();
+        assert!(resolve(&root, "real.txt").is_ok());
+    }
+
+    #[test]
     fn edit_file_rejects_ambiguous_and_missing_anchors() {
         let dir = workspace();
         std::fs::write(dir.path().join("a.txt"), "x\nx\n").unwrap();
@@ -755,6 +820,12 @@ mod tests {
         for command in [
             r#"{"command": "rm -rf /"}"#,
             r#"{"command": "cd /tmp && rm -fr /*"}"#,
+            r#"{"command": "rm -rf ~"}"#,
+            r#"{"command": "rm -rf ~/"}"#,
+            r#"{"command": "sudo rm -rf /"}"#,
+            r#"{"command": "rm -rf ."}"#,
+            r#"{"command": "rm -rf .."}"#,
+            r#"{"command": "rm -rf *"}"#,
             r#"{"command": "mkfs.ext4 /dev/sda1"}"#,
             r#"{"command": "dd if=zero of=/dev/sda"}"#,
             r#"{"command": ":(){ :|:& };:"}"#,
