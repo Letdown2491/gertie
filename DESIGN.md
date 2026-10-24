@@ -53,19 +53,26 @@ the `gertie` crate. Track Zed's toolchain per the gpui-pre requirement.
 
 ## Roadmap
 
-- **M0 — skeleton**: workspace + GPUI window with input and streamed message list. Prove the
-  stack before committing to it.
+Shipped (M0–M5), in order:
+
+- **M0 — skeleton**: workspace + GPUI window with input and streamed message list.
 - **M1 — streaming chat**: Provider trait, OpenAI-compatible implementation (covers ppq.ai,
   OpenRouter, Groq, Together, Ollama, LM Studio, vLLM…), TOML config with named endpoints,
-  SQLite session sidebar, resumable sessions. Plus `web_fetch` / `web_search` / `search_history`.
-- **M2 — agent loop**: tool calling over the event stream, six core tools + approve/deny with
-  inline diffs, workspace checkpoints. This is the hard part; budget accordingly.
-- **M3 — harness depth**: granular permissions, token/cost accounting surfaced in the UI,
-  compaction, MCP client (stdio, tools capability).
-- **M4 — workbench**: parallel sessions over separate worktrees, agents org-chart panel,
-  cost/token dashboard, settings UI.
-- **M5+**: sandboxing (Landlock/seccomp), provider fallbacks/routing, Anthropic/Google native
-  providers, plugin surface.
+  SQLite session sidebar, resumable sessions.
+- **M2 — agent loop**: tool calling over the event stream, core tools + approve/deny with
+  inline diffs, workspace checkpoints.
+- **M3 — harness depth**: permission broker, token accounting in the status line, compaction
+  (80% trigger, in-memory summary view), MCP client (stdio, tools capability).
+- **M4 — work, not chrome**: system-prompt framing, runtime skills (SKILL.md + `load_skill`),
+  the permission broker (leader *and* subagent asks through one queue), TOML agent types
+  (`[[agents]]` → `agent_{name}` tools, depth-1 structural, brief-file dispatch).
+- **M5 — reach**: `web_fetch` / `web_search` (graceful disable) / `search_history` (FTS5),
+  opt-in Landlock sandbox for bash children, UX/security/performance hardening passes.
+
+Deferred:
+
+- Parallel sessions over worktrees, agents org-chart panel, settings UI, cost dashboard.
+- Provider fallbacks/routing, Anthropic/Google native providers, plugin surface.
 
 ## Providers
 
@@ -100,14 +107,18 @@ directories beyond the optional `gertie.toml`.
 ## Safety model
 
 - **Middle ground by default**: reads and searches auto-approved; **writes and bash always
-  prompt**, with the diff shown; persistent per-project allowlists ("always allow `cargo`
-  here"); per-project "trust this workspace" escalation. Both stricter and looser are config.
-- Subagents **inherit** the parent session's permission policy and can never escalate it.
-  Permission prompts from subagents surface tagged with which child asked.
+  prompt**, with the diff shown. Both stricter and looser are config. (Persistent allowlists
+  and per-workspace trust are deferred.)
+- Subagents **inherit** the leader's broker and can never escalate it: worker asks surface in
+  the same approval queue, tagged as worker cards. Depth-1 is structural — workers have no
+  agent tools at all.
 - **Checkpoints without git**: own content-addressed snapshot store (copy-on-write file hashes,
-  SQLite-indexed) taken before each edit. Git integration is an *enhancement* when the
+  SQLite-indexed) taken before each approved edit. Git integration is an *enhancement* when the
   workspace is a git repo, never a requirement. Snapshots double as fork points.
-- Sandboxed execution (Landlock/seccomp) is M5; the prompt/allowlist system above is the v1 gate.
+- **Landlock sandbox, opt-in** (`[security] sandbox_bash = true`, default off): bash children
+  get read-only system paths, write only the workspace and /tmp. Fail-closed — a kernel that
+  can't enforce refuses the spawn rather than downgrading silently. The prompt gate + hard
+  deny list remain the base layer.
 
 ## Tools
 

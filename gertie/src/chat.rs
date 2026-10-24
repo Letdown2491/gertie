@@ -589,6 +589,7 @@ impl ChatView {
             Role::User => h_flex()
                 .w_full()
                 .justify_end()
+                .pb_2()
                 .child(
                     div()
                         .max_w_3_4()
@@ -605,6 +606,7 @@ impl ChatView {
                 div()
                     .w_full()
                     .pr_16()
+                    .pb_2()
                     .text_color(if is_error {
                         cx.theme().danger
                     } else {
@@ -840,10 +842,12 @@ impl Render for ChatView {
                     .child(
                         h_flex()
                             .gap_2()
-                            .child(div().text_size(px(15.)).child("gertie"))
+                            .items_center()
+                            .child(div().text_size(px(15.)).flex_shrink_0().child("gertie"))
                             .child(
                                 div()
                                     .text_size(px(12.))
+                                    .truncate()
                                     .text_color(cx.theme().muted_foreground)
                                     .child(self.endpoint_label.clone()),
                             ),
