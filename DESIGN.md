@@ -121,7 +121,9 @@ configured**) · `search_history` (native, FTS5 over our own session DB).
 Explicitly out of v1: LSP, notebooks, native web browsing beyond fetch/search.
 
 **MCP**: stdio transport, **tools capability only**, config-defined servers (M3). Streamable
-HTTP and resource/prompt capabilities come later.
+HTTP and resource/prompt capabilities come later. Server tool descriptions are **untrusted
+input** (prompt-injection surface): sanitized, length-capped, prefixed `[mcp]` in the registry;
+every MCP call goes through the permission prompt — the user is the capability system.
 
 ## Context management
 

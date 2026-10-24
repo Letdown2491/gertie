@@ -1,5 +1,6 @@
 //! Bootstrap: config, session store, provider, the gpui application.
 
+use gertie_core::Tool as _;
 use gertie_providers::OpenAICompatible;
 use gpui_kit::{
     App, Bounds, TitlebarOptions, WindowBounds, WindowOptions, application, open_window,
@@ -18,7 +19,7 @@ pub fn run() {
         Err(error) => (crate::config::Config::default(), Some(error)),
     };
     let endpoint = config.selected_endpoint();
-    let endpoint_label = if let Some(error) = config_error {
+    let mut endpoint_label = if let Some(error) = config_error {
         format!("config error — {error}")
     } else {
         let mut label = endpoint
@@ -63,7 +64,41 @@ pub fn run() {
                 }
             },
         );
-    let tools = gertie_tools::builtin_tools(&workspace_root);
+    let mut tools = gertie_tools::builtin_tools(&workspace_root);
+
+    // MCP servers connect at startup; a server that won't start is a
+    // status-line warning, never a failed launch — gertie's local tools
+    // carry the session alone if needed.
+    if !config.mcp_servers.is_empty() {
+        // The registry isn't shared yet, so it can be grown in place.
+        let map = Arc::get_mut(&mut tools).expect("registry not yet shared");
+        for server in &config.mcp_servers {
+            match gertie_tools::mcp::McpClient::connect(
+                &server.name,
+                &server.command,
+                &server.args,
+                &server
+                    .env
+                    .iter()
+                    .map(|(key, value)| (key.clone(), value.clone()))
+                    .collect::<Vec<_>>(),
+            ) {
+                Ok(client) => match Arc::new(client).list_tools() {
+                    Ok(mcp_tools) => {
+                        let count = mcp_tools.len();
+                        for tool in mcp_tools {
+                            map.insert(tool.name().to_string(), Arc::new(tool));
+                        }
+                        endpoint_label.push_str(&format!(" · mcp:{}×{count}", server.name));
+                    }
+                    Err(error) => {
+                        endpoint_label.push_str(&format!(" — ⚠ mcp {}: {error}", server.name))
+                    }
+                },
+                Err(error) => endpoint_label.push_str(&format!(" — ⚠ {error}")),
+            }
+        }
+    }
 
     // Constructing the provider spins up its tokio runtime; do it once.
     let provider = match endpoint {

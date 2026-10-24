@@ -9,7 +9,7 @@ base_url = "https://api.ppq.ai/v1"
 model = "glm-5.3-flash"
 api_key_env = "PPQ_API_KEY"
 # api_key = "sk-your-key"   # or inline, if you must
-# context_window = 131072   # tokens; unset = compaction disabled
+# context_window = 1046576  # tokens; unset = compaction disabled
 
 # A local model needs no key:
 # [[endpoints]]
@@ -17,5 +17,14 @@ api_key_env = "PPQ_API_KEY"
 # base_url = "http://127.0.0.1:11434/v1"
 # model = "qwen3-coder"
 # context_window = 32768
+
+# MCP servers (stdio). Every MCP tool call prompts — third-party tools
+# are untrusted by default.
+# [[mcp_servers]]
+# name = "filesystem"
+# command = "npx"
+# args = ["-y", "@modelcontextprotocol/server-filesystem", "/tmp"]
+# [mcp_servers.env]
+# NODE_ENV = "production"
 
 default_endpoint = "ppq"

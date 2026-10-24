@@ -5,6 +5,7 @@
 //! All paths are workspace-root-relative and may not escape the root —
 //! one sandbox rule, applied identically by every tool.
 
+pub mod mcp;
 pub mod shape;
 
 use gertie_core::{Tool, ToolResult};

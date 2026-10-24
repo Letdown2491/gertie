@@ -12,6 +12,21 @@ pub struct Config {
     /// Which endpoint to use; defaults to the first listed.
     #[serde(default)]
     pub default_endpoint: Option<String>,
+    /// MCP servers to spawn at startup (stdio transport).
+    #[serde(default)]
+    pub mcp_servers: Vec<McpServerConfig>,
+}
+
+#[derive(Deserialize, Debug, Clone)]
+pub struct McpServerConfig {
+    /// Provenance label; tool names become `mcp_{name}_{tool}`.
+    pub name: String,
+    pub command: String,
+    #[serde(default)]
+    pub args: Vec<String>,
+    /// Extra environment for the server process.
+    #[serde(default)]
+    pub env: std::collections::BTreeMap<String, String>,
 }
 
 #[derive(Deserialize, Debug)]
