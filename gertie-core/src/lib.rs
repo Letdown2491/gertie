@@ -5,6 +5,7 @@
 //! UI-facing `gertie` crate is one client of many.
 
 pub mod agent_loop;
+pub mod permissions;
 pub mod provider;
 pub mod request;
 pub mod snapshot;
@@ -13,6 +14,7 @@ pub mod tool;
 pub use agent_loop::{
     LoopEvent, PermissionDecision, SharedHistory, ToolRegistry, TurnSpec, run_turn,
 };
+pub use permissions::{PendingAsk, PermissionBroker, PromptSource};
 pub use provider::Provider;
 pub use request::{Request, ToolCall, ToolSpec, WireMessage};
 pub use snapshot::{Checkpoint, CheckpointId, SnapshotStore};

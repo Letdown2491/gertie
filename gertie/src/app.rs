@@ -151,6 +151,7 @@ pub fn run() {
         None => None,
     };
 
+    let broker = Arc::new(gertie_core::PermissionBroker::new());
     let app = application().with_assets(gpui_kit::assets::Assets);
     app.run(move |cx: &mut App| {
         gpui_kit::init(cx);
@@ -163,6 +164,7 @@ pub fn run() {
             tools.clone(),
             endpoint_label.clone(),
             system_prompt.clone(),
+            broker.clone(),
             cx,
         );
         cx.activate(true);
@@ -176,6 +178,7 @@ fn open_chat_window(
     tools: gertie_core::ToolRegistry,
     endpoint_label: String,
     system_prompt: Option<String>,
+    broker: Arc<gertie_core::PermissionBroker>,
     cx: &mut App,
 ) {
     let bounds = Bounds::centered(None, size(px(1080.), px(760.)), cx);
@@ -200,6 +203,7 @@ fn open_chat_window(
                     tools,
                     endpoint_label,
                     system_prompt,
+                    broker,
                     window,
                     cx,
                 )

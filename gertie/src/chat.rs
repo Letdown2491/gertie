@@ -3,8 +3,8 @@
 
 use futures_util::StreamExt as _;
 use gertie_core::{
-    LoopEvent, MessageId, PermissionDecision, Role, SessionId, SessionStore, SharedHistory,
-    SnapshotStore, ToolCall, ToolRegistry, TurnSpec, run_turn,
+    LoopEvent, MessageId, PermissionBroker, PermissionDecision, Role, SessionId, SessionStore,
+    SharedHistory, SnapshotStore, ToolCall, ToolRegistry, TurnSpec, run_turn,
 };
 use gertie_providers::OpenAICompatible;
 use gpui_kit::component::button::Button;
@@ -18,13 +18,12 @@ use gpui_kit::{
 };
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::oneshot;
 
 /// Where the transcript is in a tool call's life: waiting on the human,
 /// executing, or finished (with the result the model will also see).
 enum ToolStatus {
-    /// Holding the loop's responder; the human owes an answer.
-    Pending(oneshot::Sender<PermissionDecision>),
+    /// Waiting on the human; `broker.respond(id, …)` settles it.
+    Pending(u64),
     Running,
     Done(String),
 }
@@ -44,6 +43,8 @@ enum Turn {
         /// Read-only tools never prompted; the card says so instead of
         /// showing buttons the human never needed to click.
         auto_approved: bool,
+        /// Subagent asks get labeled — same card, provenance visible.
+        worker: bool,
     },
 }
 
@@ -74,6 +75,8 @@ pub struct ChatView {
     /// Session token totals from the provider's usage events (in, out).
     /// In-memory for now; a persisted per-session ledger is M3 scope.
     usage: (u64, u64),
+    /// Shared approval registry: leader and worker asks, one answer path.
+    broker: Arc<PermissionBroker>,
     input: Entity<InputState>,
     list_state: ListState,
     streaming: bool,
@@ -90,6 +93,7 @@ impl ChatView {
         tools: ToolRegistry,
         endpoint_label: String,
         system_prompt: Option<String>,
+        broker: Arc<PermissionBroker>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -121,6 +125,7 @@ impl ChatView {
             last_db_id: None,
             activity: "starting…".into(),
             usage: (0, 0),
+            broker,
             input,
             list_state: ListState::new(0, ListAlignment::Bottom, px(256.)),
             streaming: false,
@@ -152,6 +157,7 @@ impl ChatView {
                             },
                             status: ToolStatus::Done(row.content.clone()),
                             auto_approved: false,
+                            worker: false,
                         },
                         role => Turn::Message {
                             role,
@@ -273,8 +279,12 @@ impl ChatView {
             user_message: user_text,
             snapshots: self.snapshots.clone(),
             context_window,
+            permission_broker: Some(self.broker.clone()),
             system_prompt: self.system_prompt.clone(),
         });
+        // Subagent asks arrive here, not on the leader's stream — a
+        // worker's loop runs inside a tool, so nobody drains its events.
+        let mut worker_asks = self.broker.take_subscription();
 
         self.streaming = true;
         self.streaming_assistant = None;
@@ -282,15 +292,20 @@ impl ChatView {
 
         cx.spawn(async move |this, cx| {
             let mut stream = stream;
-            while let Some(event) = stream.next().await {
-                match event {
+            // The leader stream parks inside agent tools while a worker
+            // runs — its asks would be invisible. Selecting over both
+            // keeps every ask answerable, whoever asked.
+            loop {
+                tokio::select! {
+                    event = stream.next() => {
+                        let Some(event) = event else { break };
+                        match event {
                     LoopEvent::Delta { delta } => {
                         let _ = this.update(cx, |this, cx| this.on_delta(&delta, cx));
                     }
-                    LoopEvent::ToolCallRequested { call, respond } => {
+                    LoopEvent::ToolCallRequested { id, call } => {
                         let _ = this.update(cx, |this, cx| {
-                            this.activity = "waiting for approval".into();
-                            this.on_tool_requested(call, respond, cx)
+                            this.on_tool_requested(id, call, cx)
                         });
                     }
                     LoopEvent::ToolCallStarted { call } => {
@@ -322,6 +337,20 @@ impl ChatView {
                         let _ = this.update(cx, |this, cx| this.on_error(&message, cx));
                     }
                     LoopEvent::Done => break,
+                        }
+                    }
+                    ask = async {
+                        match &mut worker_asks {
+                            Some(receiver) => receiver.recv().await,
+                            None => std::future::pending().await,
+                        }
+                    } => {
+                        if let Some(ask) = ask {
+                            let _ = this.update(cx, |this, cx| {
+                                this.on_worker_ask(ask.id, ask.call, cx)
+                            });
+                        }
+                    }
                 }
                 cx.background_executor()
                     .timer(Duration::from_millis(1))
@@ -390,23 +419,35 @@ impl ChatView {
             call,
             status: ToolStatus::Running,
             auto_approved: true,
+            worker: false,
         });
         self.sync_list(cx);
     }
 
-    /// A mutating tool wants to run: park the loop's responder on the
-    /// card until the human answers.
-    fn on_tool_requested(
-        &mut self,
-        call: ToolCall,
-        respond: oneshot::Sender<PermissionDecision>,
-        cx: &mut Context<Self>,
-    ) {
+    /// A mutating tool wants to run: park the request id on the card
+    /// until the human answers through the broker.
+    fn on_tool_requested(&mut self, id: u64, call: ToolCall, cx: &mut Context<Self>) {
+        self.activity = "waiting for approval".into();
         self.streaming_assistant = None;
         self.turns.push(Turn::Tool {
             call,
-            status: ToolStatus::Pending(respond),
+            status: ToolStatus::Pending(id),
             auto_approved: false,
+            worker: false,
+        });
+        self.sync_list(cx);
+    }
+
+    /// A subagent's ask, arriving via the broker subscription — same
+    /// card, labeled.
+    fn on_worker_ask(&mut self, id: u64, call: ToolCall, cx: &mut Context<Self>) {
+        self.activity = "worker waiting for approval".into();
+        self.streaming_assistant = None;
+        self.turns.push(Turn::Tool {
+            call,
+            status: ToolStatus::Pending(id),
+            auto_approved: false,
+            worker: true,
         });
         self.sync_list(cx);
     }
@@ -498,13 +539,17 @@ impl ChatView {
         cx.notify();
     }
 
-    /// Answers a pending permission card. A dropped responder (UI closed)
-    /// counts as a deny in the loop; here the human did answer.
+    /// Answers a pending permission card through the broker. A dropped
+    /// request (UI closed) counts as a deny in the loop; here the human
+    /// did answer.
     fn decide_tool(&mut self, index: usize, decision: PermissionDecision, cx: &mut Context<Self>) {
         if let Some(Turn::Tool { status, .. }) = self.turns.get_mut(index) {
             match std::mem::replace(status, ToolStatus::Running) {
-                ToolStatus::Pending(respond) => {
-                    let _ = respond.send(decision);
+                ToolStatus::Pending(id) => {
+                    if !self.broker.respond(id, decision) {
+                        // Unknown id (already answered): put nothing back;
+                        // the card was settled elsewhere.
+                    }
                 }
                 // Not actually pending (double click): put it back.
                 other => *status = other,
@@ -520,7 +565,8 @@ impl ChatView {
                 call,
                 status,
                 auto_approved,
-            } => self.render_tool(index, call, status, *auto_approved, cx),
+                worker,
+            } => self.render_tool(index, call, status, *auto_approved, *worker, cx),
         }
     }
 
@@ -564,6 +610,7 @@ impl ChatView {
         call: &ToolCall,
         status: &ToolStatus,
         auto_approved: bool,
+        worker: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let mut inner = v_flex().gap_2().child(
@@ -574,7 +621,11 @@ impl ChatView {
                     div()
                         .text_size(px(13.))
                         .text_color(cx.theme().accent)
-                        .child(format!("⚙ {}", call.name)),
+                        .child(if worker {
+                            format!("⚙ {} · worker", call.name)
+                        } else {
+                            format!("⚙ {}", call.name)
+                        }),
                 )
                 .child(
                     div()

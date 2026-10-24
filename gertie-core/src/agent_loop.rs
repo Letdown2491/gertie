@@ -2,13 +2,13 @@
 //! permission policy, feed results back, repeat — bounded.
 
 use crate::Role;
+use crate::permissions::PermissionBroker;
 use crate::request::{Request, ToolCall, ToolSpec, WireMessage};
 use crate::snapshot::SnapshotStore;
 use crate::tool::Tool;
 use futures_core::stream::BoxStream;
 use futures_util::StreamExt;
 use std::sync::Arc;
-use tokio::sync::oneshot;
 
 /// Safety valve: a turn that loops this many tool rounds without finishing
 /// is cut off — runaway loops are how token bills happen.
@@ -20,12 +20,13 @@ pub enum LoopEvent {
     Delta {
         delta: String,
     },
-    /// A mutating tool wants to run. Grant or deny through `respond`; the
-    /// loop waits until answered (a dropped responder counts as a deny —
-    /// if the UI went away, doing nothing is the safe move).
+    /// A mutating tool wants to run. The ask is registered with the
+    /// broker under `id` — answer through `PermissionBroker::respond`;
+    /// the loop waits until answered (a dropped answer counts as a deny
+    /// — if the UI went away, doing nothing is the safe move).
     ToolCallRequested {
+        id: u64,
         call: ToolCall,
-        respond: oneshot::Sender<PermissionDecision>,
     },
     /// A tool finished (approved, denied, or auto-run) — this is what gets
     /// persisted and shown as the card's outcome.
@@ -93,6 +94,11 @@ pub struct TurnSpec {
     pub user_message: String,
     pub snapshots: Option<Arc<SnapshotStore>>,
     pub context_window: Option<u64>,
+    /// Shared approval registry. When set, every ask — this loop's or a
+    /// sub-loop's — registers here so one UI can answer them all. None
+    /// means nobody can approve: mutations are denied, doing nothing is
+    /// the safe move.
+    pub permission_broker: Option<Arc<crate::PermissionBroker>>,
     /// Sent as the first message of every request, never stored in
     /// history: it is per-turn framing, not conversation record (the
     /// DB stays canonical; the next turn may have a different index).
@@ -122,6 +128,7 @@ pub fn run_turn(spec: TurnSpec) -> BoxStream<'static, LoopEvent> {
         user_message,
         snapshots,
         context_window,
+        permission_broker,
         system_prompt,
     } = spec;
     let specs = tool_specs(&tools);
@@ -237,37 +244,45 @@ pub fn run_turn(spec: TurnSpec) -> BoxStream<'static, LoopEvent> {
                             Err(format!("blocked by policy: {blocked}"))
                         }
                         // Mutating tools face the permission prompt; the
-                        // yield reaches the UI and the loop resumes on
-                        // the answer.
+                        // ask registers with the broker (so the UI can
+                        // answer it) and the loop awaits the answer.
                         else if tool.mutates() {
-                            let (respond, answer) = oneshot::channel();
-                            yield LoopEvent::ToolCallRequested {
-                                call: call.clone(),
-                                respond,
-                            };
-                            match answer.await {
-                                Ok(PermissionDecision::Approve) => {
-                                    // Checkpoint the file's prior state
-                                    // before anything mutates it.
-                                    if let (Some(store), Some(path)) =
-                                        (&snapshots, argument_path(&call.arguments))
-                                        && let Err(error) = store.record_file(None, &path)
-                                    {
-                                        yield LoopEvent::Error {
-                                            message: format!(
-                                                "checkpoint before {} failed: {error}",
-                                                call.name
-                                            ),
-                                        };
-                                        return;
+                            match &permission_broker {
+                                Some(broker) => {
+                                    let (request_id, answer) =
+                                        broker.request(call.clone(), crate::PromptSource::Leader);
+                                    yield LoopEvent::ToolCallRequested {
+                                        id: request_id,
+                                        call: call.clone(),
+                                    };
+                                    match answer.await {
+                                        Ok(PermissionDecision::Approve) => {
+                                            // Checkpoint the file's prior
+                                            // state before anything
+                                            // mutates it.
+                                            if let (Some(store), Some(path)) =
+                                                (&snapshots, argument_path(&call.arguments))
+                                                && let Err(error) = store.record_file(None, &path)
+                                            {
+                                                yield LoopEvent::Error {
+                                                    message: format!(
+                                                        "checkpoint before {} failed: {error}",
+                                                        call.name
+                                                    ),
+                                                };
+                                                return;
+                                            }
+                                            tool.run(&call.arguments).await
+                                        }
+                                        // A dropped responder (UI went
+                                        // away) denies too: doing
+                                        // nothing is safe.
+                                        Ok(PermissionDecision::Deny) | Err(_) => {
+                                            Err("denied by user".to_string())
+                                        }
                                     }
-                                    tool.run(&call.arguments).await
                                 }
-                                // A dropped responder (UI went away)
-                                // denies too: doing nothing is safe.
-                                Ok(PermissionDecision::Deny) | Err(_) => {
-                                    Err("denied by user".to_string())
-                                }
+                                None => Err("no permission channel available — denied".to_string()),
                             }
                         } else {
                             yield LoopEvent::ToolCallStarted { call: call.clone() };
@@ -486,10 +501,11 @@ mod tests {
         }
     }
 
-    /// Polls the stream to completion, answering permission prompts with
-    /// `decide` (the loop runs on the provider's own runtime).
+    /// Polls the stream to completion, answering permission prompts
+    /// through the broker (the loop runs on the provider's own runtime).
     fn drain(
         stream: BoxStream<'static, LoopEvent>,
+        broker: &Arc<PermissionBroker>,
         decide: impl Fn(&ToolCall) -> PermissionDecision,
     ) -> Vec<LoopEvent> {
         let mut stream = stream;
@@ -500,9 +516,9 @@ mod tests {
             match std::pin::Pin::new(&mut stream).poll_next(&mut cx) {
                 Poll::Ready(Some(event)) => {
                     // Answer the prompt and don't keep the event: the
-                    // responder can't be cloned, and no test inspects it.
-                    if let LoopEvent::ToolCallRequested { call, respond } = event {
-                        let _ = respond.send(decide(&call));
+                    // ask is settled, no test inspects it.
+                    if let LoopEvent::ToolCallRequested { id, call } = event {
+                        broker.respond(id, decide(&call));
                     } else {
                         events.push(event);
                     }
@@ -528,16 +544,21 @@ mod tests {
         tools: ToolRegistry,
         history: SharedHistory,
         message: &str,
-    ) -> TurnSpec {
-        TurnSpec {
-            provider,
-            tools,
-            history,
-            user_message: message.into(),
-            snapshots: None,
-            context_window: None,
-            system_prompt: None,
-        }
+    ) -> (TurnSpec, Arc<PermissionBroker>) {
+        let broker = Arc::new(PermissionBroker::new());
+        (
+            TurnSpec {
+                provider,
+                tools,
+                history,
+                user_message: message.into(),
+                snapshots: None,
+                context_window: None,
+                permission_broker: Some(broker.clone()),
+                system_prompt: None,
+            },
+            broker,
+        )
     }
 
     fn tool_result(events: &[LoopEvent], name: &str) -> String {
@@ -564,10 +585,10 @@ mod tests {
             ]]),
         });
         let history: SharedHistory = Arc::new(tokio::sync::Mutex::new(Vec::new()));
-        let events = drain(
-            run_turn(turn(provider, registry(&[]), history.clone(), "hello")),
-            |_| unreachable!("no tools to prompt for"),
-        );
+        let (spec, broker) = turn(provider, registry(&[]), history.clone(), "hello");
+        let events = drain(run_turn(spec), &broker, |_| {
+            unreachable!("no tools to prompt for")
+        });
 
         assert!(events.iter().any(|event| matches!(event, LoopEvent::Done)));
         assert!(
@@ -604,10 +625,10 @@ mod tests {
         });
         let peek: Arc<dyn Tool> = Arc::new(StubTool::new("peek", false, "peeked"));
         let history: SharedHistory = Arc::new(tokio::sync::Mutex::new(Vec::new()));
-        let events = drain(
-            run_turn(turn(provider, registry(&[peek]), history.clone(), "look")),
-            |_| panic!("read-only tools must not prompt"),
-        );
+        let (spec, broker) = turn(provider, registry(&[peek]), history.clone(), "look");
+        let events = drain(run_turn(spec), &broker, |_| {
+            panic!("read-only tools must not prompt")
+        });
 
         assert_eq!(tool_result(&events, "peek"), "peeked");
         // The read's start is announced before its result — silent reads
@@ -649,13 +670,11 @@ mod tests {
             });
             let writer: Arc<dyn Tool> = Arc::new(StubTool::new("write_file", true, "wrote"));
             let history: SharedHistory = Arc::new(tokio::sync::Mutex::new(Vec::new()));
-            let events = drain(
-                run_turn(turn(provider, registry(&[writer]), history.clone(), "go")),
-                |call| {
-                    assert_eq!(call.name, "write_file");
-                    decided
-                },
-            );
+            let (spec, broker) = turn(provider, registry(&[writer]), history.clone(), "go");
+            let events = drain(run_turn(spec), &broker, |call| {
+                assert_eq!(call.name, "write_file");
+                decided
+            });
 
             assert_eq!(tool_result(&events, "write_file"), expected);
             let history = history.blocking_lock();
@@ -689,14 +708,14 @@ mod tests {
             ]),
         });
         let editor: Arc<dyn Tool> = Arc::new(StubTool::new("edit_file", true, "edited"));
-        let mut spec = turn(
+        let (mut spec, broker) = turn(
             provider,
             registry(&[editor]),
             Arc::new(tokio::sync::Mutex::new(Vec::new())),
             "",
         );
         spec.snapshots = Some(snapshots.clone());
-        let events = drain(run_turn(spec), |_| PermissionDecision::Approve);
+        let events = drain(run_turn(spec), &broker, |_| PermissionDecision::Approve);
 
         assert_eq!(tool_result(&events, "edit_file"), "edited");
         // Exactly one object: the "before" content, snapshotted pre-edit.
@@ -723,10 +742,8 @@ mod tests {
             ]),
         });
         let history: SharedHistory = Arc::new(tokio::sync::Mutex::new(Vec::new()));
-        let events = drain(
-            run_turn(turn(provider, registry(&[]), history.clone(), "go")),
-            |_| panic!("nothing to prompt for"),
-        );
+        let (spec, broker) = turn(provider, registry(&[]), history.clone(), "go");
+        let events = drain(run_turn(spec), &broker, |_| panic!("nothing to prompt for"));
 
         assert!(tool_result(&events, "mystery").starts_with("error: unknown tool"));
     }
@@ -747,15 +764,15 @@ mod tests {
                 vec![Event::Done],
             ]),
         });
-        let events = drain(
-            run_turn(turn(
-                provider,
-                registry(&[Arc::new(BlockedTool)]),
-                Arc::new(tokio::sync::Mutex::new(Vec::new())),
-                "go",
-            )),
-            |_| panic!("a vet failure must not prompt — there is nothing to approve"),
+        let (spec, broker) = turn(
+            provider,
+            registry(&[Arc::new(BlockedTool)]),
+            Arc::new(tokio::sync::Mutex::new(Vec::new())),
+            "go",
         );
+        let events = drain(run_turn(spec), &broker, |_| {
+            panic!("a vet failure must not prompt — there is nothing to approve")
+        });
 
         assert!(tool_result(&events, "bash").contains("blocked by policy"));
     }
@@ -795,9 +812,9 @@ mod tests {
         });
         let peek: Arc<dyn Tool> = Arc::new(StubTool::new("peek", false, "peeked"));
         let history: SharedHistory = Arc::new(tokio::sync::Mutex::new(Vec::new()));
-        let mut spec = turn(provider, registry(&[peek]), history.clone(), "go");
+        let (mut spec, broker) = turn(provider, registry(&[peek]), history.clone(), "go");
         spec.context_window = Some(100_000);
-        let events = drain(run_turn(spec), |_| {
+        let events = drain(run_turn(spec), &broker, |_| {
             panic!("read-only tools must not prompt")
         });
 
@@ -823,9 +840,9 @@ mod tests {
             scripts: std::sync::Mutex::new(vec![vec![Event::Done]]),
         });
         let history: SharedHistory = Arc::new(tokio::sync::Mutex::new(Vec::new()));
-        let mut spec = turn(provider, registry(&[]), history.clone(), "go");
+        let (mut spec, broker) = turn(provider, registry(&[]), history.clone(), "go");
         spec.context_window = Some(100_000);
-        let events = drain(run_turn(spec), |_| panic!("nothing to prompt for"));
+        let events = drain(run_turn(spec), &broker, |_| panic!("nothing to prompt for"));
         assert!(
             !events
                 .iter()
@@ -840,15 +857,48 @@ mod tests {
     }
 
     #[test]
+    fn headless_without_a_broker_mutations_are_denied() {
+        let provider = Arc::new(ScriptedProvider {
+            seen: std::sync::Mutex::new(Vec::new()),
+            scripts: std::sync::Mutex::new(vec![
+                vec![
+                    Event::ToolCall {
+                        id: "c1".into(),
+                        name: "write_file".into(),
+                        arguments: "{}".into(),
+                    },
+                    Event::Done,
+                ],
+                vec![
+                    Event::Token {
+                        delta: "noted".into(),
+                    },
+                    Event::Done,
+                ],
+            ]),
+        });
+        let writer: Arc<dyn Tool> = Arc::new(StubTool::new("write_file", true, "wrote"));
+        let history: SharedHistory = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let (mut spec, broker) = turn(provider, registry(&[writer]), history.clone(), "go");
+        spec.permission_broker = None;
+        let events = drain(run_turn(spec), &broker, |_| {
+            panic!("no ask should be outstanding")
+        });
+
+        // The model sees the denial — no silent no-op.
+        assert!(tool_result(&events, "write_file").contains("no permission channel"));
+    }
+
+    #[test]
     fn system_prompt_frames_every_request_but_stays_out_of_history() {
         let provider = Arc::new(ScriptedProvider {
             seen: std::sync::Mutex::new(Vec::new()),
             scripts: std::sync::Mutex::new(vec![vec![Event::Done]]),
         });
         let history: SharedHistory = Arc::new(tokio::sync::Mutex::new(Vec::new()));
-        let mut spec = turn(provider.clone(), registry(&[]), history.clone(), "go");
+        let (mut spec, broker) = turn(provider.clone(), registry(&[]), history.clone(), "go");
         spec.system_prompt = Some("You are gertie.".into());
-        let _ = drain(run_turn(spec), |_| panic!("nothing to prompt for"));
+        let _ = drain(run_turn(spec), &broker, |_| panic!("nothing to prompt for"));
 
         let seen = provider.seen.lock().unwrap();
         assert_eq!(seen[0].messages.first().unwrap().role, Role::System);

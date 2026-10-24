@@ -55,6 +55,7 @@ fn fixture() -> Fixture {
                     gertie_tools::builtin_tools(Path::new(".")),
                     "no endpoint configured".into(),
                     None,
+                    Arc::new(gertie_core::PermissionBroker::new()),
                     window,
                     cx,
                 )
