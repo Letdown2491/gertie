@@ -82,8 +82,8 @@ Deferred:
   never the user's .gitignore). Built-ins and agent tools re-root per tab; web/history/MCP/
   skills carry over by name instead of duplicating connections. Worktrees persist across
   runs (agent work is never deleted behind your back); reopen reuses by name.
-- Settings UI, cost dashboard.
-- Provider fallbacks/routing, Anthropic/Google native providers, plugin surface.
+- Settings UI, cost dashboard, plugin surface.
+- Settings UI, cost dashboard, plugin surface, native Anthropic/Google providers.
 
 ## Providers
 
