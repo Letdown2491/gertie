@@ -309,6 +309,24 @@ impl SessionStore {
         Ok(())
     }
 
+    /// Deletes a session, its messages, and their full-text rows — the
+    /// FTS index mirrors messages via an insert-only trigger, so its
+    /// rows must go by hand or search would keep finding ghosts.
+    pub fn delete_session(&self, session_id: SessionId) -> Result<(), rusqlite::Error> {
+        let connection = self.connection.lock().unwrap();
+        let transaction = connection.unchecked_transaction()?;
+        transaction.execute(
+            "DELETE FROM messages_fts WHERE session_id = ?1",
+            [session_id.0 as i64],
+        )?;
+        transaction.execute(
+            "DELETE FROM messages WHERE session_id = ?1",
+            [session_id.0 as i64],
+        )?;
+        transaction.execute("DELETE FROM sessions WHERE id = ?1", [session_id.0 as i64])?;
+        transaction.commit()
+    }
+
     /// Loads a session's messages oldest-first. M1 renders the flat path;
     /// the tree walk arrives with forking.
     pub fn load_messages(&self, session_id: SessionId) -> Result<Vec<Message>, rusqlite::Error> {
@@ -512,6 +530,37 @@ mod tests {
         let sessions = store.list_sessions().unwrap();
         assert_eq!(sessions[0].id, second);
         assert_eq!(sessions.last().unwrap().id, first);
+    }
+
+    #[test]
+    fn deleting_a_session_leaves_nothing_behind() {
+        let store = memory_store();
+        let session = store.create_session("doomed").unwrap();
+        let kept = store.create_session("kept").unwrap();
+        store
+            .append_message(session, None, Role::User, "ghost words for search")
+            .unwrap();
+        store
+            .append_message(kept, None, Role::User, "kept words")
+            .unwrap();
+
+        store.retitle_session(session, "renamed once").unwrap();
+        let sessions = store.list_sessions().unwrap();
+        assert_eq!(sessions[0].title, "renamed once");
+
+        store.delete_session(session).unwrap();
+        assert!(
+            store
+                .list_sessions()
+                .unwrap()
+                .iter()
+                .all(|summary| summary.id != session)
+        );
+        assert!(store.load_messages(session).unwrap().is_empty());
+        // The FTS index has no delete trigger — it must not report the
+        // dead session's words.
+        assert!(store.search("ghost words", 10).unwrap().is_empty());
+        assert_eq!(store.search("kept words", 10).unwrap().len(), 1);
     }
 
     #[test]

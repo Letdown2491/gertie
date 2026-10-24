@@ -8,7 +8,7 @@ use gertie_core::{
 };
 use gertie_providers::OpenAICompatible;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::input::{InputEvent, Textarea, TextareaState};
+use gpui_kit::component::input::{Input, InputEvent, InputState, Textarea, TextareaState};
 use gpui_kit::component::spinner::Spinner;
 use gpui_kit::component::{ActiveTheme, Sizable as _, h_flex, v_flex};
 use gpui_kit::{
@@ -78,6 +78,14 @@ pub struct ChatView {
     /// Shared approval registry: leader and worker asks, one answer path.
     broker: Arc<PermissionBroker>,
     input: Entity<TextareaState>,
+    /// Session-rename flow: which sidebar row is being renamed, and the
+    /// field editing its title (Enter commits; clicking away cancels).
+    renaming: Option<SessionId>,
+    rename_input: Entity<InputState>,
+    /// Two-step delete: the row whose ✕ was clicked once — the second
+    /// click confirms. A destructive action with no dialog needs a
+    /// speed bump.
+    confirming_delete: Option<SessionId>,
     list_state: ListState,
     streaming: bool,
     /// Bytes of the streaming assistant row already written to the
@@ -110,6 +118,19 @@ impl ChatView {
             }
         })
         .detach();
+        // The rename field commits on Enter; Escape/clicking away
+        // cancels implicitly.
+        let rename_input = cx.new(|cx| InputState::new(window, cx).placeholder("New title…"));
+        cx.subscribe_in(
+            &rename_input,
+            window,
+            |this, _, event: &InputEvent, window, cx| {
+                if let InputEvent::PressEnter { .. } = event {
+                    this.commit_rename(window, cx)
+                }
+            },
+        )
+        .detach();
 
         let sessions = store.list_sessions().unwrap_or_default();
         // Resume the newest session if there is one; otherwise the first
@@ -133,6 +154,9 @@ impl ChatView {
             usage: (0, 0),
             broker,
             input,
+            renaming: None,
+            rename_input,
+            confirming_delete: None,
             // Tail: follow new content while pinned to the bottom, stop
             // when the user scrolls up, resume when they return.
             list_state: {
@@ -233,6 +257,71 @@ impl ChatView {
         self.session_id = Some(session_id);
         self.reload_session(cx);
         window.focus(&self.input.read(cx).focus_handle(cx), cx);
+    }
+
+    /// Puts a sidebar row into rename mode, prefilled with its title.
+    fn start_rename(&mut self, session_id: SessionId, window: &mut Window, cx: &mut Context<Self>) {
+        self.renaming = Some(session_id);
+        self.confirming_delete = None;
+        let title = self
+            .sessions
+            .iter()
+            .find(|summary| summary.id == session_id)
+            .map(|summary| summary.title.to_string())
+            .unwrap_or_default();
+        self.rename_input.update(cx, |state, cx| {
+            state.set_value(title, window, cx);
+        });
+        window.focus(&self.rename_input.read(cx).focus_handle(cx), cx);
+        cx.notify();
+    }
+
+    /// Enter in the rename field: persist the title, refresh the sidebar.
+    /// Empty input cancels — an unnamed session is worse than a stale title.
+    fn commit_rename(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(session_id) = self.renaming.take() else {
+            return;
+        };
+        let title = self.rename_input.read(cx).value().trim().to_string();
+        if !title.is_empty() {
+            let _ = self.store.retitle_session(session_id, &title);
+            self.sessions = self.store.list_sessions().unwrap_or_default();
+        }
+        window.focus(&self.input.read(cx).focus_handle(cx), cx);
+        cx.notify();
+    }
+
+    /// The ✕ on a sidebar row: first click arms the confirm ("sure?"),
+    /// second click deletes. Deleting the open session returns to the
+    /// blank transcript.
+    fn delete_clicked(
+        &mut self,
+        session_id: SessionId,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // A streaming transcript can't be torn down; also refuse to arm
+        // a confirm for it so the double-click can't race the stream.
+        if self.streaming && self.session_id == Some(session_id) {
+            return;
+        }
+        if self.confirming_delete == Some(session_id) {
+            self.confirming_delete = None;
+            if self.store.delete_session(session_id).is_ok() && self.session_id == Some(session_id)
+            {
+                self.session_id = None;
+                self.turns.clear();
+                self.last_db_id = None;
+                self.streaming_assistant = None;
+                self.history.blocking_lock().clear();
+            }
+            self.sessions = self.store.list_sessions().unwrap_or_default();
+            self.sync_list(cx);
+        } else {
+            self.confirming_delete = Some(session_id);
+            self.renaming = None;
+            cx.notify();
+        }
     }
 
     fn send(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -935,12 +1024,65 @@ impl Render for ChatView {
                             )
                             .children(self.sessions.iter().map(|summary| {
                                 let session_id = summary.id;
-                                Button::new(SharedString::from(format!("session-{}", summary.id.0)))
-                                    .label(summary.title.clone())
-                                    .small()
-                                    .on_click(cx.listener(move |this, _, window, cx| {
-                                        this.switch_to_session(session_id, window, cx);
-                                    }))
+                                if self.renaming == Some(session_id) {
+                                    // Rename row: the field replaces the
+                                    // row; Enter commits.
+                                    return h_flex()
+                                        .w_full()
+                                        .child(Input::new(&self.rename_input).small());
+                                }
+                                let confirming = self.confirming_delete == Some(session_id);
+                                let delete_label = if confirming { "sure?" } else { "✕" };
+                                let delete_button = Button::new(SharedString::from(format!(
+                                    "delete-{}",
+                                    session_id.0
+                                )))
+                                .label(delete_label)
+                                .xsmall()
+                                .ghost();
+                                let delete_button = if confirming {
+                                    delete_button.danger()
+                                } else {
+                                    delete_button
+                                };
+                                h_flex()
+                                    .w_full()
+                                    .min_w_0()
+                                    .gap_0p5()
+                                    .child(
+                                        Button::new(SharedString::from(format!(
+                                            "session-{}",
+                                            session_id.0
+                                        )))
+                                        .label(summary.title.clone())
+                                        .small()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .on_click(
+                                            cx.listener(move |this, _, window, cx| {
+                                                this.switch_to_session(session_id, window, cx);
+                                            }),
+                                        ),
+                                    )
+                                    .child(
+                                        Button::new(SharedString::from(format!(
+                                            "rename-{}",
+                                            session_id.0
+                                        )))
+                                        .label("✎")
+                                        .xsmall()
+                                        .ghost()
+                                        .on_click(
+                                            cx.listener(move |this, _, window, cx| {
+                                                this.start_rename(session_id, window, cx);
+                                            }),
+                                        ),
+                                    )
+                                    .child(delete_button.on_click(cx.listener(
+                                        move |this, _, window, cx| {
+                                            this.delete_clicked(session_id, window, cx);
+                                        },
+                                    )))
                             })),
                     )
                     .child(
