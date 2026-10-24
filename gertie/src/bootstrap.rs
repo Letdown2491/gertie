@@ -25,6 +25,8 @@ pub struct Bootstrap {
     pub session_scope: gertie_core::SessionScope,
     pub snapshots: Option<Arc<gertie_core::SnapshotStore>>,
     pub system_prompt: Option<String>,
+    /// The effective configuration, for the settings panel.
+    pub settings: Arc<crate::settings::SettingsSummary>,
     /// Human-readable status line: endpoint, warnings, capability counts.
     pub label: String,
     pub workspace_root: PathBuf,
@@ -269,6 +271,10 @@ impl Bootstrap {
             }
         }
 
+        // The settings panel's snapshot of the effective config.
+        let mut settings = crate::settings::SettingsSummary::from_config(&config);
+        settings.skills = skills.len();
+
         Self {
             config,
             config_error,
@@ -284,9 +290,9 @@ impl Bootstrap {
             workspace_root,
             root_independent,
             skill_index,
+            settings: Arc::new(settings),
         }
     }
-
     /// A registry re-rooted at `root`, plus its system prompt: the
     /// built-ins are rebuilt (they capture the workspace root), agent
     /// tools are rebuilt against the new base (a worker dispatched from

@@ -1,12 +1,14 @@
 //! The M2 chat: session sidebar + transcript + the agent loop, with tool
 //! cards that gate mutating calls behind approve/deny.
 
+use crate::settings::SettingsSummary;
 use futures_util::StreamExt as _;
 use gertie_core::{
     LoopEvent, MessageId, PermissionBroker, PermissionDecision, Role, SessionId, SessionStore,
     SharedHistory, SnapshotStore, ToolCall, ToolRegistry, TurnSpec, run_turn,
 };
 use gertie_providers::OpenAICompatible;
+use gpui_kit::component::ThemeMode;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Input, InputEvent, InputState, Textarea, TextareaState};
 use gpui_kit::component::spinner::Spinner;
@@ -89,10 +91,12 @@ pub struct ChatView {
     /// click confirms. A destructive action with no dialog needs a
     /// speed bump.
     confirming_delete: Option<SessionId>,
-    /// The agents panel: open? and this chat's worker runs with report
-    /// status. Refreshed on agent-tool events, not per render.
-    agents_open: bool,
+    /// The right column: this chat's worker runs, or the settings view.
+    /// One slot — opening one closes the other.
+    panel: Panel,
     worker_runs: Vec<(gertie_core::SessionSummary, bool)>,
+    /// The effective configuration, for the settings panel.
+    settings: Arc<SettingsSummary>,
     list_state: ListState,
     streaming: bool,
     /// Bytes of the streaming assistant row already written to the
@@ -114,6 +118,8 @@ impl ChatView {
         system_prompt: Option<String>,
         broker: Arc<PermissionBroker>,
         session_scope: gertie_core::SessionScope,
+        // The effective configuration, for the settings panel.
+        settings: Arc<SettingsSummary>,
         // Resume the newest stored session (window open), or start
         // blank (a new tab — two views on one session would diverge).
         resume: bool,
@@ -174,8 +180,9 @@ impl ChatView {
             renaming: None,
             rename_input,
             confirming_delete: None,
-            agents_open: false,
+            panel: Panel::None,
             worker_runs: Vec::new(),
+            settings,
             // Tail: follow new content while pinned to the bottom, stop
             // when the user scrolls up, resume when they return.
             list_state: {
@@ -300,8 +307,36 @@ impl ChatView {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.agents_open = !self.agents_open;
+        self.panel = if self.panel == Panel::Agents {
+            Panel::None
+        } else {
+            Panel::Agents
+        };
         self.refresh_agent_runs(cx);
+    }
+
+    /// The settings panel toggle. One column, one panel: opening one
+    /// closes the other.
+    fn toggle_settings(
+        &mut self,
+        _event: &gpui_kit::ClickEvent,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.panel = if self.panel == Panel::Settings {
+            Panel::None
+        } else {
+            Panel::Settings
+        };
+        cx.notify();
+    }
+
+    /// Theme switch: applies immediately and persists — UI state, kept
+    /// out of the user's config.toml.
+    fn set_theme(&mut self, mode: ThemeMode, cx: &mut Context<Self>) {
+        gpui_kit::component::Theme::change(mode, None, cx);
+        crate::settings::store_theme(mode);
+        cx.notify();
     }
 
     /// Reloads this chat's worker runs (summary + report status). Cheap
@@ -989,6 +1024,142 @@ impl ChatView {
             }))
             .into_any_element()
     }
+
+    /// The settings view: what's actually in force, and where to change
+    /// it. The config file stays the single source of truth — the panel
+    /// edits nothing except the theme (UI state, stored separately).
+    fn render_settings_panel(&self, cx: &Context<Self>) -> AnyElement {
+        let theme = cx.theme();
+        let current_mode = theme.mode;
+        let theme_button = |label: &'static str, mode: ThemeMode, id: &'static str| {
+            let button = Button::new(id).label(label).xsmall();
+            let button = if current_mode == mode {
+                button.primary()
+            } else {
+                button.ghost()
+            };
+            button.on_click(cx.listener(move |this, _, _, cx| this.set_theme(mode, cx)))
+        };
+        let section = |title: &'static str| {
+            div()
+                .mt_2()
+                .text_size(px(11.))
+                .text_color(theme.muted_foreground)
+                .child(title)
+        };
+        let row = |left: String, right: String, accent: bool| {
+            h_flex()
+                .gap_2()
+                .items_center()
+                .min_w_0()
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .truncate()
+                        .text_size(px(12.))
+                        .child(left),
+                )
+                .child(
+                    div()
+                        .text_size(px(11.))
+                        .flex_shrink_0()
+                        .text_color(if accent {
+                            theme.accent
+                        } else {
+                            theme.muted_foreground
+                        })
+                        .child(right),
+                )
+        };
+
+        v_flex()
+            .id("settings-panel")
+            .w(px(260.))
+            .h_full()
+            .flex_shrink_0()
+            .border_l_1()
+            .border_color(theme.border)
+            .p_2()
+            .gap_1()
+            .overflow_y_scroll()
+            .child(section("APPEARANCE"))
+            .child(
+                h_flex()
+                    .gap_1()
+                    .child(theme_button("dark", ThemeMode::Dark, "theme-dark"))
+                    .child(theme_button("light", ThemeMode::Light, "theme-light")),
+            )
+            .child(section("ENDPOINTS"))
+            .when(self.settings.endpoints.is_empty(), |col| {
+                col.child(
+                    div()
+                        .text_size(px(12.))
+                        .text_color(theme.muted_foreground)
+                        .child("none configured"),
+                )
+            })
+            .children(self.settings.endpoints.iter().map(|endpoint| {
+                row(
+                    format!("{} · {}", endpoint.name, endpoint.model),
+                    if endpoint.key_resolved {
+                        "key ✓".into()
+                    } else {
+                        "no key".into()
+                    },
+                    endpoint.active,
+                )
+            }))
+            .child(section("RUNTIME"))
+            .children([
+                row(
+                    "bash sandbox (Landlock)".into(),
+                    if self.settings.sandbox { "on" } else { "off" }.into(),
+                    self.settings.sandbox,
+                ),
+                row("web search".into(), self.settings.search.clone(), false),
+                row(
+                    "mcp servers".into(),
+                    if self.settings.mcp_servers.is_empty() {
+                        "none".into()
+                    } else {
+                        self.settings.mcp_servers.join(", ")
+                    },
+                    false,
+                ),
+                row("skills".into(), self.settings.skills.to_string(), false),
+                row(
+                    "agents".into(),
+                    if self.settings.agents.is_empty() {
+                        "none".into()
+                    } else {
+                        self.settings.agents.join(", ")
+                    },
+                    false,
+                ),
+            ])
+            .child(section("CONFIG"))
+            .child(
+                div()
+                    .text_size(px(11.))
+                    .text_color(theme.muted_foreground)
+                    .child(match &self.settings.config_path {
+                        Some(path) => format!("edit {} — changes apply on restart", path.display()),
+                        None => "no config file — create ~/.config/gertie/config.toml".into(),
+                    }),
+            )
+            .into_any_element()
+    }
+}
+
+/// Which right-column panel is open, if any. One slot: the agents
+/// org-chart and the settings view alternate.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum Panel {
+    #[default]
+    None,
+    Agents,
+    Settings,
 }
 
 /// One-line summary of what the call targets, for the card header.
@@ -1110,6 +1281,13 @@ impl Render for ChatView {
                                     .small()
                                     .ghost()
                                     .on_click(cx.listener(Self::toggle_agents)),
+                            )
+                            .child(
+                                Button::new("toggle-settings")
+                                    .label("settings")
+                                    .small()
+                                    .ghost()
+                                    .on_click(cx.listener(Self::toggle_settings)),
                             )
                             .when(busy, |row| {
                                 row.child(Spinner::new().small().color(cx.theme().accent))
@@ -1260,9 +1438,12 @@ impl Render for ChatView {
                                 )
                             }),
                     )
-                    // The agents panel: this chat's worker runs, live.
-                    .when(self.agents_open, |row| {
+                    // The right column: agent runs or settings.
+                    .when(self.panel == Panel::Agents, |row| {
                         row.child(self.render_agents_panel(cx))
+                    })
+                    .when(self.panel == Panel::Settings, |row| {
+                        row.child(self.render_settings_panel(cx))
                     }),
             )
             .child(

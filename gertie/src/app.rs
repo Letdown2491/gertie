@@ -22,8 +22,10 @@ pub fn run_with(config_path: Option<std::path::PathBuf>) {
     let app = application().with_assets(gpui_kit::assets::Assets);
     app.run(move |cx: &mut App| {
         gpui_kit::init(cx);
-        // M1 dev default; M4 replaces this with a settings-driven theme.
-        gpui_kit::component::Theme::change(gpui_kit::component::ThemeMode::Dark, None, cx);
+        // The persisted theme choice — dark unless the user said
+        // otherwise (UI state, not config-file material).
+        let theme = crate::settings::load_theme().unwrap_or(gpui_kit::component::ThemeMode::Dark);
+        gpui_kit::component::Theme::change(theme, None, cx);
         open_chat_window(boot.clone(), cx);
         cx.activate(true);
     });
