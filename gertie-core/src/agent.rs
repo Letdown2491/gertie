@@ -17,6 +17,9 @@
 //! criteria — and dispatches the path. Workers never see leader history;
 //! the brief is the whole world.
 
+use crate::SessionId;
+use crate::SessionScope;
+use crate::SessionStore;
 use crate::ToolRegistry;
 use crate::agent_loop::{LoopEvent, SharedHistory, TurnSpec, run_turn};
 use crate::permissions::{PermissionBroker, PromptSource};
@@ -212,6 +215,11 @@ pub struct AgentTool {
     context_window: Option<u64>,
     /// Brief files resolve here, sandboxed like every other path.
     workspace_root: PathBuf,
+    /// Where worker runs persist as child sessions. None (tests,
+    /// store-less boots) means the run is transient.
+    store: Option<Arc<SessionStore>>,
+    /// The front's current session, read at dispatch to link the run.
+    scope: SessionScope,
 }
 
 #[derive(serde::Deserialize)]
@@ -225,6 +233,7 @@ struct DispatchArgs {
 const MAX_DESCRIPTION: usize = 1024;
 
 impl AgentTool {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         agent: AgentType,
         provider: Arc<dyn crate::Provider>,
@@ -233,6 +242,8 @@ impl AgentTool {
         broker: Arc<PermissionBroker>,
         context_window: Option<u64>,
         workspace_root: PathBuf,
+        store: Option<Arc<SessionStore>>,
+        scope: SessionScope,
     ) -> Self {
         Self {
             tool_name: Box::leak(
@@ -246,6 +257,8 @@ impl AgentTool {
             broker,
             context_window,
             workspace_root,
+            store,
+            scope,
         }
     }
 
@@ -260,6 +273,14 @@ impl AgentTool {
             return Err(format!("brief {brief_path}: escapes the workspace"));
         }
         std::fs::read_to_string(&canonical).map_err(|error| format!("brief {brief_path}: {error}"))
+    }
+
+    /// The agent type's name, for run titles: `agent_explore` → `explore`.
+    fn worker_label(&self) -> String {
+        self.tool_name
+            .strip_prefix("agent_")
+            .unwrap_or(self.tool_name)
+            .to_string()
     }
 }
 
@@ -306,6 +327,38 @@ impl Tool for AgentTool {
             let brief = self.read_brief(&args.brief_path)?;
             let guidance = args.guidance.unwrap_or_default();
 
+            // The run persists as a child session of the dispatching
+            // chat — inspectable in the agents panel, searchable like
+            // any message. A persistence failure never blocks the run;
+            // it just stays unrecorded.
+            let run: Option<SessionId> = self.store.as_ref().and_then(|store| {
+                let brief_name = std::path::Path::new(&args.brief_path)
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or(&args.brief_path);
+                let title = format!("⟡ {} · {}", self.worker_label(), brief_name);
+                match store.create_worker_run(self.scope.get(), &title) {
+                    Ok(session) => {
+                        let _ = store.append_message(
+                            session,
+                            None,
+                            crate::Role::User,
+                            &format!(
+                                "Brief {}{}\n\n---\n{brief}\n---",
+                                args.brief_path,
+                                if guidance.is_empty() {
+                                    String::new()
+                                } else {
+                                    format!("\n\nGuidance: {guidance}")
+                                }
+                            ),
+                        );
+                        Some(session)
+                    }
+                    Err(_) => None,
+                }
+            });
+
             let history: SharedHistory = Arc::new(tokio::sync::Mutex::new(Vec::new()));
             let stream = run_turn(TurnSpec {
                 provider: self.provider.clone(),
@@ -344,6 +397,14 @@ impl Tool for AgentTool {
                 }
             }
             if let Some(message) = failure {
+                if let (Some(store), Some(session)) = (&self.store, run) {
+                    let _ = store.append_message(
+                        session,
+                        None,
+                        crate::Role::Assistant,
+                        &format!("worker failed: {message}"),
+                    );
+                }
                 return Err(format!("worker failed: {message}"));
             }
 
@@ -356,7 +417,12 @@ impl Tool for AgentTool {
                 .find(|message| message.role == crate::Role::Assistant)
                 .and_then(|message| message.content.clone());
             match report {
-                Some(text) if !text.trim().is_empty() => Ok(text),
+                Some(text) if !text.trim().is_empty() => {
+                    if let (Some(store), Some(session)) = (&self.store, run) {
+                        let _ = store.append_message(session, None, crate::Role::Assistant, &text);
+                    }
+                    Ok(text)
+                }
                 _ => Err("worker finished without a report".to_string()),
             }
         })
@@ -407,6 +473,8 @@ mod tests {
             broker,
             None,
             tmp.path().to_path_buf(),
+            None,
+            crate::SessionScope::new(),
         );
 
         // Poll to completion — no runtime needed for these futures.
@@ -424,6 +492,73 @@ mod tests {
         let report = result.expect("worker report");
         assert!(report.contains("STATUS: done"));
         assert!(report.contains("SUMMARY: fine"));
+    }
+
+    #[test]
+    fn a_worker_run_persists_as_a_child_session() {
+        struct ReportProvider;
+        impl crate::Provider for ReportProvider {
+            fn stream(&self, _request: crate::Request) -> BoxStream<'static, crate::Event> {
+                Box::pin(futures_util::stream::iter(vec![
+                    crate::Event::Token {
+                        delta: "STATUS: done".into(),
+                    },
+                    crate::Event::Done,
+                ]))
+            }
+        }
+
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("brief.md"), "Do the thing.").unwrap();
+
+        let store = Arc::new(crate::SessionStore::open(std::path::Path::new(":memory:")).unwrap());
+        let parent = store.create_session("the chat").unwrap();
+        let scope = crate::SessionScope::new();
+        scope.set(Some(parent));
+
+        let broker = Arc::new(PermissionBroker::new());
+        let tool = AgentTool::new(
+            AgentType {
+                name: "explore".into(),
+                description: "does the thing".into(),
+                system_prompt: "work hard".into(),
+                tools: None,
+            },
+            Arc::new(ReportProvider),
+            &worker_registry(&Arc::new(Default::default()), None),
+            None,
+            broker,
+            None,
+            tmp.path().to_path_buf(),
+            Some(store.clone()),
+            scope,
+        );
+
+        let future = tool.run(r#"{"brief_path": "brief.md"}"#);
+        let waker = Waker::noop();
+        let mut cx = TaskContext::from_waker(waker);
+        let mut future = Box::pin(future);
+        let result = loop {
+            match Pin::new(&mut future).poll(&mut cx) {
+                Poll::Ready(result) => break result,
+                Poll::Pending => std::thread::sleep(Duration::from_millis(10)),
+            }
+        };
+        result.expect("worker report");
+
+        // The run is a child session: linked to the dispatching chat,
+        // hidden from the sidebar, holding brief and report.
+        let children = store.list_child_sessions(parent).unwrap();
+        assert_eq!(children.len(), 1);
+        assert!(children[0].title.starts_with("⟡ explore"));
+        let messages = store.load_messages(children[0].id).unwrap();
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].role, crate::Role::User);
+        assert!(messages[0].content.contains("Do the thing."));
+        assert_eq!(messages[1].role, crate::Role::Assistant);
+        assert!(messages[1].content.contains("STATUS: done"));
+        // The sidebar is chats only — worker runs live in the panel.
+        assert_eq!(store.list_sessions().unwrap().len(), 1);
     }
 
     fn registry_with(agent_tools: usize) -> ToolRegistry {
@@ -547,6 +682,8 @@ mod tests {
             Arc::new(PermissionBroker::new()),
             None,
             PathBuf::from("/tmp"),
+            None,
+            crate::SessionScope::new(),
         );
         // Path outside the root: canonicalize keeps it outside — rejected.
         assert!(tool.read_brief("../../etc/passwd").is_err());

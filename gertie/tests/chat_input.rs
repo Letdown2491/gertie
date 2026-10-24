@@ -56,6 +56,7 @@ fn fixture() -> Fixture {
                     "no endpoint configured".into(),
                     None,
                     Arc::new(gertie_core::PermissionBroker::new()),
+                    gertie_core::SessionScope::new(),
                     window,
                     cx,
                 )

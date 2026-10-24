@@ -77,6 +77,9 @@ pub struct ChatView {
     usage: (u64, u64),
     /// Shared approval registry: leader and worker asks, one answer path.
     broker: Arc<PermissionBroker>,
+    /// The front's current session, read by subagent dispatch to link
+    /// worker runs to the chat that dispatched them.
+    session_scope: gertie_core::SessionScope,
     input: Entity<TextareaState>,
     /// Session-rename flow: which sidebar row is being renamed, and the
     /// field editing its title (Enter commits; clicking away cancels).
@@ -106,6 +109,7 @@ impl ChatView {
         endpoint_label: String,
         system_prompt: Option<String>,
         broker: Arc<PermissionBroker>,
+        session_scope: gertie_core::SessionScope,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -136,6 +140,7 @@ impl ChatView {
         // Resume the newest session if there is one; otherwise the first
         // message creates the session (lazy, so no empty rows accumulate).
         let session_id = sessions.first().map(|summary| summary.id);
+        session_scope.set(session_id);
 
         let mut view = Self {
             store,
@@ -153,6 +158,7 @@ impl ChatView {
             activity: "starting…".into(),
             usage: (0, 0),
             broker,
+            session_scope,
             input,
             renaming: None,
             rename_input,
@@ -237,6 +243,7 @@ impl ChatView {
         // Sessions are created lazily by the first message; "New chat" just
         // blanks the transcript until then.
         self.session_id = None;
+        self.session_scope.set(None);
         self.turns.clear();
         self.last_db_id = None;
         self.streaming_assistant = None;
@@ -255,6 +262,7 @@ impl ChatView {
             return;
         }
         self.session_id = Some(session_id);
+        self.session_scope.set(Some(session_id));
         self.reload_session(cx);
         window.focus(&self.input.read(cx).focus_handle(cx), cx);
     }
@@ -376,6 +384,8 @@ impl ChatView {
 
         let context_window = provider.context_window();
         let provider: Arc<dyn gertie_core::Provider> = provider;
+        // Subagent dispatch reads this to link its runs to this chat.
+        self.session_scope.set(self.session_id);
         let stream = run_turn(TurnSpec {
             provider,
             tools: self.tools.clone(),

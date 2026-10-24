@@ -32,6 +32,38 @@ pub struct MessageId(pub u64);
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct SessionId(pub u64);
 
+/// The front's current session, shared with machinery that runs outside
+/// any session's knowledge — subagent dispatch — so worker runs can
+/// record their lineage. One atomic cell: the front sets it whenever the
+/// open session changes; dispatch reads it once. `None` means unknown —
+/// worker runs still persist, just unlinked.
+#[derive(Default)]
+pub struct SessionScope(std::sync::Arc<std::sync::atomic::AtomicI64>);
+
+impl SessionScope {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn set(&self, session: Option<SessionId>) {
+        self.0.store(
+            session.map_or(0, |session| session.0 as i64),
+            std::sync::atomic::Ordering::Relaxed,
+        );
+    }
+
+    pub fn get(&self) -> Option<SessionId> {
+        let raw = self.0.load(std::sync::atomic::Ordering::Relaxed);
+        (raw != 0).then_some(SessionId(raw as u64))
+    }
+}
+
+impl Clone for SessionScope {
+    fn clone(&self) -> Self {
+        Self(self.0.clone())
+    }
+}
+
 /// Who authored a message.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Role {
@@ -177,6 +209,22 @@ impl SessionStore {
                 )?;
             }
         }
+        // Sessions gain lineage (subagent runs are child sessions) and a
+        // kind: chats appear in the sidebar, worker runs in the agents
+        // panel. Existing rows are chats; the column defaults to that.
+        let session_columns: Vec<String> = {
+            let mut statement = connection.prepare("PRAGMA table_info(sessions)")?;
+            let rows = statement.query_map([], |row| row.get::<_, String>(1))?;
+            rows.collect::<Result<Vec<_>, _>>()?
+        };
+        for (column, definition) in [("parent_id", "INTEGER"), ("kind", "TEXT DEFAULT 'chat'")] {
+            if !session_columns.contains(&column.to_string()) {
+                connection.execute(
+                    &format!("ALTER TABLE sessions ADD COLUMN {column} {definition}"),
+                    [],
+                )?;
+            }
+        }
         Ok(Self {
             connection: std::sync::Mutex::new(connection),
         })
@@ -187,16 +235,54 @@ impl SessionStore {
     pub fn create_session(&self, title: &str) -> Result<SessionId, rusqlite::Error> {
         let connection = self.connection.lock().unwrap();
         connection
-            .prepare("INSERT INTO sessions (title) VALUES (?1)")?
+            .prepare("INSERT INTO sessions (title, kind) VALUES (?1, 'chat')")?
             .execute([title])?;
         Ok(SessionId(connection.last_insert_rowid() as u64))
+    }
+
+    /// Creates a worker-run session: kind `worker`, linked to the
+    /// dispatching chat when the front's scope knows it. Worker runs do
+    /// not appear in the sidebar; the agents panel lists them.
+    pub fn create_worker_run(
+        &self,
+        parent: Option<SessionId>,
+        title: &str,
+    ) -> Result<SessionId, rusqlite::Error> {
+        let connection = self.connection.lock().unwrap();
+        connection
+            .prepare("INSERT INTO sessions (title, kind, parent_id) VALUES (?1, 'worker', ?2)")?
+            .execute(rusqlite::params![
+                title,
+                parent.map(|session| session.0 as i64)
+            ])?;
+        Ok(SessionId(connection.last_insert_rowid() as u64))
+    }
+
+    /// A chat session's worker runs, oldest first — the agents panel's
+    /// rows.
+    pub fn list_child_sessions(
+        &self,
+        parent: SessionId,
+    ) -> Result<Vec<SessionSummary>, rusqlite::Error> {
+        let connection = self.connection.lock().unwrap();
+        let mut statement = connection
+            .prepare("SELECT id, title FROM sessions WHERE parent_id = ?1 ORDER BY id")?;
+        let rows = statement
+            .query_map([parent.0 as i64], |row| {
+                Ok(SessionSummary {
+                    id: SessionId(row.get::<_, i64>(0)? as u64),
+                    title: row.get(1)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(rows)
     }
 
     /// Newest session first, for the sidebar.
     pub fn list_sessions(&self) -> Result<Vec<SessionSummary>, rusqlite::Error> {
         let connection = self.connection.lock().unwrap();
-        let mut statement =
-            connection.prepare("SELECT id, title FROM sessions ORDER BY id DESC")?;
+        let mut statement = connection
+            .prepare("SELECT id, title FROM sessions WHERE kind = 'chat' ORDER BY id DESC")?;
         let rows = statement.query_map([], |row| {
             Ok(SessionSummary {
                 id: SessionId(row.get::<_, i64>(0)? as u64),
@@ -546,7 +632,11 @@ mod tests {
 
         store.retitle_session(session, "renamed once").unwrap();
         let sessions = store.list_sessions().unwrap();
-        assert_eq!(sessions[0].title, "renamed once");
+        assert!(
+            sessions
+                .iter()
+                .any(|summary| summary.id == session && summary.title == "renamed once")
+        );
 
         store.delete_session(session).unwrap();
         assert!(

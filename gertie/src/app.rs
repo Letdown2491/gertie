@@ -27,6 +27,7 @@ pub fn run_with(config_path: Option<std::path::PathBuf>) {
         broker,
         system_prompt,
         label: endpoint_label,
+        session_scope,
         ..
     } = boot;
 
@@ -43,6 +44,7 @@ pub fn run_with(config_path: Option<std::path::PathBuf>) {
             endpoint_label.clone(),
             system_prompt.clone(),
             broker.clone(),
+            session_scope.clone(),
             cx,
         );
         cx.activate(true);
@@ -58,6 +60,7 @@ fn open_chat_window(
     endpoint_label: String,
     system_prompt: Option<String>,
     broker: Arc<gertie_core::PermissionBroker>,
+    session_scope: gertie_core::SessionScope,
     cx: &mut App,
 ) {
     let bounds = Bounds::centered(None, size(px(1080.), px(760.)), cx);
@@ -83,6 +86,7 @@ fn open_chat_window(
                     endpoint_label,
                     system_prompt,
                     broker,
+                    session_scope,
                     window,
                     cx,
                 )

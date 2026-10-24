@@ -85,6 +85,8 @@ pub fn run(prompt: Option<String>, yes: bool, config_path: Option<PathBuf>) -> i
         eprintln!("error: could not persist user message: {error}");
         return 1;
     }
+    // Subagent dispatch reads this to link its runs to this chat.
+    boot.session_scope.set(Some(session));
 
     let history = Arc::new(tokio::sync::Mutex::new(Vec::new()));
     let stream = gertie_core::run_turn(gertie_core::TurnSpec {

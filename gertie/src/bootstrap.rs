@@ -20,6 +20,9 @@ pub struct Bootstrap {
     pub agent_endpoint: Option<gertie_providers::Endpoint>,
     pub tools: gertie_core::ToolRegistry,
     pub broker: Arc<gertie_core::PermissionBroker>,
+    /// The front's current session — subagent dispatch reads it to link
+    /// worker runs to the chat that dispatched them.
+    pub session_scope: gertie_core::SessionScope,
     pub snapshots: Option<Arc<gertie_core::SnapshotStore>>,
     pub system_prompt: Option<String>,
     /// Human-readable status line: endpoint, warnings, capability counts.
@@ -217,6 +220,7 @@ impl Bootstrap {
         };
 
         let broker = Arc::new(gertie_core::PermissionBroker::new());
+        let session_scope = gertie_core::SessionScope::new();
 
         // Agent types: each model-invoked type becomes an agent_{name}
         // tool. Construction order is safe either way — worker registries
@@ -280,6 +284,8 @@ impl Bootstrap {
                     broker.clone(),
                     endpoint.context_window,
                     workspace_root.clone(),
+                    Some(store.clone()),
+                    session_scope.clone(),
                 );
                 label.push_str(&format!(" · agent:{}", agent_type.name));
                 additions.push((tool.name().to_string(), Arc::new(tool)));
@@ -298,6 +304,7 @@ impl Bootstrap {
             agent_endpoint,
             tools,
             broker,
+            session_scope,
             snapshots,
             system_prompt,
             label,
