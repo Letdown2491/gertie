@@ -19,6 +19,48 @@ pub struct Config {
     /// becomes an `agent_{name}` tool for the leader.
     #[serde(default)]
     pub agents: Vec<AgentConfig>,
+    /// Web search backend. Absent = web_search explains how to configure
+    /// it instead of failing mysteriously.
+    #[serde(default)]
+    pub search: Option<SearchConfig>,
+}
+
+#[derive(Deserialize, Debug, Clone)]
+pub struct SearchConfig {
+    /// "brave" or "searxng".
+    pub backend: String,
+    /// Env var holding a Brave API key.
+    #[serde(default)]
+    pub api_key_env: Option<String>,
+    /// SearXNG instance base URL (must allow format=json).
+    #[serde(default)]
+    pub base_url: Option<String>,
+}
+
+impl SearchConfig {
+    /// Resolves to a configured WebSearch, or None with a plain reason.
+    pub fn to_backend(&self) -> Result<gertie_tools::web::WebSearch, String> {
+        match self.backend.as_str() {
+            "brave" => {
+                let key = self
+                    .api_key_env
+                    .as_deref()
+                    .and_then(|name| std::env::var(name).ok())
+                    .ok_or_else(|| {
+                        "brave backend needs api_key_env set and the variable present".to_string()
+                    })?;
+                Ok(gertie_tools::web::WebSearch::brave(key))
+            }
+            "searxng" => {
+                let url = self
+                    .base_url
+                    .clone()
+                    .ok_or_else(|| "searxng backend needs base_url".to_string())?;
+                Ok(gertie_tools::web::WebSearch::searxng(url))
+            }
+            other => Err(format!("unknown search backend: {other} (brave | searxng)")),
+        }
+    }
 }
 
 #[derive(Deserialize, Debug, Clone)]

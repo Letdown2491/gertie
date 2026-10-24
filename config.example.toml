@@ -27,6 +27,12 @@ api_key_env = "PPQ_API_KEY"
 # [mcp_servers.env]
 # NODE_ENV = "production"
 
+# Web search: web_search explains itself until a backend is configured.
+# [search]
+# backend = "brave"          # or "searxng"
+# api_key_env = "BRAVE_API_KEY"
+# base_url = "https://searx.example"   # searxng only; must allow format=json
+
 # Subagent types. Each model-invoked type becomes an agent_{name} tool
 # the leader can spawn (depth 1 — workers never get agent tools).
 # Dispatch is by brief file: the leader writes a self-contained brief

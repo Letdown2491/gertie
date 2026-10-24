@@ -19,11 +19,10 @@ pub use agent_loop::{
 pub use permissions::{PendingAsk, PermissionBroker, PromptSource};
 pub use provider::Provider;
 pub use request::{Request, ToolCall, ToolSpec, WireMessage};
-pub use snapshot::{Checkpoint, CheckpointId, SnapshotStore};
-pub use tool::{Tool, ToolResult};
-
 use rusqlite::Connection;
+pub use snapshot::{Checkpoint, CheckpointId, SnapshotStore};
 use std::path::Path;
+pub use tool::{Tool, ToolResult};
 
 /// Identifies one message in a session's message tree.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -90,6 +89,17 @@ pub struct SessionSummary {
     pub title: String,
 }
 
+/// One full-text search hit: which session, what role, and a marked
+/// snippet (▶…◀ around the match).
+#[derive(Clone, Debug)]
+pub struct HistoryHit {
+    pub session_title: String,
+    pub session_id: SessionId,
+    pub message_id: MessageId,
+    pub role: String,
+    pub snippet: String,
+}
+
 /// SQLite-backed session persistence. Synchronous on purpose: writes are
 /// small, rare, and local; callers decide which thread to block. The
 /// connection is mutex-guarded so the store is `Sync` — persistence can
@@ -123,6 +133,31 @@ impl SessionStore {
              CREATE INDEX IF NOT EXISTS messages_by_session
                  ON messages(session_id, id);",
         )?;
+        // Full-text index over message content (FTS5, bundled SQLite).
+        // External-content-free on purpose: messages are append-only
+        // and the index mirrors them via trigger — dead simple.
+        connection.execute_batch(
+            "CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts
+                 USING fts5(content, session_id UNINDEXED);
+             CREATE TRIGGER IF NOT EXISTS messages_fts_insert
+                 AFTER INSERT ON messages BEGIN
+                     INSERT INTO messages_fts(rowid, content, session_id)
+                     VALUES (new.rowid, new.content, new.session_id);
+                 END;",
+        )?;
+        // Stores predating the index: backfill once, when the index is
+        // empty but messages exist. Triggers keep it in sync afterward.
+        let indexed: i64 =
+            connection.query_row("SELECT count(*) FROM messages_fts", [], |row| row.get(0))?;
+        let total: i64 =
+            connection.query_row("SELECT count(*) FROM messages", [], |row| row.get(0))?;
+        if indexed == 0 && total > 0 {
+            connection.execute(
+                "INSERT INTO messages_fts(rowid, content, session_id)
+                     SELECT rowid, content, session_id FROM messages",
+                [],
+            )?;
+        }
         // Older stores predate the tool columns; add them in place rather
         // than requiring a migration dump.
         let columns: Vec<String> = {
@@ -166,6 +201,33 @@ impl SessionStore {
             Ok(SessionSummary {
                 id: SessionId(row.get::<_, i64>(0)? as u64),
                 title: row.get(1)?,
+            })
+        })?;
+        rows.collect()
+    }
+
+    /// Full-text search over every message ever recorded — the model's
+    /// memory of past sessions. `query` is a plain phrase: it is quoted
+    /// for FTS5, so model-written punctuation can't inject syntax.
+    pub fn search(&self, query: &str, limit: usize) -> Result<Vec<HistoryHit>, rusqlite::Error> {
+        let connection = self.connection.lock().unwrap();
+        let quoted = format!("\"{}\"", query.replace('"', "\"\""));
+        let mut statement = connection.prepare(
+            "SELECT sessions.title, messages.session_id, messages.id,
+                    messages.role, snippet(messages_fts, 0, '▶', '◀', '…', 16)
+             FROM messages_fts
+             JOIN messages ON messages.rowid = messages_fts.rowid
+             JOIN sessions ON sessions.id = messages.session_id
+             WHERE messages_fts MATCH ?1
+             ORDER BY rank LIMIT ?2",
+        )?;
+        let rows = statement.query_map(rusqlite::params![quoted, limit as i64], |row| {
+            Ok(HistoryHit {
+                session_title: row.get(0)?,
+                session_id: SessionId(row.get::<_, i64>(1)? as u64),
+                message_id: MessageId(row.get::<_, i64>(2)? as u64),
+                role: row.get(3)?,
+                snippet: row.get(4)?,
             })
         })?;
         rows.collect()
@@ -369,6 +431,31 @@ mod tests {
 
     fn memory_store() -> SessionStore {
         SessionStore::open(Path::new(":memory:")).expect("open in-memory store")
+    }
+
+    #[test]
+    fn full_text_search_finds_and_snippets() {
+        let store = memory_store();
+        let session = store.create_session("compaction debugging").unwrap();
+        store
+            .append_message(
+                session,
+                None,
+                Role::User,
+                "the safe_tail_start slice was wrong",
+            )
+            .unwrap();
+        store
+            .append_message(session, None, Role::User, "unrelated weather chat")
+            .unwrap();
+
+        let hits = store.search("safe_tail", 10).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].session_title, "compaction debugging");
+        assert!(hits[0].snippet.contains("safe_tail"));
+        // Quoting means punctuation can't inject FTS syntax.
+        let hits = store.search("\"weird; AND OR (query)", 10).unwrap();
+        assert!(hits.is_empty());
     }
 
     #[test]

@@ -8,6 +8,7 @@
 pub mod mcp;
 pub mod shape;
 pub mod skills;
+pub mod web;
 
 use gertie_core::{Tool, ToolResult};
 use serde::Deserialize;

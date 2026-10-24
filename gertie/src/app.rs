@@ -108,6 +108,26 @@ pub fn run() {
         Some(prompt)
     };
 
+    // Web tools: fetch always; search gracefully-disabled unless a
+    // backend resolves; history search rides the session store.
+    let map = Arc::get_mut(&mut tools).expect("registry not yet shared");
+    map.insert("web_fetch".into(), Arc::new(gertie_tools::web::WebFetch));
+    let search_tool = match &config.search {
+        Some(search) => match search.to_backend() {
+            Ok(backend) => backend,
+            Err(error) => {
+                endpoint_label.push_str(&format!(" — ⚠ search: {error}"));
+                gertie_tools::web::WebSearch::unconfigured()
+            }
+        },
+        None => gertie_tools::web::WebSearch::unconfigured(),
+    };
+    map.insert("web_search".into(), Arc::new(search_tool));
+    map.insert(
+        "search_history".into(),
+        Arc::new(gertie_tools::web::SearchHistory::new(store.clone())),
+    );
+
     // MCP servers connect at startup; a server that won't start is a
     // status-line warning, never a failed launch — gertie's local tools
     // carry the session alone if needed.
