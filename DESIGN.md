@@ -69,10 +69,15 @@ Shipped (M0–M5), in order:
   (`[[agents]]` → `agent_{name}` tools, depth-1 structural, brief-file dispatch).
 - **M5 — reach**: `web_fetch` / `web_search` (graceful disable) / `search_history` (FTS5),
   opt-in Landlock sandbox for bash children, UX/security/performance hardening passes.
+- **Post-M5 — the deferred row**: built-in agent registry (8 types, config replaces by name),
+  `gertie run` headless mode (piped-safe approvals, `--config`/`--yes`/`--help`), session
+  rename + delete in the sidebar, subagent runs persisted as child sessions (`parent_id` +
+  `kind` columns, brief + report as rows), and the agents panel (toggleable column listing
+  the chat's worker runs with live report status).
 
 Deferred:
 
-- Parallel sessions over worktrees, agents org-chart panel, settings UI, cost dashboard.
+- Parallel sessions over worktrees, settings UI, cost dashboard.
 - Provider fallbacks/routing, Anthropic/Google native providers, plugin surface.
 
 ## Providers
@@ -204,6 +209,11 @@ Each type earns existence via distinct toolset or safety posture, not just a dif
 - **M4**: agents panel (live leader/worker org-chart), cost/token dashboard, settings UI.
 - **Not an IDE.** No file tree, no terminal pane — Zed exists. gertie is the harness.
 - Parallel sessions run against separate worktrees, visible simultaneously (M4).
+
+(The agents panel shipped post-M5: a toggleable column listing the chat's persisted worker
+runs, live report status. The worktree/parallel-sessions row and the settings UI stay
+deferred; the cost dashboard reduced to the token line — per-message cost needs persisted
+usage, not yet worth its storage.)
 
 ## Distribution
 
