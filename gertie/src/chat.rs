@@ -7,8 +7,8 @@ use gertie_core::{
     SharedHistory, SnapshotStore, ToolCall, ToolRegistry, TurnSpec, run_turn,
 };
 use gertie_providers::OpenAICompatible;
-use gpui_kit::component::button::Button;
-use gpui_kit::component::input::{Input, InputEvent, InputState};
+use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::component::input::{InputEvent, Textarea, TextareaState};
 use gpui_kit::component::spinner::Spinner;
 use gpui_kit::component::{ActiveTheme, Sizable as _, h_flex, v_flex};
 use gpui_kit::{
@@ -77,7 +77,7 @@ pub struct ChatView {
     usage: (u64, u64),
     /// Shared approval registry: leader and worker asks, one answer path.
     broker: Arc<PermissionBroker>,
-    input: Entity<InputState>,
+    input: Entity<TextareaState>,
     list_state: ListState,
     streaming: bool,
 }
@@ -97,9 +97,11 @@ impl ChatView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let input = cx.new(|cx| InputState::new(window, cx).placeholder("Message gertie…"));
+        // The composer is a multi-line text area: Enter sends,
+        // Shift+Enter is a newline (long prompts, pasted snippets).
+        let input = cx.new(|cx| TextareaState::new(window, cx).placeholder("Message gertie…"));
         cx.subscribe_in(&input, window, |this, _, event: &InputEvent, window, cx| {
-            if let InputEvent::PressEnter { .. } = event {
+            if let InputEvent::PressEnter { shift: false, .. } = event {
                 this.send(window, cx)
             }
         })
@@ -127,7 +129,13 @@ impl ChatView {
             usage: (0, 0),
             broker,
             input,
-            list_state: ListState::new(0, ListAlignment::Bottom, px(256.)),
+            // Tail: follow new content while pinned to the bottom, stop
+            // when the user scrolls up, resume when they return.
+            list_state: {
+                let state = ListState::new(0, ListAlignment::Bottom, px(256.));
+                state.set_follow_mode(gpui_kit::FollowMode::Tail);
+                state
+            },
             streaming: false,
         };
         view.reload_session(cx);
@@ -182,6 +190,8 @@ impl ChatView {
 
     fn sync_list(&mut self, cx: &mut Context<Self>) {
         self.list_state.reset(self.turns.len());
+        // Jump to the end AND re-engage tail-following (a session switch
+        // or a fresh chat starts following again).
         self.list_state.scroll_to_end();
         cx.notify();
     }
@@ -398,6 +408,10 @@ impl ChatView {
             }
         };
 
+        // Tail mode: the list follows new content while pinned to the
+        // bottom, and politely stops when the user scrolls up to read —
+        // re-engaging when they return. No per-delta scroll_to_end here:
+        // it used to yank the viewport on every token.
         let persisted = if let Some(Turn::Message { text, db_id, .. }) = self.turns.get_mut(index) {
             text.push_str(delta);
             db_id.map(|db_id| (db_id, text.clone()))
@@ -407,7 +421,6 @@ impl ChatView {
         if let Some((db_id, text)) = persisted {
             let _ = self.store.update_message(db_id, &text);
         }
-        self.list_state.scroll_to_end();
         cx.notify();
     }
 
@@ -643,7 +656,11 @@ impl ChatView {
                         div()
                             .text_size(px(12.))
                             .text_color(cx.theme().warning)
-                            .child("wants to modify your workspace"),
+                            .child(if call.name == "bash" {
+                                "requires your approval to run"
+                            } else {
+                                "requires your approval to modify the workspace"
+                            }),
                     )
                     .child(
                         h_flex()
@@ -652,6 +669,7 @@ impl ChatView {
                                 Button::new(SharedString::from(format!("approve-{index}")))
                                     .label("Approve")
                                     .small()
+                                    .primary()
                                     .on_click(cx.listener(move |this, _, _, cx| {
                                         this.decide_tool(index, PermissionDecision::Approve, cx)
                                     })),
@@ -688,7 +706,16 @@ impl ChatView {
                 if let Some(diff) = diff_lines(call, cx) {
                     inner = inner.child(diff);
                 }
-                let preview: String = result.lines().take(12).collect::<Vec<_>>().join("\n");
+                let lines: Vec<&str> = result.lines().collect();
+                let mut preview = lines
+                    .iter()
+                    .take(12)
+                    .copied()
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                if lines.len() > 12 {
+                    preview.push_str(&format!("\n… (+{} more lines)", lines.len() - 12));
+                }
                 inner = inner.child(
                     div()
                         .text_size(px(12.))
@@ -888,14 +915,38 @@ impl Render for ChatView {
                     .child(
                         // The transcript: flex sizing goes directly on the
                         // list element — a wrapper div collapses it.
-                        list(self.list_state.clone(), move |index, _window, cx| {
-                            view.update(cx, |view, cx| view.render_turn(index, cx))
-                                .unwrap_or_else(|_| div().into_any_element())
-                        })
-                        .flex_1()
-                        .min_h_0()
-                        .overflow_hidden()
-                        .px_4(),
+                        v_flex()
+                            .flex_1()
+                            .min_h_0()
+                            .relative()
+                            .child(
+                                list(self.list_state.clone(), move |index, _window, cx| {
+                                    view.update(cx, |view, cx| view.render_turn(index, cx))
+                                        .unwrap_or_else(|_| div().into_any_element())
+                                })
+                                .flex_1()
+                                .min_h_0()
+                                .overflow_hidden()
+                                .px_4(),
+                            )
+                            // Empty state: the transcript is quiet until
+                            // it isn't — say so, quietly.
+                            .when(self.turns.is_empty(), |col| {
+                                col.child(
+                                    div()
+                                        .absolute()
+                                        .inset_0()
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .child(
+                                            div()
+                                                .text_size(px(14.))
+                                                .text_color(cx.theme().muted_foreground)
+                                                .child("Ready. Ask, paste, or point me at a file."),
+                                        ),
+                                )
+                            }),
                     ),
             )
             .child(
@@ -904,7 +955,12 @@ impl Render for ChatView {
                     .py_3()
                     .border_t_1()
                     .border_color(cx.theme().border)
-                    .child(div().flex_1().child(Input::new(&self.input))),
+                    .child(div().flex_1().py_1().child(
+                        // Multi-line: Enter sends, Shift+Enter
+                        // is a newline. Capped so a long paste
+                        // can't eat the transcript.
+                        Textarea::new(&self.input).h(px(96.)),
+                    )),
             )
     }
 }
