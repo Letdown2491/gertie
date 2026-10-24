@@ -77,7 +77,8 @@ Shipped (M0–M5), in order:
 
 Deferred:
 
-- Parallel sessions over worktrees, settings UI, cost dashboard.
+- Worktree-per-tab, settings UI, cost dashboard. Parallel *chats* shipped as tabs; the
+  worktree half of the promise stays open (needs per-view tool registries).
 - Provider fallbacks/routing, Anthropic/Google native providers, plugin surface.
 
 ## Providers
@@ -211,7 +212,8 @@ Each type earns existence via distinct toolset or safety posture, not just a dif
 - Parallel sessions run against separate worktrees, visible simultaneously (M4).
 
 (The agents panel shipped post-M5: a toggleable column listing the chat's persisted worker
-runs, live report status. The worktree/parallel-sessions row and the settings UI stay
+runs, live report status. Parallel chats shipped as tabs — one window, multiple live
+sessions sharing workspace and approval queue. Worktree-per-tab and the settings UI stay
 deferred; the cost dashboard reduced to the token line — per-message cost needs persisted
 usage, not yet worth its storage.)
 
