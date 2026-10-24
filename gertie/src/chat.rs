@@ -7,7 +7,7 @@ use gertie_core::{
     LoopEvent, MessageId, PermissionBroker, PermissionDecision, Role, SessionId, SessionStore,
     SharedHistory, SnapshotStore, ToolCall, ToolRegistry, TurnSpec, run_turn,
 };
-use gertie_providers::OpenAICompatible;
+use gertie_providers::AnyProvider;
 use gpui_kit::component::ThemeMode;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Input, InputEvent, InputState, Textarea, TextareaState};
@@ -52,7 +52,7 @@ enum Turn {
 
 pub struct ChatView {
     store: Arc<SessionStore>,
-    provider: Option<Arc<OpenAICompatible>>,
+    provider: Option<Arc<AnyProvider>>,
     snapshots: Option<Arc<SnapshotStore>>,
     tools: ToolRegistry,
     endpoint_label: String,
@@ -111,7 +111,7 @@ impl ChatView {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         store: Arc<SessionStore>,
-        provider: Option<Arc<OpenAICompatible>>,
+        provider: Option<Arc<AnyProvider>>,
         snapshots: Option<Arc<SnapshotStore>>,
         tools: ToolRegistry,
         endpoint_label: String,

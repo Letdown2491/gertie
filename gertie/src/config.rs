@@ -132,6 +132,9 @@ pub struct EndpointConfig {
     /// e.g. `https://api.ppq.ai/v1`
     pub base_url: String,
     pub model: String,
+    /// Which wire protocol to speak: `openai` (default) or `anthropic`.
+    #[serde(default)]
+    pub wire: Option<String>,
     /// Literal key (handy at home; prefer the env variants).
     #[serde(default)]
     pub api_key: Option<String>,
@@ -175,6 +178,11 @@ impl EndpointConfig {
             model: self.model.clone(),
             api_key,
             context_window: self.context_window,
+            wire: self
+                .wire
+                .as_deref()
+                .and_then(gertie_providers::Wire::parse)
+                .unwrap_or_default(),
         }
     }
 }
@@ -267,6 +275,17 @@ impl Config {
             if mode & 0o077 != 0 {
                 warnings.push(format!(
                     "config.toml is readable by others (mode {mode:o}) — chmod 600 it"
+                ));
+            }
+        }
+        for endpoint in &self.endpoints {
+            if let Some(wire) = &endpoint.wire
+                && gertie_providers::Wire::parse(wire).is_none()
+            {
+                warnings.push(format!(
+                    "endpoint {}: unknown wire {:?} — speaking openai; \
+                     valid wires are openai | anthropic",
+                    endpoint.name, wire
                 ));
             }
         }

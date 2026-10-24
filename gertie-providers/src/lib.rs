@@ -16,24 +16,88 @@ use tokio_stream::wrappers::UnboundedReceiverStream;
 // them directly); this crate only implements them.
 pub use gertie_core::{Provider, ToolCall, ToolSpec};
 
+/// Which wire protocol an endpoint speaks. OpenAI's chat/completions
+/// schema is the default and the most universal (ppq.ai, OpenRouter,
+/// Ollama, vLLM); Anthropic's Messages API is the first second adapter —
+/// the honest test of whether the Provider trait is really
+/// vendor-neutral.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum Wire {
+    #[default]
+    OpenAI,
+    Anthropic,
+}
+
+impl Wire {
+    pub fn parse(name: &str) -> Option<Self> {
+        match name {
+            "openai" => Some(Self::OpenAI),
+            "anthropic" => Some(Self::Anthropic),
+            _ => None,
+        }
+    }
+}
+
 /// One configured endpoint: where to POST, how to authenticate, what model
 /// to ask for. Keys resolve from config values or the environment at
 /// construction time — never stored in logs or events.
 #[derive(Clone, Debug)]
 pub struct Endpoint {
     pub name: String,
-    /// e.g. `https://api.ppq.ai/v1` — `/chat/completions` is appended.
+    /// e.g. `https://api.ppq.ai/v1` — the wire appends its own path
+    /// (`/chat/completions`, `/v1/messages`).
     pub base_url: String,
     pub model: String,
     pub api_key: Option<String>,
     /// Model context window in tokens; None disables compaction.
     pub context_window: Option<u64>,
+    pub wire: Wire,
 }
 
 /// Retry policy per DESIGN.md: auto-retry transient failures with
 /// exponential backoff + jitter; never auto-retry auth errors.
-const MAX_ATTEMPTS: u32 = 3;
+pub(crate) const MAX_ATTEMPTS: u32 = 3;
 const INITIAL_BACKOFF: Duration = Duration::from_millis(500);
+
+pub mod anthropic;
+
+pub use anthropic::Anthropic;
+
+/// The two wire adapters, behind one type. The loop and UI take this;
+/// which wire a given endpoint speaks is decided once, at construction.
+pub enum AnyProvider {
+    OpenAI(OpenAICompatible),
+    Anthropic(Anthropic),
+}
+
+impl AnyProvider {
+    pub fn context_window(&self) -> Option<u64> {
+        match self {
+            Self::OpenAI(provider) => provider.context_window(),
+            Self::Anthropic(provider) => provider.context_window(),
+        }
+    }
+
+    pub fn with_endpoints(endpoints: Vec<Endpoint>) -> Result<Self, reqwest::Error> {
+        match endpoints
+            .first()
+            .map(|endpoint| endpoint.wire.clone())
+            .unwrap_or_default()
+        {
+            Wire::OpenAI => OpenAICompatible::with_endpoints(endpoints).map(Self::OpenAI),
+            Wire::Anthropic => Anthropic::with_endpoints(endpoints).map(Self::Anthropic),
+        }
+    }
+}
+
+impl gertie_core::Provider for AnyProvider {
+    fn stream(&self, request: Request) -> BoxStream<'static, Event> {
+        match self {
+            Self::OpenAI(provider) => provider.stream(request),
+            Self::Anthropic(provider) => provider.stream(request),
+        }
+    }
+}
 
 /// Any OpenAI-compatible chat/completions endpoint (ppq.ai, OpenRouter,
 /// Ollama's OpenAI mode, LM Studio, vLLM, …), plus optional fallbacks.
@@ -63,13 +127,13 @@ impl OpenAICompatible {
 /// Per-request state: reqwest clients are cheap Arc handles; the endpoint
 /// is small. Cloning sidesteps lifetime plumbing through the spawned task.
 #[derive(Clone)]
-struct RequestScoped {
-    endpoint: Endpoint,
-    client: reqwest::Client,
+pub(crate) struct RequestScoped {
+    pub(crate) endpoint: Endpoint,
+    pub(crate) client: reqwest::Client,
 }
 
 /// What one HTTP attempt decided.
-enum Outcome {
+pub(crate) enum Outcome {
     /// Stream completed (however it ended — errors were already sent).
     Done,
     /// Auth/config problem: never retried.
@@ -446,7 +510,7 @@ fn endpoint_url(endpoint: &Endpoint) -> String {
 /// Full jitter: uniform in [0, 2^(attempt-1) * base). Clock-derived
 /// randomness keeps this dependency-free; precision of the distribution
 /// does not matter for a retry delay.
-fn backoff(attempt: u32) -> Duration {
+pub(crate) fn backoff(attempt: u32) -> Duration {
     let max = INITIAL_BACKOFF.as_millis() as u64 * (1 << (attempt - 1).min(16));
     let jitter = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -462,7 +526,7 @@ fn count(value: &serde_json::Value) -> Option<u64> {
         .or_else(|| value.as_i64().map(|n| n.max(0) as u64))
 }
 
-fn truncate(text: &str, limit: usize) -> &str {
+pub(crate) fn truncate(text: &str, limit: usize) -> &str {
     match text.char_indices().nth(limit) {
         Some((index, _)) => &text[..index],
         None => text,
@@ -470,9 +534,13 @@ fn truncate(text: &str, limit: usize) -> &str {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod test_support {
+    //! Shared test harness: a fake HTTP server that answers one POST
+    //! with raw bytes, and helpers to drain a provider stream on the
+    //! current thread.
+
     use super::*;
-    use futures_core::Stream;
+    use futures_core::Stream as _;
     use std::io::{Read, Write};
     use std::net::TcpListener;
     use std::task::{Context as TaskContext, Poll, Waker};
@@ -480,7 +548,7 @@ mod tests {
     /// Drains a stream to completion on the current thread. The provider's
     /// tokio tasks run on their own runtime; this only polls the receiving
     /// end, so `Pending` here means "task still producing", not deadlock.
-    fn drain(mut stream: BoxStream<'static, Event>) -> Vec<Event> {
+    pub fn drain(mut stream: BoxStream<'static, Event>) -> Vec<Event> {
         let waker = Waker::noop();
         let mut cx = TaskContext::from_waker(waker);
         let mut events = Vec::new();
@@ -495,16 +563,16 @@ mod tests {
 
     /// A fake OpenAI-compatible server: responds to one POST with raw
     /// bytes (already-shaped SSE, or an error status), then closes.
-    struct FakeServer {
-        address: String,
+    pub struct FakeServer {
+        pub address: String,
     }
 
     impl FakeServer {
-        fn start(response: &str) -> Self {
+        pub fn start(response: &str) -> Self {
             Self::with_status("200 OK", response)
         }
 
-        fn with_status(status_line: &str, body: &str) -> Self {
+        pub fn with_status(status_line: &str, body: &str) -> Self {
             let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
             let address = listener.local_addr().expect("addr").to_string();
             let response = format!(
@@ -522,24 +590,31 @@ mod tests {
             Self { address }
         }
 
-        fn endpoint(&self) -> Endpoint {
+        pub fn endpoint(&self, wire: Wire) -> Endpoint {
             Endpoint {
                 name: "fake".into(),
-                base_url: format!("http://{}/v1", self.address),
+                base_url: format!("http://{}", self.address),
                 model: "fake-model".into(),
                 api_key: Some("fake-key".into()),
                 context_window: None,
+                wire,
             }
         }
     }
 
-    fn user_request() -> Request {
+    pub fn user_request() -> Request {
         Request {
             messages: vec![WireMessage::user("hi")],
             tools: Vec::new(),
             max_output_tokens: None,
         }
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::test_support::{FakeServer, drain, user_request};
+    use super::*;
 
     #[test]
     fn wire_translation_expresses_the_tool_protocol() {
@@ -572,7 +647,7 @@ mod tests {
              data: {\"choices\":[{\"delta\":{}}],\"usage\":{\"prompt_tokens\":7,\"completion_tokens\":2}}\n\n\
              data: [DONE]\n\n",
         );
-        let provider = OpenAICompatible::new(server.endpoint()).unwrap();
+        let provider = OpenAICompatible::new(server.endpoint(Wire::OpenAI)).unwrap();
         let events = drain(provider.stream(user_request()));
 
         assert!(events.contains(&Event::Token {
@@ -593,7 +668,7 @@ mod tests {
              data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"name\":\"d_file\",\"arguments\":\"th\\\":\\\"x\\\"}\"}}]}}]}\n\n\
              data: [DONE]\n\n",
         );
-        let provider = OpenAICompatible::new(server.endpoint()).unwrap();
+        let provider = OpenAICompatible::new(server.endpoint(Wire::OpenAI)).unwrap();
         let events = drain(provider.stream(user_request()));
 
         assert_eq!(
@@ -612,7 +687,7 @@ mod tests {
     #[test]
     fn auth_errors_are_terminal_in_one_message() {
         let server = FakeServer::with_status("401 Unauthorized", "{}");
-        let provider = OpenAICompatible::new(server.endpoint()).unwrap();
+        let provider = OpenAICompatible::new(server.endpoint(Wire::OpenAI)).unwrap();
         let events = drain(provider.stream(user_request()));
 
         // One error, not a Started + Error progression: the loop stops
@@ -627,7 +702,7 @@ mod tests {
     #[test]
     fn transient_errors_retry_then_report_the_exhausted_policy() {
         let server = FakeServer::with_status("503 Service Unavailable", "overloaded");
-        let provider = OpenAICompatible::new(server.endpoint()).unwrap();
+        let provider = OpenAICompatible::new(server.endpoint(Wire::OpenAI)).unwrap();
         let events = drain(provider.stream(user_request()));
 
         let errors: Vec<&String> = events
@@ -647,8 +722,11 @@ mod tests {
         let good = FakeServer::start(
             "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\ndata: [DONE]\n\n",
         );
-        let provider =
-            OpenAICompatible::with_endpoints(vec![bad.endpoint(), good.endpoint()]).unwrap();
+        let provider = OpenAICompatible::with_endpoints(vec![
+            bad.endpoint(Wire::OpenAI),
+            good.endpoint(Wire::OpenAI),
+        ])
+        .unwrap();
         let events = drain(provider.stream(user_request()));
 
         assert!(
@@ -668,8 +746,11 @@ mod tests {
     fn all_endpoints_failing_reports_once() {
         let first = FakeServer::with_status("401 Unauthorized", "{}");
         let second = FakeServer::with_status("401 Unauthorized", "{}");
-        let provider =
-            OpenAICompatible::with_endpoints(vec![first.endpoint(), second.endpoint()]).unwrap();
+        let provider = OpenAICompatible::with_endpoints(vec![
+            first.endpoint(Wire::OpenAI),
+            second.endpoint(Wire::OpenAI),
+        ])
+        .unwrap();
         let events = drain(provider.stream(user_request()));
 
         assert_eq!(events.len(), 1);
@@ -686,7 +767,7 @@ mod tests {
             "data: {\"choices\":[{\"delta\":{\"content\":\"partial\"}}]}\n\n\
              data: {\"error\":{\"message\":\"overloaded mid-stream\"}}\n\n",
         );
-        let provider = OpenAICompatible::new(server.endpoint()).unwrap();
+        let provider = OpenAICompatible::new(server.endpoint(Wire::OpenAI)).unwrap();
         let events = drain(provider.stream(user_request()));
 
         assert!(events.contains(&Event::Token {

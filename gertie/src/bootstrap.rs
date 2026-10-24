@@ -4,7 +4,7 @@
 //! must exist identically no matter which surface you talk to.
 
 use gertie_core::Tool as _;
-use gertie_providers::OpenAICompatible;
+use gertie_providers::AnyProvider;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -15,7 +15,7 @@ pub struct Bootstrap {
     /// as fatal.
     pub config_error: Option<String>,
     pub store: Arc<gertie_core::SessionStore>,
-    pub provider: Option<Arc<OpenAICompatible>>,
+    pub provider: Option<Arc<AnyProvider>>,
     /// The raw endpoint, kept for agent-type model overrides.
     pub agent_endpoint: Option<gertie_providers::Endpoint>,
     pub tools: gertie_core::ToolRegistry,
@@ -207,14 +207,23 @@ impl Bootstrap {
 
         // Constructing the provider spins up its tokio runtime; do it
         // once. Every configured endpoint rides the provider — the
-        // selected one first, the rest as fallbacks when an endpoint
-        // dies before producing content. The first endpoint is kept
-        // for agent-type model overrides (model names don't translate
-        // across providers).
+        // selected one first, then same-wire endpoints as fallbacks
+        // when an endpoint dies before producing content (model names
+        // don't translate across wires, so the chain never switches).
+        // The preferred endpoint is kept for agent-type model
+        // overrides on the same wire.
         let all_endpoints = config.resolved_endpoints();
         let agent_endpoint = all_endpoints.first().cloned();
-        let provider = match all_endpoints.first() {
-            Some(_) => OpenAICompatible::with_endpoints(all_endpoints)
+        let selected_wire = all_endpoints
+            .first()
+            .map(|endpoint| endpoint.wire.clone())
+            .unwrap_or_default();
+        let chain: Vec<gertie_providers::Endpoint> = all_endpoints
+            .into_iter()
+            .filter(|endpoint| endpoint.wire == selected_wire)
+            .collect();
+        let provider = match chain.first() {
+            Some(_) => gertie_providers::AnyProvider::with_endpoints(chain)
                 .map(Arc::new)
                 .map_err(|error| eprintln!("warning: endpoint setup failed: {error}"))
                 .ok(),
@@ -238,10 +247,12 @@ impl Bootstrap {
             for (agent_type, model) in &types {
                 let worker_provider: Arc<dyn gertie_core::Provider> = match model {
                     Some(model) => {
-                        match OpenAICompatible::new(gertie_providers::Endpoint {
-                            model: model.clone(),
-                            ..endpoint.clone()
-                        }) {
+                        match gertie_providers::AnyProvider::with_endpoints(vec![
+                            gertie_providers::Endpoint {
+                                model: model.clone(),
+                                ..endpoint.clone()
+                            },
+                        ]) {
                             Ok(provider) => Arc::new(provider),
                             Err(error) => {
                                 label.push_str(&format!(" — ⚠ agent {}: {error}", agent_type.name));
@@ -320,10 +331,12 @@ impl Bootstrap {
             for (agent_type, model) in &types {
                 let worker_provider: Arc<dyn gertie_core::Provider> = match model {
                     Some(model) => {
-                        match OpenAICompatible::new(gertie_providers::Endpoint {
-                            model: model.clone(),
-                            ..endpoint.clone()
-                        }) {
+                        match gertie_providers::AnyProvider::with_endpoints(vec![
+                            gertie_providers::Endpoint {
+                                model: model.clone(),
+                                ..endpoint.clone()
+                            },
+                        ]) {
                             Ok(provider) => Arc::new(provider),
                             Err(_) => continue,
                         }
