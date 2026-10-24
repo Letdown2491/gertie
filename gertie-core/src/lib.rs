@@ -4,6 +4,7 @@
 //! GUI framework: it is embeddable from a CLI, a server, or an editor. The
 //! UI-facing `gertie` crate is one client of many.
 
+pub mod agent;
 pub mod agent_loop;
 pub mod permissions;
 pub mod provider;
@@ -11,6 +12,7 @@ pub mod request;
 pub mod snapshot;
 pub mod tool;
 
+pub use agent::{AgentTool, AgentType, worker_registry};
 pub use agent_loop::{
     LoopEvent, PermissionDecision, SharedHistory, ToolRegistry, TurnSpec, run_turn,
 };

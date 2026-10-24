@@ -143,15 +143,78 @@ pub fn run() {
     }
 
     // Constructing the provider spins up its tokio runtime; do it once.
-    let provider = match endpoint {
-        Some(endpoint) => OpenAICompatible::new(endpoint)
-            .map(Arc::new)
-            .map_err(|error| eprintln!("warning: endpoint setup failed: {error}"))
-            .ok(),
-        None => None,
+    // The endpoint is kept for agent-type model overrides.
+    let (provider, agent_endpoint) = match endpoint {
+        Some(endpoint) => {
+            let for_agents = endpoint.clone();
+            (
+                OpenAICompatible::new(endpoint)
+                    .map(Arc::new)
+                    .map_err(|error| eprintln!("warning: endpoint setup failed: {error}"))
+                    .ok(),
+                Some(for_agents),
+            )
+        }
+        None => (None, None),
     };
 
     let broker = Arc::new(gertie_core::PermissionBroker::new());
+
+    // Agent types: each model-invoked type becomes an agent_{name} tool.
+    // Construction order is safe either way — worker registries strip
+    // every agent_* tool, so workers can never see each other.
+    if let (Some(endpoint), Some(leader_provider)) = (&agent_endpoint, &provider) {
+        // Build first (borrowing `tools` immutably), insert after.
+        let mut additions: Vec<(String, Arc<dyn gertie_core::Tool>)> = Vec::new();
+        for agent in &config.agents {
+            if agent.invocation == crate::config::Invocation::User {
+                // Registered later, when UI dispatch exists.
+                continue;
+            }
+            let worker_provider: Arc<dyn gertie_core::Provider> = match &agent.model {
+                Some(model) => {
+                    match OpenAICompatible::new(gertie_providers::Endpoint {
+                        model: model.clone(),
+                        ..endpoint.clone()
+                    }) {
+                        Ok(provider) => Arc::new(provider),
+                        Err(error) => {
+                            endpoint_label.push_str(&format!(" — ⚠ agent {}: {error}", agent.name));
+                            continue;
+                        }
+                    }
+                }
+                None => leader_provider.clone(),
+            };
+            let agent_type = gertie_core::AgentType {
+                name: agent.name.clone(),
+                description: agent.description.clone(),
+                system_prompt: agent.prompt.clone().unwrap_or_else(|| {
+                    "You are a focused subagent. You have your own tools \
+                     and context; the leader sees only your final report. \
+                     Work exactly within the brief, verify what you build, \
+                     and report honestly."
+                        .into()
+                }),
+                tools: agent.tools.clone(),
+            };
+            let tool = gertie_core::AgentTool::new(
+                agent_type,
+                worker_provider,
+                &tools,
+                snapshots.clone(),
+                broker.clone(),
+                endpoint.context_window,
+                workspace_root.clone(),
+            );
+            endpoint_label.push_str(&format!(" · agent:{}", agent.name));
+            additions.push((tool.name().to_string(), Arc::new(tool)));
+        }
+        let map = Arc::get_mut(&mut tools).expect("registry not yet shared");
+        for (name, tool) in additions {
+            map.insert(name, tool);
+        }
+    }
     let app = application().with_assets(gpui_kit::assets::Assets);
     app.run(move |cx: &mut App| {
         gpui_kit::init(cx);

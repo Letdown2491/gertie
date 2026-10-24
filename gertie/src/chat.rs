@@ -280,6 +280,7 @@ impl ChatView {
             snapshots: self.snapshots.clone(),
             context_window,
             permission_broker: Some(self.broker.clone()),
+            prompt_source: gertie_core::PromptSource::Leader,
             system_prompt: self.system_prompt.clone(),
         });
         // Subagent asks arrive here, not on the leader's stream — a

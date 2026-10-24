@@ -15,6 +15,40 @@ pub struct Config {
     /// MCP servers to spawn at startup (stdio transport).
     #[serde(default)]
     pub mcp_servers: Vec<McpServerConfig>,
+    /// Subagent types, TOML-defined (M4). Each model-invoked type
+    /// becomes an `agent_{name}` tool for the leader.
+    #[serde(default)]
+    pub agents: Vec<AgentConfig>,
+}
+
+#[derive(Deserialize, Debug, Clone)]
+pub struct AgentConfig {
+    /// Slug; the tool is `agent_{name}`.
+    pub name: String,
+    /// Triggers only ("Use when…") — never a workflow summary. Context
+    /// load paid on every leader turn.
+    pub description: String,
+    /// `model` (default) = the leader may spawn it; `user` = future UI
+    /// dispatch, registered but not offered to the model.
+    #[serde(default)]
+    pub invocation: Invocation,
+    /// Model override on the same endpoint (None = the endpoint's model).
+    #[serde(default)]
+    pub model: Option<String>,
+    /// The worker's system prompt. A sane default when unset.
+    #[serde(default)]
+    pub prompt: Option<String>,
+    /// Tool-name allowlist; None = everything except agent tools.
+    #[serde(default)]
+    pub tools: Option<Vec<String>>,
+}
+
+#[derive(Deserialize, Debug, Clone, Default, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum Invocation {
+    #[default]
+    Model,
+    User,
 }
 
 #[derive(Deserialize, Debug, Clone)]

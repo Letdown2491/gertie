@@ -27,4 +27,20 @@ api_key_env = "PPQ_API_KEY"
 # [mcp_servers.env]
 # NODE_ENV = "production"
 
+# Subagent types. Each model-invoked type becomes an agent_{name} tool
+# the leader can spawn (depth 1 — workers never get agent tools).
+# Dispatch is by brief file: the leader writes a self-contained brief
+# and passes its workspace path.
+#
+# [[agents]]
+# name = "reviewer"
+# description = "Use when code needs review before it ships. Read-only."
+# tools = ["read_file", "glob", "grep", "load_skill"]   # critic-only: no writes
+# model = "glm-5.3-flash"    # per-type model override (same endpoint)
+# prompt = """
+# You are a code reviewer. Read the code named in the brief. Judge
+# correctness first, then security, then clarity. Every finding cites a
+# file and line. Verify claims by reading, never by assuming.
+# """
+
 default_endpoint = "ppq"

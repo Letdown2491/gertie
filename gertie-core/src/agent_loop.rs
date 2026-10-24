@@ -98,6 +98,9 @@ pub struct TurnSpec {
     /// means nobody can approve: mutations are denied, doing nothing is
     /// the safe move.
     pub permission_broker: Option<Arc<crate::PermissionBroker>>,
+    /// Whose ask this loop's prompts are: the leader's surface as loop
+    /// events, a worker's through the broker subscription.
+    pub prompt_source: crate::PromptSource,
     /// Sent as the first message of every request, never stored in
     /// history: it is per-turn framing, not conversation record (the
     /// DB stays canonical; the next turn may have a different index).
@@ -128,6 +131,7 @@ pub fn run_turn(spec: TurnSpec) -> BoxStream<'static, LoopEvent> {
         snapshots,
         context_window,
         permission_broker,
+        prompt_source,
         system_prompt,
     } = spec;
     let specs = tool_specs(&tools);
@@ -249,7 +253,7 @@ pub fn run_turn(spec: TurnSpec) -> BoxStream<'static, LoopEvent> {
                             match &permission_broker {
                                 Some(broker) => {
                                     let (request_id, answer) =
-                                        broker.request(call.clone(), crate::PromptSource::Leader);
+                                        broker.request(call.clone(), prompt_source);
                                     yield LoopEvent::ToolCallRequested {
                                         id: request_id,
                                         call: call.clone(),
@@ -555,6 +559,7 @@ mod tests {
                 snapshots: None,
                 context_window: None,
                 permission_broker: Some(broker.clone()),
+                prompt_source: crate::PromptSource::Leader,
                 system_prompt: None,
             },
             broker,
