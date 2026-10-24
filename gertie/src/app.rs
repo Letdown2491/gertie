@@ -8,12 +8,21 @@ use std::sync::Arc;
 const APP_IDENTITY: &str = "dev.gertie.gertie";
 
 pub fn run() {
-    let config = crate::config::Config::load();
+    // A config that fails to parse is reported in the window's status, not
+    // just stderr — a GUI user would never see stderr.
+    let (config, config_error) = match crate::config::Config::load() {
+        Ok(config) => (config, None),
+        Err(error) => (crate::config::Config::default(), Some(error)),
+    };
     let endpoint = config.selected_endpoint();
-    let endpoint_label = endpoint
-        .as_ref()
-        .map(|endpoint| format!("{} · {}", endpoint.name, endpoint.model))
-        .unwrap_or_else(|| "no endpoint configured".to_string());
+    let endpoint_label = if let Some(error) = config_error {
+        format!("config error — {error}")
+    } else {
+        endpoint
+            .as_ref()
+            .map(|endpoint| format!("{} · {}", endpoint.name, endpoint.model))
+            .unwrap_or_else(|| "no endpoint configured".to_string())
+    };
 
     let store = match crate::config::Config::data_dir() {
         Some(data_dir) => {

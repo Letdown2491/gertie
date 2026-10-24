@@ -38,18 +38,18 @@ impl Config {
         directories::ProjectDirs::from("dev", "gertie", "gertie").map(|dirs| dirs.data_dir().to_owned())
     }
 
-    /// Loads the user config; missing file is an empty config, not an error.
-    pub fn load() -> Self {
+    /// Loads the user config. A missing file is an empty config; a file
+    /// that fails to parse is a *reported* error, never a silent fallback —
+    /// the caller shows it in the UI.
+    pub fn load() -> Result<Self, String> {
         let Some(path) = Self::path() else {
-            return Self::default();
+            return Ok(Self::default());
         };
-        match std::fs::read_to_string(&path) {
-            Ok(raw) => toml::from_str(&raw).unwrap_or_else(|error| {
-                eprintln!("warning: could not parse {}: {error}", path.display());
-                Self::default()
-            }),
-            Err(_) => Self::default(),
-        }
+        let raw = std::fs::read_to_string(&path).map_err(|error| {
+            format!("could not read {}: {error}", path.display())
+        })?;
+        toml::from_str(&raw)
+            .map_err(|error| format!("could not parse {}: {error}", path.display()))
     }
 
     /// The endpoint gertie talks to, with its key resolved from the

@@ -1,5 +1,5 @@
 mod app;
-mod chat;
+pub mod chat;
 mod config;
 
 pub fn run() {

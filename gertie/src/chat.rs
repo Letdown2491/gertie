@@ -27,7 +27,9 @@ pub struct ChatView {
     provider: Option<Arc<OpenAICompatible>>,
     endpoint_label: String,
     sessions: Vec<gertie_core::SessionSummary>,
-    session_id: SessionId,
+    /// None until the first message — empty chats don't exist as rows, so
+    /// the sidebar shows only real conversations.
+    session_id: Option<SessionId>,
     messages: Vec<ChatMessage>,
     input: Entity<InputState>,
     list_state: ListState,
@@ -50,15 +52,9 @@ impl ChatView {
         .detach();
 
         let sessions = store.list_sessions().unwrap_or_default();
-        // Resume the newest session, or open a fresh one.
-        let session_id = sessions
-            .first()
-            .map(|summary| summary.id)
-            .unwrap_or_else(|| {
-                store
-                    .create_session("new chat")
-                    .expect("create first session")
-            });
+        // Resume the newest session if there is one; otherwise the first
+        // message creates the session (lazy, so no empty rows accumulate).
+        let session_id = sessions.first().map(|summary| summary.id);
 
         let mut view = Self {
             store,
@@ -76,19 +72,27 @@ impl ChatView {
         view
     }
 
+    /// The session the transcript is bound to, for tests and tooling.
+    pub fn session_id(&self) -> Option<SessionId> {
+        self.session_id
+    }
+
     /// Swaps the transcript for a session's stored messages.
     fn reload_session(&mut self, cx: &mut Context<Self>) {
-        self.messages = self
-            .store
-            .load_messages(self.session_id)
-            .unwrap_or_default()
-            .into_iter()
-            .map(|message| ChatMessage {
-                role: message.role,
-                text: message.content,
-                db_id: Some(message.id),
-            })
-            .collect();
+        self.messages = match self.session_id {
+            Some(session_id) => self
+                .store
+                .load_messages(session_id)
+                .unwrap_or_default()
+                .into_iter()
+                .map(|message| ChatMessage {
+                    role: message.role,
+                    text: message.content,
+                    db_id: Some(message.id),
+                })
+                .collect(),
+            None => Vec::new(),
+        };
         self.streaming = false;
         self.sync_list(cx);
     }
@@ -103,11 +107,9 @@ impl ChatView {
         if self.streaming {
             return;
         }
-        self.session_id = self
-            .store
-            .create_session("new chat")
-            .expect("create session");
-        self.sessions = self.store.list_sessions().unwrap_or_default();
+        // Sessions are created lazily by the first message; "New chat" just
+        // blanks the transcript until then.
+        self.session_id = None;
         self.messages.clear();
         self.sync_list(cx);
         window.focus(&self.input.read(cx).focus_handle(cx), cx);
@@ -122,7 +124,7 @@ impl ChatView {
         if self.streaming {
             return;
         }
-        self.session_id = session_id;
+        self.session_id = Some(session_id);
         self.reload_session(cx);
         window.focus(&self.input.read(cx).focus_handle(cx), cx);
     }
@@ -136,10 +138,25 @@ impl ChatView {
             .update(cx, |input, cx| input.set_value("", window, cx));
         window.focus(&self.input.read(cx).focus_handle(cx), cx);
 
+        // First message of a chat: the session is born here, titled by it.
+        let session_id = match self.session_id {
+            Some(session_id) => session_id,
+            None => {
+                let title: String = text.chars().take(48).collect();
+                let session_id = self
+                    .store
+                    .create_session(&title)
+                    .expect("create session");
+                self.session_id = Some(session_id);
+                self.sessions = self.store.list_sessions().unwrap_or_default();
+                session_id
+            }
+        };
+
         let parent = self.messages.last().and_then(|message| message.db_id);
         let db_id = self
             .store
-            .append_message(self.session_id, parent, Role::User, &text)
+            .append_message(session_id, parent, Role::User, &text)
             .ok();
         self.messages.push(ChatMessage {
             role: Role::User,
@@ -163,11 +180,10 @@ impl ChatView {
         };
 
         let store = self.store.clone();
-        let session_id = self.session_id;
         let parent = self.messages.last().and_then(|message| message.db_id);
-        let assistant_db = store
-            .append_message(session_id, parent, Role::Assistant, "")
-            .ok();
+        let assistant_db = self
+            .session_id
+            .and_then(|session_id| store.append_message(session_id, parent, Role::Assistant, "").ok());
 
         let request = Request {
             messages: self
@@ -178,19 +194,6 @@ impl ChatView {
             max_output_tokens: None,
         };
         let stream = provider.stream(request);
-
-        // Retitle from the first exchange; later sessions keep their name.
-        if self.messages.iter().filter(|m| m.role == Role::User).count() == 1 {
-            if let Some(first) = self
-                .messages
-                .iter()
-                .find(|message| message.role == Role::User)
-            {
-                let title: String = first.text.chars().take(48).collect();
-                let _ = store.retitle_session(session_id, &title);
-            }
-            self.sessions = store.list_sessions().unwrap_or_default();
-        }
 
         self.messages.push(ChatMessage {
             role: Role::Assistant,
@@ -355,15 +358,16 @@ impl Render for ChatView {
                             })),
                     )
                     .child(
-                        div()
-                            .flex_1()
-                            .min_h_0()
-                            .overflow_hidden()
-                            .px_4()
-                            .child(list(self.list_state.clone(), move |index, _window, cx| {
-                                view.update(cx, |view, cx| view.render_message(index, cx))
-                                    .unwrap_or_else(|_| div().into_any_element())
-                            })),
+                        // The transcript: flex sizing goes directly on the
+                        // list element — a wrapper div collapses it.
+                        list(self.list_state.clone(), move |index, _window, cx| {
+                            view.update(cx, |view, cx| view.render_message(index, cx))
+                                .unwrap_or_else(|_| div().into_any_element())
+                        })
+                        .flex_1()
+                        .min_h_0()
+                        .overflow_hidden()
+                        .px_4(),
                     ),
             )
             .child(
