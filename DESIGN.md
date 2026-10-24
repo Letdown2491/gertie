@@ -77,8 +77,12 @@ Shipped (M0–M5), in order:
 
 Deferred:
 
-- Worktree-per-tab, settings UI, cost dashboard. Parallel *chats* shipped as tabs; the
-  worktree half of the promise stays open (needs per-view tool registries).
+- Worktree tabs shipped (⎇ in the tab bar): a tab rooted at its own git worktree
+  (`<repo>/.gertie/worktrees/tab-N`, branched from HEAD, excluded via the local exclude —
+  never the user's .gitignore). Built-ins and agent tools re-root per tab; web/history/MCP/
+  skills carry over by name instead of duplicating connections. Worktrees persist across
+  runs (agent work is never deleted behind your back); reopen reuses by name.
+- Settings UI, cost dashboard.
 - Provider fallbacks/routing, Anthropic/Google native providers, plugin surface.
 
 ## Providers
@@ -212,10 +216,11 @@ Each type earns existence via distinct toolset or safety posture, not just a dif
 - Parallel sessions run against separate worktrees, visible simultaneously (M4).
 
 (The agents panel shipped post-M5: a toggleable column listing the chat's persisted worker
-runs, live report status. Parallel chats shipped as tabs — one window, multiple live
-sessions sharing workspace and approval queue. Worktree-per-tab and the settings UI stay
-deferred; the cost dashboard reduced to the token line — per-message cost needs persisted
-usage, not yet worth its storage.)
+runs, live report status. Parallel sessions shipped as tabs, including the worktree half:
+the ⎇ button opens a chat rooted at its own git worktree with a re-rooted tool registry, so
+two agents can edit the same repo without colliding. Settings UI stays deferred; the cost
+dashboard reduced to the token line — per-message cost needs persisted usage, not yet
+worth its storage.)
 
 ## Distribution
 
