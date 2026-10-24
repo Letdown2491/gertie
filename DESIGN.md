@@ -82,7 +82,13 @@ Deferred:
   never the user's .gitignore). Built-ins and agent tools re-root per tab; web/history/MCP/
   skills carry over by name instead of duplicating connections. Worktrees persist across
   runs (agent work is never deleted behind your back); reopen reuses by name.
-- Settings UI, cost dashboard, plugin surface.
+- *Settings UI*: shipped as a settings panel — the live config visible in-app (endpoints,
+  sandbox, search, MCP, skills, agents, config path), with the theme as the one writable
+  setting (persisted outside config.toml). The config file remains the single source of
+  truth; in-place TOML editing stays out on purpose (comment/unknown-key round-trip risk
+  for zero capability the file doesn't already provide better).
+- Cost dashboard (reduced to the token line), plugin surface, native Anthropic/Google
+  providers.
 - Settings UI, cost dashboard, plugin surface, native Anthropic/Google providers.
 
 ## Providers
@@ -218,9 +224,9 @@ Each type earns existence via distinct toolset or safety posture, not just a dif
 (The agents panel shipped post-M5: a toggleable column listing the chat's persisted worker
 runs, live report status. Parallel sessions shipped as tabs, including the worktree half:
 the ⎇ button opens a chat rooted at its own git worktree with a re-rooted tool registry, so
-two agents can edit the same repo without colliding. Settings UI stays deferred; the cost
-dashboard reduced to the token line — per-message cost needs persisted usage, not yet
-worth its storage.)
+two agents can edit the same repo without colliding. The settings panel closed the UI
+scope: live config visible in-app, theme persisted. Remaining deferred: cost dashboard
+(reduced to the token line), plugin surface, native Anthropic/Google providers.)
 
 ## Distribution
 
