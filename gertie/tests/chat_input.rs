@@ -54,6 +54,7 @@ fn fixture() -> Fixture {
                     None,
                     gertie_tools::builtin_tools(Path::new(".")),
                     "no endpoint configured".into(),
+                    None,
                     window,
                     cx,
                 )

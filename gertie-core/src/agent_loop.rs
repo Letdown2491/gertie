@@ -83,6 +83,22 @@ pub fn tool_specs(tools: &ToolRegistry) -> Vec<ToolSpec> {
 
 use std::collections::BTreeMap;
 
+/// Everything one turn needs. The loop grows no more positional
+/// parameters: system prompt, permission broker, and whatever M4+
+/// adds are fields here.
+pub struct TurnSpec {
+    pub provider: Arc<dyn crate::provider::Provider>,
+    pub tools: ToolRegistry,
+    pub history: SharedHistory,
+    pub user_message: String,
+    pub snapshots: Option<Arc<SnapshotStore>>,
+    pub context_window: Option<u64>,
+    /// Sent as the first message of every request, never stored in
+    /// history: it is per-turn framing, not conversation record (the
+    /// DB stays canonical; the next turn may have a different index).
+    pub system_prompt: Option<String>,
+}
+
 /// Runs one user turn to completion: request → (text | tool calls)* →
 /// tool execution → repeat, until the model answers without tools, the
 /// round budget is spent, or an error surfaces.
@@ -98,14 +114,16 @@ use std::collections::BTreeMap;
 /// When `context_window` is set, the loop compacts: once a round's
 /// observed prompt size crosses 80% of the window, history is replaced
 /// by a structured summary plus a safe tail before the next request.
-pub fn run_turn(
-    provider: Arc<dyn crate::provider::Provider>,
-    tools: ToolRegistry,
-    history: SharedHistory,
-    user_message: String,
-    snapshots: Option<Arc<SnapshotStore>>,
-    context_window: Option<u64>,
-) -> BoxStream<'static, LoopEvent> {
+pub fn run_turn(spec: TurnSpec) -> BoxStream<'static, LoopEvent> {
+    let TurnSpec {
+        provider,
+        tools,
+        history,
+        user_message,
+        snapshots,
+        context_window,
+        system_prompt,
+    } = spec;
     let specs = tool_specs(&tools);
     Box::pin(async_stream::stream! {
         let mut request = Request {
@@ -152,7 +170,19 @@ pub fn run_turn(
                     }
                 }
             }
-            request.messages = history.lock().await.clone();
+            request.messages = history
+                .lock()
+                .await
+                .iter()
+                .map(WireMessage::clone)
+                .collect::<Vec<_>>();
+            // System prompt is framing, not record: prepended to the
+            // request, absent from history and the DB.
+            if let Some(prompt) = &system_prompt {
+                request
+                    .messages
+                    .insert(0, WireMessage { role: Role::System, content: Some(prompt.clone()), ..WireMessage::default() });
+            }
 
             let mut stream = provider.stream(request.clone());
             let mut assistant_text = String::new();
@@ -403,10 +433,13 @@ mod tests {
     /// tool call, turn two the final text.
     struct ScriptedProvider {
         scripts: std::sync::Mutex<Vec<Vec<Event>>>,
+        /// Requests seen, for assertions about what the loop sends.
+        seen: std::sync::Mutex<Vec<crate::Request>>,
     }
 
     impl crate::provider::Provider for ScriptedProvider {
-        fn stream(&self, _request: crate::Request) -> BoxStream<'static, Event> {
+        fn stream(&self, request: crate::Request) -> BoxStream<'static, Event> {
+            self.seen.lock().unwrap().push(request);
             let script = self.scripts.lock().unwrap().remove(0);
             Box::pin(futures_util::stream::iter(script))
         }
@@ -489,6 +522,24 @@ mod tests {
         )
     }
 
+    /// Boring TurnSpec for tests; override fields for the special cases.
+    fn turn(
+        provider: Arc<dyn crate::provider::Provider>,
+        tools: ToolRegistry,
+        history: SharedHistory,
+        message: &str,
+    ) -> TurnSpec {
+        TurnSpec {
+            provider,
+            tools,
+            history,
+            user_message: message.into(),
+            snapshots: None,
+            context_window: None,
+            system_prompt: None,
+        }
+    }
+
     fn tool_result(events: &[LoopEvent], name: &str) -> String {
         events
             .iter()
@@ -506,6 +557,7 @@ mod tests {
     #[test]
     fn plain_answers_finish_without_tool_rounds() {
         let provider = Arc::new(ScriptedProvider {
+            seen: std::sync::Mutex::new(Vec::new()),
             scripts: std::sync::Mutex::new(vec![vec![
                 Event::Token { delta: "hi".into() },
                 Event::Done,
@@ -513,14 +565,7 @@ mod tests {
         });
         let history: SharedHistory = Arc::new(tokio::sync::Mutex::new(Vec::new()));
         let events = drain(
-            run_turn(
-                provider,
-                registry(&[]),
-                history.clone(),
-                "hello".into(),
-                None,
-                None,
-            ),
+            run_turn(turn(provider, registry(&[]), history.clone(), "hello")),
             |_| unreachable!("no tools to prompt for"),
         );
 
@@ -539,6 +584,7 @@ mod tests {
     #[test]
     fn read_only_tools_run_without_prompting() {
         let provider = Arc::new(ScriptedProvider {
+            seen: std::sync::Mutex::new(Vec::new()),
             scripts: std::sync::Mutex::new(vec![
                 vec![
                     Event::ToolCall {
@@ -559,14 +605,7 @@ mod tests {
         let peek: Arc<dyn Tool> = Arc::new(StubTool::new("peek", false, "peeked"));
         let history: SharedHistory = Arc::new(tokio::sync::Mutex::new(Vec::new()));
         let events = drain(
-            run_turn(
-                provider,
-                registry(&[peek]),
-                history.clone(),
-                "look".into(),
-                None,
-                None,
-            ),
+            run_turn(turn(provider, registry(&[peek]), history.clone(), "look")),
             |_| panic!("read-only tools must not prompt"),
         );
 
@@ -595,6 +634,7 @@ mod tests {
             (PermissionDecision::Deny, "error: denied by user"),
         ] {
             let provider = Arc::new(ScriptedProvider {
+                seen: std::sync::Mutex::new(Vec::new()),
                 scripts: std::sync::Mutex::new(vec![
                     vec![
                         Event::ToolCall {
@@ -610,14 +650,7 @@ mod tests {
             let writer: Arc<dyn Tool> = Arc::new(StubTool::new("write_file", true, "wrote"));
             let history: SharedHistory = Arc::new(tokio::sync::Mutex::new(Vec::new()));
             let events = drain(
-                run_turn(
-                    provider,
-                    registry(&[writer]),
-                    history.clone(),
-                    "go".into(),
-                    None,
-                    None,
-                ),
+                run_turn(turn(provider, registry(&[writer]), history.clone(), "go")),
                 |call| {
                     assert_eq!(call.name, "write_file");
                     decided
@@ -642,6 +675,7 @@ mod tests {
         std::fs::write(&target, "before").unwrap();
 
         let provider = Arc::new(ScriptedProvider {
+            seen: std::sync::Mutex::new(Vec::new()),
             scripts: std::sync::Mutex::new(vec![
                 vec![
                     Event::ToolCall {
@@ -655,17 +689,14 @@ mod tests {
             ]),
         });
         let editor: Arc<dyn Tool> = Arc::new(StubTool::new("edit_file", true, "edited"));
-        let events = drain(
-            run_turn(
-                provider,
-                registry(&[editor]),
-                Arc::new(tokio::sync::Mutex::new(Vec::new())),
-                String::new(),
-                Some(snapshots.clone()),
-                None,
-            ),
-            |_| PermissionDecision::Approve,
+        let mut spec = turn(
+            provider,
+            registry(&[editor]),
+            Arc::new(tokio::sync::Mutex::new(Vec::new())),
+            "",
         );
+        spec.snapshots = Some(snapshots.clone());
+        let events = drain(run_turn(spec), |_| PermissionDecision::Approve);
 
         assert_eq!(tool_result(&events, "edit_file"), "edited");
         // Exactly one object: the "before" content, snapshotted pre-edit.
@@ -678,6 +709,7 @@ mod tests {
     #[test]
     fn unknown_tools_report_back_rather_than_die() {
         let provider = Arc::new(ScriptedProvider {
+            seen: std::sync::Mutex::new(Vec::new()),
             scripts: std::sync::Mutex::new(vec![
                 vec![
                     Event::ToolCall {
@@ -692,14 +724,7 @@ mod tests {
         });
         let history: SharedHistory = Arc::new(tokio::sync::Mutex::new(Vec::new()));
         let events = drain(
-            run_turn(
-                provider,
-                registry(&[]),
-                history.clone(),
-                "go".into(),
-                None,
-                None,
-            ),
+            run_turn(turn(provider, registry(&[]), history.clone(), "go")),
             |_| panic!("nothing to prompt for"),
         );
 
@@ -709,6 +734,7 @@ mod tests {
     #[test]
     fn hard_blocked_calls_never_reach_the_prompt() {
         let provider = Arc::new(ScriptedProvider {
+            seen: std::sync::Mutex::new(Vec::new()),
             scripts: std::sync::Mutex::new(vec![
                 vec![
                     Event::ToolCall {
@@ -722,14 +748,12 @@ mod tests {
             ]),
         });
         let events = drain(
-            run_turn(
+            run_turn(turn(
                 provider,
                 registry(&[Arc::new(BlockedTool)]),
                 Arc::new(tokio::sync::Mutex::new(Vec::new())),
-                "go".into(),
-                None,
-                None,
-            ),
+                "go",
+            )),
             |_| panic!("a vet failure must not prompt — there is nothing to approve"),
         );
 
@@ -741,6 +765,7 @@ mod tests {
         // Round 1 reports 90% of a 100k window; the loop should compact
         // (script 2 is the summarizer's answer) before round 3 finishes.
         let provider = Arc::new(ScriptedProvider {
+            seen: std::sync::Mutex::new(Vec::new()),
             scripts: std::sync::Mutex::new(vec![
                 vec![
                     Event::Usage {
@@ -770,17 +795,11 @@ mod tests {
         });
         let peek: Arc<dyn Tool> = Arc::new(StubTool::new("peek", false, "peeked"));
         let history: SharedHistory = Arc::new(tokio::sync::Mutex::new(Vec::new()));
-        let events = drain(
-            run_turn(
-                provider,
-                registry(&[peek]),
-                history.clone(),
-                "go".into(),
-                None,
-                Some(100_000),
-            ),
-            |_| panic!("read-only tools must not prompt"),
-        );
+        let mut spec = turn(provider, registry(&[peek]), history.clone(), "go");
+        spec.context_window = Some(100_000);
+        let events = drain(run_turn(spec), |_| {
+            panic!("read-only tools must not prompt")
+        });
 
         assert!(
             events
@@ -800,20 +819,13 @@ mod tests {
     #[test]
     fn below_the_window_history_is_untouched() {
         let provider = Arc::new(ScriptedProvider {
+            seen: std::sync::Mutex::new(Vec::new()),
             scripts: std::sync::Mutex::new(vec![vec![Event::Done]]),
         });
         let history: SharedHistory = Arc::new(tokio::sync::Mutex::new(Vec::new()));
-        let events = drain(
-            run_turn(
-                provider,
-                registry(&[]),
-                history.clone(),
-                "go".into(),
-                None,
-                Some(100_000),
-            ),
-            |_| panic!("nothing to prompt for"),
-        );
+        let mut spec = turn(provider, registry(&[]), history.clone(), "go");
+        spec.context_window = Some(100_000);
+        let events = drain(run_turn(spec), |_| panic!("nothing to prompt for"));
         assert!(
             !events
                 .iter()
@@ -825,6 +837,27 @@ mod tests {
                 .iter()
                 .any(|message| message.role == Role::System)
         );
+    }
+
+    #[test]
+    fn system_prompt_frames_every_request_but_stays_out_of_history() {
+        let provider = Arc::new(ScriptedProvider {
+            seen: std::sync::Mutex::new(Vec::new()),
+            scripts: std::sync::Mutex::new(vec![vec![Event::Done]]),
+        });
+        let history: SharedHistory = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let mut spec = turn(provider.clone(), registry(&[]), history.clone(), "go");
+        spec.system_prompt = Some("You are gertie.".into());
+        let _ = drain(run_turn(spec), |_| panic!("nothing to prompt for"));
+
+        let seen = provider.seen.lock().unwrap();
+        assert_eq!(seen[0].messages.first().unwrap().role, Role::System);
+        // The DB-bound history holds the conversation, not the framing:
+        // no System message ever lands there.
+        let history = history.blocking_lock();
+        assert!(history.len() <= 2);
+        assert!(history.iter().all(|message| message.role != Role::System));
+        assert_eq!(history[0].role, Role::User);
     }
 
     #[test]

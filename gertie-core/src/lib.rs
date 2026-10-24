@@ -10,7 +10,9 @@ pub mod request;
 pub mod snapshot;
 pub mod tool;
 
-pub use agent_loop::{LoopEvent, PermissionDecision, SharedHistory, ToolRegistry, run_turn};
+pub use agent_loop::{
+    LoopEvent, PermissionDecision, SharedHistory, ToolRegistry, TurnSpec, run_turn,
+};
 pub use provider::Provider;
 pub use request::{Request, ToolCall, ToolSpec, WireMessage};
 pub use snapshot::{Checkpoint, CheckpointId, SnapshotStore};

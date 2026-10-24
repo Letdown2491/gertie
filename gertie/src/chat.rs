@@ -4,7 +4,7 @@
 use futures_util::StreamExt as _;
 use gertie_core::{
     LoopEvent, MessageId, PermissionDecision, Role, SessionId, SessionStore, SharedHistory,
-    SnapshotStore, ToolCall, ToolRegistry, run_turn,
+    SnapshotStore, ToolCall, ToolRegistry, TurnSpec, run_turn,
 };
 use gertie_providers::OpenAICompatible;
 use gpui_kit::component::button::Button;
@@ -53,6 +53,9 @@ pub struct ChatView {
     snapshots: Option<Arc<SnapshotStore>>,
     tools: ToolRegistry,
     endpoint_label: String,
+    /// Per-turn request framing (identity, policy, skill index). Not
+    /// part of history: the DB stays canonical.
+    system_prompt: Option<String>,
     sessions: Vec<gertie_core::SessionSummary>,
     /// None until the first message — empty chats don't exist as rows, so
     /// the sidebar shows only real conversations.
@@ -77,12 +80,16 @@ pub struct ChatView {
 }
 
 impl ChatView {
+    /// The constructor is UI-wiring, not an abstraction boundary; every
+    /// argument is a genuine dependency of the view.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         store: Arc<SessionStore>,
         provider: Option<Arc<OpenAICompatible>>,
         snapshots: Option<Arc<SnapshotStore>>,
         tools: ToolRegistry,
         endpoint_label: String,
+        system_prompt: Option<String>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -105,6 +112,7 @@ impl ChatView {
             snapshots,
             tools,
             endpoint_label,
+            system_prompt,
             sessions,
             session_id,
             turns: Vec::new(),
@@ -258,14 +266,15 @@ impl ChatView {
 
         let context_window = provider.context_window();
         let provider: Arc<dyn gertie_core::Provider> = provider;
-        let stream = run_turn(
+        let stream = run_turn(TurnSpec {
             provider,
-            self.tools.clone(),
-            self.history.clone(),
-            user_text,
-            self.snapshots.clone(),
+            tools: self.tools.clone(),
+            history: self.history.clone(),
+            user_message: user_text,
+            snapshots: self.snapshots.clone(),
             context_window,
-        );
+            system_prompt: self.system_prompt.clone(),
+        });
 
         self.streaming = true;
         self.streaming_assistant = None;

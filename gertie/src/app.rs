@@ -6,6 +6,7 @@ use gpui_kit::{
     App, Bounds, TitlebarOptions, WindowBounds, WindowOptions, application, open_window,
     prelude::*, px, size,
 };
+use std::path::PathBuf;
 use std::sync::Arc;
 
 /// The Wayland app_id / X11 WM_CLASS, matching the desktop entry.
@@ -66,6 +67,47 @@ pub fn run() {
         );
     let mut tools = gertie_tools::builtin_tools(&workspace_root);
 
+    // Skills: user dir + project dir (project overrides by name), loaded
+    // on demand through load_skill; only the index rides the system
+    // prompt. Discovery problems are warnings, never a failed launch.
+    let skills_user = crate::config::Config::path()
+        .map(|path| path.parent().unwrap().join("skills"))
+        .unwrap_or_else(|| PathBuf::from(".gertie-skills"));
+    let skills_project = workspace_root.join(".gertie/skills");
+    let (skills, skill_warnings) = gertie_tools::skills::discover(&skills_user, &skills_project);
+    if !skills.is_empty() {
+        let count = skills.len();
+        Arc::get_mut(&mut tools)
+            .expect("registry not yet shared")
+            .insert(
+                "load_skill".into(),
+                Arc::new(gertie_tools::skills::LoadSkill::new(&skills)),
+            );
+        endpoint_label.push_str(&format!(" · skills×{count}"));
+    }
+    for warning in &skill_warnings {
+        endpoint_label.push_str(&format!(" — ⚠ {warning}"));
+    }
+
+    // The system prompt: identity, the one policy paragraph the model
+    // must know, the skill index. Terse by the two-loads rule — every
+    // line is context paid on every turn.
+    let system_prompt = {
+        let mut prompt = format!(
+            "You are gertie, a coding agent working in {}.\n\
+             Read-only tools run without asking; anything that changes the \
+             world shows the user a card and waits. Write code, run the \
+             tests, report plainly.",
+            workspace_root.display()
+        );
+        let index = gertie_tools::skills::index_prompt(&skills);
+        if !index.is_empty() {
+            prompt.push_str("\n\n");
+            prompt.push_str(&index);
+        }
+        Some(prompt)
+    };
+
     // MCP servers connect at startup; a server that won't start is a
     // status-line warning, never a failed launch — gertie's local tools
     // carry the session alone if needed.
@@ -120,6 +162,7 @@ pub fn run() {
             snapshots.clone(),
             tools.clone(),
             endpoint_label.clone(),
+            system_prompt.clone(),
             cx,
         );
         cx.activate(true);
@@ -132,6 +175,7 @@ fn open_chat_window(
     snapshots: Option<Arc<gertie_core::SnapshotStore>>,
     tools: gertie_core::ToolRegistry,
     endpoint_label: String,
+    system_prompt: Option<String>,
     cx: &mut App,
 ) {
     let bounds = Bounds::centered(None, size(px(1080.), px(760.)), cx);
@@ -155,6 +199,7 @@ fn open_chat_window(
                     snapshots,
                     tools,
                     endpoint_label,
+                    system_prompt,
                     window,
                     cx,
                 )

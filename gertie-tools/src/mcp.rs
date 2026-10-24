@@ -37,7 +37,7 @@ const PROTOCOL_VERSION: &str = "2024-11-05";
 
 /// Descriptions from servers are untrusted: strip control characters
 /// (terminal-escape and prompt-injection hygiene) and cap the length.
-fn sanitize_description(raw: &str, cap: usize) -> String {
+pub(crate) fn sanitize_description(raw: &str, cap: usize) -> String {
     let filtered: String = raw
         .chars()
         .filter(|c| !(c.is_control() && !c.is_whitespace()))
