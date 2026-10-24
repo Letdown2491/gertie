@@ -1,13 +1,14 @@
 # gertie config — copy to ~/.config/gertie/config.toml and edit.
-# Keys are read from the environment (preferred) or the `api_key` field.
-# IMPORTANT: `[[endpoints]]` is a TOML table header — uncomment it too,
-# not just the fields under it.
+# Keys resolve in order: api_key_env → GERTIE_<NAME>_API_KEY / <NAME>_API_KEY
+# env vars → a literal `api_key` (allowed, but gertie warns about it in the
+# status line, and the file should be chmod 600 if you use one).
 
 [[endpoints]]
 name = "ppq"
 base_url = "https://api.ppq.ai/v1"
 model = "glm-5.3-flash"
 api_key_env = "PPQ_API_KEY"
+# api_key = "sk-your-key"   # or inline, if you must
 
 # A local model needs no key:
 # [[endpoints]]

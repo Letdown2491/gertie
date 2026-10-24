@@ -92,4 +92,28 @@ impl Config {
             api_key,
         })
     }
+
+    /// Keys sitting in plaintext config are allowed but get called out,
+    /// and a world-readable config file is flagged (DESIGN.md: warn +
+    /// 0600, never silently accept).
+    pub fn key_warnings(&self) -> Vec<String> {
+        let mut warnings = Vec::new();
+        if self.endpoints.iter().any(|endpoint| endpoint.api_key.is_some()) {
+            warnings.push(
+                "a literal API key is set in config.toml — prefer api_key_env".to_string(),
+            );
+        }
+        if let Some(path) = Self::path() {
+            if let Ok(metadata) = std::fs::metadata(&path) {
+                use std::os::unix::fs::PermissionsExt;
+                let mode = metadata.permissions().mode() & 0o777;
+                if mode & 0o077 != 0 {
+                    warnings.push(format!(
+                        "config.toml is readable by others (mode {mode:o}) — chmod 600 it"
+                    ));
+                }
+            }
+        }
+        warnings
+    }
 }

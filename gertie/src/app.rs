@@ -18,10 +18,14 @@ pub fn run() {
     let endpoint_label = if let Some(error) = config_error {
         format!("config error — {error}")
     } else {
-        endpoint
+        let mut label = endpoint
             .as_ref()
             .map(|endpoint| format!("{} · {}", endpoint.name, endpoint.model))
-            .unwrap_or_else(|| "no endpoint configured".to_string())
+            .unwrap_or_else(|| "no endpoint configured".to_string());
+        for warning in config.key_warnings() {
+            label.push_str(&format!(" — ⚠ {warning}"));
+        }
+        label
     };
 
     let store = match crate::config::Config::data_dir() {
