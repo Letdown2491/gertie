@@ -54,6 +54,18 @@ pub fn run(prompt: Option<String>, yes: bool, config_path: Option<PathBuf>) -> i
     }
 
     eprintln!("· {}", boot.label);
+    for warning in boot.config.key_warnings() {
+        eprintln!("⚠ {warning}");
+    }
+    // A key that didn't resolve means a guaranteed 401 — refuse to send
+    // the doomed request; the warning above carries the fix.
+    if boot
+        .config
+        .selected_endpoint()
+        .is_some_and(|endpoint| endpoint.api_key.is_none())
+    {
+        return 1;
+    }
     let context_window = provider.context_window();
     let provider: Arc<dyn gertie_core::Provider> = provider;
 

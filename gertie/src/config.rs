@@ -240,6 +240,17 @@ impl Config {
                 ));
             }
         }
+        // A key that resolves to nothing means a guaranteed 401 on the
+        // first request — say so up front, with the fix, not after.
+        if let Some(endpoint) = self.selected_endpoint()
+            && endpoint.api_key.is_none()
+        {
+            warnings.push(format!(
+                "endpoint {}: no API key resolved — set the api_key_env variable \
+                 in your environment, or api_key in config.toml",
+                endpoint.name
+            ));
+        }
         warnings
     }
 }
