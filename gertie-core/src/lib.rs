@@ -278,6 +278,16 @@ impl SessionStore {
         Ok(rows)
     }
 
+    /// Whether a worker run has its report yet: any assistant row means
+    /// the run finished (or failed loudly) — the panel's status.
+    pub fn worker_run_reported(&self, session_id: SessionId) -> bool {
+        let connection = self.connection.lock().unwrap();
+        connection
+            .prepare("SELECT 1 FROM messages WHERE session_id = ?1 AND role = 'assistant' LIMIT 1")
+            .and_then(|mut statement| statement.query_row([session_id.0 as i64], |_| Ok(())))
+            .is_ok()
+    }
+
     /// Newest session first, for the sidebar.
     pub fn list_sessions(&self) -> Result<Vec<SessionSummary>, rusqlite::Error> {
         let connection = self.connection.lock().unwrap();

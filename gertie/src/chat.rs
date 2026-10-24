@@ -89,6 +89,10 @@ pub struct ChatView {
     /// click confirms. A destructive action with no dialog needs a
     /// speed bump.
     confirming_delete: Option<SessionId>,
+    /// The agents panel: open? and this chat's worker runs with report
+    /// status. Refreshed on agent-tool events, not per render.
+    agents_open: bool,
+    worker_runs: Vec<(gertie_core::SessionSummary, bool)>,
     list_state: ListState,
     streaming: bool,
     /// Bytes of the streaming assistant row already written to the
@@ -163,6 +167,8 @@ impl ChatView {
             renaming: None,
             rename_input,
             confirming_delete: None,
+            agents_open: false,
+            worker_runs: Vec::new(),
             // Tail: follow new content while pinned to the bottom, stop
             // when the user scrolls up, resume when they return.
             list_state: {
@@ -244,6 +250,7 @@ impl ChatView {
         // blanks the transcript until then.
         self.session_id = None;
         self.session_scope.set(None);
+        self.refresh_agent_runs(cx);
         self.turns.clear();
         self.last_db_id = None;
         self.streaming_assistant = None;
@@ -263,8 +270,40 @@ impl ChatView {
         }
         self.session_id = Some(session_id);
         self.session_scope.set(Some(session_id));
+        self.refresh_agent_runs(cx);
         self.reload_session(cx);
         window.focus(&self.input.read(cx).focus_handle(cx), cx);
+    }
+
+    /// The agents panel toggle: opens/closes and refreshes the run list.
+    fn toggle_agents(
+        &mut self,
+        _event: &gpui_kit::ClickEvent,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.agents_open = !self.agents_open;
+        self.refresh_agent_runs(cx);
+    }
+
+    /// Reloads this chat's worker runs (summary + report status). Cheap
+    /// queries on agent-tool events only — never per render.
+    fn refresh_agent_runs(&mut self, cx: &mut Context<Self>) {
+        self.worker_runs = self
+            .session_id
+            .map(|session| {
+                self.store
+                    .list_child_sessions(session)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|summary| {
+                        let reported = self.store.worker_run_reported(summary.id);
+                        (summary, reported)
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        cx.notify();
     }
 
     /// Puts a sidebar row into rename mode, prefilled with its title.
@@ -324,6 +363,7 @@ impl ChatView {
                 self.history.blocking_lock().clear();
             }
             self.sessions = self.store.list_sessions().unwrap_or_default();
+            self.refresh_agent_runs(cx);
             self.sync_list(cx);
         } else {
             self.confirming_delete = Some(session_id);
@@ -552,12 +592,18 @@ impl ChatView {
         self.activity = format!("running {}…", call.name);
         self.flush_stream(cx);
         self.streaming_assistant = None;
+        let dispatches_workers = call.name.starts_with("agent_");
         self.turns.push(Turn::Tool {
             call,
             status: ToolStatus::Running,
             auto_approved: true,
             worker: false,
         });
+        if dispatches_workers {
+            // The worker run's child session exists once the tool starts
+            // executing; a second refresh lands with its result.
+            self.refresh_agent_runs(cx);
+        }
         self.sync_list(cx);
     }
 
@@ -588,6 +634,8 @@ impl ChatView {
             auto_approved: false,
             worker: true,
         });
+        // A worker is mid-run: its child session exists by now.
+        self.refresh_agent_runs(cx);
         self.sync_list(cx);
     }
 
@@ -596,6 +644,10 @@ impl ChatView {
     fn on_tool_result(&mut self, call_id: &str, name: &str, result: &str, cx: &mut Context<Self>) {
         self.activity = "thinking…".into();
         self.streaming_assistant = None;
+        if name.starts_with("agent_") {
+            // The worker's report row is on disk; the panel flips to done.
+            self.refresh_agent_runs(cx);
+        }
 
         let arguments = self
             .turns
@@ -867,6 +919,63 @@ impl ChatView {
             )
             .into_any_element()
     }
+
+    /// The agents panel: this chat's worker runs, oldest first, with a
+    /// report status per run. A live org-chart in miniature — dispatch,
+    /// watch, inspect later via search_history.
+    fn render_agents_panel(&self, cx: &Context<Self>) -> AnyElement {
+        let theme = cx.theme();
+        v_flex()
+            .id("agents-panel")
+            .w(px(240.))
+            .h_full()
+            .flex_shrink_0()
+            .border_l_1()
+            .border_color(theme.border)
+            .p_2()
+            .gap_1()
+            .overflow_y_scroll()
+            .child(
+                div()
+                    .text_size(px(11.))
+                    .text_color(theme.muted_foreground)
+                    .child("WORKER RUNS"),
+            )
+            .when(self.worker_runs.is_empty(), |col| {
+                col.child(
+                    div()
+                        .text_size(px(12.))
+                        .text_color(theme.muted_foreground)
+                        .child("none yet — dispatch an agent and its run shows up here"),
+                )
+            })
+            .children(self.worker_runs.iter().map(|(summary, reported)| {
+                h_flex()
+                    .gap_1()
+                    .items_center()
+                    .min_w_0()
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .text_size(px(12.))
+                            .child(summary.title.clone()),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(11.))
+                            .flex_shrink_0()
+                            .text_color(if *reported {
+                                theme.muted_foreground
+                            } else {
+                                theme.accent
+                            })
+                            .child(if *reported { "done" } else { "running…" }),
+                    )
+            }))
+            .into_any_element()
+    }
 }
 
 /// One-line summary of what the call targets, for the card header.
@@ -982,6 +1091,13 @@ impl Render for ChatView {
                         h_flex()
                             .gap_2()
                             .items_center()
+                            .child(
+                                Button::new("toggle-agents")
+                                    .label("agents")
+                                    .small()
+                                    .ghost()
+                                    .on_click(cx.listener(Self::toggle_agents)),
+                            )
                             .when(busy, |row| {
                                 row.child(Spinner::new().small().color(cx.theme().accent))
                             })
@@ -1130,7 +1246,11 @@ impl Render for ChatView {
                                         ),
                                 )
                             }),
-                    ),
+                    )
+                    // The agents panel: this chat's worker runs, live.
+                    .when(self.agents_open, |row| {
+                        row.child(self.render_agents_panel(cx))
+                    }),
             )
             .child(
                 h_flex()
