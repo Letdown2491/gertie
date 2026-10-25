@@ -1,22 +1,22 @@
 //! The M2 chat: session sidebar + transcript + the agent loop, with tool
 //! cards that gate mutating calls behind approve/deny.
 
-use crate::settings::SettingsSummary;
+use crate::bootstrap::Reloaded;
+use crate::settings_edit::{SettingsEvent, SettingsPanelView};
 use futures_util::StreamExt as _;
 use gertie_core::{
     LoopEvent, MessageId, PermissionBroker, PermissionDecision, Role, SessionId, SessionStore,
     SharedHistory, SnapshotStore, ToolCall, ToolRegistry, TurnSpec, run_turn,
 };
 use gertie_providers::AnyProvider;
-use gpui_kit::component::ThemeMode;
 use gpui_kit::component::button::{Button, ButtonCustomVariant, ButtonVariants as _};
 use gpui_kit::component::input::{Input, InputEvent, InputState, Textarea, TextareaState};
 use gpui_kit::component::spinner::Spinner;
 use gpui_kit::component::{ActiveTheme, Sizable as _, h_flex, v_flex};
 use gpui_kit::{
-    AnyElement, App, AppContext as _, Context, Entity, Focusable, IntoElement, ListAlignment,
-    ListState, ParentElement, Render, SharedString, StatefulInteractiveElement as _, Styled,
-    Window, div, list, prelude::*, px,
+    AnyElement, App, AppContext as _, Context, Entity, EventEmitter, Focusable, IntoElement,
+    ListAlignment, ListState, ParentElement, Render, SharedString, StatefulInteractiveElement as _,
+    Styled, Window, div, list, prelude::*, px,
 };
 use std::sync::Arc;
 use std::time::Duration;
@@ -98,8 +98,9 @@ pub struct ChatView {
     /// One slot — opening one closes the other.
     panel: Panel,
     worker_runs: Vec<(gertie_core::SessionSummary, bool)>,
-    /// The effective configuration, for the settings panel.
-    settings: Arc<SettingsSummary>,
+    /// The settings editor (summary + form) — its Saved event bubbles
+    /// to the workspace, which reloads the bootstrap and applies here.
+    settings_panel: Entity<SettingsPanelView>,
     list_state: ListState,
     streaming: bool,
     /// Bytes of the streaming assistant row already written to the
@@ -121,8 +122,8 @@ impl ChatView {
         system_prompt: Option<String>,
         broker: Arc<PermissionBroker>,
         session_scope: gertie_core::SessionScope,
-        // The effective configuration, for the settings panel.
-        settings: Arc<SettingsSummary>,
+        // The settings editor over the live config.
+        settings_panel: Entity<SettingsPanelView>,
         // Resume the newest stored session (window open), or start
         // blank (a new tab — two views on one session would diverge).
         resume: bool,
@@ -148,6 +149,16 @@ impl ChatView {
                 if let InputEvent::PressEnter { .. } = event {
                     this.commit_rename(window, cx)
                 }
+            },
+        )
+        .detach();
+        // A settings save bubbles to the workspace, which reloads the
+        // bootstrap and pushes the fresh provider into every tab.
+        cx.subscribe_in(
+            &settings_panel,
+            window,
+            |_this, _, event: &SettingsEvent, _, cx| match event {
+                SettingsEvent::Saved => cx.emit(ChatViewEvent::ConfigSaved),
             },
         )
         .detach();
@@ -192,7 +203,7 @@ impl ChatView {
             confirming_delete: None,
             panel: Panel::None,
             worker_runs: Vec::new(),
-            settings,
+            settings_panel,
             // Tail: follow new content while pinned to the bottom, stop
             // when the user scrolls up, resume when they return.
             list_state: {
@@ -345,14 +356,6 @@ impl ChatView {
             Panel::Settings
         };
         self.total_usage = self.store.total_usage();
-        cx.notify();
-    }
-
-    /// Theme switch: applies immediately and persists — UI state, kept
-    /// out of the user's config.toml.
-    fn set_theme(&mut self, mode: ThemeMode, cx: &mut Context<Self>) {
-        gpui_kit::component::Theme::change(mode, None, cx);
-        crate::settings::store_theme(mode);
         cx.notify();
     }
 
@@ -1054,144 +1057,6 @@ impl ChatView {
             }))
             .into_any_element()
     }
-
-    /// The settings view: what's actually in force, and where to change
-    /// it. The config file stays the single source of truth — the panel
-    /// edits nothing except the theme (UI state, stored separately).
-    fn render_settings_panel(&self, cx: &Context<Self>) -> AnyElement {
-        let theme = cx.theme();
-        let current_mode = theme.mode;
-        let theme_button = |label: &'static str, mode: ThemeMode, id: &'static str| {
-            let button = Button::new(id).label(label).xsmall();
-            let button = if current_mode == mode {
-                button.primary()
-            } else {
-                button.ghost()
-            };
-            button.on_click(cx.listener(move |this, _, _, cx| this.set_theme(mode, cx)))
-        };
-        let section = |title: &'static str| {
-            div()
-                .mt_3()
-                .mb_0p5()
-                .text_size(px(11.))
-                .text_color(theme.muted_foreground)
-                .child(title)
-        };
-        let row = |left: String, right: String, accent: bool| {
-            h_flex()
-                .gap_2()
-                .items_center()
-                .min_w_0()
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .truncate()
-                        .text_size(px(12.))
-                        .child(left),
-                )
-                .child(
-                    div()
-                        .text_size(px(11.))
-                        .flex_shrink_0()
-                        .text_color(if accent {
-                            theme.accent
-                        } else {
-                            theme.muted_foreground
-                        })
-                        .child(right),
-                )
-        };
-
-        v_flex()
-            .id("settings-panel")
-            .w(px(260.))
-            .h_full()
-            .flex_shrink_0()
-            .border_l_1()
-            .border_color(theme.border)
-            .pt_3()
-            .px_3()
-            .pb_3()
-            .gap_1()
-            .overflow_y_scroll()
-            .child(section("APPEARANCE"))
-            .child(
-                h_flex()
-                    .gap_1()
-                    .child(theme_button("dark", ThemeMode::Dark, "theme-dark"))
-                    .child(theme_button("light", ThemeMode::Light, "theme-light")),
-            )
-            .child(section("ENDPOINTS"))
-            .when(self.settings.endpoints.is_empty(), |col| {
-                col.child(
-                    div()
-                        .text_size(px(12.))
-                        .text_color(theme.muted_foreground)
-                        .child("none configured"),
-                )
-            })
-            .children(self.settings.endpoints.iter().map(|endpoint| {
-                row(
-                    format!("{} · {}", endpoint.name, endpoint.model),
-                    if endpoint.key_resolved {
-                        "key ✓".into()
-                    } else {
-                        "no key".into()
-                    },
-                    endpoint.active,
-                )
-            }))
-            .child(section("RUNTIME"))
-            .children([
-                row(
-                    "bash sandbox (Landlock)".into(),
-                    if self.settings.sandbox { "on" } else { "off" }.into(),
-                    self.settings.sandbox,
-                ),
-                row("web search".into(), self.settings.search.clone(), false),
-                row(
-                    "mcp servers".into(),
-                    if self.settings.mcp_servers.is_empty() {
-                        "none".into()
-                    } else {
-                        self.settings.mcp_servers.join(", ")
-                    },
-                    false,
-                ),
-                row("skills".into(), self.settings.skills.to_string(), false),
-                row(
-                    "agents".into(),
-                    if self.settings.agents.is_empty() {
-                        "none".into()
-                    } else {
-                        self.settings.agents.join(", ")
-                    },
-                    false,
-                ),
-                row(
-                    "tokens, all sessions".into(),
-                    format!(
-                        "in {} · out {}",
-                        human_tokens(self.total_usage.0),
-                        human_tokens(self.total_usage.1)
-                    ),
-                    false,
-                ),
-            ])
-            .child(section("CONFIG"))
-            .child(
-                div()
-                    .text_size(px(11.))
-                    .text_color(theme.muted_foreground)
-                    .child(match &self.settings.config_path {
-                        Some(path) => format!("edit {} — changes apply on restart", path.display()),
-                        None => "no config file — create ~/.config/gertie/config.toml".into(),
-                    }),
-            )
-            .into_any_element()
-    }
 }
 
 /// Which right-column panel is open, if any. One slot: the agents
@@ -1202,6 +1067,30 @@ enum Panel {
     None,
     Agents,
     Settings,
+}
+
+/// Bubbles out of the chat: a settings save landed. The workspace
+/// (which owns the bootstrap) reloads and fans the result to every tab.
+pub enum ChatViewEvent {
+    ConfigSaved,
+}
+
+impl EventEmitter<ChatViewEvent> for ChatView {}
+
+impl ChatView {
+    /// Applies a fresh bootstrap snapshot — what a settings save
+    /// triggers. The provider swap takes effect on the next turn's
+    /// send (a running turn keeps the provider it started with).
+    pub fn apply_provider(&mut self, update: Reloaded, cx: &mut Context<Self>) {
+        self.provider = update.provider;
+        self.endpoint_label = update.label;
+        let config = update.config.clone();
+        let summary = (*update.settings).clone();
+        self.settings_panel.update(cx, |panel, cx| {
+            panel.set_config(&config, summary, cx);
+        });
+        cx.notify();
+    }
 }
 
 /// Minimal markdown: fenced code blocks render as mono blocks with a
@@ -1616,7 +1505,7 @@ impl Render for ChatView {
                         row.child(self.render_agents_panel(cx))
                     })
                     .when(self.panel == Panel::Settings, |row| {
-                        row.child(self.render_settings_panel(cx))
+                        row.child(self.settings_panel.clone())
                     }),
             )
             .child(

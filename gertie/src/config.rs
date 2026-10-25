@@ -5,7 +5,7 @@ use serde::Deserialize;
 use std::path::PathBuf;
 
 /// The user's config: `~/.config/gertie/config.toml`.
-#[derive(Deserialize, Debug, Default)]
+#[derive(Deserialize, Debug, Clone, Default)]
 pub struct Config {
     #[serde(default)]
     pub endpoints: Vec<EndpointConfig>,
@@ -132,7 +132,7 @@ pub struct McpServerConfig {
     pub env: std::collections::BTreeMap<String, String>,
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Clone)]
 pub struct EndpointConfig {
     pub name: String,
     /// e.g. `https://api.ppq.ai/v1`
@@ -214,6 +214,132 @@ impl EndpointConfig {
     /// The env-var-friendly endpoint name: `my-endpoint` → `MY_ENDPOINT`.
     pub(crate) fn env_name(&self) -> String {
         self.name.to_uppercase().replace([' ', '-'], "_")
+    }
+}
+
+/// What the settings panel writes back: the full endpoint list, the
+/// default, the sandbox flag, and the MCP server list. Deliberately
+/// whole-section replacement rather than a key-by-key diff — the panel
+/// owns these four sections; every other key, table, and comment in
+/// the file is untouchable.
+#[derive(Debug, Default)]
+pub struct ConfigEdits {
+    pub endpoints: Vec<EndpointConfig>,
+    pub default_endpoint: Option<String>,
+    pub sandbox_bash: bool,
+    pub mcp_servers: Vec<McpServerConfig>,
+}
+
+impl ConfigEdits {
+    /// Comments above a section header are the user's voice about the
+    /// section — when the section is rebuilt wholesale, carry that
+    /// prefix decor onto the first new table.
+    fn carry_header_comment(root: &toml_edit::Table, key: &str, first: &mut toml_edit::Table) {
+        let comment = root
+            .get(key)
+            .and_then(|item| item.as_array_of_tables())
+            .and_then(|array| array.iter().next())
+            .and_then(|table| table.decor().prefix().cloned());
+        if let Some(comment) = comment {
+            first.decor_mut().set_prefix(comment);
+        }
+    }
+
+    fn apply_to_document(&self, doc: &mut toml_edit::DocumentMut) {
+        let root = doc.as_table_mut();
+
+        // Endpoints: the `[[endpoints]]` array is rebuilt wholesale.
+        let mut endpoints = toml_edit::ArrayOfTables::new();
+        for endpoint in &self.endpoints {
+            let mut table = toml_edit::Table::new();
+            table.insert("name", toml_edit::value(endpoint.name.clone()));
+            table.insert("base_url", toml_edit::value(endpoint.base_url.clone()));
+            table.insert("model", toml_edit::value(endpoint.model.clone()));
+            if let Some(wire) = &endpoint.wire {
+                table.insert("wire", toml_edit::value(wire.clone()));
+            }
+            if let Some(api_key_env) = &endpoint.api_key_env {
+                table.insert("api_key_env", toml_edit::value(api_key_env.clone()));
+            }
+            if let Some(api_key) = &endpoint.api_key {
+                table.insert("api_key", toml_edit::value(api_key.clone()));
+            }
+            if let Some(window) = endpoint.context_window {
+                table.insert("context_window", toml_edit::value(window as i64));
+            }
+            endpoints.push(table);
+        }
+        if let Some(first) = endpoints.iter_mut().next() {
+            Self::carry_header_comment(root, "endpoints", first);
+        }
+        root.insert("endpoints", toml_edit::Item::ArrayOfTables(endpoints));
+
+        // The default: a name points at an endpoint; nothing means
+        // "first one wins", so the key is removed rather than written.
+        match &self.default_endpoint {
+            Some(name) => {
+                root.insert("default_endpoint", toml_edit::value(name.clone()));
+            }
+            None => {
+                root.remove("default_endpoint");
+            }
+        }
+
+        // Security posture: the flag lives under [security]; a
+        // non-table `security` key is pathological, replaced outright.
+        if !matches!(root.get("security"), Some(toml_edit::Item::Table(_))) {
+            root.insert("security", toml_edit::Item::Table(toml_edit::Table::new()));
+        }
+        let Some(toml_edit::Item::Table(security)) = root.get_mut("security") else {
+            unreachable!("just normalized security to a table");
+        };
+        security.insert("sandbox_bash", toml_edit::value(self.sandbox_bash));
+
+        // MCP servers: same whole-array replacement as endpoints.
+        let mut servers = toml_edit::ArrayOfTables::new();
+        for server in &self.mcp_servers {
+            let mut table = toml_edit::Table::new();
+            table.insert("name", toml_edit::value(server.name.clone()));
+            if let Some(url) = &server.url {
+                table.insert("url", toml_edit::value(url.clone()));
+            }
+            if let Some(command) = &server.command {
+                table.insert("command", toml_edit::value(command.clone()));
+            }
+            if !server.args.is_empty() {
+                table.insert(
+                    "args",
+                    toml_edit::value(server.args.iter().cloned().collect::<toml_edit::Array>()),
+                );
+            }
+            servers.push(table);
+        }
+        if let Some(first) = servers.iter_mut().next() {
+            Self::carry_header_comment(root, "mcp_servers", first);
+        }
+        root.insert("mcp_servers", toml_edit::Item::ArrayOfTables(servers));
+    }
+
+    /// Writes these edits to `path`, preserving every comment,
+    /// non-replaced key, and unknown section (toml_edit keeps the
+    /// document's decor; only the four owned sections are rewritten).
+    /// An unparseable existing file is an error, never a clobber.
+    pub fn save(&self, path: &std::path::Path) -> Result<(), String> {
+        let raw = std::fs::read_to_string(path).unwrap_or_default();
+        let mut doc: toml_edit::DocumentMut = raw.parse().map_err(|error| {
+            format!(
+                "{} does not parse, so it can't be edited from the panel — fix it by hand: {error}",
+                path.display()
+            )
+        })?;
+        self.apply_to_document(&mut doc);
+        if let Some(parent) = path.parent()
+            && let Err(error) = std::fs::create_dir_all(parent)
+        {
+            return Err(format!("could not create {}: {error}", parent.display()));
+        }
+        std::fs::write(path, doc.to_string())
+            .map_err(|error| format!("could not write {}: {error}", path.display()))
     }
 }
 
@@ -399,6 +525,137 @@ default_endpoint = "ppq"
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn endpoint(name: &str, model: &str) -> EndpointConfig {
+        EndpointConfig {
+            name: name.into(),
+            base_url: format!("https://{name}.example.com/v1"),
+            model: model.into(),
+            wire: None,
+            api_key: None,
+            api_key_env: Some(format!("{name}_KEY")),
+            context_window: None,
+        }
+    }
+
+    /// The edited sections are rewritten, the rest of the file is
+    /// preserved byte-for-byte in spirit: comments, ordering, unknown
+    /// keys.
+    #[test]
+    fn edits_preserve_comments_and_unknown_keys() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            "# my personal endpoint, kept by hand\n[[endpoints]]\nname = \"ppq\"\n\
+             base_url = \"https://api.ppq.ai/v1\"\nmodel = \"glm-5.3-flash\"\n\
+             api_key_env = \"PPQ_API_KEY\"\n\n[extra]\nanything = true\n",
+        )
+        .unwrap();
+
+        ConfigEdits {
+            endpoints: vec![endpoint("other", "m2")],
+            default_endpoint: Some("other".into()),
+            sandbox_bash: true,
+            mcp_servers: vec![],
+        }
+        .save(&path)
+        .unwrap();
+
+        let raw = std::fs::read_to_string(&path).unwrap();
+        assert!(raw.contains("# my personal endpoint"), "comment kept");
+        assert!(raw.contains("[extra]"), "unknown section kept");
+        assert!(raw.contains("anything = true"));
+
+        // And the written file still parses as a real config.
+        let config = Config::load_from(&path).unwrap();
+        assert_eq!(config.endpoints.len(), 1);
+        assert_eq!(config.endpoints[0].name, "other");
+        assert_eq!(config.default_endpoint.as_deref(), Some("other"));
+        assert!(config.security.sandbox_bash);
+    }
+
+    #[test]
+    fn edits_add_change_and_delete_endpoints() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        ConfigEdits {
+            endpoints: vec![endpoint("ppq", "glm-5.3-flash")],
+            default_endpoint: Some("ppq".into()),
+            ..Default::default()
+        }
+        .save(&path)
+        .unwrap();
+
+        // Add a second endpoint, switch the default to it.
+        let mut second = endpoint("local", "qwen3-coder");
+        second.base_url = "http://127.0.0.1:11434/v1".into();
+        second.wire = Some("openai".into());
+        ConfigEdits {
+            endpoints: vec![endpoint("ppq", "glm-5.3-flash"), second],
+            default_endpoint: Some("local".into()),
+            ..Default::default()
+        }
+        .save(&path)
+        .unwrap();
+        let config = Config::load_from(&path).unwrap();
+        assert_eq!(config.selected_endpoint().unwrap().name, "local");
+        assert_eq!(config.resolved_endpoints().len(), 2);
+
+        // Deleting everything removes the default too — "first one
+        // wins" is the absence semantics, not a stale name.
+        ConfigEdits::default().save(&path).unwrap();
+        let raw = std::fs::read_to_string(&path).unwrap();
+        assert!(!raw.contains("default_endpoint"));
+        let config = Config::load_from(&path).unwrap();
+        assert!(config.endpoints.is_empty());
+        assert!(config.selected_endpoint().is_none());
+    }
+
+    #[test]
+    fn edits_write_mcp_servers_and_sandbox() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        ConfigEdits {
+            sandbox_bash: true,
+            mcp_servers: vec![McpServerConfig {
+                name: "docs".into(),
+                url: Some("https://mcp.example.com/mcp".into()),
+                command: None,
+                args: vec!["--verbose".into()],
+                env: Default::default(),
+            }],
+            ..Default::default()
+        }
+        .save(&path)
+        .unwrap();
+
+        let config = Config::load_from(&path).unwrap();
+        assert!(config.security.sandbox_bash);
+        assert_eq!(config.mcp_servers.len(), 1);
+        assert_eq!(config.mcp_servers[0].name, "docs");
+        assert_eq!(
+            config.mcp_servers[0].url.as_deref(),
+            Some("https://mcp.example.com/mcp")
+        );
+        assert_eq!(config.mcp_servers[0].args, vec!["--verbose"]);
+    }
+
+    /// An unparseable file must never be clobbered by a save — the
+    /// user's hand-edited config survives a bad paste.
+    #[test]
+    fn save_refuses_to_edit_an_unparseable_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "[[endpoints]\nname = broken").unwrap();
+        let result = ConfigEdits::default().save(&path);
+        assert!(result.is_err(), "unparseable file is refused");
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "[[endpoints]\nname = broken",
+            "the file is untouched"
+        );
+    }
 
     #[test]
     fn skeleton_is_created_once_and_never_overwritten() {

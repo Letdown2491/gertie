@@ -48,6 +48,14 @@ fn fixture() -> Fixture {
     let window = cx
         .open_window(size(px(900.), px(640.)), |window, cx| {
             let view = cx.new(|cx| {
+                let panel = cx.new(|_| {
+                    gertie::settings_edit::SettingsPanelView::new(
+                        &gertie::config::Config::default(),
+                        gertie::settings::SettingsSummary::from_config(
+                            &gertie::config::Config::default(),
+                        ),
+                    )
+                });
                 ChatView::new(
                     store.clone(),
                     None,
@@ -57,9 +65,7 @@ fn fixture() -> Fixture {
                     None,
                     Arc::new(gertie_core::PermissionBroker::new()),
                     gertie_core::SessionScope::new(),
-                    Arc::new(gertie::settings::SettingsSummary::from_config(
-                        &gertie::config::Config::default(),
-                    )),
+                    panel,
                     true,
                     window,
                     cx,

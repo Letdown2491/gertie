@@ -1,16 +1,19 @@
-//! Settings: the live configuration, visible in-app. gertie's config is
-//! a file on purpose (reviewable, versionable, no hidden state) — the
-//! panel shows what's actually in force and where to change it, rather
-//! than becoming a second source of truth. The one thing the panel does
-//! write is the theme choice, which is UI state, not configuration: it
-//! lives in its own file under the data dir, never in the user's
-//! config.toml.
+//! Settings: the live configuration, visible and editable in-app.
+//! The config file stays the single source of truth — the panel edits
+//! it in place through `toml_edit` (comments and unknown keys
+//! preserved, see `config::ConfigEdits`), then the workspace reloads
+//! the bootstrap so endpoint changes apply to open chats. MCP and
+//! sandbox are load-time setup: the panel says "restart to apply"
+//! rather than pretending. The theme choice is UI state, not
+//! configuration: it lives in its own file under the data dir, never
+//! in the user's config.toml.
 
 use gpui_kit::component::ThemeMode;
 use serde_json::json;
 use std::path::PathBuf;
 
 /// One configured endpoint as the panel shows it.
+#[derive(Clone)]
 pub struct EndpointInfo {
     pub name: String,
     pub model: String,
@@ -20,6 +23,7 @@ pub struct EndpointInfo {
 }
 
 /// A snapshot of the effective configuration, computed once at startup.
+#[derive(Clone)]
 pub struct SettingsSummary {
     pub endpoints: Vec<EndpointInfo>,
     /// Landlock sandbox for bash children (opt-in).

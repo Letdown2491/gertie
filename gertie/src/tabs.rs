@@ -7,8 +7,9 @@
 //! checkout of the same repo, invisible to the tab next door.
 
 use crate::bootstrap::Bootstrap;
-use crate::chat::ChatView;
+use crate::chat::{ChatView, ChatViewEvent};
 use gpui_kit::component::ActiveTheme as _;
+use gpui_kit::component::Disableable as _;
 use gpui_kit::component::Sizable as _;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::tab::{Tab, TabBar};
@@ -41,23 +42,24 @@ impl WorkspaceView {
     /// starts blank — two views on one session would diverge their
     /// in-memory histories against one database.
     pub fn new(boot: Arc<Bootstrap>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let panel = cx.new(|_| boot.settings_panel());
         let first = cx.new(|cx| {
             ChatView::new(
                 boot.store.clone(),
-                boot.provider.clone(),
+                boot.provider(),
                 boot.snapshots.clone(),
                 boot.tools.clone(),
-                boot.label.clone(),
+                boot.label(),
                 boot.system_prompt.clone(),
                 boot.broker.clone(),
                 boot.session_scope.clone(),
-                boot.settings.clone(),
+                panel,
                 true,
                 window,
                 cx,
             )
         });
-        Self {
+        let mut this = Self {
             boot,
             tabs: vec![TabState {
                 view: first,
@@ -66,7 +68,40 @@ impl WorkspaceView {
             active: 0,
             next_worktree: 0,
             last_error: None,
+        };
+        this.subscribe_config_saved(0, window, cx);
+        this
+    }
+
+    /// A settings save anywhere reloads the bootstrap once and fans the
+    /// fresh provider/label/panel out to every open tab.
+    fn subscribe_config_saved(&mut self, tab: usize, _window: &mut Window, cx: &mut Context<Self>) {
+        cx.subscribe_in(
+            &self.tabs[tab].view,
+            _window,
+            |this, _, event, _, cx| match event {
+                ChatViewEvent::ConfigSaved => this.reload_and_apply(cx),
+            },
+        )
+        .detach();
+    }
+
+    fn reload_and_apply(&mut self, cx: &mut Context<Self>) {
+        if let Err(error) = self.boot.reload() {
+            // The written config doesn't parse — leave the live state
+            // alone and say so where the worktree errors show.
+            self.last_error = Some(format!("config: {error}"));
+            cx.notify();
+            return;
         }
+        self.last_error = None;
+        let update = self.boot.snapshot();
+        for tab in &self.tabs {
+            let update = update.clone();
+            tab.view
+                .update(cx, |chat, cx| chat.apply_provider(update, cx));
+        }
+        cx.notify();
     }
 
     fn make_view(
@@ -76,22 +111,26 @@ impl WorkspaceView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Entity<ChatView> {
-        cx.new(|cx| {
+        let panel = cx.new(|_| self.boot.settings_panel());
+        let view = cx.new(|cx| {
             ChatView::new(
                 self.boot.store.clone(),
-                self.boot.provider.clone(),
+                self.boot.provider(),
                 self.boot.snapshots.clone(),
                 tools,
-                self.boot.label.clone(),
+                self.boot.label(),
                 system_prompt,
                 self.boot.broker.clone(),
                 self.boot.session_scope.clone(),
-                self.boot.settings.clone(),
+                panel,
                 false,
                 window,
                 cx,
             )
-        })
+        });
+        // Subscribing needs &mut self — the caller does it (add_tab /
+        // add_worktree_tab / new).
+        view
     }
 
     /// A plain tab: parallel chat, shared workspace.
@@ -106,7 +145,9 @@ impl WorkspaceView {
             view,
             worktree: None,
         });
-        self.active = self.tabs.len() - 1;
+        let index = self.tabs.len() - 1;
+        self.active = index;
+        self.subscribe_config_saved(index, window, cx);
         cx.notify();
     }
 
@@ -124,11 +165,25 @@ impl WorkspaceView {
                     view,
                     worktree: Some(root),
                 });
-                self.active = self.tabs.len() - 1;
+                let index = self.tabs.len() - 1;
+                self.active = index;
+                self.subscribe_config_saved(index, window, cx);
                 self.last_error = None;
             }
             Err(error) => self.last_error = Some(error),
         }
+        cx.notify();
+    }
+
+    /// Closes the tab at `index`. The last tab stays — an empty window
+    /// is a broken state, not a feature. A worktree tab's checkout
+    /// persists on disk (the DESIGN note on worktree tabs).
+    fn close_tab(&mut self, index: usize, cx: &mut Context<Self>) {
+        if self.tabs.len() <= 1 {
+            return;
+        }
+        self.tabs.remove(index);
+        self.active = self.active.min(self.tabs.len() - 1);
         cx.notify();
     }
 }
@@ -169,6 +224,21 @@ impl Render for WorkspaceView {
                     .tooltip("New worktree tab — its own git checkout of this repo")
                     .on_click(cx.listener(|this, _, window, cx| {
                         this.add_worktree_tab(window, cx);
+                    })),
+            )
+            .child(
+                Button::new("close-tab")
+                    .label("✕")
+                    .xsmall()
+                    .ghost()
+                    .disabled(self.tabs.len() <= 1)
+                    .tooltip(if self.tabs.len() <= 1 {
+                        "The last tab stays"
+                    } else {
+                        "Close this tab"
+                    })
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.close_tab(active, cx);
                     })),
             );
 

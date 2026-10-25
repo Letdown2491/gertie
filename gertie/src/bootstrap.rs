@@ -8,16 +8,35 @@ use gertie_providers::AnyProvider;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+/// The bootstrap parts a settings save replaces live: the provider
+/// (and its fallback chain), the preferred agent endpoint, the status
+/// label, and the settings snapshot. Tabs re-read these on apply; MCP
+/// connections, the store, and already-built worker agents keep their
+/// setup until restart — the label and the panel say so.
+#[derive(Clone)]
+pub struct Reloaded {
+    /// The full config as re-read — the settings editor edits the
+    /// real fields, not a summary of them.
+    pub config: Arc<crate::config::Config>,
+    pub provider: Option<Arc<AnyProvider>>,
+    pub agent_endpoint: Option<gertie_providers::Endpoint>,
+    pub label: String,
+    pub settings: Arc<crate::settings::SettingsSummary>,
+}
+
 pub struct Bootstrap {
     pub config: crate::config::Config,
+    /// The `--config` override, if any — reload reads the same file
+    /// the original load did.
+    config_path: Option<PathBuf>,
     /// Config load/parse failure, if any. The GUI reports it in the
     /// status label (a GUI user never sees stderr); headless treats it
     /// as fatal.
     pub config_error: Option<String>,
     pub store: Arc<gertie_core::SessionStore>,
-    pub provider: Option<Arc<AnyProvider>>,
-    /// The raw endpoint, kept for agent-type model overrides.
-    pub agent_endpoint: Option<gertie_providers::Endpoint>,
+    /// Live-reloadable state (provider, agent endpoint, label,
+    /// settings), swapped after a settings save.
+    reloaded: std::sync::RwLock<Reloaded>,
     pub tools: gertie_core::ToolRegistry,
     pub broker: Arc<gertie_core::PermissionBroker>,
     /// The front's current session — subagent dispatch reads it to link
@@ -25,11 +44,12 @@ pub struct Bootstrap {
     pub session_scope: gertie_core::SessionScope,
     pub snapshots: Option<Arc<gertie_core::SnapshotStore>>,
     pub system_prompt: Option<String>,
-    /// The effective configuration, for the settings panel.
-    pub settings: Arc<crate::settings::SettingsSummary>,
     /// Human-readable status line: endpoint, warnings, capability counts.
-    pub label: String,
     pub workspace_root: PathBuf,
+    /// The label tail that doesn't change on an endpoint switch:
+    /// skills, MCP connections, agent types — set up once at load.
+    capability_suffix: String,
+    skill_count: usize,
     /// Tool names that don't capture the workspace root (web, history,
     /// MCP, skills) — a re-rooted registry carries these over as-is
     /// instead of rebuilding or reconnecting them.
@@ -40,6 +60,69 @@ pub struct Bootstrap {
 }
 
 impl Bootstrap {
+    /// Live parts, for readers (tabs clone them per construction).
+    pub fn provider(&self) -> Option<Arc<AnyProvider>> {
+        self.reloaded.read().unwrap().provider.clone()
+    }
+
+    pub fn agent_endpoint(&self) -> Option<gertie_providers::Endpoint> {
+        self.reloaded.read().unwrap().agent_endpoint.clone()
+    }
+
+    pub fn label(&self) -> String {
+        self.reloaded.read().unwrap().label.clone()
+    }
+
+    pub fn settings(&self) -> Arc<crate::settings::SettingsSummary> {
+        self.reloaded.read().unwrap().settings.clone()
+    }
+
+    /// The live config as re-read (a settings save swaps it in).
+    pub fn live_config(&self) -> Arc<crate::config::Config> {
+        self.reloaded.read().unwrap().config.clone()
+    }
+
+    /// A fresh settings editor over the live config.
+    pub fn settings_panel(&self) -> crate::settings_edit::SettingsPanelView {
+        let reloaded = self.reloaded.read().unwrap();
+        crate::settings_edit::SettingsPanelView::new(&reloaded.config, (*reloaded.settings).clone())
+    }
+
+    /// A copy of the live state, for fanning an apply out to tabs.
+    pub fn snapshot(&self) -> Reloaded {
+        self.reloaded.read().unwrap().clone()
+    }
+
+    /// Rebuilds the live parts from the config file — what a settings
+    /// save calls to make endpoint changes apply to open chats without
+    /// a restart. MCP servers, sandbox, and existing worker agents are
+    /// load-time setup; the label keeps saying what's live.
+    pub fn reload(&self) -> Result<(), String> {
+        let config = match &self.config_path {
+            Some(path) => crate::config::Config::load_from(path)?,
+            None => crate::config::Config::load()?,
+        };
+        let endpoint = config.selected_endpoint();
+        let mut label = endpoint
+            .as_ref()
+            .map(|endpoint| format!("{} · {}", endpoint.name, endpoint.model))
+            .unwrap_or_else(|| "no endpoint configured".to_string());
+        for warning in config.key_warnings() {
+            label.push_str(&format!(" — ⚠ {warning}"));
+        }
+        label.push_str(&self.capability_suffix);
+        let (provider, agent_endpoint) = provider_chain(&config);
+        let mut settings = crate::settings::SettingsSummary::from_config(&config);
+        settings.skills = self.skill_count;
+        *self.reloaded.write().unwrap() = Reloaded {
+            config: Arc::new(config),
+            provider,
+            agent_endpoint,
+            label,
+            settings: Arc::new(settings),
+        };
+        Ok(())
+    }
     /// Builds everything both fronts share. Never exits on its own
     /// except for the one non-negotiable (no session store): callers
     /// decide what their surface does with warnings.
@@ -77,6 +160,10 @@ impl Bootstrap {
         for warning in config.key_warnings() {
             label.push_str(&format!(" — ⚠ {warning}"));
         }
+        // Everything appended from here on (skills, MCP, agents) is
+        // load-time setup — the reload path reuses it verbatim as the
+        // label tail, since only endpoints change live.
+        let capability_start = label.len();
 
         let store = match crate::config::Config::data_dir() {
             Some(data_dir) => {
@@ -238,23 +325,7 @@ impl Bootstrap {
         // don't translate across wires, so the chain never switches).
         // The preferred endpoint is kept for agent-type model
         // overrides on the same wire.
-        let all_endpoints = config.resolved_endpoints();
-        let agent_endpoint = all_endpoints.first().cloned();
-        let selected_wire = all_endpoints
-            .first()
-            .map(|endpoint| endpoint.wire.clone())
-            .unwrap_or_default();
-        let chain: Vec<gertie_providers::Endpoint> = all_endpoints
-            .into_iter()
-            .filter(|endpoint| endpoint.wire == selected_wire)
-            .collect();
-        let provider = match chain.first() {
-            Some(_) => gertie_providers::AnyProvider::with_endpoints(chain)
-                .map(Arc::new)
-                .map_err(|error| eprintln!("warning: endpoint setup failed: {error}"))
-                .ok(),
-            None => None,
-        };
+        let (provider, agent_endpoint) = provider_chain(&config);
 
         let broker = Arc::new(gertie_core::PermissionBroker::new());
         let session_scope = gertie_core::SessionScope::new();
@@ -311,23 +382,30 @@ impl Bootstrap {
         // The settings panel's snapshot of the effective config.
         let mut settings = crate::settings::SettingsSummary::from_config(&config);
         settings.skills = skills.len();
+        let live_config = Arc::new(config.clone());
 
         Self {
             config,
+            config_path: config_path.map(Path::to_path_buf),
             config_error,
             store,
-            provider,
-            agent_endpoint,
+            capability_suffix: label[capability_start..].to_string(),
+            skill_count: skills.len(),
+            reloaded: std::sync::RwLock::new(Reloaded {
+                config: live_config,
+                provider,
+                agent_endpoint,
+                label,
+                settings: Arc::new(settings),
+            }),
             tools,
             broker,
             session_scope,
             snapshots,
             system_prompt,
-            label,
             workspace_root,
             root_independent,
             skill_index,
-            settings: Arc::new(settings),
         }
     }
     /// A registry re-rooted at `root`, plus its system prompt: the
@@ -351,7 +429,7 @@ impl Bootstrap {
                 }
             }
         }
-        if let (Some(endpoint), Some(leader_provider)) = (&self.agent_endpoint, &self.provider) {
+        if let (Some(endpoint), Some(leader_provider)) = (self.agent_endpoint(), self.provider()) {
             let types = agent_types(&self.config);
             let mut additions: Vec<(String, Arc<dyn gertie_core::Tool>)> = Vec::new();
             for (agent_type, model) in &types {
@@ -389,6 +467,33 @@ impl Bootstrap {
         }
         (tools, system_prompt_for(root, &self.skill_index))
     }
+}
+
+/// The provider over every configured endpoint (selected first, then
+/// same-wire fallbacks), plus the preferred endpoint for agent-type
+/// model overrides. Shared by `load` and `reload` — an endpoint
+/// switch must produce exactly what a restart would have.
+fn provider_chain(
+    config: &crate::config::Config,
+) -> (Option<Arc<AnyProvider>>, Option<gertie_providers::Endpoint>) {
+    let all_endpoints = config.resolved_endpoints();
+    let agent_endpoint = all_endpoints.first().cloned();
+    let selected_wire = all_endpoints
+        .first()
+        .map(|endpoint| endpoint.wire.clone())
+        .unwrap_or_default();
+    let chain: Vec<gertie_providers::Endpoint> = all_endpoints
+        .into_iter()
+        .filter(|endpoint| endpoint.wire == selected_wire)
+        .collect();
+    let provider = match chain.first() {
+        Some(_) => gertie_providers::AnyProvider::with_endpoints(chain)
+            .map(Arc::new)
+            .map_err(|error| eprintln!("warning: endpoint setup failed: {error}"))
+            .ok(),
+        None => None,
+    };
+    (provider, agent_endpoint)
 }
 
 /// The shipped agent types first; a config `[[agents]]` entry with a

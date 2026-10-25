@@ -20,7 +20,7 @@ pub fn run(prompt: Option<String>, yes: bool, config_path: Option<PathBuf>) -> i
         eprintln!("error: {error}");
         return 1;
     }
-    let Some(provider) = boot.provider.clone() else {
+    let Some(provider) = boot.provider() else {
         eprintln!(
             "error: no endpoint configured — add one to config.toml (see config.example.toml)"
         );
@@ -53,7 +53,7 @@ pub fn run(prompt: Option<String>, yes: bool, config_path: Option<PathBuf>) -> i
         return 2;
     }
 
-    eprintln!("· {}", boot.label);
+    eprintln!("· {}", boot.label());
     for warning in boot.config.key_warnings() {
         eprintln!("⚠ {warning}");
     }
