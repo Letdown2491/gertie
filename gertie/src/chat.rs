@@ -107,6 +107,9 @@ pub struct ChatView {
     /// store. Deltas persist in coarse steps (a write per token would
     /// dominate the render loop); transitions flush the rest.
     stream_persisted: usize,
+    /// Tool cards with expanded output (beyond the 12-line preview),
+    /// keyed by turn index; cleared on session switch.
+    expanded_tools: std::collections::HashSet<usize>,
 }
 
 impl ChatView {
@@ -213,6 +216,7 @@ impl ChatView {
             },
             streaming: false,
             stream_persisted: 0,
+            expanded_tools: Default::default(),
         };
         view.reload_session(cx);
         window.focus(&view.input.read(cx).focus_handle(cx), cx);
@@ -272,6 +276,7 @@ impl ChatView {
         self.last_db_id = last_db_id;
         self.streaming = false;
         self.streaming_assistant = None;
+        self.expanded_tools.clear();
         self.sync_list(cx);
     }
 
@@ -965,22 +970,46 @@ impl ChatView {
                 if let Some(diff) = diff_lines(call, cx) {
                     inner = inner.child(diff);
                 }
+                const PREVIEW_LINES: usize = 12;
                 let lines: Vec<&str> = result.lines().collect();
-                let mut preview = lines
-                    .iter()
-                    .take(12)
-                    .copied()
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                if lines.len() > 12 {
-                    preview.push_str(&format!("\n… (+{} more lines)", lines.len() - 12));
-                }
+                let expanded = self.expanded_tools.contains(&index);
+                let shown = if expanded || lines.len() <= PREVIEW_LINES {
+                    &lines[..]
+                } else {
+                    &lines[..PREVIEW_LINES]
+                };
                 inner = inner.child(
                     div()
                         .text_size(px(12.))
                         .text_color(cx.theme().muted_foreground)
-                        .child(preview),
+                        .child(shown.join("\n")),
                 );
+                if lines.len() > PREVIEW_LINES {
+                    let (label, tooltip) = if expanded {
+                        (
+                            format!("show less ({})", lines.len()),
+                            "Collapse the output",
+                        )
+                    } else {
+                        (
+                            format!("show {} more lines", lines.len() - PREVIEW_LINES),
+                            "Expand the output",
+                        )
+                    };
+                    inner = inner.child(
+                        Button::new(SharedString::from(format!("tool-toggle-{index}")))
+                            .label(label)
+                            .xsmall()
+                            .ghost()
+                            .tooltip(tooltip)
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                if !this.expanded_tools.remove(&index) {
+                                    this.expanded_tools.insert(index);
+                                }
+                                cx.notify();
+                            })),
+                    );
+                }
             }
         }
 

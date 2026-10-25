@@ -30,6 +30,9 @@ fronts, nothing shared over the network.
 - **Any endpoint** — speaks the OpenAI-compatible wire (ppq.ai, OpenRouter, Ollama,
   vLLM, Gemini's compat endpoint) plus a native Anthropic adapter. Fallback chains: when
   an endpoint dies before producing content, the next one takes over invisibly.
+- **Editable settings** — endpoints, API keys, the sandbox, and MCP servers are
+  configurable in the panel; saves go through `toml_edit`, so your config comments and
+  hand-written keys survive. Endpoint switches apply to open chats immediately.
 - **MCP** — external tools over stdio *or* Streamable HTTP. Server tool descriptions are
   treated as untrusted input (sanitized, capped); every MCP call prompts.
 - **Token ledger** — per-session and all-time token totals, persisted locally. No
