@@ -775,21 +775,19 @@ impl ChatView {
         self.drive_turn(text, images, cx);
     }
 
-    /// `/compact`: summarize the history now instead of waiting for the
-    /// context ceiling. Shapes the next request, not the record — the
-    /// DB keeps every row, so a reload restores full history.
+    /// `/compact`: replace the in-memory history with its selection now
+    /// instead of waiting for the context ceiling. Shapes the next
+    /// request, not the record — the DB keeps every row, so a reload
+    /// restores full history. No model is called; this works with no
+    /// endpoint configured at all.
     fn compact_now(&mut self, cx: &mut Context<Self>) {
         if self.streaming {
             self.push_notice("A run is in flight — wait for it to finish.", cx);
             return;
         }
-        let Some(provider) = self.provider.clone() else {
-            self.push_notice(NO_ENDPOINT_NOTICE, cx);
-            return;
-        };
         let history = self.history.clone();
         // Below twice the kept tail there's nothing to give back —
-        // summarizing would spend tokens to shrink nothing.
+        // selecting would shrink nothing.
         let big_enough = {
             let current = history.blocking_lock();
             current.len() >= 2 * gertie_core::agent_loop::KEEP_TAIL
@@ -798,17 +796,15 @@ impl ChatView {
             self.push_notice("Nothing to compact — the history is already short.", cx);
             return;
         }
+        let budget = gertie_core::agent_loop::selection_budget(self.context_window);
         cx.spawn(async move |this, cx| {
-            let result = gertie_core::agent_loop::compact_history(provider, history).await;
+            let result = gertie_core::agent_loop::compact_history(history, budget).await;
             let _ = this.update(cx, |this, cx| match result {
                 Some((kept, total)) => {
                     this.on_compacted(kept, total, cx);
                     this.activity = "Context compacted".into();
                 }
-                None => this.push_notice(
-                    "Nothing to compact — history is small (or the summarizer failed).",
-                    cx,
-                ),
+                None => this.push_notice("Nothing to compact — history is small.", cx),
             });
         })
         .detach();

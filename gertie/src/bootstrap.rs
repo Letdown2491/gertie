@@ -375,6 +375,22 @@ impl Bootstrap {
         let broker = Arc::new(gertie_core::PermissionBroker::new());
         let session_scope = gertie_core::SessionScope::new();
 
+        // read_session: the model's way back into the record a context
+        // compaction selected away. Scoped to the front's open session
+        // — the same scope worker dispatch uses for lineage — and
+        // read-only, so it auto-runs.
+        {
+            let map = Arc::get_mut(&mut tools).expect("registry not yet shared");
+            map.insert(
+                "read_session".into(),
+                Arc::new(gertie_tools::web::ReadSession::new(
+                    store.clone(),
+                    session_scope.clone(),
+                )),
+            );
+            root_independent.push("read_session".into());
+        }
+
         // Agent types: each model-invoked type becomes an agent_{name}
         // tool. Construction order is safe either way — worker registries
         // strip every agent_* tool, so workers can never see each other.

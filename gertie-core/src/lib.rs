@@ -401,6 +401,67 @@ impl SessionStore {
         rows.collect()
     }
 
+    /// The session's own record as full-text hits, oldest first — what
+    /// a compaction's selection points the model back to. A query
+    /// scopes to full-text matches inside this session (quoted for
+    /// FTS5, same as `search`); without one, the last `limit` messages
+    /// come back in order, snippet field carrying the whole content.
+    /// Read-only over the rows every surface already sees.
+    pub fn read_session(
+        &self,
+        session_id: SessionId,
+        query: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<HistoryHit>, rusqlite::Error> {
+        let connection = self.connection.lock().unwrap();
+        match query {
+            None => {
+                let mut statement = connection.prepare(
+                    "SELECT sessions.title, messages.session_id, messages.id,
+                            messages.role, messages.content
+                     FROM messages
+                     JOIN sessions ON sessions.id = messages.session_id
+                     WHERE messages.session_id = ?1
+                     ORDER BY messages.id DESC LIMIT ?2",
+                )?;
+                let rows = statement.query_map(
+                    rusqlite::params![session_id.0 as i64, limit as i64],
+                    Self::hit_row,
+                )?;
+                let mut hits: Vec<HistoryHit> = rows.collect::<Result<_, _>>()?;
+                hits.reverse(); // conversation order, oldest first
+                Ok(hits)
+            }
+            Some(query) => {
+                let quoted = format!("\"{}\"", query.replace('"', "\"\""));
+                let mut statement = connection.prepare(
+                    "SELECT sessions.title, messages.session_id, messages.id,
+                            messages.role, snippet(messages_fts, 0, '▶', '◀', '…', 24)
+                     FROM messages_fts
+                     JOIN messages ON messages.rowid = messages_fts.rowid
+                     JOIN sessions ON sessions.id = messages.session_id
+                     WHERE messages_fts MATCH ?1 AND messages.session_id = ?2
+                     ORDER BY messages.id LIMIT ?3",
+                )?;
+                let rows = statement.query_map(
+                    rusqlite::params![quoted, session_id.0 as i64, limit as i64],
+                    Self::hit_row,
+                )?;
+                rows.collect()
+            }
+        }
+    }
+
+    fn hit_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<HistoryHit> {
+        Ok(HistoryHit {
+            session_title: row.get(0)?,
+            session_id: SessionId(row.get::<_, i64>(1)? as u64),
+            message_id: MessageId(row.get::<_, i64>(2)? as u64),
+            role: row.get(3)?,
+            snippet: row.get(4)?,
+        })
+    }
+
     /// Appends a message under `parent_id` (None = root-level turn).
     pub fn append_message(
         &self,
@@ -795,6 +856,39 @@ mod tests {
         // Quoting means punctuation can't inject FTS syntax.
         let hits = store.search("\"weird; AND OR (query)", 10).unwrap();
         assert!(hits.is_empty());
+    }
+
+    #[test]
+    fn read_session_scopes_to_one_session_in_conversation_order() {
+        let store = memory_store();
+        let session = store.create_session("the one").unwrap();
+        let other = store.create_session("the other").unwrap();
+        for (role, text) in [
+            (Role::User, "first ask"),
+            (Role::Assistant, "first answer"),
+            (Role::User, "second ask mentions the wug"),
+            (Role::Assistant, "second answer"),
+        ] {
+            store.append_message(session, None, role, text).unwrap();
+        }
+        store
+            .append_message(other, None, Role::User, "another session mentions the wug")
+            .unwrap();
+
+        // No query: the newest N, oldest first.
+        let hits = store.read_session(session, None, 3).unwrap();
+        assert_eq!(hits.len(), 3);
+        assert_eq!(hits[0].snippet, "first answer");
+        assert_eq!(hits[2].snippet, "second answer");
+
+        // A query: matches only from this session, in order, full-text.
+        let hits = store.read_session(session, Some("wug"), 10).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert!(hits[0].snippet.contains("wug"));
+
+        // An empty record reads as empty, not as an error.
+        let empty = store.create_session("empty").unwrap();
+        assert!(store.read_session(empty, None, 10).unwrap().is_empty());
     }
 
     #[test]

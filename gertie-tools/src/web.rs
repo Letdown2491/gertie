@@ -413,9 +413,136 @@ impl Tool for SearchHistory {
     }
 }
 
+/// Read back the open session's own record — the full text a context
+/// compaction selected away, and everything before the model's current
+/// window. Scoped by the front's session scope (the same cell worker
+/// dispatch uses for lineage); read-only.
+pub struct ReadSession {
+    store: Arc<gertie_core::SessionStore>,
+    scope: gertie_core::SessionScope,
+}
+
+impl ReadSession {
+    pub fn new(store: Arc<gertie_core::SessionStore>, scope: gertie_core::SessionScope) -> Self {
+        Self { store, scope }
+    }
+}
+
+impl Tool for ReadSession {
+    fn name(&self) -> &'static str {
+        "read_session"
+    }
+
+    fn description(&self) -> String {
+        "Read back earlier messages from the open session's record. \
+         After a context compaction, the selection in your context is a \
+         table of contents — this returns the full text of omitted turns. \
+         Without a query you get the most recent messages in order; with \
+         one, full-text matches from this session."
+            .into()
+    }
+
+    fn parameters(&self) -> serde_json::Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "optional full-text filter"},
+                "limit": {"type": "integer", "description": "max messages (default 20, max 100)"}
+            }
+        })
+    }
+
+    fn run<'a>(
+        &'a self,
+        arguments: &'a str,
+    ) -> std::pin::Pin<Box<dyn Future<Output = ToolResult> + Send + 'a>> {
+        blocking(move || {
+            #[derive(serde::Deserialize)]
+            struct Args {
+                query: Option<String>,
+                limit: Option<usize>,
+            }
+            let args: Args = crate::parse(arguments, "read_session")?;
+            let Some(session) = self.scope.get() else {
+                return Ok("no session is open — nothing to read".into());
+            };
+            let query = args
+                .query
+                .as_deref()
+                .map(str::trim)
+                .filter(|q| !q.is_empty());
+            let hits = self
+                .store
+                .read_session(session, query, args.limit.unwrap_or(20).clamp(1, 100))
+                .map_err(|error| format!("read_session: {error}"))?;
+            if hits.is_empty() {
+                return Ok("nothing in the session record for that".into());
+            }
+            let mut out = String::new();
+            for hit in hits {
+                out.push_str(&format!(
+                    "[{} #{}] {}\n\n",
+                    hit.role, hit.message_id.0, hit.snippet
+                ));
+            }
+            Ok(out)
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn read_session_reads_the_scoped_session_and_honors_the_query() {
+        let store =
+            Arc::new(gertie_core::SessionStore::open(std::path::Path::new(":memory:")).unwrap());
+        let scope = gertie_core::SessionScope::new();
+        let tool = ReadSession::new(store.clone(), scope.clone());
+        let session = store.create_session("s").unwrap();
+        store
+            .append_message(
+                session,
+                None,
+                gertie_core::Role::User,
+                "hello from the record",
+            )
+            .unwrap();
+
+        // Scope unset: an honest nothing, not an error.
+        let out = futures_now(tool.run("{}")).unwrap();
+        assert!(out.contains("no session is open"), "{out}");
+
+        // Scope set: the record comes back.
+        scope.set(Some(session));
+        let out = futures_now(tool.run("{}")).unwrap();
+        assert!(out.contains("hello from the record"), "{out}");
+
+        // The query path scopes full-text, and an absent term says so.
+        // Snippet markers (▶…◀) wrap the match — assert around them.
+        let out = futures_now(tool.run(r#"{"query": "record"}"#)).unwrap();
+        assert!(out.contains("hello from the"), "{out}");
+        assert!(out.contains('▶'), "the match is marked: {out}");
+        let out = futures_now(tool.run(r#"{"query": "absent-thing"}"#)).unwrap();
+        assert!(out.contains("nothing in the session record"), "{out}");
+    }
+
+    /// Tests run outside a runtime; `blocking` futures are computed on
+    /// first poll, so a plain poll loop suffices (same as mcp.rs).
+    fn futures_now(
+        mut future: std::pin::Pin<Box<dyn Future<Output = ToolResult> + Send + '_>>,
+    ) -> ToolResult {
+        use std::task::{Context, Poll, Waker};
+        let waker = Waker::noop();
+        let mut cx = Context::from_waker(waker);
+        loop {
+            match std::pin::Pin::new(&mut future).poll(&mut cx) {
+                Poll::Ready(result) => return result,
+                Poll::Pending => std::thread::sleep(std::time::Duration::from_millis(10)),
+            }
+        }
+    }
 
     #[test]
     fn html_strips_to_readable_text() {

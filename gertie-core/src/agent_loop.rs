@@ -143,7 +143,8 @@ pub struct TurnSpec {
 ///
 /// When `context_window` is set, the loop compacts: once a round's
 /// observed prompt size crosses 80% of the window, history is replaced
-/// by a structured summary plus a safe tail before the next request.
+/// by a budgeted selection (verbatim prefixes — no summarizer model)
+/// plus a safe tail before the next request.
 pub fn run_turn(spec: TurnSpec) -> BoxStream<'static, LoopEvent> {
     let TurnSpec {
         provider,
@@ -188,11 +189,12 @@ pub fn run_turn(spec: TurnSpec) -> BoxStream<'static, LoopEvent> {
                 if let Some(threshold) = threshold
                     && prompt_tokens > threshold
                 {
-                    // Fail-open: if the summarization request fails, this
-                    // round just runs long — compaction is an
-                    // optimization, not a correctness step.
+                    // Selection, not summarization: no model call, so
+                    // there is no provider to fail — the only way this
+                    // "fails" is nothing to select, which changes
+                    // nothing.
                     if let Some((kept, total)) =
-                        compact_history(provider.clone(), history.clone()).await
+                        compact_history(history.clone(), selection_budget(context_window)).await
                     {
                         // The old observation describes the pre-compact
                         // prompt; don't let it re-trigger.
@@ -383,39 +385,70 @@ pub fn run_turn(spec: TurnSpec) -> BoxStream<'static, LoopEvent> {
 /// `/compact` reads this as its minimum-size gate.
 pub const KEEP_TAIL: usize = 8;
 
-/// Structured-summary marker: the replacement history opens with this
-/// system message, and later compactions summarize it like anything else.
-fn summary_message(summary: &str) -> WireMessage {
-    WireMessage {
-        role: Role::System,
-        content: Some(format!(
-            "### Conversation summary\n\n\
-             {summary}\n\n\
-             This summary replaced earlier history; continue the task from NEXT."
-        )),
-        ..WireMessage::default()
-    }
+/// An item of the compaction digest keeps a 240-char prefix — enough
+/// to know what happened, not enough to fill a window. (t3code's
+/// handoff rule: a budgeted selection, not an agent-written summary;
+/// see research/t3code-ideas.md §7.)
+const ITEM_PREFIX: usize = 240;
+
+/// The original request keeps a bigger allowance than the digest's
+/// other lines — it anchors everything that follows.
+const REQUEST_PREFIX: usize = 2_000;
+
+/// Tokens held back for instructions, tools, and the work that follows
+/// a compaction: at least 16k, never more than a quarter of the window
+/// (the same reserve shape t3code uses).
+fn reserve_tokens(window: u64) -> u64 {
+    (window / 4).max(16_000)
 }
 
-/// Compacts the history in place: summarizes everything before the kept
-/// tail into one summary message. Returns `(kept, total)` on success.
-///
-/// Fail-open: a failed summarization returns `None` and leaves the
-/// history untouched — compaction is an optimization, not a
-/// correctness step. The auto-trigger in `run_turn` fires near the
-/// context ceiling (where a history is by definition big enough);
-/// the UI's `/compact` gates the minimum size itself.
+/// Selection never shrinks below this, even on tiny windows — a digest
+/// that keeps nothing is worse than one that overshoots.
+const MIN_SELECTION_TOKENS: u64 = 4_000;
+
+/// When no context window is configured (compaction never auto-fires),
+/// `/compact` budgets against this assumption — t3code's stand-in for
+/// unknown capacity.
+const ASSUMED_WINDOW_TOKENS: u64 = 128_000;
+
+/// The character budget for a compaction's selection: the window minus
+/// the reserve, in chars at the bytes/4 estimate — floored so a tiny
+/// window still keeps *something*.
+pub fn selection_budget(context_window: Option<u64>) -> usize {
+    let window = context_window.unwrap_or(ASSUMED_WINDOW_TOKENS);
+    let budget_tokens = window
+        .saturating_sub(reserve_tokens(window))
+        .max(MIN_SELECTION_TOKENS);
+    (budget_tokens * 4) as usize
+}
+
+/// Compacts the history in place: everything before the kept tail
+/// becomes a budgeted SELECTION, not a summary — the original request,
+/// then verbatim prefixes of the omitted turns, newest first, inside
+/// one system message. No model is called; every line cites the record
+/// verbatim. Returns `(kept, total)` — None when the kept tail already
+/// covers the whole history (a compaction that shrinks nothing is not
+/// one), leaving the history untouched. Fail-open by construction:
+/// there is no provider call to fail.
 pub async fn compact_history(
-    provider: Arc<dyn crate::Provider>,
     history: SharedHistory,
+    budget_chars: usize,
 ) -> Option<(usize, usize)> {
-    let transcript = render_transcript(&history.lock().await);
-    let total = history.lock().await.len();
-    let summary = summarize(provider.clone(), &transcript).await.ok()?;
     let mut current = history.lock().await;
-    let tail_start = safe_tail_start(&current, KEEP_TAIL);
+    compact_in_place(&mut current, budget_chars)
+}
+
+/// The synchronous core of `compact_history` — the lock is the only
+/// thing that awaits, so the logic is directly unit-testable.
+fn compact_in_place(current: &mut Vec<WireMessage>, budget_chars: usize) -> Option<(usize, usize)> {
+    let total = current.len();
+    let tail_start = safe_tail_start(current, KEEP_TAIL);
+    if tail_start == 0 {
+        return None;
+    }
+    let digest = select_digest(&current[..tail_start], budget_chars);
     let tail: Vec<WireMessage> = current.drain(tail_start..).collect();
-    *current = vec![summary_message(&summary)];
+    *current = vec![selection_message(&digest)];
     current.extend(tail);
     Some((current.len(), total))
 }
@@ -437,64 +470,106 @@ fn estimate_tokens(history: &[WireMessage]) -> u64 {
     (chars as u64) / 4
 }
 
-/// Flattens history to text for the summarizer — the summarizer sees the
-/// conversation the way the transcript would read, tool calls included.
-fn render_transcript(history: &[WireMessage]) -> String {
-    let mut lines = Vec::new();
-    for message in history {
-        let role = match message.role {
-            Role::System => "system",
-            Role::User => "user",
-            Role::Assistant => "assistant",
-            Role::Tool => "tool",
-        };
-        if let Some(content) = message.content.as_deref()
-            && !content.trim().is_empty()
-        {
-            lines.push(format!("[{role}] {content}"));
-        }
-        for call in &message.tool_calls {
+/// Flattens the pre-tail history into the digest's lines: the original
+/// request on its own line, then one line per omitted item — verbatim
+/// prefix, role cited — newest first until the character budget is
+/// spent, restored to chronological order. This is a table of contents
+/// of the conversation's own past, not a retelling of it.
+fn select_digest(head: &[WireMessage], budget_chars: usize) -> String {
+    let mut lines: Vec<String> = Vec::new();
+    // The original request anchors the selection; it survives every
+    // compaction (bounded by its own larger prefix).
+    if let Some(first) = head
+        .iter()
+        .find(|message| message.role == Role::User)
+        .and_then(|message| message.content.as_deref())
+    {
+        let text = first.trim();
+        if !text.is_empty() {
             lines.push(format!(
-                "[assistant calls {}] {}",
-                call.name, call.arguments
+                "[user — the original request] {}",
+                prefix(text, REQUEST_PREFIX)
             ));
         }
     }
+    // The rest of the digest: walk newest → oldest (the turns nearest
+    // the kept tail matter most), stop when the budget is spent, then
+    // put the survivors back in the order they happened. The anchor
+    // message is skipped — it already has its line.
+    let first_user = head.iter().position(|message| message.role == Role::User);
+    let mut spent: usize = lines.iter().map(String::len).sum();
+    let mut items: Vec<String> = Vec::new();
+    'outer: for (position, message) in head.iter().enumerate().rev() {
+        if Some(position) == first_user {
+            continue;
+        }
+        if let Some(content) = message
+            .content
+            .as_deref()
+            .map(str::trim)
+            .filter(|text| !text.is_empty())
+        {
+            let line = format!(
+                "[{}] {}",
+                role_name(&message.role),
+                prefix(content, ITEM_PREFIX)
+            );
+            if spent + line.len() > budget_chars {
+                break;
+            }
+            spent += line.len();
+            items.push(line);
+        }
+        for call in &message.tool_calls {
+            let line = format!(
+                "[assistant called {}] {}",
+                call.name,
+                prefix(call.arguments.trim(), ITEM_PREFIX)
+            );
+            if spent + line.len() > budget_chars {
+                break 'outer;
+            }
+            spent += line.len();
+            items.push(line);
+        }
+    }
+    items.reverse();
+    lines.extend(items);
     lines.join("\n")
 }
 
-/// Compaction prompt: preserve the ledger discipline — what was the
-/// goal, what's true now, what's decided, what's next.
-const SUMMARY_PROMPT: &str = "Summarize the conversation below for a continuation agent that will carry the work forward with no other context. Respond in exactly this structure:\n\
-     OBJECTIVE: the user's goal, one sentence.\n\
-     STATE: what has been done — files touched, commands run, results that matter.\n\
-     RULINGS: decisions made, user denials or corrections, constraints discovered.\n\
-     NEXT: the immediate next action.\n\
-     Be terse. Keep file paths and identifiers exact.\n\n\
-     --- conversation ---\n";
-
-async fn summarize(
-    provider: Arc<dyn crate::provider::Provider>,
-    transcript: &str,
-) -> Result<String, String> {
-    let request = Request {
-        messages: vec![WireMessage::user(format!("{SUMMARY_PROMPT}\n{transcript}"))],
-        tools: Vec::new(),
-        max_output_tokens: None,
-    };
-    let mut stream = provider.stream(request);
-    let mut summary = String::new();
-    while let Some(event) = stream.next().await {
-        match event {
-            crate::Event::Token { delta } => summary.push_str(&delta),
-            crate::Event::Error { message } => return Err(message),
-            _ => {}
-        }
+fn role_name(role: &Role) -> &'static str {
+    match role {
+        Role::System => "system",
+        Role::User => "user",
+        Role::Assistant => "assistant",
+        Role::Tool => "tool",
     }
-    if summary.trim().is_empty() {
-        Err("summarizer produced nothing".into())
-    } else {
-        Ok(summary)
+}
+
+/// Char-boundary-safe prefix: a byte slice would tear a multi-byte
+/// character; this takes whole characters or all of them.
+fn prefix(text: &str, max: usize) -> &str {
+    text.char_indices()
+        .nth(max)
+        .map_or(text, |(end, _)| &text[..end])
+}
+
+/// The digest rides in the same system-message shape the old summary
+/// used — legal on every wire — and later compactions treat it like
+/// any other message.
+fn selection_message(digest: &str) -> WireMessage {
+    WireMessage {
+        role: Role::System,
+        content: Some(format!(
+            "### Earlier history — selected from the record, not summarized\n\n\
+             {digest}\n\n\
+             Context was compacted to fit the window. The lines above are\n\
+             verbatim prefixes, not a retelling; the full text of every\n\
+             omitted message is still in the session record — the\n\
+             read_session tool retrieves it."
+        )),
+        ..WireMessage::default()
     }
 }
 
@@ -994,8 +1069,10 @@ mod tests {
 
     #[test]
     fn history_compacts_when_usage_crosses_the_window() {
-        // Round 1 reports 90% of a 100k window; the loop should compact
-        // (script 2 is the summarizer's answer) before round 3 finishes.
+        // A prior conversation sits in history; round 1 observes 90% of
+        // a 100k window — the loop must replace the old turns with a
+        // budgeted selection before the next request. No summarizer
+        // round exists: two scripts drive the whole turn.
         let provider = Arc::new(ScriptedProvider {
             seen: std::sync::Mutex::new(Vec::new()),
             scripts: std::sync::Mutex::new(vec![
@@ -1013,12 +1090,6 @@ mod tests {
                 ],
                 vec![
                     Event::Token {
-                        delta: "OBJECTIVE: test compaction".into(),
-                    },
-                    Event::Done,
-                ],
-                vec![
-                    Event::Token {
                         delta: "all done".into(),
                     },
                     Event::Done,
@@ -1027,23 +1098,49 @@ mod tests {
         });
         let peek: Arc<dyn Tool> = Arc::new(StubTool::new("peek", false, "peeked"));
         let history: SharedHistory = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        // The prior conversation: an original request and ten settled
+        // turns — enough head for the selection to have something to
+        // select.
+        {
+            let mut current = history.blocking_lock();
+            current.push(WireMessage::user("the original request"));
+            for i in 0..10 {
+                current.push(WireMessage::assistant(format!(
+                    "old turn {i} — did a thing"
+                )));
+                current.push(WireMessage::user(format!("older reply {i}")));
+            }
+        }
         let (mut spec, broker) = turn(provider, registry(&[peek]), history.clone(), "go");
         spec.context_window = Some(100_000);
         let events = drain(run_turn(spec), &broker, |_| {
             panic!("read-only tools must not prompt")
         });
 
+        // 1 original + 20 turns + "go" + assistant+call + tool result.
         assert!(
             events
                 .iter()
-                .any(|event| matches!(event, LoopEvent::Compacted { total: 3, .. }))
+                .any(|event| matches!(event, LoopEvent::Compacted { total: 24, .. }))
         );
         let history = history.blocking_lock();
-        let summary = history
+        let selection = history
             .iter()
             .find(|message| message.role == Role::System)
-            .expect("compacted history opens with the summary");
-        assert!(summary.content.as_deref().unwrap().contains("OBJECTIVE"));
+            .expect("compacted history opens with the selection");
+        let selection = selection.content.as_deref().unwrap();
+        assert!(
+            selection.contains("selected from the record"),
+            "the marker says what happened"
+        );
+        assert!(
+            selection.contains("[user — the original request] the original request"),
+            "the original request survives verbatim"
+        );
+        assert!(
+            selection.contains("[tool] peeked") || selection.contains("old turn"),
+            "omitted turns appear as prefix lines: {selection}"
+        );
         assert!(history.iter().any(|message| message.role == Role::Assistant
             && message.content.as_deref() == Some("all done")));
     }
@@ -1150,6 +1247,118 @@ mod tests {
         // forward to include the call that produced it.
         assert_eq!(safe_tail_start(&history, 2), 1);
         assert_eq!(safe_tail_start(&history, 3), 0);
+    }
+
+    #[test]
+    fn digest_lines_are_verbatim_prefixes_in_conversation_order() {
+        let head = vec![
+            WireMessage::user("goal: refactor the thing"),
+            WireMessage::assistant("working on it"),
+            WireMessage::user("use the staging dir for outputs"),
+        ];
+        let digest = select_digest(&head, 100_000);
+        let lines: Vec<&str> = digest.lines().collect();
+        assert_eq!(
+            lines[0],
+            "[user — the original request] goal: refactor the thing"
+        );
+        assert_eq!(lines[1], "[assistant] working on it");
+        assert_eq!(lines[2], "[user] use the staging dir for outputs");
+    }
+
+    #[test]
+    fn the_original_request_survives_regardless_of_budget() {
+        let head = vec![
+            WireMessage::user("the original request is long and matters"),
+            WireMessage::assistant("yes"),
+            WireMessage::user("go on"),
+        ];
+        // A budget too small for anything else still keeps the request.
+        let digest = select_digest(&head, 10);
+        assert!(digest.contains("the original request is long"));
+        assert!(!digest.contains("go on"), "budget ran out before it");
+    }
+
+    #[test]
+    fn over_budget_selection_prefers_the_recent_middle() {
+        let mut head = vec![WireMessage::user("the original request")];
+        for i in 0..400 {
+            head.push(WireMessage::assistant(format!(
+                "ancient turn {i} — {}",
+                "x".repeat(ITEM_PREFIX)
+            )));
+        }
+        head.push(WireMessage::assistant("the newest middle turn"));
+        // Generous but bounded: not everything fits.
+        let digest = select_digest(&head, 8_000);
+        assert!(digest.contains("the newest middle turn"));
+        assert!(
+            !digest.contains("ancient turn 0 "),
+            "the oldest middle is what gets dropped: {}",
+            &digest[..200]
+        );
+    }
+
+    #[test]
+    fn compaction_does_nothing_when_the_tail_covers_everything() {
+        let mut current = vec![WireMessage::user("go"), WireMessage::assistant("done")];
+        assert_eq!(compact_in_place(&mut current, 10_000), None);
+        assert_eq!(current.len(), 2, "history untouched");
+    }
+
+    #[test]
+    fn compaction_selects_and_reports_kept_and_total() {
+        let mut current = vec![WireMessage::user("the original request")];
+        for i in 0..20 {
+            current.push(WireMessage::assistant(format!("old turn {i}")));
+        }
+        current.push(WireMessage::assistant("fresh work"));
+        let (kept, total) =
+            compact_in_place(&mut current, 100_000).expect("there is a head to select");
+        assert_eq!(total, 22);
+        assert_eq!(kept, 1 + KEEP_TAIL, "the digest replaces the head only");
+        assert_eq!(current[0].role, Role::System);
+        let digest = current[0].content.as_deref().unwrap();
+        assert!(digest.contains("selected from the record"));
+        assert!(digest.contains("the original request"));
+        // The tail is verbatim and still last.
+        assert_eq!(
+            current.last().unwrap().content.as_deref(),
+            Some("fresh work")
+        );
+    }
+
+    #[test]
+    fn selection_budget_holds_back_a_reserve() {
+        // A quarter of the window is reserved; bytes/4 converts back.
+        assert_eq!(selection_budget(Some(100_000)), (100_000 - 25_000) * 4);
+        // Small windows keep the 16k reserve but never select below 4k.
+        assert_eq!(
+            selection_budget(Some(20_000)),
+            (20_000 - 16_000) as usize * 4
+        );
+        assert_eq!(
+            selection_budget(Some(17_000)),
+            (MIN_SELECTION_TOKENS * 4) as usize
+        );
+        // No window: the assumed-capacity fallback.
+        assert_eq!(
+            selection_budget(None),
+            ((ASSUMED_WINDOW_TOKENS - ASSUMED_WINDOW_TOKENS / 4) * 4) as usize
+        );
+    }
+
+    #[test]
+    fn prefixes_never_tear_a_multibyte_character() {
+        let text = "héllo wörld — ünïcode ✓";
+        // A byte slice would panic or corrupt at these cut points; a
+        // char slice returns a valid prefix every time.
+        for n in 0..=text.chars().count() {
+            let cut = prefix(text, n);
+            assert!(text.starts_with(cut), "prefix {n} stays a prefix");
+            assert!(cut.chars().count() <= n);
+        }
+        assert_eq!(prefix(text, text.chars().count()), text);
     }
 
     /// Mutating, so it would prompt if the vet were consulted in the
