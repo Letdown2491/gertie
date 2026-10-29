@@ -223,16 +223,17 @@ impl EndpointConfig {
 }
 
 /// What the settings panel writes back: the full endpoint list, the
-/// default, the sandbox flag, and the MCP server list. Deliberately
-/// whole-section replacement rather than a key-by-key diff — the panel
-/// owns these four sections; every other key, table, and comment in
-/// the file is untouchable.
+/// default, the sandbox flag, the MCP server list, and the agent
+/// types. Deliberately whole-section replacement rather than a
+/// key-by-key diff — the panel owns these five sections; every other
+/// key, table, and comment in the file is untouchable.
 #[derive(Debug, Default)]
 pub struct ConfigEdits {
     pub endpoints: Vec<EndpointConfig>,
     pub default_endpoint: Option<String>,
     pub sandbox_bash: bool,
     pub mcp_servers: Vec<McpServerConfig>,
+    pub agents: Vec<AgentConfig>,
 }
 
 impl ConfigEdits {
@@ -323,6 +324,40 @@ impl ConfigEdits {
             Self::carry_header_comment(root, "mcp_servers", first);
         }
         root.insert("mcp_servers", toml_edit::Item::ArrayOfTables(servers));
+
+        // Agents: same whole-array replacement. Every field the panel
+        // knows about is written back — a hand-written `invocation`
+        // survives because the draft carries it, not because toml_edit
+        // round-trips the table.
+        let mut agents = toml_edit::ArrayOfTables::new();
+        for agent in &self.agents {
+            let mut table = toml_edit::Table::new();
+            table.insert("name", toml_edit::value(agent.name.clone()));
+            table.insert("description", toml_edit::value(agent.description.clone()));
+            if agent.invocation == Invocation::User {
+                table.insert("invocation", toml_edit::value("user".to_string()));
+            }
+            if let Some(model) = &agent.model {
+                table.insert("model", toml_edit::value(model.clone()));
+            }
+            if let Some(endpoint) = &agent.endpoint {
+                table.insert("endpoint", toml_edit::value(endpoint.clone()));
+            }
+            if let Some(prompt) = &agent.prompt {
+                table.insert("prompt", toml_edit::value(prompt.clone()));
+            }
+            if let Some(tools) = &agent.tools {
+                table.insert(
+                    "tools",
+                    toml_edit::value(tools.iter().cloned().collect::<toml_edit::Array>()),
+                );
+            }
+            agents.push(table);
+        }
+        if let Some(first) = agents.iter_mut().next() {
+            Self::carry_header_comment(root, "agents", first);
+        }
+        root.insert("agents", toml_edit::Item::ArrayOfTables(agents));
     }
 
     /// Writes these edits to `path`, preserving every comment,
@@ -575,7 +610,7 @@ mod tests {
             endpoints: vec![endpoint("other", "m2")],
             default_endpoint: Some("other".into()),
             sandbox_bash: true,
-            mcp_servers: vec![],
+            ..Default::default()
         }
         .save(&path)
         .unwrap();
@@ -673,6 +708,57 @@ mod tests {
             "[[endpoints]\nname = broken",
             "the file is untouched"
         );
+    }
+
+    /// The panel owns the agents section: every field round-trips —
+    /// including a hand-written `invocation = "user"`, which the form
+    /// doesn't edit but must not drop — and the comment above the
+    /// section survives like any other user voice.
+    #[test]
+    fn edits_round_trip_agents_with_pins_and_invocation() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            "# my council, kept by hand\n[[agents]]\nname = \"council-two\"\n\
+             description = \"Use when a council review runs.\"\ninvocation = \"user\"\n\
+             endpoint = \"anthropic\"\nmodel = \"claude-opus-4-6\"\n\
+             prompt = \"You are a council seat.\"\ntools = [\"read_file\", \"grep\"]\n",
+        )
+        .unwrap();
+
+        ConfigEdits {
+            agents: vec![AgentConfig {
+                name: "council-two".into(),
+                description: "Use when a council review runs.".into(),
+                invocation: Invocation::User,
+                model: Some("claude-opus-4-6".into()),
+                endpoint: Some("anthropic".into()),
+                prompt: Some("You are a council seat.".into()),
+                tools: Some(vec!["read_file".into(), "grep".into()]),
+            }],
+            ..Default::default()
+        }
+        .save(&path)
+        .unwrap();
+
+        let raw = std::fs::read_to_string(&path).unwrap();
+        assert!(raw.contains("# my council, kept by hand"), "comment kept");
+
+        let config = Config::load_from(&path).unwrap();
+        assert_eq!(config.agents.len(), 1);
+        let agent = &config.agents[0];
+        assert_eq!(agent.invocation, Invocation::User, "invocation survives");
+        assert_eq!(agent.endpoint.as_deref(), Some("anthropic"));
+        assert_eq!(agent.model.as_deref(), Some("claude-opus-4-6"));
+        assert_eq!(agent.prompt.as_deref(), Some("You are a council seat."));
+        assert_eq!(agent.tools, Some(vec!["read_file".into(), "grep".into()]));
+
+        // And a panel-less edit in the other direction: dropping the
+        // agent list removes the section rather than leaving a stub.
+        ConfigEdits::default().save(&path).unwrap();
+        let config = Config::load_from(&path).unwrap();
+        assert!(config.agents.is_empty(), "agents removed wholesale");
     }
 
     #[test]

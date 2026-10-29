@@ -1,15 +1,18 @@
 //! The settings panel as its own view: a summary of the live config
-//! plus an editor over the four sections it owns — endpoints (with
-//! keys), the default endpoint, the bash sandbox, MCP servers.
+//! plus an editor over the five sections it owns — endpoints (with
+//! keys), the default endpoint, the bash sandbox, MCP servers, and
+//! agent types.
 //!
 //! The file stays the single source of truth: Save runs the edits
 //! through `toml_edit`, which preserves the user's comments and any
 //! sections the panel doesn't own. Endpoint changes apply live (the
 //! workspace reloads the bootstrap and fans the new provider out to
-//! every open chat); MCP and sandbox are load-time setup and say
-//! "restart to apply" instead of pretending.
+//! every open chat); MCP, sandbox, and agents are load-time setup and
+//! say "restart to apply" instead of pretending.
 
-use crate::config::{Config, ConfigEdits, EndpointConfig, McpServerConfig};
+use crate::config::{
+    AgentConfig, Config, ConfigEdits, EndpointConfig, Invocation, McpServerConfig,
+};
 use crate::settings::SettingsSummary;
 use gpui_kit::component::ActiveTheme as _;
 use gpui_kit::component::Sizable as _;
@@ -86,6 +89,46 @@ impl McpDraft {
     }
 }
 
+/// One agent type as the editor holds it. `invocation` rides along
+/// unedited — the form can't create `user` types (UI dispatch doesn't
+/// exist yet), but a hand-written one must survive a save.
+#[derive(Clone)]
+struct AgentDraft {
+    name: String,
+    description: String,
+    invocation: Invocation,
+    endpoint: Option<String>,
+    model: Option<String>,
+    prompt: Option<String>,
+    tools: Option<Vec<String>>,
+}
+
+impl AgentDraft {
+    fn from_config(agent: &AgentConfig) -> Self {
+        Self {
+            name: agent.name.clone(),
+            description: agent.description.clone(),
+            invocation: agent.invocation.clone(),
+            endpoint: agent.endpoint.clone(),
+            model: agent.model.clone(),
+            prompt: agent.prompt.clone(),
+            tools: agent.tools.clone(),
+        }
+    }
+
+    fn to_config(&self) -> AgentConfig {
+        AgentConfig {
+            name: self.name.trim().to_string(),
+            description: self.description.trim().to_string(),
+            invocation: self.invocation.clone(),
+            endpoint: self.endpoint.clone(),
+            model: self.model.clone(),
+            prompt: self.prompt.clone(),
+            tools: self.tools.clone(),
+        }
+    }
+}
+
 /// The endpoint form's text fields, created when the form opens.
 struct EndpointForm {
     /// Index into `endpoints`; None = a new endpoint.
@@ -99,6 +142,18 @@ struct EndpointForm {
     context_window: Entity<InputState>,
 }
 
+/// The agent form's text fields, created when the form opens.
+struct AgentForm {
+    /// Index into `agents`; None = a new agent.
+    editing: Option<usize>,
+    name: Entity<InputState>,
+    description: Entity<InputState>,
+    endpoint: Entity<InputState>,
+    model: Entity<InputState>,
+    tools: Entity<InputState>,
+    prompt: Entity<InputState>,
+}
+
 pub struct SettingsPanelView {
     summary: SettingsSummary,
     /// Pending edits — the desired next state of the config.
@@ -106,7 +161,9 @@ pub struct SettingsPanelView {
     default_endpoint: Option<String>,
     sandbox: bool,
     mcp_servers: Vec<McpDraft>,
+    agents: Vec<AgentDraft>,
     form: Option<EndpointForm>,
+    agent_form: Option<AgentForm>,
     /// The MCP add form's fields, when open.
     mcp_name: Option<Entity<InputState>>,
     mcp_url: Option<Entity<InputState>>,
@@ -123,7 +180,9 @@ impl SettingsPanelView {
             default_endpoint: None,
             sandbox: false,
             mcp_servers: Vec::new(),
+            agents: Vec::new(),
             form: None,
+            agent_form: None,
             mcp_name: None,
             mcp_url: None,
             mcp_command: None,
@@ -144,6 +203,7 @@ impl SettingsPanelView {
         self.summary = summary;
         self.reset_pending(config);
         self.form = None;
+        self.agent_form = None;
         self.mcp_name = None;
         self.mcp_url = None;
         self.mcp_command = None;
@@ -163,6 +223,7 @@ impl SettingsPanelView {
             .iter()
             .map(McpDraft::from_config)
             .collect();
+        self.agents = config.agents.iter().map(AgentDraft::from_config).collect();
     }
 
     /// Opens the endpoint form for `index` (None = add), pre-filled
@@ -282,6 +343,122 @@ impl SettingsPanelView {
         cx.notify();
     }
 
+    /// Opens the agent form for `index` (None = add), pre-filled from
+    /// the draft.
+    fn open_agent_form(
+        &mut self,
+        index: Option<usize>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let draft = index.map(|i| self.agents[i].clone()).unwrap_or(AgentDraft {
+            name: String::new(),
+            description: String::new(),
+            invocation: Invocation::Model,
+            endpoint: None,
+            model: None,
+            prompt: None,
+            tools: None,
+        });
+        let mut field = |value: Option<String>, placeholder: &'static str| {
+            let state = cx.new(|cx| InputState::new(window, cx).placeholder(placeholder));
+            if let Some(value) = value
+                && !value.is_empty()
+            {
+                state.update(cx, |state, cx| state.set_value(value, window, cx));
+            }
+            state
+        };
+        let joined = |tools: Option<Vec<String>>| tools.map(|tools| tools.join(", "));
+        self.agent_form = Some(AgentForm {
+            editing: index,
+            name: field(Some(draft.name.clone()), "name, e.g. council-anthropic"),
+            description: field(
+                Some(draft.description.clone()),
+                "when the leader should use it",
+            ),
+            endpoint: field(
+                draft.endpoint.clone(),
+                "endpoint name — blank = the leader's",
+            ),
+            model: field(draft.model.clone(), "model override — blank = endpoint's"),
+            tools: field(
+                joined(draft.tools),
+                "allowlist, comma-separated — blank = all",
+            ),
+            prompt: field(draft.prompt.clone(), "system prompt — blank = default"),
+        });
+        cx.notify();
+    }
+
+    /// Reads the agent form back into the pending list.
+    fn commit_agent_form(
+        &mut self,
+        _event: &gpui_kit::ClickEvent,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(form) = &self.agent_form else { return };
+        let read = |entity: &Entity<InputState>| entity.read(cx).value().trim().to_string();
+        let name = read(&form.name);
+        let description = read(&form.description);
+        if name.is_empty() || description.is_empty() {
+            self.status = Some(("an agent needs a name and a description".into(), true));
+            cx.notify();
+            return;
+        }
+        if name.contains(char::is_whitespace) {
+            self.status = Some((
+                "agent name must be one word — letters, digits, dashes".into(),
+                true,
+            ));
+            cx.notify();
+            return;
+        }
+        let option_field = |raw: String| (!raw.is_empty()).then_some(raw);
+        let tools_field = |raw: String| {
+            let tools: Vec<String> = raw
+                .split(',')
+                .map(|tool| tool.trim().to_string())
+                .filter(|tool| !tool.is_empty())
+                .collect();
+            (!tools.is_empty()).then_some(tools)
+        };
+        let draft = AgentDraft {
+            name,
+            description,
+            invocation: form
+                .editing
+                .map(|index| self.agents[index].invocation.clone())
+                .unwrap_or(Invocation::Model),
+            endpoint: option_field(read(&form.endpoint)),
+            model: option_field(read(&form.model)),
+            prompt: option_field(read(&form.prompt)),
+            tools: tools_field(read(&form.tools)),
+        };
+        match form.editing {
+            Some(index) => self.agents[index] = draft,
+            None => self.agents.push(draft),
+        }
+        self.agent_form = None;
+        cx.notify();
+    }
+
+    fn remove_agent(&mut self, index: usize, cx: &mut Context<Self>) {
+        self.agents.remove(index);
+        // The form edits by index; keep it pointing at the same draft.
+        if let Some(form) = &mut self.agent_form
+            && let Some(editing) = form.editing
+        {
+            match editing.checked_sub(1) {
+                Some(_) if editing > index => form.editing = Some(editing - 1),
+                _ if editing == index => self.agent_form = None,
+                _ => {}
+            }
+        }
+        cx.notify();
+    }
+
     /// Theme switch: applies immediately and persists — UI state, kept
     /// out of the user's config.toml.
     fn set_theme(&mut self, mode: ThemeMode, cx: &mut Context<Self>) {
@@ -321,11 +498,13 @@ impl SettingsPanelView {
                     env: Default::default(),
                 })
                 .collect(),
+            agents: self.agents.iter().map(|d| d.to_config()).collect(),
         };
         match edits.save(&path) {
             Ok(()) => {
                 self.status = Some((
-                    "saved — endpoints apply to open chats; sandbox and MCP on restart".into(),
+                    "saved — endpoints apply to open chats; sandbox, MCP, and agents on restart"
+                        .into(),
                     false,
                 ));
                 cx.emit(SettingsEvent::Saved);
@@ -392,6 +571,46 @@ fn endpoint_row(
                 .tooltip("Remove (pending until Save)")
                 .on_click(cx.listener(move |this, _, _, cx| {
                     this.remove_endpoint(index, cx);
+                })),
+        )
+}
+
+/// One agent row: edit on click, ✕ to remove. The pin is the point —
+/// a seat without its endpoint visible is just a name.
+fn agent_row(
+    index: usize,
+    draft: &AgentDraft,
+    cx: &Context<SettingsPanelView>,
+) -> impl IntoElement {
+    let mut label = draft.name.clone();
+    if let Some(endpoint) = &draft.endpoint {
+        label.push_str(&format!("@{endpoint}"));
+    }
+    if let Some(model) = &draft.model {
+        label.push_str(&format!(" · {model}"));
+    }
+    h_flex()
+        .w_full()
+        .gap_0p5()
+        .child(
+            Button::new(SharedString::from(format!("agent-{index}")))
+                .label(label)
+                .small()
+                .flex_1()
+                .min_w_0()
+                .tooltip(format!("{} — click to edit", draft.description))
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    this.open_agent_form(Some(index), window, cx);
+                })),
+        )
+        .child(
+            Button::new(SharedString::from(format!("remove-agent-{index}")))
+                .label("✕")
+                .xsmall()
+                .ghost()
+                .tooltip("Remove (pending until Save)")
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.remove_agent(index, cx);
                 })),
         )
 }
@@ -528,6 +747,54 @@ impl Render for SettingsPanelView {
                     )
             });
 
+        let agent_form = self.agent_form.as_ref().map(|form| {
+            let labeled = |label: &'static str, field: &Entity<InputState>| {
+                v_flex()
+                    .gap_0p5()
+                    .child(
+                        div()
+                            .text_size(px(10.5))
+                            .text_color(theme.muted_foreground)
+                            .child(label),
+                    )
+                    .child(Input::new(field).small().w_full())
+            };
+            v_flex()
+                .id("agent-form")
+                .gap_1p5()
+                .rounded_md()
+                .border_1()
+                .border_color(theme.border)
+                .p_2()
+                .child(labeled("name", &form.name))
+                .child(labeled("description", &form.description))
+                .child(labeled("endpoint", &form.endpoint))
+                .child(labeled("model override", &form.model))
+                .child(labeled("tool allowlist", &form.tools))
+                .child(labeled("system prompt", &form.prompt))
+                .child(
+                    h_flex()
+                        .gap_1()
+                        .child(
+                            Button::new("commit-agent")
+                                .label("Save agent")
+                                .small()
+                                .primary()
+                                .on_click(cx.listener(Self::commit_agent_form)),
+                        )
+                        .child(
+                            Button::new("cancel-agent")
+                                .label("Cancel")
+                                .small()
+                                .ghost()
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.agent_form = None;
+                                    cx.notify();
+                                })),
+                        ),
+                )
+        });
+
         let mcp_form_open = mcp_form.is_some();
         v_flex()
             .id("settings-panel")
@@ -661,6 +928,32 @@ impl Render for SettingsPanelView {
                                 InputState::new(window, cx).placeholder("or command (stdio)")
                             }));
                             cx.notify();
+                        })),
+                )
+            })
+            .child(section_header("AGENTS", cx))
+            .when(self.agents.is_empty(), |col| {
+                col.child(
+                    div()
+                        .text_size(px(12.))
+                        .text_color(theme.muted_foreground)
+                        .child("none configured — the eight built-ins need none"),
+                )
+            })
+            .children(
+                self.agents
+                    .iter()
+                    .enumerate()
+                    .map(|(index, draft)| agent_row(index, draft, cx).into_any_element()),
+            )
+            .children(agent_form)
+            .when(self.agent_form.is_none(), |col| {
+                col.child(
+                    Button::new("add-agent")
+                        .label("Add agent")
+                        .small()
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.open_agent_form(None, window, cx);
                         })),
                 )
             })

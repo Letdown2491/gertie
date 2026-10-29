@@ -88,7 +88,7 @@ The original "Deferred" row — every item shipped or decided:
   truth; in-place TOML editing stays out on purpose (comment/unknown-key round-trip risk
   for zero capability the file doesn't already provide better).
   *Superseded:* TOML editing is in — the panel edits endpoints (with keys), the default
-  endpoint, sandbox, and MCP servers, written through `toml_edit` so comments and
+  endpoint, sandbox, MCP servers, and agent types, written through `toml_edit` so comments and
   unknown keys survive the round trip (`ConfigEdits`). Endpoint changes apply live (the
   bootstrap's live state reloads and every tab re-reads it); MCP, sandbox, and
   already-built worker agents are load-time setup and honestly say "restart to apply".
