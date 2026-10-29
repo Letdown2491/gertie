@@ -63,10 +63,16 @@ pub enum LoopEvent {
     Done,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PermissionDecision {
     Approve,
-    Deny,
+    /// The human refused. `feedback` is what they typed back — a bare
+    /// deny is None. The loop folds feedback into the tool result, so
+    /// a "no, and here's why" reaches the model and can become a
+    /// correction instead of a dead end.
+    Deny {
+        feedback: Option<String>,
+    },
 }
 
 /// The conversation history, shared between the loop and the caller so the
@@ -318,12 +324,24 @@ pub fn run_turn(spec: TurnSpec) -> BoxStream<'static, LoopEvent> {
                                             }
                                             tool.run(&call.arguments).await
                                         }
+                                        // The human said no — and possibly
+                                        // why. Their reply rides in the tool
+                                        // result, so the next round can act
+                                        // on it instead of repeating itself.
+                                        Ok(PermissionDecision::Deny { feedback }) => Err(
+                                            match feedback {
+                                                Some(text) if !text.trim().is_empty() => {
+                                                    format!(
+                                                        "denied by user — their reply: {text}"
+                                                    )
+                                                }
+                                                _ => "denied by user".to_string(),
+                                            },
+                                        ),
                                         // A dropped responder (UI went
                                         // away) denies too: doing
                                         // nothing is safe.
-                                        Ok(PermissionDecision::Deny) | Err(_) => {
-                                            Err("denied by user".to_string())
-                                        }
+                                        Err(_) => Err("denied by user".to_string()),
                                     }
                                 }
                                 None => Err("no permission channel available — denied".to_string()),
@@ -840,7 +858,16 @@ mod tests {
     fn mutating_tools_ask_and_honor_the_answer() {
         for (decided, expected) in [
             (PermissionDecision::Approve, "wrote"),
-            (PermissionDecision::Deny, "error: denied by user"),
+            (
+                PermissionDecision::Deny { feedback: None },
+                "error: denied by user",
+            ),
+            (
+                PermissionDecision::Deny {
+                    feedback: Some("no — use the staging dir".into()),
+                },
+                "error: denied by user — their reply: no — use the staging dir",
+            ),
         ] {
             let provider = Arc::new(ScriptedProvider {
                 seen: std::sync::Mutex::new(Vec::new()),
@@ -861,7 +888,7 @@ mod tests {
             let (spec, broker) = turn(provider, registry(&[writer]), history.clone(), "go");
             let events = drain(run_turn(spec), &broker, |call| {
                 assert_eq!(call.name, "write_file");
-                decided
+                decided.clone()
             });
 
             assert_eq!(tool_result(&events, "write_file"), expected);

@@ -114,6 +114,11 @@ pub struct ChatView {
     /// field editing its title (Enter commits; clicking away cancels).
     renaming: Option<SessionId>,
     rename_input: Entity<InputState>,
+    /// Reply inputs for pending permission cards, keyed by turn index —
+    /// the deny-with-feedback path: the human's text rides back to the
+    /// model in the tool result. Created on first render (that's where
+    /// a window handle exists), dropped when the card is answered.
+    approval_replies: std::collections::HashMap<usize, Entity<InputState>>,
     /// Two-step delete: the row whose ✕ was clicked once — the second
     /// click confirms. A destructive action with no dialog needs a
     /// speed bump.
@@ -277,6 +282,7 @@ impl ChatView {
             attachments: Vec::new(),
             stream_persisted: 0,
             expanded_tools: Default::default(),
+            approval_replies: Default::default(),
         };
         view.reload_session(cx);
         window.focus(&view.input.read(cx).focus_handle(cx), cx);
@@ -343,6 +349,7 @@ impl ChatView {
         self.thinking = false;
         self.streaming_assistant = None;
         self.expanded_tools.clear();
+        self.approval_replies.clear();
         self.sync_list(cx);
     }
 
@@ -393,6 +400,7 @@ impl ChatView {
         self.context_used = 0;
         self.refresh_agent_runs(cx);
         self.turns.clear();
+        self.approval_replies.clear();
         self.last_db_id = None;
         self.streaming_assistant = None;
         self.history.blocking_lock().clear();
@@ -533,6 +541,7 @@ impl ChatView {
             {
                 self.session_id = None;
                 self.turns.clear();
+                self.approval_replies.clear();
                 self.last_db_id = None;
                 self.streaming_assistant = None;
                 self.history.blocking_lock().clear();
@@ -1262,6 +1271,8 @@ impl ChatView {
         if let Some(Turn::Tool { status, .. }) = self.turns.get_mut(index) {
             match std::mem::replace(status, ToolStatus::Running) {
                 ToolStatus::Pending(id) => {
+                    // The card is settled; its reply input goes with it.
+                    self.approval_replies.remove(&index);
                     if !self.broker.respond(id, decision) {
                         // Unknown id (already answered): put nothing back;
                         // the card was settled elsewhere.
@@ -1272,6 +1283,44 @@ impl ChatView {
             }
         }
         cx.notify();
+    }
+
+    /// "Reply" on a pending card: deny with the typed text as feedback.
+    /// An empty reply is a bare deny. The model sees the text in the
+    /// tool result and can act on it in the next round.
+    fn reply_tool(&mut self, index: usize, cx: &mut Context<Self>) {
+        let feedback = self
+            .approval_replies
+            .get(&index)
+            .map(|reply| reply.read(cx).value().trim().to_string())
+            .unwrap_or_default();
+        self.decide_tool(
+            index,
+            PermissionDecision::Deny {
+                feedback: (!feedback.is_empty()).then_some(feedback),
+            },
+            cx,
+        );
+    }
+
+    /// The reply input for a pending card, created at first render —
+    /// that's where a window handle exists — and remembered until the
+    /// card is answered. Per-card, never shared: two pending asks must
+    /// not merge their drafts.
+    fn approval_reply_for(
+        &mut self,
+        index: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Entity<InputState> {
+        self.approval_replies
+            .entry(index)
+            .or_insert_with(|| {
+                cx.new(|cx| {
+                    InputState::new(window, cx).placeholder("…or reply to the model — why deny?")
+                })
+            })
+            .clone()
     }
 
     /// "Fork from here" on a persisted user turn: branch the conversation
@@ -1300,7 +1349,12 @@ impl ChatView {
         }
     }
 
-    fn render_turn(&mut self, index: usize, cx: &mut Context<Self>) -> AnyElement {
+    fn render_turn(
+        &mut self,
+        index: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         // The transcript row that isn't a turn: while the model thinks
         // and nothing else is on screen, a sentinel item past the last
         // turn keeps the conversation visibly alive.
@@ -1312,6 +1366,19 @@ impl ChatView {
                 .pb_2()
                 .child(self.render_activity_row(cx))
                 .into_any_element();
+        }
+        // The reply input for a pending permission card must exist
+        // before the turn is borrowed below: creating it takes &mut
+        // self (and a window handle, which only render has), the match
+        // takes &self for the whole arm.
+        if matches!(
+            self.turns.get(index),
+            Some(Turn::Tool {
+                status: ToolStatus::Pending(_),
+                ..
+            })
+        ) {
+            self.approval_reply_for(index, window, cx);
         }
         let inner = match &self.turns[index] {
             Turn::Message { role, text, .. } => self.render_message(role, text, cx),
@@ -1550,6 +1617,7 @@ impl ChatView {
 
         match status {
             ToolStatus::Pending(_) => {
+                let reply = self.approval_replies.get(&index);
                 inner = inner
                     .child(
                         div()
@@ -1582,10 +1650,32 @@ impl ChatView {
                                     .outline()
                                     .tooltip("Refuse this call")
                                     .on_click(cx.listener(move |this, _, _, cx| {
-                                        this.decide_tool(index, PermissionDecision::Deny, cx)
+                                        this.decide_tool(
+                                            index,
+                                            PermissionDecision::Deny { feedback: None },
+                                            cx,
+                                        )
                                     })),
                             ),
-                    );
+                    )
+                    // The text path: what you type here denies the call
+                    // AND goes back to the model — "no, use the other
+                    // file" becomes a correction, not a dead end.
+                    .children(reply.map(|reply| {
+                        h_flex()
+                            .gap_2()
+                            .child(Input::new(reply).small().flex_1())
+                            .child(
+                                Button::new(SharedString::from(format!("reply-{index}")))
+                                    .label("Reply")
+                                    .small()
+                                    .outline()
+                                    .tooltip("Deny the call and send your text to the model")
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.reply_tool(index, cx)
+                                    })),
+                            )
+                    }));
             }
             ToolStatus::Running => {
                 // The header already carries the spinner and the label;
@@ -2016,9 +2106,11 @@ impl Render for ChatView {
                             .min_h_0()
                             .relative()
                             .child(
-                                list(self.list_state.clone(), move |index, _window, cx| {
-                                    view.update(cx, |view, cx| view.render_turn(index, cx))
-                                        .unwrap_or_else(|_| div().into_any_element())
+                                list(self.list_state.clone(), move |index, window, cx| {
+                                    view.update(cx, |view, cx| {
+                                        view.render_turn(index, window, cx)
+                                    })
+                                    .unwrap_or_else(|_| div().into_any_element())
                                 })
                                 .flex_1()
                                 .min_h_0()

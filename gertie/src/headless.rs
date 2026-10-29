@@ -112,23 +112,31 @@ pub fn run(prompt: Option<String>, yes: bool, config_path: Option<PathBuf>) -> i
         }
         if !interactive {
             eprintln!("  denied (non-interactive; use --yes to auto-approve)");
-            return PermissionDecision::Deny;
+            return PermissionDecision::Deny { feedback: None };
         }
-        eprint!("  approve? [Enter/y = yes, anything else denies] ");
+        eprint!("  approve? [Enter/y = yes, n = no, anything else is a reply to the model] ");
         use std::io::Write as _;
         let _ = std::io::stderr().flush();
         let mut line = String::new();
         match std::io::stdin().read_line(&mut line) {
             Ok(_) => match line.trim() {
                 "" | "y" | "Y" | "yes" => PermissionDecision::Approve,
-                _ => {
+                "n" | "N" | "no" => {
                     eprintln!("  denied");
-                    PermissionDecision::Deny
+                    PermissionDecision::Deny { feedback: None }
+                }
+                // Anything else the human typed is worth more than a
+                // bare no: it goes back to the model in the tool result.
+                reply => {
+                    eprintln!("  denied — your reply goes back to the model");
+                    PermissionDecision::Deny {
+                        feedback: Some(reply.to_string()),
+                    }
                 }
             },
             Err(_) => {
                 eprintln!("  denied (stdin closed)");
-                PermissionDecision::Deny
+                PermissionDecision::Deny { feedback: None }
             }
         }
     };
@@ -549,7 +557,7 @@ mod tests {
             session,
             &mut |_| {
                 approvals += 1;
-                PermissionDecision::Deny
+                PermissionDecision::Deny { feedback: None }
             },
         );
         assert!(matches!(outcome, Outcome::Done));

@@ -139,7 +139,7 @@ mod tests {
         assert!(broker.respond(id, PermissionDecision::Approve));
         assert_eq!(answer.blocking_recv(), Ok(PermissionDecision::Approve));
         // Second answer for the same id: unknown, reports false.
-        assert!(!broker.respond(id, PermissionDecision::Deny));
+        assert!(!broker.respond(id, PermissionDecision::Deny { feedback: None }));
     }
 
     #[test]
@@ -174,9 +174,12 @@ mod tests {
         let broker = PermissionBroker::new();
         let mut rx = broker.subscribe();
         let (id, answer) = broker.request(call(), PromptSource::Leader);
-        broker.respond(id, PermissionDecision::Deny);
+        broker.respond(id, PermissionDecision::Deny { feedback: None });
         // The loop-side receiver still resolves.
-        assert_eq!(answer.blocking_recv(), Ok(PermissionDecision::Deny));
+        assert_eq!(
+            answer.blocking_recv(),
+            Ok(PermissionDecision::Deny { feedback: None })
+        );
         // Nothing was published: the UI saw the ask via the event.
         assert!(rx.try_recv().is_err());
     }
