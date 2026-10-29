@@ -20,12 +20,14 @@ pub use gertie_core::{Provider, ToolCall, ToolSpec};
 /// schema is the default and the most universal (ppq.ai, OpenRouter,
 /// Ollama, vLLM); Anthropic's Messages API is the first second adapter —
 /// the honest test of whether the Provider trait is really
-/// vendor-neutral.
+/// vendor-neutral; Replay is the dev/test wire that streams scripted
+/// scenarios through the real loop.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub enum Wire {
     #[default]
     OpenAI,
     Anthropic,
+    Replay,
 }
 
 impl Wire {
@@ -33,6 +35,7 @@ impl Wire {
         match name {
             "openai" => Some(Self::OpenAI),
             "anthropic" => Some(Self::Anthropic),
+            "replay" => Some(Self::Replay),
             _ => None,
         }
     }
@@ -60,14 +63,17 @@ pub(crate) const MAX_ATTEMPTS: u32 = 3;
 const INITIAL_BACKOFF: Duration = Duration::from_millis(500);
 
 pub mod anthropic;
+pub mod replay;
 
 pub use anthropic::Anthropic;
+pub use replay::ReplayProvider;
 
-/// The two wire adapters, behind one type. The loop and UI take this;
+/// The wire adapters, behind one type. The loop and UI take this;
 /// which wire a given endpoint speaks is decided once, at construction.
 pub enum AnyProvider {
     OpenAI(OpenAICompatible),
     Anthropic(Anthropic),
+    Replay(ReplayProvider),
 }
 
 impl AnyProvider {
@@ -75,6 +81,7 @@ impl AnyProvider {
         match self {
             Self::OpenAI(provider) => provider.context_window(),
             Self::Anthropic(provider) => provider.context_window(),
+            Self::Replay(provider) => provider.context_window(),
         }
     }
 
@@ -86,6 +93,7 @@ impl AnyProvider {
         {
             Wire::OpenAI => OpenAICompatible::with_endpoints(endpoints).map(Self::OpenAI),
             Wire::Anthropic => Anthropic::with_endpoints(endpoints).map(Self::Anthropic),
+            Wire::Replay => ReplayProvider::with_endpoints(endpoints).map(Self::Replay),
         }
     }
 }
@@ -95,6 +103,7 @@ impl gertie_core::Provider for AnyProvider {
         match self {
             Self::OpenAI(provider) => provider.stream(request),
             Self::Anthropic(provider) => provider.stream(request),
+            Self::Replay(provider) => provider.stream(request),
         }
     }
 }

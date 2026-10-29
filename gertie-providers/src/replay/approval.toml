@@ -1,0 +1,13 @@
+# The approval scenario: a scripted mutating call, so the permission
+# card, the diff preview, and the deny-with-feedback path all get
+# exercised without a paid model anywhere.
+
+[[steps]]
+text = "I'll add a scratch file so a permission card appears — deny it if you like."
+
+[[steps.tool_calls]]
+name = "write_file"
+arguments = '{"path": "replay-approval.txt", "content": "written by the replay provider - this file is safe to delete"}'
+
+[[steps]]
+text = "That write was scripted either way. If you approved, the file is in your workspace; if you denied, the tool result said so — both paths end here."

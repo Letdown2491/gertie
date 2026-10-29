@@ -255,7 +255,7 @@ impl SettingsPanelView {
             name: field(draft.name.clone(), "name"),
             base_url: field(draft.base_url.clone(), "https://…/v1"),
             model: field(draft.model.clone(), "model"),
-            wire: field(wire, "openai | anthropic"),
+            wire: field(wire, "openai | anthropic | replay"),
             api_key_env: field(api_key_env, "env var, e.g. PPQ_API_KEY"),
             api_key: field(api_key, "literal key — prefer the env var"),
             context_window: field(

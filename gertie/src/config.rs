@@ -158,6 +158,21 @@ pub struct EndpointConfig {
     pub context_window: Option<u64>,
 }
 
+/// `~` or `~/…` at the start of an endpoint's base_url expands to the
+/// home directory — a replay endpoint points at a scenario directory
+/// on this machine, not at a network host. Everything else (https://…)
+/// passes through untouched; `$HOME` unset leaves the value as written.
+fn expand_tilde(base_url: &str) -> String {
+    let starts_with_home = base_url == "~" || base_url.starts_with("~/");
+    if starts_with_home
+        && let Ok(home) = std::env::var("HOME")
+        && !home.is_empty()
+    {
+        return format!("{home}{}", &base_url[1..]);
+    }
+    base_url.to_string()
+}
+
 impl EndpointConfig {
     /// The endpoint with its key resolved: `api_key_env`, then the
     /// conventional `GERTIE_<NAME>_API_KEY` / `<NAME>_API_KEY`
@@ -185,7 +200,7 @@ impl EndpointConfig {
 
         gertie_providers::Endpoint {
             name: self.name.clone(),
-            base_url: self.base_url.clone(),
+            base_url: expand_tilde(&self.base_url),
             model: self.model.clone(),
             api_key,
             context_window: self.context_window,
@@ -480,7 +495,7 @@ impl Config {
             {
                 warnings.push(format!(
                     "endpoint {}: unknown wire {:?} — speaking openai; \
-                 valid wires are openai | anthropic",
+                  valid wires are openai | anthropic | replay",
                     endpoint.name, wire
                 ));
             }

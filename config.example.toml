@@ -18,6 +18,16 @@ api_key_env = "PPQ_API_KEY"
 # model = "qwen3-coder"
 # context_window = 32768
 
+# Replay: scripted scenarios instead of a model — dev/test only, zero
+# tokens. The model name picks the scenario: "showcase" and "approval"
+# ship embedded; any other name loads <base_url>/<model>.toml. Drivers
+# the real loop, permission cards and all; nothing leaves the machine.
+# [[endpoints]]
+# name = "replay"
+# base_url = "~/lib/gertie-scenarios"   # where your .toml scenarios live
+# wire = "replay"
+# model = "showcase"
+
 # MCP servers — either a spawned process (stdio) or a remote URL
 # (Streamable HTTP). Every MCP tool call prompts — third-party tools
 # are untrusted by default.

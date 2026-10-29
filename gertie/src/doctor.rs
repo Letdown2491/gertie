@@ -52,6 +52,7 @@ pub fn run(config_override: Option<PathBuf>) -> i32 {
         let wire = match selected.wire {
             gertie_providers::Wire::OpenAI => "openai",
             gertie_providers::Wire::Anthropic => "anthropic",
+            gertie_providers::Wire::Replay => "replay (scripted)",
         };
         println!(
             "endpoint    {} · {} ({wire}) · {}",
