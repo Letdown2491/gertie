@@ -157,6 +157,10 @@ impl SessionStore {
         let connection = Connection::open(path)?;
         connection.execute_batch(
             "PRAGMA journal_mode = WAL;
+             -- Wait out a concurrent writer (the desktop app and a
+             -- headless `gertie run` share this store) instead of
+             -- failing the open with SQLITE_BUSY.
+             PRAGMA busy_timeout = 5000;
              PRAGMA foreign_keys = ON;
              CREATE TABLE IF NOT EXISTS sessions (
                  id INTEGER PRIMARY KEY,
