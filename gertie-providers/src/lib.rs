@@ -472,10 +472,30 @@ fn wire_messages(messages: &[WireMessage]) -> Vec<serde_json::Value> {
                     );
                 }
                 role => {
-                    entry.insert(
-                        "content".into(),
-                        serde_json::json!(message.content.clone().unwrap_or_default()),
-                    );
+                    // Images ride only on user turns: the content
+                    // becomes a parts array — text first, then one
+                    // `image_url` part per image (data URLs pass
+                    // through whole). No images: the plain string the
+                    // vast majority of messages are.
+                    let has_images = role == gertie_core::Role::User && !message.images.is_empty();
+                    if has_images {
+                        let mut parts = vec![serde_json::json!({
+                            "type": "text",
+                            "text": message.content.clone().unwrap_or_default(),
+                        })];
+                        parts.extend(message.images.iter().map(|image| {
+                            serde_json::json!({
+                                "type": "image_url",
+                                "image_url": { "url": image },
+                            })
+                        }));
+                        entry.insert("content".into(), serde_json::Value::Array(parts));
+                    } else {
+                        entry.insert(
+                            "content".into(),
+                            serde_json::json!(message.content.clone().unwrap_or_default()),
+                        );
+                    }
                     if role == gertie_core::Role::Assistant && !message.tool_calls.is_empty() {
                         entry.insert(
                             "tool_calls".into(),
@@ -637,6 +657,25 @@ mod tests {
         assert_eq!(wire[2]["tool_call_id"], "call_9");
         assert_eq!(wire[2]["name"], "edit_file");
         assert_eq!(wire[2]["content"], "done");
+    }
+
+    #[test]
+    fn user_images_become_content_parts() {
+        let mut message = WireMessage::user("what is in this picture");
+        message.images = vec!["data:image/png;base64,QUJD".into()];
+        let wire = wire_messages(&[message]);
+
+        // Text and image ride as a parts array, text first.
+        let content = &wire[0]["content"];
+        assert!(content.is_array());
+        assert_eq!(content[0]["type"], "text");
+        assert_eq!(content[0]["text"], "what is in this picture");
+        assert_eq!(content[1]["type"], "image_url");
+        assert_eq!(content[1]["image_url"]["url"], "data:image/png;base64,QUJD");
+        // Text-only messages stay plain strings — the overwhelmingly
+        // common shape must not grow a parts wrapper.
+        let plain = wire_messages(&[WireMessage::user("just words")]);
+        assert_eq!(plain[0]["content"], "just words");
     }
 
     #[test]

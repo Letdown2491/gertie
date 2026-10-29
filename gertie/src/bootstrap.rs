@@ -21,6 +21,15 @@ pub struct Reloaded {
     pub provider: Option<Arc<AnyProvider>>,
     pub agent_endpoint: Option<gertie_providers::Endpoint>,
     pub label: String,
+
+    /// Just the identity — `ppq · glm-5.3-flash` — for the footer,
+    /// where the capability suffix (skills, agents) and key warnings
+    /// would be noise. Headless keeps the full label on stderr.
+    pub model_label: String,
+    /// Discovered prompt templates — `/name` expands from the
+    /// composer. Reload keeps the load-time set (templates don't
+    /// depend on endpoint config).
+    pub templates: Vec<gertie_tools::templates::Template>,
     pub settings: Arc<crate::settings::SettingsSummary>,
 }
 
@@ -57,6 +66,9 @@ pub struct Bootstrap {
     /// The skills index prompt section, shared by every registry's
     /// system prompt (skills are repo content, identical per worktree).
     skill_index: String,
+    /// Discovered prompt templates — `/name` expansion in the
+    /// composer. Load-time setup; reload carries the same set.
+    pub templates: Vec<gertie_tools::templates::Template>,
 }
 
 impl Bootstrap {
@@ -71,6 +83,11 @@ impl Bootstrap {
 
     pub fn label(&self) -> String {
         self.reloaded.read().unwrap().label.clone()
+    }
+
+    /// The footer identity: just provider · model, no wiring.
+    pub fn model_label(&self) -> String {
+        self.reloaded.read().unwrap().model_label.clone()
     }
 
     pub fn settings(&self) -> Arc<crate::settings::SettingsSummary> {
@@ -103,10 +120,11 @@ impl Bootstrap {
             None => crate::config::Config::load()?,
         };
         let endpoint = config.selected_endpoint();
-        let mut label = endpoint
+        let model_label = endpoint
             .as_ref()
             .map(|endpoint| format!("{} · {}", endpoint.name, endpoint.model))
             .unwrap_or_else(|| "no endpoint configured".to_string());
+        let mut label = model_label.clone();
         for warning in config.key_warnings() {
             label.push_str(&format!(" — ⚠ {warning}"));
         }
@@ -119,6 +137,8 @@ impl Bootstrap {
             provider,
             agent_endpoint,
             label,
+            model_label,
+            templates: self.templates.clone(),
             settings: Arc::new(settings),
         };
         Ok(())
@@ -147,7 +167,7 @@ impl Bootstrap {
             Err(error) => (crate::config::Config::default(), Some(error)),
         };
         let endpoint = config.selected_endpoint();
-        let mut label = if let Some(error) = &config_error {
+        let model_label = if let Some(error) = &config_error {
             format!("config error — {error}")
         } else if let Some(note) = &skeleton_note {
             note.clone()
@@ -157,6 +177,7 @@ impl Bootstrap {
                 .map(|endpoint| format!("{} · {}", endpoint.name, endpoint.model))
                 .unwrap_or_else(|| "no endpoint configured".to_string())
         };
+        let mut label = model_label.clone();
         for warning in config.key_warnings() {
             label.push_str(&format!(" — ⚠ {warning}"));
         }
@@ -225,8 +246,14 @@ impl Bootstrap {
             })
             .unwrap_or_else(|| PathBuf::from(".gertie-skills"));
         let skills_project = workspace_root.join(".gertie/skills");
+        // Built-ins materialize before discovery so the writing skill is
+        // found this launch. The voice-sample cache derives from the
+        // same dir skills live in (beside config.toml).
+        let builtin_warnings = materialize_builtin_skills(&skills_user, skills_user.parent());
         let (skills, skill_warnings) =
             gertie_tools::skills::discover(&skills_user, &skills_project);
+        let mut skill_warnings = skill_warnings;
+        skill_warnings.extend(builtin_warnings);
         let skill_index = gertie_tools::skills::index_prompt(&skills);
         if !skills.is_empty() {
             let count = skills.len();
@@ -240,6 +267,24 @@ impl Bootstrap {
             root_independent.push("load_skill".into());
         }
         for warning in &skill_warnings {
+            label.push_str(&format!(" — ⚠ {warning}"));
+        }
+
+        // Prompt templates: the same two-root convention as skills —
+        // `/name` in the composer expands from a file; the builtins
+        // /compact and /export are UI-side and always win. Discovery
+        // problems are warnings, never a failed launch.
+        let templates_user = config_path
+            .and_then(|path| path.parent().map(|parent| parent.join("templates")))
+            .or_else(|| {
+                crate::config::Config::path().map(|path| path.parent().unwrap().join("templates"))
+            })
+            .unwrap_or_else(|| PathBuf::from(".gertie-templates"));
+        let templates_project = workspace_root.join(".gertie/templates");
+        let builtin_template_warnings = materialize_builtin_templates(&templates_user);
+        let (templates, template_warnings) =
+            gertie_tools::templates::discover(&templates_user, &templates_project);
+        for warning in builtin_template_warnings.iter().chain(&template_warnings) {
             label.push_str(&format!(" — ⚠ {warning}"));
         }
 
@@ -336,41 +381,44 @@ impl Bootstrap {
         if let (Some(endpoint), Some(leader_provider)) = (&agent_endpoint, &provider) {
             // The shipped registry first; a config `[[agents]]` entry with
             // a matching name replaces the built-in (and may pin its own
-            // model), extras are added on top. Built-ins inherit the
-            // leader model.
-            let types = agent_types(&config);
+            // model or endpoint), extras are added on top. Built-ins
+            // inherit the leader provider.
+            let (types, type_warnings) = agent_types(&config, endpoint);
+            for warning in type_warnings {
+                label.push_str(&format!(" — ⚠ {warning}"));
+            }
             // Build first (borrowing `tools` immutably), insert after.
             let mut additions: Vec<(String, Arc<dyn gertie_core::Tool>)> = Vec::new();
-            for (agent_type, model) in &types {
-                let worker_provider: Arc<dyn gertie_core::Provider> = match model {
-                    Some(model) => {
-                        match gertie_providers::AnyProvider::with_endpoints(vec![
-                            gertie_providers::Endpoint {
-                                model: model.clone(),
-                                ..endpoint.clone()
-                            },
-                        ]) {
-                            Ok(provider) => Arc::new(provider),
-                            Err(error) => {
-                                label.push_str(&format!(" — ⚠ agent {}: {error}", agent_type.name));
-                                continue;
-                            }
+            for target in &types {
+                let (worker_provider, context_window) =
+                    match worker_backend(target, endpoint, leader_provider) {
+                        Ok(backend) => backend,
+                        Err(error) => {
+                            label.push_str(&format!(
+                                " — ⚠ agent {}: {error}",
+                                target.agent_type.name
+                            ));
+                            continue;
                         }
-                    }
-                    None => leader_provider.clone(),
-                };
+                    };
                 let tool = gertie_core::AgentTool::new(
-                    agent_type.clone(),
+                    target.agent_type.clone(),
                     worker_provider,
                     &tools,
                     snapshots.clone(),
                     broker.clone(),
-                    endpoint.context_window,
+                    context_window,
                     workspace_root.clone(),
                     Some(store.clone()),
                     session_scope.clone(),
                 );
-                label.push_str(&format!(" · agent:{}", agent_type.name));
+                match &target.endpoint {
+                    Some(pinned) => label.push_str(&format!(
+                        " · agent:{}@{}",
+                        target.agent_type.name, pinned.name
+                    )),
+                    None => label.push_str(&format!(" · agent:{}", target.agent_type.name)),
+                }
                 additions.push((tool.name().to_string(), Arc::new(tool)));
             }
             let map = Arc::get_mut(&mut tools).expect("registry not yet shared");
@@ -391,11 +439,14 @@ impl Bootstrap {
             store,
             capability_suffix: label[capability_start..].to_string(),
             skill_count: skills.len(),
+            templates: templates.clone(),
             reloaded: std::sync::RwLock::new(Reloaded {
                 config: live_config,
                 provider,
                 agent_endpoint,
                 label,
+                model_label,
+                templates,
                 settings: Arc::new(settings),
             }),
             tools,
@@ -430,30 +481,27 @@ impl Bootstrap {
             }
         }
         if let (Some(endpoint), Some(leader_provider)) = (self.agent_endpoint(), self.provider()) {
-            let types = agent_types(&self.config);
+            let (types, type_warnings) = agent_types(&self.config, &endpoint);
+            for warning in type_warnings {
+                eprintln!("warning: {warning}");
+            }
             let mut additions: Vec<(String, Arc<dyn gertie_core::Tool>)> = Vec::new();
-            for (agent_type, model) in &types {
-                let worker_provider: Arc<dyn gertie_core::Provider> = match model {
-                    Some(model) => {
-                        match gertie_providers::AnyProvider::with_endpoints(vec![
-                            gertie_providers::Endpoint {
-                                model: model.clone(),
-                                ..endpoint.clone()
-                            },
-                        ]) {
-                            Ok(provider) => Arc::new(provider),
-                            Err(_) => continue,
+            for target in &types {
+                let (worker_provider, context_window) =
+                    match worker_backend(target, &endpoint, &leader_provider) {
+                        Ok(backend) => backend,
+                        Err(error) => {
+                            eprintln!("warning: agent {}: {error}", target.agent_type.name);
+                            continue;
                         }
-                    }
-                    None => leader_provider.clone(),
-                };
+                    };
                 let tool = gertie_core::AgentTool::new(
-                    agent_type.clone(),
+                    target.agent_type.clone(),
                     worker_provider,
                     &tools,
                     self.snapshots.clone(),
                     self.broker.clone(),
-                    endpoint.context_window,
+                    context_window,
                     root.to_path_buf(),
                     Some(self.store.clone()),
                     self.session_scope.clone(),
@@ -496,20 +544,62 @@ fn provider_chain(
     (provider, agent_endpoint)
 }
 
+/// An agent type plus the endpoint its worker talks to. `None` = the
+/// leader's provider (built-ins, and config agents that pin nothing);
+/// `Some` = a dedicated single-endpoint provider — a model override on
+/// the leader's endpoint, or a pin to a different configured endpoint
+/// (a different provider or wire) entirely.
+struct AgentTarget {
+    agent_type: gertie_core::AgentType,
+    endpoint: Option<gertie_providers::Endpoint>,
+}
+
 /// The shipped agent types first; a config `[[agents]]` entry with a
-/// matching name replaces the built-in (and may pin its own model),
-/// extras are added on top. Built-ins inherit the leader model.
-fn agent_types(config: &crate::config::Config) -> Vec<(gertie_core::AgentType, Option<String>)> {
-    let mut types: Vec<(gertie_core::AgentType, Option<String>)> =
-        gertie_core::builtin_agent_types()
-            .into_iter()
-            .map(|t| (t, None))
-            .collect();
+/// matching name replaces the built-in (and may pin its own model or
+/// endpoint), extras are added on top. A pin to an endpoint that isn't
+/// configured is a warning and the entry is skipped — the built-in
+/// keeps its slot, because a council member that silently answers as
+/// some other model is worse than a missing one. Warnings come back
+/// for the caller to surface.
+fn agent_types(
+    config: &crate::config::Config,
+    leader_endpoint: &gertie_providers::Endpoint,
+) -> (Vec<AgentTarget>, Vec<String>) {
+    let mut warnings = Vec::new();
+    let mut types: Vec<AgentTarget> = gertie_core::builtin_agent_types()
+        .into_iter()
+        .map(|agent_type| AgentTarget {
+            agent_type,
+            endpoint: None,
+        })
+        .collect();
     for agent in &config.agents {
         if agent.invocation == crate::config::Invocation::User {
             // Registered later, when UI dispatch exists.
             continue;
         }
+        let endpoint = match &agent.endpoint {
+            Some(name) => match config.endpoints.iter().find(|e| &e.name == name) {
+                Some(endpoint_config) => {
+                    let mut resolved = endpoint_config.resolve();
+                    if let Some(model) = &agent.model {
+                        resolved.model = model.clone();
+                    }
+                    Some(resolved)
+                }
+                None => {
+                    warnings.push(format!(
+                        "agent {}: endpoint {name:?} is not configured — skipping",
+                        agent.name
+                    ));
+                    continue;
+                }
+            },
+            None => agent.model.clone().map(|model| gertie_providers::Endpoint {
+                model,
+                ..leader_endpoint.clone()
+            }),
+        };
         let agent_type = gertie_core::AgentType {
             name: agent.name.clone(),
             description: agent.description.clone(),
@@ -522,18 +612,56 @@ fn agent_types(config: &crate::config::Config) -> Vec<(gertie_core::AgentType, O
             }),
             tools: agent.tools.clone(),
         };
-        let entry = (agent_type, agent.model.clone());
-        match types.iter_mut().find(|(t, _)| t.name == agent.name) {
+        let entry = AgentTarget {
+            agent_type,
+            endpoint,
+        };
+        match types.iter_mut().find(|t| t.agent_type.name == agent.name) {
             Some(slot) => *slot = entry,
             None => types.push(entry),
         }
     }
-    types
+    (types, warnings)
 }
 
+/// What a dispatched worker talks to: its provider and the context
+/// window its compaction should assume. A pinned worker gets exactly
+/// its own endpoint — no fallback chain — so a council member fails
+/// loudly instead of quietly answering as some other model.
+fn worker_backend(
+    target: &AgentTarget,
+    leader_endpoint: &gertie_providers::Endpoint,
+    leader_provider: &Arc<AnyProvider>,
+) -> Result<(Arc<dyn gertie_core::Provider>, Option<u64>), String> {
+    match &target.endpoint {
+        Some(endpoint) => {
+            let provider = gertie_providers::AnyProvider::with_endpoints(vec![endpoint.clone()])
+                .map_err(|error| error.to_string())?;
+            Ok((Arc::new(provider), endpoint.context_window))
+        }
+        None => Ok((leader_provider.clone(), leader_endpoint.context_window)),
+    }
+}
+
+/// The voice block: always on, part of every request. This is what
+/// keeps chat replies from reading like chatbot output — the writing
+/// skill carries the full discipline for kept prose, but a two-line
+/// answer never loads a skill, so the default lives here.
+const VOICE_SECTION: &str = "## Voice\n\n\
+     Write like a person, not a press release. Lead with the answer; keep \
+     the reasoning that would change the reader's decision. No staged \
+     openers (\"Let's dive in\", \"Great question\") and no closers (\"I \
+     hope this helps\"). No \"it's not X, it's Y\" contrasts. No forced \
+     triples. Em dashes: at most one per paragraph, never in a row. No \
+     bold labels on list items; headings in sentence case. Plain verbs \
+     (is, has — not \"serves as\", \"boasts\"). Specifics beat \
+     significance: a fact, never a testament. Vary sentence length. For \
+     prose the reader will keep — docs, READMEs, commit messages — load \
+     the writing skill.";
+
 /// The system prompt: identity, the one policy paragraph the model
-/// must know, the skill index. Terse by the two-loads rule — every
-/// line is context paid on every turn.
+/// must know, the voice block, the skill index. Terse by the two-loads
+/// rule — every line is context paid on every turn.
 fn system_prompt_for(root: &Path, skill_index: &str) -> Option<String> {
     let mut prompt = format!(
         "You are gertie, a coding agent working in {}.\n\
@@ -542,9 +670,253 @@ fn system_prompt_for(root: &Path, skill_index: &str) -> Option<String> {
          tests, report plainly.",
         root.display()
     );
+    prompt.push_str("\n\n");
+    prompt.push_str(VOICE_SECTION);
     if !skill_index.is_empty() {
         prompt.push_str("\n\n");
         prompt.push_str(skill_index);
     }
     Some(prompt)
+}
+
+/// The built-in writing skill, embedded at compile time and
+/// materialized into the user skills dir on launch — write-if-absent,
+/// so from the first run the file is the user's to edit or shadow
+/// (a project skill named `writing` overrides it, same rule as for
+/// any other skill). Same posture as the starter config.toml.
+const WRITING_SKILL: &str = include_str!("skills/writing/SKILL.md");
+const COUNCIL_SKILL: &str = include_str!("skills/council/SKILL.md");
+const EXPLAIN_TEMPLATE: &str = include_str!("templates/explain.md");
+
+/// Writes the built-in templates if absent — same write-if-absent
+/// contract as the writing skill: a user edit is theirs, and survives
+/// every launch. Returns warnings, never a failed launch.
+fn materialize_builtin_templates(templates_user: &Path) -> Vec<String> {
+    let file = templates_user.join("explain.md");
+    if file.exists() {
+        return vec![];
+    }
+    if let Err(error) = std::fs::create_dir_all(templates_user)
+        .and_then(|_| std::fs::write(&file, EXPLAIN_TEMPLATE))
+    {
+        vec![format!("built-in explain template: {error}")]
+    } else {
+        vec![]
+    }
+}
+
+/// Write-if-absent materialization of one built-in skill directory —
+/// same contract as the starter config.toml: the user's edit (or a
+/// project shadow) is theirs and survives every launch. Returns
+/// warnings, never a failed launch.
+fn materialize_skill(skills_user: &Path, name: &str, contents: &str) -> Vec<String> {
+    let dir = skills_user.join(name);
+    let skill_file = dir.join("SKILL.md");
+    if let Err(error) = std::fs::create_dir_all(&dir) {
+        return vec![format!("built-in {name} skill: {error}")];
+    }
+    if !skill_file.exists()
+        && let Err(error) = std::fs::write(&skill_file, contents)
+    {
+        return vec![format!("built-in {name} skill: {error}")];
+    }
+    vec![]
+}
+
+/// Writes the built-in skills if absent, and refreshes the voice-sample
+/// cache: the user-level sample (`voice.md` beside config.toml) lives
+/// outside any workspace, where `read_file` can't follow, so a copy
+/// rides in the writing skill's dir and is re-copied (or removed) every
+/// launch. Project-level samples (workspace `.gertie/voice.md`) are read
+/// in place and need no cache. Returns warnings, never a failed launch.
+fn materialize_builtin_skills(skills_user: &Path, user_config_dir: Option<&Path>) -> Vec<String> {
+    let mut warnings = materialize_skill(skills_user, "writing", WRITING_SKILL);
+    warnings.extend(materialize_skill(skills_user, "council", COUNCIL_SKILL));
+
+    let writing_dir = skills_user.join("writing");
+    let sample = user_config_dir.map(|dir| dir.join("voice.md"));
+    let cache = writing_dir.join("voice.md");
+    match sample {
+        Some(sample) if sample.exists() => {
+            if let Err(error) =
+                std::fs::read_to_string(&sample).and_then(|sample| std::fs::write(&cache, sample))
+            {
+                warnings.push(format!("voice sample copy: {error}"));
+            }
+        }
+        // No user sample: a stale cache would speak in a deleted
+        // voice — remove it.
+        _ => {
+            if let Err(error) = std::fs::remove_file(&cache)
+                && error.kind() != std::io::ErrorKind::NotFound
+            {
+                warnings.push(format!("voice sample copy: {error}"));
+            }
+        }
+    }
+    warnings
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[test]
+    fn the_writing_skill_materializes_once_and_is_the_users_after() {
+        let dir = tempdir().unwrap();
+        let skills_user = dir.path().join("skills");
+
+        let warnings = materialize_builtin_skills(&skills_user, None);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        let skill_file = skills_user.join("writing/SKILL.md");
+        let first = std::fs::read_to_string(&skill_file).unwrap();
+        assert!(first.starts_with("---"), "parse_skill demands frontmatter");
+        assert!(first.contains("name: writing"));
+        let council_file = skills_user.join("council/SKILL.md");
+        assert!(
+            council_file.exists()
+                && std::fs::read_to_string(&council_file)
+                    .unwrap()
+                    .contains("name: council"),
+            "council materialized alongside"
+        );
+
+        // Discovery picks the built-in up like any other skill.
+        let (skills, _) =
+            gertie_tools::skills::discover(&skills_user, &dir.path().join(".gertie/skills"));
+        let writing = skills.iter().find(|skill| skill.name == "writing");
+        assert!(writing.is_some(), "built-in writing skill not discovered");
+        assert!(!writing.unwrap().description.is_empty());
+
+        // A user edit survives the next launch.
+        std::fs::write(&skill_file, "mine").unwrap();
+        let warnings = materialize_builtin_skills(&skills_user, None);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(std::fs::read_to_string(&skill_file).unwrap(), "mine");
+    }
+
+    #[test]
+    fn the_voice_sample_cache_follows_the_user_file() {
+        let dir = tempdir().unwrap();
+        let config_dir = dir.path().join("config");
+        let skills_user = dir.path().join("skills");
+        std::fs::create_dir_all(&config_dir).unwrap();
+        let cache = skills_user.join("writing/voice.md");
+
+        // No sample: no cache.
+        let warnings = materialize_builtin_skills(&skills_user, Some(&config_dir));
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert!(!cache.exists());
+
+        // A sample is copied on launch.
+        std::fs::write(config_dir.join("voice.md"), "Short sentences. Period.").unwrap();
+        materialize_builtin_skills(&skills_user, Some(&config_dir));
+        assert_eq!(
+            std::fs::read_to_string(&cache).unwrap(),
+            "Short sentences. Period."
+        );
+
+        // Edits propagate on the next launch.
+        std::fs::write(config_dir.join("voice.md"), "updated").unwrap();
+        materialize_builtin_skills(&skills_user, Some(&config_dir));
+        assert_eq!(std::fs::read_to_string(&cache).unwrap(), "updated");
+
+        // Deletion removes the stale cache.
+        std::fs::remove_file(config_dir.join("voice.md")).unwrap();
+        materialize_builtin_skills(&skills_user, Some(&config_dir));
+        assert!(!cache.exists());
+    }
+
+    #[test]
+    fn the_system_prompt_always_carries_the_voice() {
+        let prompt = system_prompt_for(Path::new("/w"), "").unwrap();
+        assert!(prompt.contains("## Voice"));
+
+        // The skill index still appends when present.
+        let prompt = system_prompt_for(Path::new("/w"), "## Skills\n\n- **x** — y\n").unwrap();
+        assert!(prompt.contains("## Voice"));
+        assert!(prompt.contains("**x**"));
+    }
+
+    /// Council seats resolve to their pinned endpoint; a pin to an
+    /// endpoint that isn't configured warns and keeps the built-in.
+    #[test]
+    fn agent_pins_resolve_or_warn() {
+        let mut config = crate::config::Config::default();
+        config.endpoints.push(crate::config::EndpointConfig {
+            name: "anthropic".into(),
+            base_url: "https://api.anthropic.com".into(),
+            model: "claude-opus-4-6".into(),
+            wire: Some("anthropic".into()),
+            api_key: None,
+            api_key_env: Some("ANTHROPIC_API_KEY".into()),
+            context_window: Some(200_000),
+        });
+        let mut seat = crate::config::AgentConfig {
+            name: "council-anthropic".into(),
+            description: "Use when a council review runs.".into(),
+            invocation: Default::default(),
+            model: None,
+            endpoint: Some("anthropic".into()),
+            prompt: None,
+            tools: None,
+        };
+        config.agents.push(seat.clone());
+        seat.name = "review".into(); // replaces the built-in…
+        seat.endpoint = Some("nowhere".into()); // …but the pin is broken
+        config.agents.push(seat);
+        config.agents.push(crate::config::AgentConfig {
+            name: "cheap-explore".into(),
+            description: "Use for cheap exploration.".into(),
+            invocation: Default::default(),
+            model: Some("glm-5.3-flash".into()),
+            endpoint: None,
+            prompt: None,
+            tools: None,
+        });
+
+        let leader = gertie_providers::Endpoint {
+            name: "ppq".into(),
+            base_url: "https://api.ppq.ai/v1".into(),
+            model: "glm-5.3-flash".into(),
+            api_key: None,
+            context_window: Some(1_000_000),
+            wire: Default::default(),
+        };
+
+        let (types, warnings) = agent_types(&config, &leader);
+
+        // The good seat: pinned to its endpoint, wire included.
+        let seat = types
+            .iter()
+            .find(|t| t.agent_type.name == "council-anthropic")
+            .expect("seat present");
+        let pinned = seat.endpoint.as_ref().expect("seat pinned");
+        assert_eq!(pinned.name, "anthropic");
+        assert_eq!(pinned.model, "claude-opus-4-6");
+
+        // A model-only override swaps the model on the leader's endpoint.
+        let cheap = types
+            .iter()
+            .find(|t| t.agent_type.name == "cheap-explore")
+            .expect("extra present");
+        let pinned = cheap.endpoint.as_ref().expect("model pin");
+        assert_eq!(pinned.name, "ppq");
+        assert_eq!(pinned.model, "glm-5.3-flash");
+
+        // The broken pin: a warning, and the built-in review keeps its
+        // slot on the leader's provider — never a silent substitute.
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("agent review") && w.contains("nowhere")),
+            "warning names the agent and the endpoint: {warnings:?}"
+        );
+        let review = types
+            .iter()
+            .find(|t| t.agent_type.name == "review")
+            .expect("built-in kept");
+        assert!(review.endpoint.is_none(), "built-in unpinned");
+    }
 }

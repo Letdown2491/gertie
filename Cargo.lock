@@ -2148,6 +2148,7 @@ dependencies = [
 name = "gertie"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "directories",
  "futures-util",
  "gertie-core",
@@ -2167,6 +2168,7 @@ name = "gertie-core"
 version = "0.1.0"
 dependencies = [
  "async-stream",
+ "base64 0.22.1",
  "futures-core",
  "futures-util",
  "rusqlite",

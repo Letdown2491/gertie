@@ -108,6 +108,35 @@ pub fn run(config_override: Option<PathBuf>) -> i32 {
         }
     }
 
+    // Agent types — custom `[[agents]]` entries, pins called out. A
+    // seat on a missing endpoint is skipped at bootstrap; doctor is
+    // where that's spelled out, not at dispatch time.
+    if config.agents.is_empty() {
+        println!("agents      eight built-ins (no custom types)");
+    } else {
+        for agent in &config.agents {
+            match (&agent.endpoint, &agent.model) {
+                (Some(endpoint), Some(model)) => {
+                    println!("agent       {} → {endpoint} · {model}", agent.name)
+                }
+                (Some(endpoint), None) => println!("agent       {} → {endpoint}", agent.name),
+                (None, Some(model)) => println!("agent       {} · {model}", agent.name),
+                (None, None) => println!("agent       {}", agent.name),
+            }
+            if let Some(name) = &agent.endpoint
+                && !config
+                    .endpoints
+                    .iter()
+                    .any(|endpoint| &endpoint.name == name)
+            {
+                println!(
+                    "            ✗ endpoint {name:?} is not configured — this agent is skipped"
+                );
+                ready = false;
+            }
+        }
+    }
+
     // Search, sandbox, sessions.
     match &config.search {
         Some(search) => println!("search      {}", search.backend),

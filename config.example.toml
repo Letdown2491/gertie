@@ -64,5 +64,24 @@ api_key_env = "PPQ_API_KEY"
 # correctness first, then security, then clarity. Every finding cites a
 # file and line. Verify claims by reading, never by assuming.
 # """
+#
+# A worker can also live on a different endpoint — the name of any
+# [[endpoints]] entry above, its wire included. That is what makes a
+# council possible: several models, one diff, one verdict each (the
+# bundled `council` skill runs the loop). A pin to a missing endpoint
+# warns at startup and the agent is skipped — no silent substitution.
+#
+# [[endpoints]]
+# name = "anthropic"
+# base_url = "https://api.anthropic.com"
+# wire = "anthropic"
+# model = "claude-opus-4-6"
+# api_key_env = "ANTHROPIC_API_KEY"
+#
+# [[agents]]
+# name = "council-anthropic"
+# description = "Use when a council review runs. Read-only."
+# endpoint = "anthropic"
+# tools = ["read_file", "glob", "grep", "load_skill"]
 
 default_endpoint = "ppq"

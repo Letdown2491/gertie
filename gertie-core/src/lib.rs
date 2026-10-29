@@ -18,7 +18,10 @@ pub use agent_loop::{
 };
 pub use permissions::{PendingAsk, PermissionBroker, PromptSource};
 pub use provider::Provider;
-pub use request::{Request, ToolCall, ToolSpec, WireMessage};
+pub use request::{
+    IMAGE_MARKER_PREFIX, Request, ToolCall, ToolSpec, WireMessage, data_url_parts,
+    extract_image_markers, file_to_data_url,
+};
 use rusqlite::Connection;
 pub use snapshot::{Checkpoint, CheckpointId, SnapshotStore};
 use std::path::Path;
@@ -123,6 +126,10 @@ pub struct SessionSummary {
     /// session shows what it spent before, not just since reopen.
     pub input_tokens: u64,
     pub output_tokens: u64,
+    /// The last request's context size (prompt + completion) — the live
+    /// number the compaction threshold watches. Persisted so a resumed
+    /// session shows its distance to the window immediately.
+    pub context_tokens: u64,
 }
 
 /// One full-text search hit: which session, what role, and a marked
@@ -226,6 +233,7 @@ impl SessionStore {
             ("kind", "TEXT DEFAULT 'chat'"),
             ("input_tokens", "INTEGER DEFAULT 0"),
             ("output_tokens", "INTEGER DEFAULT 0"),
+            ("last_context_tokens", "INTEGER DEFAULT 0"),
         ] {
             if !session_columns.contains(&column.to_string()) {
                 connection.execute(
@@ -275,7 +283,7 @@ impl SessionStore {
     ) -> Result<Vec<SessionSummary>, rusqlite::Error> {
         let connection = self.connection.lock().unwrap();
         let mut statement = connection
-            .prepare("SELECT id, title, input_tokens, output_tokens FROM sessions WHERE parent_id = ?1 ORDER BY id")?;
+            .prepare("SELECT id, title, input_tokens, output_tokens, last_context_tokens FROM sessions WHERE parent_id = ?1 ORDER BY id")?;
         let rows = statement
             .query_map([parent.0 as i64], |row| {
                 Ok(SessionSummary {
@@ -283,6 +291,7 @@ impl SessionStore {
                     title: row.get(1)?,
                     input_tokens: row.get::<_, i64>(2)?.max(0) as u64,
                     output_tokens: row.get::<_, i64>(3)?.max(0) as u64,
+                    context_tokens: row.get::<_, i64>(4)?.max(0) as u64,
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -299,8 +308,10 @@ impl SessionStore {
             .is_ok()
     }
 
-    /// Adds a request's usage to the session's running totals. One call
-    /// per Usage event — a single UPDATE, not a per-token write.
+    /// Adds a request's usage to the session's running totals, and
+    /// remembers the request's context size (prompt + completion — what
+    /// the next request carries). One call per Usage event — a single
+    /// UPDATE, not a per-token write.
     pub fn add_usage(
         &self,
         session: SessionId,
@@ -311,7 +322,8 @@ impl SessionStore {
         connection
             .prepare(
                 "UPDATE sessions SET input_tokens = input_tokens + ?2,
-                       output_tokens = output_tokens + ?3 WHERE id = ?1",
+                        output_tokens = output_tokens + ?3,
+                        last_context_tokens = ?2 + ?3 WHERE id = ?1",
             )?
             .execute(rusqlite::params![
                 session.0 as i64,
@@ -344,7 +356,7 @@ impl SessionStore {
     pub fn list_sessions(&self) -> Result<Vec<SessionSummary>, rusqlite::Error> {
         let connection = self.connection.lock().unwrap();
         let mut statement = connection.prepare(
-            "SELECT id, title, input_tokens, output_tokens FROM sessions WHERE kind = 'chat' ORDER BY id DESC",
+            "SELECT id, title, input_tokens, output_tokens, last_context_tokens FROM sessions WHERE kind = 'chat' ORDER BY id DESC",
         )?;
         let rows = statement.query_map([], |row| {
             Ok(SessionSummary {
@@ -352,6 +364,7 @@ impl SessionStore {
                 title: row.get(1)?,
                 input_tokens: row.get::<_, i64>(2)?.max(0) as u64,
                 output_tokens: row.get::<_, i64>(3)?.max(0) as u64,
+                context_tokens: row.get::<_, i64>(4)?.max(0) as u64,
             })
         })?;
         rows.collect()
@@ -513,6 +526,21 @@ impl SessionStore {
         let mut index = 0;
         while index < messages.len() {
             let message = &messages[index];
+            // Image markers ride inside stored content; expand them back
+            // into wire images so a resumed session re-sends what the
+            // model saw. A missing file degrades to a text note — the
+            // conversation keeps working without the bytes.
+            let (content, images) = {
+                let (text, paths) = crate::request::extract_image_markers(&message.content);
+                let images = paths
+                    .iter()
+                    .map(|path| {
+                        crate::request::file_to_data_url(std::path::Path::new(path))
+                            .unwrap_or_else(|| "[missing image]".to_string())
+                    })
+                    .collect::<Vec<_>>();
+                (text, images)
+            };
             match message.role {
                 Role::Assistant => {
                     // Tool rows answering this assistant turn follow it.
@@ -531,7 +559,7 @@ impl SessionStore {
                         next += 1;
                     }
                     wire.push(WireMessage::assistant_with_tool_calls(
-                        (!message.content.is_empty()).then(|| message.content.clone()),
+                        (!content.is_empty()).then_some(content),
                         calls,
                     ));
                     for row in &messages[index + 1..next] {
@@ -547,13 +575,13 @@ impl SessionStore {
                     index = next;
                 }
                 Role::User => {
-                    wire.push(WireMessage::user(&message.content));
+                    wire.push(WireMessage::user_with_images(content, images));
                     index += 1;
                 }
                 Role::System => {
                     wire.push(WireMessage {
                         role: Role::System,
-                        content: Some(message.content.clone()),
+                        content: Some(content),
                         ..WireMessage::default()
                     });
                     index += 1;
@@ -562,6 +590,123 @@ impl SessionStore {
             }
         }
         Ok(wire)
+    }
+
+    /// Forks the conversation at `upto`: a new session whose messages
+    /// are the canonical path root → `upto`, copied verbatim (tool
+    /// fields ride along; parents are remapped to the new ids). The
+    /// parent_id column planned for this all along — a fork is a
+    /// sibling branch, and the source session is untouched. Returns
+    /// the new session id and the copy of `upto` (the fork point, which
+    /// becomes the view's last message).
+    pub fn fork_session(
+        &self,
+        source: SessionId,
+        upto: MessageId,
+        title: &str,
+    ) -> Result<(SessionId, MessageId), String> {
+        let messages = self
+            .load_messages(source)
+            .map_err(|error| error.to_string())?;
+        if !messages.iter().any(|message| message.id == upto) {
+            return Err(format!("message {} is not in session {}", upto.0, source.0));
+        }
+
+        // The canonical path: walk parents from the fork point to the
+        // root, then copy in root-first order so every parent's new id
+        // exists before its child references it.
+        let mut chain = Vec::new();
+        let mut cursor = Some(upto);
+        while let Some(id) = cursor {
+            let message = messages
+                .iter()
+                .find(|message| message.id == id)
+                .ok_or_else(|| format!("message {}: parent not in session", id.0))?;
+            chain.push(message.clone());
+            cursor = message.parent_id;
+        }
+        chain.reverse();
+
+        let new_session = self
+            .create_session(title)
+            .map_err(|error| error.to_string())?;
+        let mut remap: std::collections::HashMap<MessageId, MessageId> =
+            std::collections::HashMap::new();
+        let mut fork_point = upto;
+        for message in &chain {
+            let copied = {
+                let connection = self.connection.lock().unwrap();
+                let mapped_parent = message.parent_id.map(|parent| remap[&parent]);
+                connection
+                    .prepare(
+                        "INSERT INTO messages
+                             (session_id, parent_id, role, content, tool_call_id, tool_name, tool_arguments)
+                         SELECT ?1, ?2, role, content, tool_call_id, tool_name, tool_arguments
+                         FROM messages WHERE id = ?3",
+                    )
+                    .and_then(|mut statement| {
+                        statement.execute(rusqlite::params![
+                            new_session.0 as i64,
+                            mapped_parent.map(|parent| parent.0 as i64),
+                            message.id.0 as i64,
+                        ])
+                    })
+                    .map_err(|error| error.to_string())?;
+                MessageId(connection.last_insert_rowid() as u64)
+            };
+            remap.insert(message.id, copied);
+            fork_point = copied;
+        }
+        Ok((new_session, fork_point))
+    }
+
+    /// Exports a session's messages as JSONL — one object per row,
+    /// oldest first. The shape mirrors what the model saw (role,
+    /// content, tool fields), which makes the file both a shareable
+    /// transcript and a training-shaped trace. Returns the row count.
+    pub fn export_session_jsonl(
+        &self,
+        session_id: SessionId,
+        path: &Path,
+    ) -> Result<usize, String> {
+        let title: String = {
+            let connection = self.connection.lock().unwrap();
+            connection
+                .query_row(
+                    "SELECT title FROM sessions WHERE id = ?1",
+                    [session_id.0 as i64],
+                    |row| row.get(0),
+                )
+                .map_err(|error| format!("session {}: {error}", session_id.0))?
+        };
+        let messages = self
+            .load_messages(session_id)
+            .map_err(|error| error.to_string())?;
+
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|error| format!("{}: {error}", parent.display()))?;
+        }
+        let file =
+            std::fs::File::create(path).map_err(|error| format!("{}: {error}", path.display()))?;
+        let mut out = std::io::BufWriter::new(file);
+        use std::io::Write as _;
+        for message in &messages {
+            let row = serde_json::json!({
+                "session_id": session_id.0,
+                "session_title": title,
+                "role": message.role.as_str(),
+                "content": message.content,
+                "tool_call_id": message.tool_call_id,
+                "tool_name": message.tool_name,
+                "tool_arguments": message.tool_arguments,
+            });
+            serde_json::to_writer(&mut out, &row)
+                .map_err(|error| format!("{}: {error}", path.display()))?;
+            out.write_all(b"\n")
+                .map_err(|error| format!("{}: {error}", path.display()))?;
+        }
+        Ok(messages.len())
     }
 }
 
@@ -615,6 +760,9 @@ mod tests {
         let chats = store.list_sessions().unwrap();
         let chat_row = chats.iter().find(|summary| summary.id == chat).unwrap();
         assert_eq!((chat_row.input_tokens, chat_row.output_tokens), (140, 15));
+        // The last request's size is the live context gauge: prompt +
+        // completion of the most recent usage event, not a sum.
+        assert_eq!(chat_row.context_tokens, 40 + 5);
         // The all-sessions total includes worker runs too — that's the
         // real cost.
         assert_eq!(store.total_usage(), (340, 45));
@@ -672,6 +820,71 @@ mod tests {
     }
 
     #[test]
+    fn export_writes_one_json_object_per_row() {
+        let store = memory_store();
+        let session = store.create_session("shared trace").unwrap();
+        let user = store
+            .append_message(session, None, Role::User, "hello")
+            .unwrap();
+        store
+            .append_message(session, Some(user), Role::Assistant, "hello back")
+            .unwrap();
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nested").join("trace.jsonl");
+        let count = store.export_session_jsonl(session, &path).unwrap();
+        assert_eq!(count, 2);
+
+        let raw = std::fs::read_to_string(&path).unwrap();
+        let lines: Vec<serde_json::Value> = raw
+            .lines()
+            .map(|line| serde_json::from_str(line).expect("every line is one JSON object"))
+            .collect();
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0]["role"], "user");
+        assert_eq!(lines[0]["content"], "hello");
+        assert_eq!(lines[0]["session_title"], "shared trace");
+        assert_eq!(lines[1]["role"], "assistant");
+        assert_eq!(lines[1]["content"], "hello back");
+        // Tool-only fields ride along as nulls, never silently absent.
+        assert!(lines[0]["tool_call_id"].is_null());
+        // A missing session is an error, not an empty file.
+        assert!(store.export_session_jsonl(SessionId(9999), &path).is_err());
+    }
+
+    #[test]
+    fn wire_history_expands_image_markers_back_into_images() {
+        let store = memory_store();
+        let session = store.create_session("with picture").unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("shot.png");
+        std::fs::write(&path, b"\x89PNG-bytes").unwrap();
+        store
+            .append_message(
+                session,
+                None,
+                Role::User,
+                &format!("look\n\n{{{{image:{}}}}}", path.display()),
+            )
+            .unwrap();
+
+        let wire = store.load_wire_history(session).unwrap();
+        assert_eq!(wire.len(), 1);
+        // Clean text on the wire — the marker never reaches the model.
+        assert_eq!(wire[0].content.as_deref(), Some("look"));
+        assert_eq!(wire[0].images.len(), 1);
+        let (media_type, payload) = crate::request::data_url_parts(&wire[0].images[0]).unwrap();
+        assert_eq!(media_type, "image/png");
+        use base64::Engine as _;
+        assert_eq!(
+            base64::engine::general_purpose::STANDARD
+                .decode(payload)
+                .unwrap(),
+            b"\x89PNG-bytes"
+        );
+    }
+
+    #[test]
     fn forks_are_sibling_nodes_not_overwrites() {
         let store = memory_store();
         let session = store.create_session("forked").unwrap();
@@ -689,6 +902,51 @@ mod tests {
         assert_eq!(messages.len(), 3);
         assert_ne!(a, b);
         assert_eq!(messages[1].parent_id, messages[2].parent_id);
+    }
+
+    #[test]
+    fn forking_copies_the_path_and_leaves_the_source_whole() {
+        let store = memory_store();
+        let session = store.create_session("original").unwrap();
+        let q1 = store
+            .append_message(session, None, Role::User, "first question")
+            .unwrap();
+        let a1 = store
+            .append_message(session, Some(q1), Role::Assistant, "first answer")
+            .unwrap();
+        let tool = store
+            .append_tool_result(session, Some(a1), "call-1", "peek", "{}", "peeked")
+            .unwrap();
+        let _q2 = store
+            .append_message(session, Some(tool), Role::User, "second question")
+            .unwrap();
+
+        // Fork at the first answer: the new session gets root → a1.
+        let (fork_id, fork_point) = store.fork_session(session, a1, "original (fork)").unwrap();
+        assert_ne!(fork_id, session);
+        assert_eq!(store.load_messages(fork_id).unwrap().len(), 2);
+        let forked = store.load_messages(fork_id).unwrap();
+        assert_eq!(forked[0].content, "first question");
+        assert_eq!(forked[0].parent_id, None);
+        assert_eq!(forked[1].content, "first answer");
+        assert_eq!(forked[1].parent_id, Some(forked[0].id));
+        assert_eq!(fork_point, forked[1].id);
+        // Tool rows fork verbatim when in the copied path.
+        let (tool_fork, _) = store.fork_session(session, tool, "tool fork").unwrap();
+        let tool_rows = store.load_messages(tool_fork).unwrap();
+        assert_eq!(tool_rows.len(), 3);
+        assert_eq!(tool_rows[2].role, Role::Tool);
+        assert_eq!(tool_rows[2].tool_call_id.as_deref(), Some("call-1"));
+        assert_eq!(tool_rows[2].tool_name.as_deref(), Some("peek"));
+        // The source session is untouched — a fork adds, never rewrites.
+        assert_eq!(store.load_messages(session).unwrap().len(), 4);
+        assert_eq!(store.list_sessions().unwrap().len(), 3);
+        // A fork point outside the session is an error, not a panic.
+        assert!(
+            store
+                .fork_session(session, MessageId(9999), "nope")
+                .is_err()
+        );
     }
 
     #[test]

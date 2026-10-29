@@ -24,7 +24,9 @@ fronts, nothing shared over the network.
   isolates bash children (system read-only, writes limited to the workspace and /tmp).
 - **Subagents, not a monolith** — eight built-in agent types (explore, plan, implement,
   test, debug, review, research, librarian) dispatched by the leader; define your own in
-  TOML. Workers never spawn workers; their runs are visible in the agents panel.
+  TOML, pinned to any configured endpoint — a council of three models can review one diff
+  (the bundled `council` skill runs the loop). Workers never spawn workers; their runs are
+  visible in the agents panel.
 - **Tabs and worktree tabs** — parallel chats in one window. The ⎇ button gives a tab its
   own `git worktree`, so two agents can edit the same repo without colliding.
 - **Any endpoint** — speaks the OpenAI-compatible wire (ppq.ai, OpenRouter, Ollama,

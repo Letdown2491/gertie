@@ -98,6 +98,11 @@ pub struct AgentConfig {
     /// Model override on the same endpoint (None = the endpoint's model).
     #[serde(default)]
     pub model: Option<String>,
+    /// Named endpoint (`[[endpoints]].name`) this worker talks to — a
+    /// different provider or wire than the leader's. None = the leader's
+    /// endpoint. This is what makes a multi-model council possible.
+    #[serde(default)]
+    pub endpoint: Option<String>,
     /// The worker's system prompt. A sane default when unset.
     #[serde(default)]
     pub prompt: Option<String>,
@@ -445,6 +450,19 @@ impl Config {
                 ));
             }
         }
+        // An agent pinned to an endpoint that isn't configured is skipped
+        // at bootstrap — say so here, where the fix is still one edit away.
+        for agent in &self.agents {
+            if let Some(name) = &agent.endpoint
+                && !self.endpoints.iter().any(|endpoint| &endpoint.name == name)
+            {
+                warnings.push(format!(
+                    "agent {}: endpoint {name:?} is not configured — the agent is \
+                 skipped; add an [[endpoints]] entry with that name",
+                    agent.name
+                ));
+            }
+        }
         // A key that resolves to nothing means a guaranteed 401 on the
         // first request — say so up front, with the exact fix, not after.
         if let Some(selected) = self.selected_endpoint_config()
@@ -699,6 +717,33 @@ mod tests {
         assert!(
             warning.contains("export GERTIE_TEST_UNSET_KEY_8347="),
             "the warning names the fix: {warning}"
+        );
+    }
+
+    /// An agent pinned to an endpoint that isn't configured is a named
+    /// warning (the agent gets skipped at bootstrap), never a silent
+    /// fallback onto some other provider's model.
+    #[test]
+    fn agent_endpoints_must_be_configured() {
+        let mut config = Config::default();
+        config.agents.push(AgentConfig {
+            name: "council-two".into(),
+            description: "Use when a council review runs.".into(),
+            invocation: Default::default(),
+            model: None,
+            endpoint: Some("nowhere".into()),
+            prompt: None,
+            tools: None,
+        });
+
+        let warnings = config.key_warnings();
+        let warning = warnings
+            .iter()
+            .find(|warning| warning.contains("council-two"))
+            .expect("warning present");
+        assert!(
+            warning.contains("\"nowhere\"") && warning.contains("skipped"),
+            "the warning names the agent, the endpoint, and the skip: {warning}"
         );
     }
 }

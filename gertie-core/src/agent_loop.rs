@@ -51,6 +51,12 @@ pub enum LoopEvent {
         kept: usize,
         total: usize,
     },
+    /// A steered user message joined the history at a round boundary.
+    /// The receiver persists it like any user turn — the loop only
+    /// owns the in-memory history.
+    Steered {
+        text: String,
+    },
     Error {
         message: String,
     },
@@ -105,6 +111,16 @@ pub struct TurnSpec {
     /// history: it is per-turn framing, not conversation record (the
     /// DB stays canonical; the next turn may have a different index).
     pub system_prompt: Option<String>,
+    /// Mid-run steering: user messages typed while the turn is already
+    /// running. Drained at round boundaries — each becomes a user push
+    /// plus a `LoopEvent::Steered` — and a steer landing on what would
+    /// be the final round buys another one, so it is always answered.
+    /// None = the turn cannot be steered.
+    pub steer: Option<tokio::sync::mpsc::UnboundedReceiver<String>>,
+    /// Images riding with `user_message`, as data URLs. Steered
+    /// messages are text-only; the first message of the turn carries
+    /// the attachments.
+    pub user_images: Vec<String>,
 }
 
 /// Runs one user turn to completion: request → (text | tool calls)* →
@@ -133,7 +149,10 @@ pub fn run_turn(spec: TurnSpec) -> BoxStream<'static, LoopEvent> {
         permission_broker,
         prompt_source,
         system_prompt,
+        steer,
+        user_images,
     } = spec;
+    let mut steer = steer;
     let specs = tool_specs(&tools);
     Box::pin(async_stream::stream! {
         let mut request = Request {
@@ -141,7 +160,10 @@ pub fn run_turn(spec: TurnSpec) -> BoxStream<'static, LoopEvent> {
             ..Request::default()
         };
 
-        history.lock().await.push(WireMessage::user(user_message));
+        history
+            .lock()
+            .await
+            .push(WireMessage::user_with_images(user_message, user_images));
 
         // Observed prompt size from the last request's usage events, if
         // the provider reported any; the chars/4 estimate covers the rest.
@@ -160,24 +182,26 @@ pub fn run_turn(spec: TurnSpec) -> BoxStream<'static, LoopEvent> {
                 if let Some(threshold) = threshold
                     && prompt_tokens > threshold
                 {
-                    let transcript = render_transcript(&history.lock().await);
-                    let total = history.lock().await.len();
                     // Fail-open: if the summarization request fails, this
                     // round just runs long — compaction is an
                     // optimization, not a correctness step.
-                    if let Ok(summary) = summarize(provider.clone(), &transcript).await {
-                        let mut current = history.lock().await;
-                        let tail_start = safe_tail_start(&current, KEEP_TAIL);
-                        let tail: Vec<WireMessage> = current.drain(tail_start..).collect();
-                        *current = vec![summary_message(&summary)];
-                        current.extend(tail);
-                        let kept = current.len();
-                        drop(current);
+                    if let Some((kept, total)) =
+                        compact_history(provider.clone(), history.clone()).await
+                    {
                         // The old observation describes the pre-compact
                         // prompt; don't let it re-trigger.
                         last_input_tokens = None;
                         yield LoopEvent::Compacted { kept, total };
                     }
+                }
+            }
+            // Steering: messages the user typed mid-run join the
+            // conversation here — the model reads them with the next
+            // request, after the tool results it was working on.
+            if let Some(steer) = steer.as_mut() {
+                while let Ok(text) = steer.try_recv() {
+                    history.lock().await.push(WireMessage::user(&text));
+                    yield LoopEvent::Steered { text };
                 }
             }
             request.messages = history
@@ -225,6 +249,23 @@ pub fn run_turn(spec: TurnSpec) -> BoxStream<'static, LoopEvent> {
                     .lock()
                     .await
                     .push(WireMessage::assistant(assistant_text));
+                // A steer landing on what would be the final round buys
+                // another one: the message joins the history and the
+                // loop turns back to answer it. The round budget still
+                // bounds this — steering is not an infinite ladder.
+                let mut steered = Vec::new();
+                if let Some(steer) = steer.as_mut() {
+                    while let Ok(text) = steer.try_recv() {
+                        steered.push(text);
+                    }
+                }
+                if !steered.is_empty() {
+                    for text in steered {
+                        history.lock().await.push(WireMessage::user(&text));
+                        yield LoopEvent::Steered { text };
+                    }
+                    continue;
+                }
                 yield LoopEvent::Done;
                 return;
             }
@@ -320,7 +361,9 @@ pub fn run_turn(spec: TurnSpec) -> BoxStream<'static, LoopEvent> {
 }
 
 /// Messages kept verbatim after a compaction, roughly two tool rounds.
-const KEEP_TAIL: usize = 8;
+/// How many trailing messages survive a compaction. The UI's manual
+/// `/compact` reads this as its minimum-size gate.
+pub const KEEP_TAIL: usize = 8;
 
 /// Structured-summary marker: the replacement history opens with this
 /// system message, and later compactions summarize it like anything else.
@@ -334,6 +377,29 @@ fn summary_message(summary: &str) -> WireMessage {
         )),
         ..WireMessage::default()
     }
+}
+
+/// Compacts the history in place: summarizes everything before the kept
+/// tail into one summary message. Returns `(kept, total)` on success.
+///
+/// Fail-open: a failed summarization returns `None` and leaves the
+/// history untouched — compaction is an optimization, not a
+/// correctness step. The auto-trigger in `run_turn` fires near the
+/// context ceiling (where a history is by definition big enough);
+/// the UI's `/compact` gates the minimum size itself.
+pub async fn compact_history(
+    provider: Arc<dyn crate::Provider>,
+    history: SharedHistory,
+) -> Option<(usize, usize)> {
+    let transcript = render_transcript(&history.lock().await);
+    let total = history.lock().await.len();
+    let summary = summarize(provider.clone(), &transcript).await.ok()?;
+    let mut current = history.lock().await;
+    let tail_start = safe_tail_start(&current, KEEP_TAIL);
+    let tail: Vec<WireMessage> = current.drain(tail_start..).collect();
+    *current = vec![summary_message(&summary)];
+    current.extend(tail);
+    Some((current.len(), total))
 }
 
 /// chars/4: the boring token estimate, used only when the provider
@@ -561,6 +627,8 @@ mod tests {
                 permission_broker: Some(broker.clone()),
                 prompt_source: crate::PromptSource::Leader,
                 system_prompt: None,
+                steer: None,
+                user_images: Vec::new(),
             },
             broker,
         )
@@ -578,6 +646,121 @@ mod tests {
                 _ => None,
             })
             .unwrap_or_else(|| panic!("no ToolResult for {name}"))
+    }
+
+    #[test]
+    fn steering_drains_at_the_round_boundary() {
+        // Steers queued before the turn: both land at the first
+        // boundary, before request one — the model reads them with it.
+        let provider = Arc::new(ScriptedProvider {
+            seen: std::sync::Mutex::new(Vec::new()),
+            scripts: std::sync::Mutex::new(vec![vec![
+                Event::Token {
+                    delta: "partial".into(),
+                },
+                Event::Done,
+            ]]),
+        });
+        let history: SharedHistory = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let (mut spec, broker) = turn(provider, registry(&[]), history.clone(), "go");
+        let (steer_tx, steer_rx) = tokio::sync::mpsc::unbounded_channel();
+        steer_tx.send("first steer".to_string()).unwrap();
+        steer_tx.send("second steer".to_string()).unwrap();
+        spec.steer = Some(steer_rx);
+        let events = drain(run_turn(spec), &broker, |_| {
+            panic!("no tools to prompt for")
+        });
+
+        let steered: Vec<&String> = events
+            .iter()
+            .filter_map(|event| match event {
+                LoopEvent::Steered { text } => Some(text),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(steered, ["first steer", "second steer"]);
+        let history = history.blocking_lock();
+        // user, steer 1, steer 2, assistant
+        assert_eq!(history.len(), 4);
+        assert_eq!(history[1], WireMessage::user("first steer"));
+        assert_eq!(history[2], WireMessage::user("second steer"));
+        assert_eq!(history[3], WireMessage::assistant("partial"));
+    }
+
+    /// A provider that injects a steer the moment its script hits
+    /// Done — the user typed while the model was finishing, the
+    /// classic rescue shape. Once.
+    struct SteerOnDone {
+        inner: Arc<ScriptedProvider>,
+        steer_tx: tokio::sync::mpsc::UnboundedSender<String>,
+        steered: Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    impl crate::provider::Provider for SteerOnDone {
+        fn stream(&self, request: crate::Request) -> BoxStream<'static, Event> {
+            let inner = self.inner.clone();
+            let steer_tx = self.steer_tx.clone();
+            let steered = self.steered.clone();
+            Box::pin(async_stream::stream! {
+                let mut inner_stream = inner.stream(request);
+                while let Some(event) = inner_stream.next().await {
+                    let done = matches!(event, Event::Done);
+                    yield event;
+                    if done
+                        && !steered.swap(true, std::sync::atomic::Ordering::SeqCst)
+                    {
+                        let _ = steer_tx.send("late steer".to_string());
+                    }
+                }
+            })
+        }
+    }
+
+    #[test]
+    fn a_steer_rescues_the_final_round() {
+        // The model finishes — but the steer landed first, so the loop
+        // turns back and answers it instead of calling it done.
+        let (steer_tx, steer_rx) = tokio::sync::mpsc::unbounded_channel();
+        let provider = Arc::new(SteerOnDone {
+            inner: Arc::new(ScriptedProvider {
+                seen: std::sync::Mutex::new(Vec::new()),
+                scripts: std::sync::Mutex::new(vec![
+                    vec![
+                        Event::Token {
+                            delta: "partial".into(),
+                        },
+                        Event::Done,
+                    ],
+                    vec![
+                        Event::Token {
+                            delta: "answered the steer".into(),
+                        },
+                        Event::Done,
+                    ],
+                ]),
+            }),
+            steer_tx,
+            steered: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        });
+        let history: SharedHistory = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let (mut spec, broker) = turn(provider, registry(&[]), history.clone(), "go");
+        spec.steer = Some(steer_rx);
+        let events = drain(run_turn(spec), &broker, |_| {
+            panic!("no tools to prompt for")
+        });
+
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, LoopEvent::Steered { text } if text == "late steer"))
+        );
+        assert!(events.iter().any(|event| matches!(event, LoopEvent::Done)));
+        let history = history.blocking_lock();
+        // user, assistant round 1, steered user, assistant round 2
+        assert_eq!(history.len(), 4);
+        assert_eq!(history[1], WireMessage::assistant("partial"));
+        assert_eq!(history[2], WireMessage::user("late steer"));
+        assert_eq!(history[3], WireMessage::assistant("answered the steer"));
     }
 
     #[test]

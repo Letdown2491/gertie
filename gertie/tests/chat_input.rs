@@ -63,6 +63,7 @@ fn fixture() -> Fixture {
                     gertie_tools::builtin_tools(Path::new(".")),
                     "no endpoint configured".into(),
                     None,
+                    Vec::new(),
                     Arc::new(gertie_core::PermissionBroker::new()),
                     gertie_core::SessionScope::new(),
                     panel,
@@ -154,4 +155,96 @@ fn enter_on_an_empty_input_does_nothing() {
         window.press("enter", cx);
     });
     assert!(fixture.store.list_sessions().unwrap().is_empty());
+}
+
+/// A resumed transcript full of markdown and a finished tool row must
+/// draw without panicking — the markdown renderer is hand-rolled and
+/// byte-index-driven, so the headless draw is the guard against
+/// char-boundary panics reaching a user.
+#[test]
+fn markdown_and_tool_rows_draw_clean() {
+    let store = Arc::new(SessionStore::open(Path::new(":memory:")).expect("memory store"));
+    let session_id = store
+        .create_session("markdown transcript")
+        .expect("session");
+    let db = store
+        .append_message(session_id, None, gertie_core::Role::User, "hello")
+        .expect("user row");
+    for text in [
+        "# Heading\n\nprose with **bold**, *em*, `code`, and a [link](https://x.y)\n",
+        "- item one\n- [x] done\n- [ ] open\n  1. nested\n",
+        "| a | b |\n|---|---|\n| 1 | 2 |\n",
+        "> quoted **prose**\n\n---\n\n```rust\nfn main() {}\n```",
+        "closed **span and *nested* inside** end — écrit en français — 🦀 emoji",
+    ] {
+        store
+            .append_message(session_id, Some(db), gertie_core::Role::Assistant, text)
+            .expect("assistant row");
+    }
+    store
+        .append_tool_result(
+            session_id,
+            Some(db),
+            "call-1",
+            "read_file",
+            r#"{"path": "src/main.rs"}"#,
+            "   1  fn main() {}\n   2  // three lines",
+        )
+        .expect("tool row");
+
+    // Open the chat on the stored session and force full draws: every
+    // row kind above goes through layout at least once.
+    let mut cx = HeadlessAppContext::with_asset_source(
+        Arc::new(NoopTextSystem),
+        Arc::new(gpui_kit::assets::Assets),
+    );
+    cx.update(|cx| {
+        gpui_kit::init(cx);
+        gpui_kit::component::Theme::change(gpui_kit::component::ThemeMode::Dark, None, cx);
+    });
+    let mut view_entity = None;
+    let window = cx
+        .open_window(size(px(900.), px(640.)), |window, cx| {
+            let view = cx.new(|cx| {
+                let panel = cx.new(|_| {
+                    gertie::settings_edit::SettingsPanelView::new(
+                        &gertie::config::Config::default(),
+                        gertie::settings::SettingsSummary::from_config(
+                            &gertie::config::Config::default(),
+                        ),
+                    )
+                });
+                ChatView::new(
+                    store.clone(),
+                    None,
+                    None,
+                    gertie_tools::builtin_tools(Path::new(".")),
+                    "no endpoint configured".into(),
+                    None,
+                    Vec::new(),
+                    Arc::new(gertie_core::PermissionBroker::new()),
+                    gertie_core::SessionScope::new(),
+                    panel,
+                    true,
+                    window,
+                    cx,
+                )
+            });
+            view_entity = Some(view.downgrade());
+            cx.new(|cx| Root::new(view, window, cx))
+        })
+        .expect("chat window");
+    settle(&mut cx, window.into());
+
+    // The transcript actually loaded the persisted rows: 5 markdown
+    // messages + the user row + the tool card.
+    let turns = cx.update(|cx| {
+        view_entity
+            .expect("view entity")
+            .upgrade()
+            .expect("view alive")
+            .read(cx)
+            .turn_count_for_test()
+    });
+    assert!(turns >= 7, "expected the stored rows to load, got {turns}");
 }

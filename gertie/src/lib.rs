@@ -4,9 +4,11 @@ pub mod cli;
 pub mod config;
 pub mod doctor;
 pub mod headless;
+pub mod markdown;
 pub mod settings;
 pub mod settings_edit;
 pub mod tabs;
+pub mod tools_ui;
 pub mod worktree;
 
 pub mod bootstrap;

@@ -9,6 +9,7 @@ pub mod mcp;
 pub mod sandbox;
 pub mod shape;
 pub mod skills;
+pub mod templates;
 pub mod web;
 
 use gertie_core::{Tool, ToolResult};

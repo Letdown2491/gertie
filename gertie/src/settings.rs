@@ -77,7 +77,12 @@ impl SettingsSummary {
                 .agents
                 .iter()
                 .filter(|agent| agent.invocation == crate::config::Invocation::Model)
-                .map(|agent| agent.name.clone())
+                .map(|agent| match &agent.endpoint {
+                    // A pinned worker announces where it answers from —
+                    // a council seat is meaningless without its endpoint.
+                    Some(endpoint) => format!("{}@{}", agent.name, endpoint),
+                    None => agent.name.clone(),
+                })
                 .collect(),
             config_path: crate::config::Config::path(),
         }

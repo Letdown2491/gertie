@@ -102,7 +102,7 @@ The original "Deferred" row — every item shipped or decided:
   content-block SSE normalized to whole tool calls.
 - *Plugin surface*: declared, not built — gertie's extension points are MCP servers
   (external tools, stdio transport), TOML `[[agents]]` (custom subagents with pinned
-  models), and SKILL.md skills (runtime behavior). A second plugin mechanism would
+  models *or endpoints*), and SKILL.md skills (runtime behavior). A second plugin mechanism would
   duplicate MCP for no capability MCP doesn't already provide.
 - *Google/Gemini*: no native adapter — Gemini exposes an OpenAI-compatible endpoint
   (`generativelanguage.googleapis.com/v1beta/openai/`); gertie speaks it today with
@@ -198,12 +198,14 @@ building anything fancier.
 ### Agent types
 
 Types are **data, not code**: a type = `system_prompt`, `tools` allow/deny, `model` override,
-`description` (what the leader sees in the `agent` tool schema), optional `report_format`.
+an `endpoint` pin (the worker talks to that `[[endpoints]]` entry — its wire included — which
+is the whole mechanism behind the bundled `council` skill: three seats, three providers, one
+diff), `description` (what the leader sees in the `agent` tool schema), optional `report_format`.
 The leader discovers types from the tool schema; description quality is type quality.
 Custom types are five-line TOML entries from day one.
 
 Built-in registry at launch (shipped — `builtin_agent_types()`; a `[[agents]]` entry with a
-matching name replaces the built-in, and may pin its own `model`):
+matching name replaces the built-in, and may pin its own `model` or `endpoint`):
 
 | Type | Toolset | Posture |
 |---|---|---|

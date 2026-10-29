@@ -99,6 +99,9 @@ pub fn run(prompt: Option<String>, yes: bool, config_path: Option<PathBuf>) -> i
         permission_broker: Some(boot.broker.clone()),
         prompt_source: gertie_core::PromptSource::Leader,
         system_prompt: boot.system_prompt.clone(),
+        // One-shot prompt mode: no steering, nothing queues.
+        steer: None,
+        user_images: Vec::new(),
     });
     let worker_asks = boot.broker.subscribe();
 
@@ -251,6 +254,9 @@ pub(crate) fn pump(
                 LoopEvent::Compacted { kept, total } => {
                     eprintln!("· context compacted — {kept} of {total} messages kept");
                 }
+                // One-shot prompt mode cannot steer — no stdin to speak
+                // of — so the event cannot fire; the arm is completeness.
+                LoopEvent::Steered { .. } => {}
                 LoopEvent::Error { message } => {
                     recorder.flush();
                     return (Outcome::Error { message }, recorder.text);
@@ -457,6 +463,8 @@ mod tests {
             permission_broker: Some(broker.clone()),
             prompt_source: gertie_core::PromptSource::Leader,
             system_prompt: None,
+            steer: None,
+            user_images: Vec::new(),
         });
         let mut approvals = 0;
         let (outcome, text) = pump(
@@ -529,6 +537,8 @@ mod tests {
             permission_broker: Some(broker.clone()),
             prompt_source: gertie_core::PromptSource::Leader,
             system_prompt: None,
+            steer: None,
+            user_images: Vec::new(),
         });
         let mut approvals = 0;
         let (outcome, _) = pump(

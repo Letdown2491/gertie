@@ -9,6 +9,7 @@ repository.workspace = true
 
 [dependencies]
 async-stream = "0.3"
+base64 = "0.22"
 futures-core = { version = "0.3", features = ["alloc"] }
 futures-util = { version = "0.3", default-features = false, features = ["alloc"] }
 rusqlite = { version = "0.40", features = ["bundled"] }

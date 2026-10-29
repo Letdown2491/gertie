@@ -78,9 +78,33 @@ pub(crate) fn wire_messages(request: &Request) -> (Option<String>, serde_json::V
                 }
             }
             gertie_core::Role::User => {
+                // Images ride as base64 source blocks, text first —
+                // Anthropic's multimodal order. A data URL that doesn't
+                // parse (shouldn't happen; the UI builds them) degrades
+                // to a text note rather than a 400 from the endpoint.
+                let mut content = vec![serde_json::json!({
+                    "type": "text",
+                    "text": message.content.clone().unwrap_or_default(),
+                })];
+                for image in &message.images {
+                    match gertie_core::data_url_parts(image) {
+                        Some((media_type, data)) => content.push(serde_json::json!({
+                            "type": "image",
+                            "source": {
+                                "type": "base64",
+                                "media_type": media_type,
+                                "data": data,
+                            },
+                        })),
+                        None => content.push(serde_json::json!({
+                            "type": "text",
+                            "text": "[unreadable image]",
+                        })),
+                    }
+                }
                 messages.push(serde_json::json!({
                     "role": "user",
-                    "content": [{ "type": "text", "text": message.content.clone().unwrap_or_default() }],
+                    "content": content,
                 }));
             }
             gertie_core::Role::Assistant => {
@@ -411,6 +435,38 @@ mod tests {
     use gertie_core::Provider as _;
     use gertie_core::request::WireMessage;
     use gertie_core::{Role, ToolCall};
+
+    #[test]
+    fn user_images_become_base64_source_blocks() {
+        let mut message = WireMessage::user("what is in this picture");
+        message.images = vec!["data:image/jpeg;base64,QUJD".into()];
+        let request = Request {
+            messages: vec![message],
+            ..Request::default()
+        };
+        let (system, wire) = wire_messages(&request);
+
+        assert!(system.is_none());
+        // Text and image ride as blocks, text first, base64 source split
+        // back into media type + payload.
+        let content = &wire[0]["content"];
+        assert_eq!(content[0]["type"], "text");
+        assert_eq!(content[0]["text"], "what is in this picture");
+        assert_eq!(content[1]["type"], "image");
+        assert_eq!(content[1]["source"]["type"], "base64");
+        assert_eq!(content[1]["source"]["media_type"], "image/jpeg");
+        assert_eq!(content[1]["source"]["data"], "QUJD");
+        // An unparseable data URL degrades to a text note, not a 400.
+        let mut broken = WireMessage::user("look");
+        broken.images = vec!["not a data url".into()];
+        let request = Request {
+            messages: vec![broken],
+            ..Request::default()
+        };
+        let (_, wire) = wire_messages(&request);
+        assert_eq!(wire[0]["content"][1]["type"], "text");
+        assert_eq!(wire[0]["content"][1]["text"], "[unreadable image]");
+    }
 
     #[test]
     fn streams_text_usage_and_done_from_sse() {

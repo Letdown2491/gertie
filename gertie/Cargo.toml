@@ -15,6 +15,7 @@ path = "src/main.rs"
 gertie-core = { workspace = true }
 gertie-providers = { workspace = true }
 gertie-tools = { workspace = true }
+base64 = "0.22"
 directories = "6"
 futures-util = { version = "0.3", default-features = false, features = ["alloc"] }
 gpui-kit = "=0.7.0"
