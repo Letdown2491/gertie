@@ -1196,7 +1196,9 @@ impl ChatView {
         self.turns.push(Turn::Message {
             role: Role::System,
             text: format!(
-                "⟳ context compacted — {kept} of {total} messages kept, earlier history summarized"
+                "⟳ context compacted — {kept} of {total} messages kept: the original \
+                 request, prefix lines of the omitted turns, and the live tail. \
+                 read_session retrieves any omitted message in full."
             ),
             db_id: None,
         });

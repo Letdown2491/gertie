@@ -356,11 +356,22 @@ impl SessionStore {
             .unwrap_or((0, 0))
     }
 
-    /// Newest session first, for the sidebar.
+    /// The sidebar as an inbox: the session whose record moved most
+    /// recently first — "ordered by when each thread last came back to
+    /// you" (t3code's threads list; research/t3code-ideas.md §2).
+    /// Message ids are monotonic across all sessions, so MAX(messages.id)
+    /// orders by last activity; sessions with no messages yet sink
+    /// below every active one and fall back to creation order among
+    /// themselves.
     pub fn list_sessions(&self) -> Result<Vec<SessionSummary>, rusqlite::Error> {
         let connection = self.connection.lock().unwrap();
         let mut statement = connection.prepare(
-            "SELECT id, title, input_tokens, output_tokens, last_context_tokens FROM sessions WHERE kind = 'chat' ORDER BY id DESC",
+            "SELECT s.id, s.title, s.input_tokens, s.output_tokens, s.last_context_tokens
+             FROM sessions s
+             LEFT JOIN messages m ON m.session_id = s.id
+             WHERE s.kind = 'chat'
+             GROUP BY s.id
+             ORDER BY MAX(m.id) DESC, s.id DESC",
         )?;
         let rows = statement.query_map([], |row| {
             Ok(SessionSummary {
@@ -1055,6 +1066,23 @@ mod tests {
         let sessions = store.list_sessions().unwrap();
         assert_eq!(sessions[0].id, second);
         assert_eq!(sessions.last().unwrap().id, first);
+    }
+
+    #[test]
+    fn the_session_that_came_back_last_lists_first() {
+        // Activity ordering, not creation ordering: an older session
+        // whose record moved most recently outranks a newer, quieter
+        // one. A silent session falls back to creation order.
+        let store = memory_store();
+        let older = store.create_session("older").unwrap();
+        let newer = store.create_session("newer").unwrap();
+        store
+            .append_message(older, None, Role::User, "the older thread is alive again")
+            .unwrap();
+
+        let sessions = store.list_sessions().unwrap();
+        assert_eq!(sessions[0].id, older);
+        assert_eq!(sessions[1].id, newer);
     }
 
     #[test]

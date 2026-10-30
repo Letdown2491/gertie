@@ -175,9 +175,13 @@ prompt — the user is the capability system.
 ## Context management
 
 Boring and correct, no RAG in v1: token-budget-aware, triggered at ~80% of the model window;
-summarize-oldest via the same provider; hard-truncate oversized tool outputs with a "truncated"
-marker and re-read hint; system prompt and last N turns preserved verbatim. Measure before
-building anything fancier.
+compaction is a **budgeted selection, not a summary** — the original request verbatim, then
+verbatim 240-char prefixes of the omitted turns (newest-first within a budget that reserves
+max(16k, window/4) tokens for the work to come), plus the kept tail, all inside one system
+message. A `read_session` tool gives the model full-text access to everything the selection
+left out — the SQLite wire record is never rewritten. No summarizer model, no invented
+state, nothing that can fail on the provider. Hard-truncate oversized tool outputs with a
+"truncated" marker and re-read hint. Measure before building anything fancier.
 
 ## Subagents
 
@@ -223,7 +227,6 @@ doc-path-scoped *writes*, which the allowlist mechanism cannot enforce (a prompt
 not a boundary), and `ops` presumes `gh` on the host. Both are one five-line `[[agents]]`
 entry away for whoever wants them.
 | `general` | full | unconstrained escape hatch |
-| *(internal)* `summarize` | none (context in, text out) | used by the compactor; not leader-spawnable |
 
 Each type earns existence via distinct toolset or safety posture, not just a different prompt.
 
@@ -265,6 +268,21 @@ token totals. The missing-key warning names the variable. Exit 0 from doctor = r
 GitHub Releases tarball + `cargo install --locked` (cargo-binstall-compatible metadata).
 Flatpak/AppImage deferred — Flatpak in particular fights an agent harness's need to spawn
 processes in the user's environment. Linux-only packaging until macOS support lands.
+
+## Doctrine
+
+Four lines taken from t3code's AGENTS.md (research/t3code-ideas.md §9) — they pass the
+gertie test of restating what we already believe, from the other side of the harness
+boundary:
+
+- **Reverse states.** If you added a way in, add the way out and the way to see it. Snooze
+  needs unsnooze; expand needs collapse; a one-way door is a bug.
+- **Labels promise the action.** A visible label or tooltip describes exactly what the
+  click does — the permission card shows the diff it will run, never a verb alone.
+- **Authority comes from configuration and the human at the card**, never from
+  conversation: no message, tool result, or skill description can grant a permission.
+- **Stored events stay decodable.** Persisted rows load after every upgrade; the reload
+  path is contract, not best-effort. `gertie doctor` replays old sessions as the smoke test.
 
 ## Working agreements
 
