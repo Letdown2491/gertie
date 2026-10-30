@@ -78,27 +78,42 @@ pub(crate) fn wire_messages(request: &Request) -> (Option<String>, serde_json::V
                 }
             }
             gertie_core::Role::User => {
-                // Images ride as base64 source blocks, text first —
-                // Anthropic's multimodal order. A data URL that doesn't
-                // parse (shouldn't happen; the UI builds them) degrades
-                // to a text note rather than a 400 from the endpoint.
+                // Attachments ride as typed blocks, text first —
+                // Anthropic's multimodal order. Images go as image
+                // blocks, PDFs as document blocks. A data URL that
+                // doesn't parse (shouldn't happen; the UI builds them)
+                // degrades to a text note rather than a 400 from the
+                // endpoint.
                 let mut content = vec![serde_json::json!({
                     "type": "text",
                     "text": message.content.clone().unwrap_or_default(),
                 })];
-                for image in &message.images {
-                    match gertie_core::data_url_parts(image) {
-                        Some((media_type, data)) => content.push(serde_json::json!({
-                            "type": "image",
+                for attachment in &message.attachments {
+                    match gertie_core::data_url_parts(attachment) {
+                        Some((media_type, data)) if media_type.starts_with("image/") => content
+                            .push(serde_json::json!({
+                                "type": "image",
+                                "source": {
+                                    "type": "base64",
+                                    "media_type": media_type,
+                                    "data": data,
+                                },
+                            })),
+                        Some(("application/pdf", data)) => content.push(serde_json::json!({
+                            "type": "document",
                             "source": {
                                 "type": "base64",
-                                "media_type": media_type,
+                                "media_type": "application/pdf",
                                 "data": data,
                             },
                         })),
+                        Some((media_type, _)) => content.push(serde_json::json!({
+                            "type": "text",
+                            "text": format!("[attachment the endpoint can't read: {media_type}]"),
+                        })),
                         None => content.push(serde_json::json!({
                             "type": "text",
-                            "text": "[unreadable image]",
+                            "text": "[unreadable attachment]",
                         })),
                     }
                 }
@@ -437,9 +452,9 @@ mod tests {
     use gertie_core::{Role, ToolCall};
 
     #[test]
-    fn user_images_become_base64_source_blocks() {
+    fn user_attachments_become_base64_source_blocks() {
         let mut message = WireMessage::user("what is in this picture");
-        message.images = vec!["data:image/jpeg;base64,QUJD".into()];
+        message.attachments = vec!["data:image/jpeg;base64,QUJD".into()];
         let request = Request {
             messages: vec![message],
             ..Request::default()
@@ -458,14 +473,33 @@ mod tests {
         assert_eq!(content[1]["source"]["data"], "QUJD");
         // An unparseable data URL degrades to a text note, not a 400.
         let mut broken = WireMessage::user("look");
-        broken.images = vec!["not a data url".into()];
+        broken.attachments = vec!["not a data url".into()];
         let request = Request {
             messages: vec![broken],
             ..Request::default()
         };
         let (_, wire) = wire_messages(&request);
         assert_eq!(wire[0]["content"][1]["type"], "text");
-        assert_eq!(wire[0]["content"][1]["text"], "[unreadable image]");
+        assert_eq!(wire[0]["content"][1]["text"], "[unreadable attachment]");
+    }
+
+    #[test]
+    fn pdfs_become_document_blocks() {
+        let mut message = WireMessage::user("read this paper");
+        message.attachments = vec!["data:application/pdf;base64,JVBERi0".into()];
+        let request = Request {
+            messages: vec![message],
+            ..Request::default()
+        };
+        let (_, wire) = wire_messages(&request);
+
+        assert_eq!(wire[0]["content"][1]["type"], "document");
+        assert_eq!(wire[0]["content"][1]["source"]["type"], "base64");
+        assert_eq!(
+            wire[0]["content"][1]["source"]["media_type"],
+            "application/pdf"
+        );
+        assert_eq!(wire[0]["content"][1]["source"]["data"], "JVBERi0");
     }
 
     #[test]

@@ -366,7 +366,7 @@ impl Tool for AgentTool {
                 history: history.clone(),
                 // Workers don't take steering — the brief is the job.
                 steer: None,
-                user_images: Vec::new(),
+                user_attachments: Vec::new(),
                 user_message: format!(
                     "A brief file has been written for you:\n\n---\n{brief}\n---\n\n\
                      {guidance}\n\n\

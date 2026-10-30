@@ -101,7 +101,7 @@ pub fn run(prompt: Option<String>, yes: bool, config_path: Option<PathBuf>) -> i
         system_prompt: boot.system_prompt.clone(),
         // One-shot prompt mode: no steering, nothing queues.
         steer: None,
-        user_images: Vec::new(),
+        user_attachments: Vec::new(),
     });
     let worker_asks = boot.broker.subscribe();
 
@@ -472,7 +472,7 @@ mod tests {
             prompt_source: gertie_core::PromptSource::Leader,
             system_prompt: None,
             steer: None,
-            user_images: Vec::new(),
+            user_attachments: Vec::new(),
         });
         let mut approvals = 0;
         let (outcome, text) = pump(
@@ -546,7 +546,7 @@ mod tests {
             prompt_source: gertie_core::PromptSource::Leader,
             system_prompt: None,
             steer: None,
-            user_images: Vec::new(),
+            user_attachments: Vec::new(),
         });
         let mut approvals = 0;
         let (outcome, _) = pump(

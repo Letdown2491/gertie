@@ -35,10 +35,12 @@ pub struct WireMessage {
     pub tool_call_id: Option<String>,
     /// Tool-only: the tool's name.
     pub name: Option<String>,
-    /// User-only: images riding with the text, as data URLs
-    /// (`data:image/png;base64,…`). Empty = text-only — the common
-    /// case, and the only shape the wires emit today for other roles.
-    pub images: Vec<String>,
+    /// User-only: attachments riding with the text, as data URLs
+    /// (`data:image/png;base64,…`). Images and PDFs — the provider
+    /// adapters pick the block shape per media type. Empty = text-only
+    /// — the common case, and the only shape the wires emit today for
+    /// other roles.
+    pub attachments: Vec<String>,
 }
 
 impl WireMessage {
@@ -50,11 +52,11 @@ impl WireMessage {
         }
     }
 
-    pub fn user_with_images(content: impl Into<String>, images: Vec<String>) -> Self {
+    pub fn user_with_attachments(content: impl Into<String>, attachments: Vec<String>) -> Self {
         Self {
             role: Role::User,
             content: Some(content.into()),
-            images,
+            attachments,
             ..Self::default()
         }
     }
@@ -124,6 +126,28 @@ pub fn extract_image_markers(content: &str) -> (String, Vec<String>) {
     (text.trim().to_string(), images)
 }
 
+/// The attachment extension table: what the picker accepts and what
+/// the wire calls each kind. Images and PDFs ride the multimodal
+/// blocks as base64 data URLs; text-likes are read as UTF-8 and sent
+/// inline (one shared media type — the extension is cosmetic from
+/// here down). `None` = gertie can't attach it: office documents and
+/// other opaque formats have no wire representation the endpoints
+/// accept, and a silent attach that the model never sees is the worst
+/// possible answer.
+pub fn media_type_for_extension(extension: &str) -> Option<&'static str> {
+    Some(match extension.to_ascii_lowercase().as_str() {
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "pdf" => "application/pdf",
+        "txt" | "md" | "markdown" | "csv" | "json" | "toml" | "yaml" | "yml" | "xml" | "html"
+        | "rs" | "py" | "js" | "ts" | "tsx" | "jsx" | "go" | "c" | "h" | "cpp" | "hpp" | "sh"
+        | "sql" | "css" | "log" | "ini" | "diff" | "patch" => "text/plain",
+        _ => return None,
+    })
+}
+
 /// Splits a data URL into `(media_type, base64 payload)` — what the
 /// Anthropic wire wants for an image block. The OpenAI wire passes the
 /// data URL through whole.
@@ -135,16 +159,15 @@ pub fn data_url_parts(data_url: &str) -> Option<(&str, &str)> {
 
 /// Reads an attachment file into a data URL — the load-path inverse of
 /// the send path's write. A missing or unknown-format file returns
-/// None; the caller degrades to a text note.
+/// None; the caller degrades to a text note. Text-likes return None
+/// too: they ride inline in the message text and never get storage
+/// markers, so there is nothing for this to reload.
 pub fn file_to_data_url(path: &std::path::Path) -> Option<String> {
     let bytes = std::fs::read(path).ok()?;
-    let media_type = match path.extension()?.to_str()? {
-        "png" => "image/png",
-        "jpg" | "jpeg" => "image/jpeg",
-        "gif" => "image/gif",
-        "webp" => "image/webp",
-        _ => return None,
-    };
+    let media_type = media_type_for_extension(path.extension()?.to_str()?)?;
+    if media_type == "text/plain" {
+        return None;
+    }
     use base64::Engine as _;
     Some(format!(
         "data:{media_type};base64,{}",
@@ -217,5 +240,42 @@ mod tests {
         assert!(file_to_data_url(&mystery).is_none());
         // Missing file: None.
         assert!(file_to_data_url(&dir.path().join("gone.png")).is_none());
+    }
+
+    #[test]
+    fn pdfs_reload_as_data_urls_and_text_likes_stay_inline() {
+        let dir = tempfile::tempdir().unwrap();
+
+        // PDFs ride the binary path: marker → data URL → document block.
+        let path = dir.path().join("paper.pdf");
+        std::fs::write(&path, b"%PDF-1.4").unwrap();
+        let url = file_to_data_url(&path).unwrap();
+        assert_eq!(
+            data_url_parts(&url).unwrap(),
+            ("application/pdf", "JVBERi0xLjQ=")
+        );
+
+        // Text-likes never become data URLs — they ride inline, so a
+        // stray marker pointing at one has nothing to reload into.
+        let text = dir.path().join("notes.md");
+        std::fs::write(&text, b"# hi").unwrap();
+        assert!(file_to_data_url(&text).is_none());
+    }
+
+    #[test]
+    fn the_extension_table_promises_what_endpoints_read() {
+        // Images and PDFs: the multimodal blocks.
+        assert_eq!(media_type_for_extension("png"), Some("image/png"));
+        assert_eq!(media_type_for_extension("JPEG"), Some("image/jpeg"));
+        assert_eq!(media_type_for_extension("pdf"), Some("application/pdf"));
+        // Text-likes collapse to one media type; the extension is
+        // cosmetic from here down.
+        assert_eq!(media_type_for_extension("md"), Some("text/plain"));
+        assert_eq!(media_type_for_extension("rs"), Some("text/plain"));
+        // Opaque formats: a refusal, not a silent attach the model
+        // never sees.
+        assert_eq!(media_type_for_extension("docx"), None);
+        assert_eq!(media_type_for_extension("xlsx"), None);
+        assert_eq!(media_type_for_extension("zip"), None);
     }
 }

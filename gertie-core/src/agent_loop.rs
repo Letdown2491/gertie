@@ -123,10 +123,10 @@ pub struct TurnSpec {
     /// be the final round buys another one, so it is always answered.
     /// None = the turn cannot be steered.
     pub steer: Option<tokio::sync::mpsc::UnboundedReceiver<String>>,
-    /// Images riding with `user_message`, as data URLs. Steered
+    /// Attachments riding with `user_message`, as data URLs. Steered
     /// messages are text-only; the first message of the turn carries
     /// the attachments.
-    pub user_images: Vec<String>,
+    pub user_attachments: Vec<String>,
 }
 
 /// Runs one user turn to completion: request → (text | tool calls)* →
@@ -157,7 +157,7 @@ pub fn run_turn(spec: TurnSpec) -> BoxStream<'static, LoopEvent> {
         prompt_source,
         system_prompt,
         steer,
-        user_images,
+        user_attachments,
     } = spec;
     let mut steer = steer;
     let specs = tool_specs(&tools);
@@ -170,7 +170,7 @@ pub fn run_turn(spec: TurnSpec) -> BoxStream<'static, LoopEvent> {
         history
             .lock()
             .await
-            .push(WireMessage::user_with_images(user_message, user_images));
+            .push(WireMessage::user_with_attachments(user_message, user_attachments));
 
         // Observed prompt size from the last request's usage events, if
         // the provider reported any; the chars/4 estimate covers the rest.
@@ -721,7 +721,7 @@ mod tests {
                 prompt_source: crate::PromptSource::Leader,
                 system_prompt: None,
                 steer: None,
-                user_images: Vec::new(),
+                user_attachments: Vec::new(),
             },
             broker,
         )

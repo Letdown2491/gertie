@@ -481,22 +481,42 @@ fn wire_messages(messages: &[WireMessage]) -> Vec<serde_json::Value> {
                     );
                 }
                 role => {
-                    // Images ride only on user turns: the content
-                    // becomes a parts array — text first, then one
-                    // `image_url` part per image (data URLs pass
-                    // through whole). No images: the plain string the
-                    // vast majority of messages are.
-                    let has_images = role == gertie_core::Role::User && !message.images.is_empty();
+                    // Attachments ride only on user turns: the content
+                    // becomes a parts array — text first, then one part
+                    // per attachment, shaped by media type: images as
+                    // `image_url` parts (data URLs pass through whole),
+                    // PDFs as `file` parts. No attachments: the plain
+                    // string the vast majority of messages are.
+                    let has_images =
+                        role == gertie_core::Role::User && !message.attachments.is_empty();
                     if has_images {
                         let mut parts = vec![serde_json::json!({
                             "type": "text",
                             "text": message.content.clone().unwrap_or_default(),
                         })];
-                        parts.extend(message.images.iter().map(|image| {
-                            serde_json::json!({
-                                "type": "image_url",
-                                "image_url": { "url": image },
-                            })
+                        parts.extend(message.attachments.iter().map(|attachment| {
+                            match gertie_core::data_url_parts(attachment) {
+                                Some((media_type, _)) if media_type.starts_with("image/") => {
+                                    serde_json::json!({
+                                        "type": "image_url",
+                                        "image_url": { "url": attachment },
+                                    })
+                                }
+                                // The one document format the endpoint
+                                // reads natively; the name is cosmetic —
+                                // the model sees the data.
+                                Some(("application/pdf", _)) => serde_json::json!({
+                                    "type": "file",
+                                    "file": {
+                                        "filename": "document.pdf",
+                                        "file_data": attachment,
+                                    },
+                                }),
+                                _ => serde_json::json!({
+                                    "type": "text",
+                                    "text": "[unreadable attachment]",
+                                }),
+                            }
                         }));
                         entry.insert("content".into(), serde_json::Value::Array(parts));
                     } else {
@@ -669,9 +689,9 @@ mod tests {
     }
 
     #[test]
-    fn user_images_become_content_parts() {
+    fn user_attachments_become_content_parts() {
         let mut message = WireMessage::user("what is in this picture");
-        message.images = vec!["data:image/png;base64,QUJD".into()];
+        message.attachments = vec!["data:image/png;base64,QUJD".into()];
         let wire = wire_messages(&[message]);
 
         // Text and image ride as a parts array, text first.
@@ -685,6 +705,20 @@ mod tests {
         // common shape must not grow a parts wrapper.
         let plain = wire_messages(&[WireMessage::user("just words")]);
         assert_eq!(plain[0]["content"], "just words");
+    }
+
+    #[test]
+    fn pdfs_become_file_parts() {
+        let mut message = WireMessage::user("read this paper");
+        message.attachments = vec!["data:application/pdf;base64,JVBERi0".into()];
+        let wire = wire_messages(&[message]);
+
+        let content = &wire[0]["content"];
+        assert_eq!(content[1]["type"], "file");
+        assert_eq!(
+            content[1]["file"]["file_data"],
+            "data:application/pdf;base64,JVBERi0"
+        );
     }
 
     #[test]

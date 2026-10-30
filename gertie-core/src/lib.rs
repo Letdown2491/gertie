@@ -20,7 +20,7 @@ pub use permissions::{PendingAsk, PermissionBroker, PromptSource};
 pub use provider::Provider;
 pub use request::{
     IMAGE_MARKER_PREFIX, Request, ToolCall, ToolSpec, WireMessage, data_url_parts,
-    extract_image_markers, file_to_data_url,
+    extract_image_markers, file_to_data_url, media_type_for_extension,
 };
 use rusqlite::Connection;
 pub use snapshot::{Checkpoint, CheckpointId, SnapshotStore};
@@ -651,7 +651,7 @@ impl SessionStore {
                     index = next;
                 }
                 Role::User => {
-                    wire.push(WireMessage::user_with_images(content, images));
+                    wire.push(WireMessage::user_with_attachments(content, images));
                     index += 1;
                 }
                 Role::System => {
@@ -981,8 +981,9 @@ mod tests {
         assert_eq!(wire.len(), 1);
         // Clean text on the wire — the marker never reaches the model.
         assert_eq!(wire[0].content.as_deref(), Some("look"));
-        assert_eq!(wire[0].images.len(), 1);
-        let (media_type, payload) = crate::request::data_url_parts(&wire[0].images[0]).unwrap();
+        assert_eq!(wire[0].attachments.len(), 1);
+        let (media_type, payload) =
+            crate::request::data_url_parts(&wire[0].attachments[0]).unwrap();
         assert_eq!(media_type, "image/png");
         use base64::Engine as _;
         assert_eq!(

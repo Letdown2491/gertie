@@ -30,13 +30,25 @@ enum ToolStatus {
     Done(String),
 }
 
-/// A pending image attachment: clipboard bytes wrapped in a data URL,
-/// held until send. `id` is gpui's content hash — unique per image, so
-/// chips and their remove buttons key off it.
+/// A pending attachment, held until send. Two kinds, split by what the
+/// endpoints actually read: images and PDFs ride the multimodal blocks
+/// as data URLs; text-likes ride inline in the message text, the one
+/// shape every endpoint accepts. `id` keys the chip and its remove
+/// button — a content or path hash, so re-attaching the same thing
+/// replaces the chip instead of stacking it.
 struct Attachment {
     id: u64,
     name: String,
-    data_url: String,
+    kind: AttachmentKind,
+}
+
+enum AttachmentKind {
+    /// Binary bytes base64-wrapped as a data URL for the wire; a send
+    /// also writes them to the attachments dir so a reload re-sends.
+    DataUrl(String),
+    /// UTF-8 content inlined into the message text at send. No storage
+    /// marker — the stored transcript carries the text itself.
+    Text(String),
 }
 
 /// One rendered turn in the transcript. Plain messages keep their row in
@@ -102,8 +114,12 @@ pub struct ChatView {
     /// denominator.
     context_window: Option<u64>,
     /// Prompt templates for `/name` expansion in the composer. The
-    /// builtins /compact and /export are methods, not files.
+    /// builtins /compact, /export, /new, /settings and /agents are
+    /// methods, not files.
     templates: Vec<gertie_tools::templates::Template>,
+    /// The folder the agent's tools run in — shown in the footer so
+    /// "which project am I talking about" is always answered on screen.
+    workspace_root: std::path::PathBuf,
     /// Shared approval registry: leader and worker asks, one answer path.
     broker: Arc<PermissionBroker>,
     /// The front's current session, read by subagent dispatch to link
@@ -161,6 +177,8 @@ impl ChatView {
         endpoint_label: String,
         system_prompt: Option<String>,
         templates: Vec<gertie_tools::templates::Template>,
+        // The folder the agent's tools run in, shown in the footer.
+        workspace_root: std::path::PathBuf,
         broker: Arc<PermissionBroker>,
         session_scope: gertie_core::SessionScope,
         // The settings editor over the live config.
@@ -248,6 +266,7 @@ impl ChatView {
             endpoint_label,
             system_prompt,
             templates,
+            workspace_root,
             sessions,
             session_id,
             turns: Vec::new(),
@@ -383,12 +402,7 @@ impl ChatView {
         self.streaming && self.thinking && !pending
     }
 
-    fn new_session(
-        &mut self,
-        _event: &gpui_kit::ClickEvent,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn new_session(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.streaming {
             return;
         }
@@ -438,12 +452,7 @@ impl ChatView {
     }
 
     /// The agents panel toggle: opens/closes and refreshes the run list.
-    fn toggle_agents(
-        &mut self,
-        _event: &gpui_kit::ClickEvent,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn toggle_agents(&mut self, cx: &mut Context<Self>) {
         self.panel = if self.panel == Panel::Agents {
             Panel::None
         } else {
@@ -454,12 +463,7 @@ impl ChatView {
 
     /// The settings panel toggle. One column, one panel: opening one
     /// closes the other.
-    fn toggle_settings(
-        &mut self,
-        _event: &gpui_kit::ClickEvent,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn toggle_settings(&mut self, cx: &mut Context<Self>) {
         self.panel = if self.panel == Panel::Settings {
             Panel::None
         } else {
@@ -556,83 +560,204 @@ impl ChatView {
         }
     }
 
-    /// The attach affordance: wraps the clipboard's image (if any) as a
-    /// data URL and parks it for the next send. Text clipboards do
-    /// nothing — the textarea already pastes those itself.
-    fn attach_from_clipboard(&mut self, cx: &mut Context<Self>) {
-        use base64::Engine as _;
-        let Some(item) = cx.read_from_clipboard() else {
-            return;
-        };
-        for entry in item.entries {
-            let gpui_kit::ClipboardEntry::Image(image) = entry else {
-                continue;
+    /// The attach affordance, three ways in, one destination:
+    /// the "attach file" button opens a native file picker; pasting
+    /// intercepts images and copied files before the textarea sees
+    /// them; both land in the same pending set as removable chips.
+    fn attach_from_picker(&mut self, cx: &mut Context<Self>) {
+        let picker = cx.prompt_for_paths(gpui_kit::PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: true,
+            prompt: Some("Attach files".into()),
+        });
+        cx.spawn(async move |this, cx| {
+            let paths = match picker.await {
+                Ok(Ok(Some(paths))) => paths,
+                _ => return, // cancelled, or the portal is missing
             };
-            let (media_type, extension) = match image.format {
-                gpui_kit::ImageFormat::Jpeg => ("image/jpeg", "jpg"),
-                gpui_kit::ImageFormat::Webp => ("image/webp", "webp"),
-                gpui_kit::ImageFormat::Gif => ("image/gif", "gif"),
-                _ => ("image/png", "png"),
-            };
-            let data_url = format!(
-                "data:{media_type};base64,{}",
-                base64::engine::general_purpose::STANDARD.encode(&image.bytes)
-            );
-            // Re-pasting the same image replaces the chip, not stacks it.
-            self.attachments.retain(|held| held.id != image.id);
-            self.attachments.push(Attachment {
-                id: image.id,
-                name: format!("image.{extension}"),
-                data_url,
+            let _ = this.update(cx, |this, cx| {
+                for path in paths {
+                    this.attach_file(path, cx);
+                }
             });
-            cx.notify();
-            return;
-        }
+        })
+        .detach();
     }
 
+    /// The paste hook body: image and file payloads become chips and
+    /// the paste is consumed; anything else falls through to the
+    /// textarea's normal text insertion.
+    fn attach_paste(&mut self, item: &gpui_kit::ClipboardItem, cx: &mut Context<Self>) -> bool {
+        use base64::Engine as _;
+        let mut attached = false;
+        for entry in &item.entries {
+            match entry {
+                gpui_kit::ClipboardEntry::Image(image) => {
+                    let (media_type, extension) = match image.format {
+                        gpui_kit::ImageFormat::Jpeg => ("image/jpeg", "jpg"),
+                        gpui_kit::ImageFormat::Webp => ("image/webp", "webp"),
+                        gpui_kit::ImageFormat::Gif => ("image/gif", "gif"),
+                        _ => ("image/png", "png"),
+                    };
+                    let data_url = format!(
+                        "data:{media_type};base64,{}",
+                        base64::engine::general_purpose::STANDARD.encode(&image.bytes)
+                    );
+                    self.attach_chip(
+                        image.id,
+                        format!("image.{extension}"),
+                        AttachmentKind::DataUrl(data_url),
+                        cx,
+                    );
+                    attached = true;
+                }
+                gpui_kit::ClipboardEntry::ExternalPaths(paths) => {
+                    for path in &paths.0 {
+                        self.attach_file(path.clone(), cx);
+                        attached = true;
+                    }
+                }
+                // Text entries paste as text, as always.
+                gpui_kit::ClipboardEntry::String(_) => {}
+            }
+        }
+        attached
+    }
+
+    /// One file from the picker or a copied path: read it, classify it
+    /// by extension, park it as a chip. Refusals speak — an unsupported
+    /// type or an oversized file explains itself instead of silently
+    /// vanishing on the wire later.
+    fn attach_file(&mut self, path: std::path::PathBuf, cx: &mut Context<Self>) {
+        use base64::Engine as _;
+        let Some(name) = path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+        else {
+            return;
+        };
+        let extension = path
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .unwrap_or("");
+        let Some(media_type) = gertie_core::media_type_for_extension(extension) else {
+            self.push_notice(
+                format!(
+                    "Can't attach {name} — models read images, PDFs, and text files; \
+                     .{extension} has no wire shape."
+                ),
+                cx,
+            );
+            return;
+        };
+        let bytes = match std::fs::read(&path) {
+            Ok(bytes) => bytes,
+            Err(_) => {
+                self.push_notice(format!("Couldn't read {name}."), cx);
+                return;
+            }
+        };
+        // Endpoints cap requests far below disk sizes; a chip that
+        // can never send is a trap.
+        const MAX_ATTACHMENT_BYTES: usize = 20 * 1024 * 1024;
+        if bytes.len() > MAX_ATTACHMENT_BYTES {
+            self.push_notice(
+                format!(
+                    "{name} is too large to attach ({} MB limit).",
+                    MAX_ATTACHMENT_BYTES / 1024 / 1024
+                ),
+                cx,
+            );
+            return;
+        }
+        // Path hash: re-attaching the same file replaces the chip.
+        let id = {
+            use std::hash::{Hash, Hasher as _};
+            let mut hasher = std::hash::DefaultHasher::new();
+            path.hash(&mut hasher);
+            hasher.finish()
+        };
+        let kind = if media_type == "text/plain" {
+            AttachmentKind::Text(String::from_utf8_lossy(&bytes).into_owned())
+        } else {
+            AttachmentKind::DataUrl(format!(
+                "data:{media_type};base64,{}",
+                base64::engine::general_purpose::STANDARD.encode(&bytes)
+            ))
+        };
+        self.attach_chip(id, name, kind, cx);
+    }
+
+    /// Parks one classified attachment as a chip, replacing any held
+    /// under the same id.
+    fn attach_chip(&mut self, id: u64, name: String, kind: AttachmentKind, cx: &mut Context<Self>) {
+        self.attachments.retain(|held| held.id != id);
+        self.attachments.push(Attachment { id, name, kind });
+        cx.notify();
+    }
     /// Pulls the chip back off the composer.
     fn remove_attachment(&mut self, id: u64, cx: &mut Context<Self>) {
         self.attachments.retain(|held| held.id != id);
         cx.notify();
     }
 
-    /// Turns pending attachments into (markers for the stored text,
-    /// data URLs for the wire). Bytes land in the attachments dir under
+    /// Turns pending attachments into (inline text, storage markers,
+    /// wire data URLs). Binary bytes land in the attachments dir under
     /// their content hash; the DB keeps only the path — a reload reads
     /// the file back. A write failure degrades to wire-only: the live
     /// turn still sees the image, it just won't survive a restart.
-    fn take_attachments(&mut self) -> (String, Vec<String>) {
+    /// Text attachments never touch the dir — their content joins the
+    /// message text itself, so the record and the wire stay identical.
+    fn take_attachments(&mut self) -> (String, String, Vec<String>) {
         use base64::Engine as _;
         let mut images = Vec::new();
         let mut markers = String::new();
+        let mut inline = String::new();
         let dir = crate::config::Config::data_dir().map(|dir| dir.join("attachments"));
         for attachment in std::mem::take(&mut self.attachments) {
-            images.push(attachment.data_url.clone());
-            let stored = match (
-                dir.as_deref(),
-                gertie_core::data_url_parts(&attachment.data_url),
-            ) {
-                (Some(dir), Some((_, payload))) => base64::engine::general_purpose::STANDARD
-                    .decode(payload)
-                    .ok()
-                    .map(|bytes| {
-                        let path = dir.join(format!("{}-{}", attachment.id, attachment.name));
-                        std::fs::create_dir_all(dir).ok()?;
-                        std::fs::write(&path, bytes).ok()?;
-                        Some(path)
-                    })
-                    .unwrap_or(None),
-                _ => None,
-            };
-            if let Some(path) = stored {
-                markers.push_str(&format!(
-                    "\n\n{}{}}}",
-                    gertie_core::IMAGE_MARKER_PREFIX,
-                    path.display()
-                ));
+            match attachment.kind {
+                AttachmentKind::Text(content) => {
+                    let extension = attachment
+                        .name
+                        .rsplit('.')
+                        .next()
+                        .unwrap_or("txt")
+                        .to_ascii_lowercase();
+                    inline.push_str(&format!(
+                        "\n\n--- attached file: {} ---\n```{extension}\n{content}\n```",
+                        attachment.name
+                    ));
+                }
+                AttachmentKind::DataUrl(data_url) => {
+                    images.push(data_url.clone());
+                    let stored = match (dir.as_deref(), gertie_core::data_url_parts(&data_url)) {
+                        (Some(dir), Some((_, payload))) => {
+                            base64::engine::general_purpose::STANDARD
+                                .decode(payload)
+                                .ok()
+                                .map(|bytes| {
+                                    let path =
+                                        dir.join(format!("{}-{}", attachment.id, attachment.name));
+                                    std::fs::create_dir_all(dir).ok()?;
+                                    std::fs::write(&path, bytes).ok()?;
+                                    Some(path)
+                                })
+                                .unwrap_or(None)
+                        }
+                        _ => None,
+                    };
+                    if let Some(path) = stored {
+                        markers.push_str(&format!(
+                            "\n\n{}{}}}",
+                            gertie_core::IMAGE_MARKER_PREFIX,
+                            path.display()
+                        ));
+                    }
+                }
             }
         }
-        (markers, images)
+        (inline, markers, images)
     }
 
     /// Accepts the popup's top match (what Enter does while the slash
@@ -682,9 +807,9 @@ impl ChatView {
             return;
         }
         // Slash commands act on the session, not through the model:
-        // builtins first (/compact, /export), then file templates. An
-        // unknown name reports and keeps the input — the user fixes
-        // the spelling instead of retyping the message.
+        // builtins first, then file templates. An unknown name reports
+        // and keeps the input — the user fixes the spelling instead of
+        // retyping the message.
         let text = match gertie_tools::templates::parse_invocation(&typed) {
             Some((name, args)) => match name.as_str() {
                 "compact" => {
@@ -699,16 +824,45 @@ impl ChatView {
                     self.export_now(cx);
                     return;
                 }
+                "new" => {
+                    // The composer blanks only when the new chat
+                    // actually happens — a run in flight keeps its
+                    // turn's state, and the user hears why.
+                    if self.streaming {
+                        self.push_notice("A run is in flight — /new waits for it to finish.", cx);
+                        return;
+                    }
+                    self.input
+                        .update(cx, |input, cx| input.set_value("", window, cx));
+                    self.new_session(window, cx);
+                    return;
+                }
+                "settings" => {
+                    self.input
+                        .update(cx, |input, cx| input.set_value("", window, cx));
+                    self.toggle_settings(cx);
+                    return;
+                }
+                "agents" => {
+                    self.input
+                        .update(cx, |input, cx| input.set_value("", window, cx));
+                    self.toggle_agents(cx);
+                    return;
+                }
                 _ => {
                     let Some(template) = gertie_tools::templates::lookup(&self.templates, &name)
                     else {
-                        let mut names: Vec<String> = self
-                            .templates
+                        // The same list the bare `/` popup shows —
+                        // derived, so the notice can't drift from it.
+                        let names: Vec<String> = slash_matches("/", &self.templates)
                             .iter()
-                            .map(|t| format!("/{}", t.name))
+                            .map(|matched| match matched {
+                                SlashMatch::Builtin(name, _) => format!("/{name}"),
+                                SlashMatch::Template(index) => {
+                                    format!("/{}", self.templates[*index].name)
+                                }
+                            })
                             .collect();
-                        names.push("/compact".into());
-                        names.push("/export".into());
                         self.push_notice(
                             format!("No template `/{name}` — available: {}.", names.join(", ")),
                             cx,
@@ -755,9 +909,13 @@ impl ChatView {
             }
         };
 
-        // Attachments become storage markers + wire data URLs; the
-        // wire text stays clean — the model gets the images as images.
-        let (markers, images) = self.take_attachments();
+        // Attachments split three ways at send: text files join the
+        // message text (record and wire stay identical), binary bytes
+        // become storage markers for the DB and data URLs for the wire
+        // — the wire text itself stays clean, the model gets files as
+        // typed blocks.
+        let (inline, markers, images) = self.take_attachments();
+        let text = format!("{text}{inline}");
         let stored = format!("{text}{markers}");
 
         let db_id = self
@@ -861,7 +1019,12 @@ impl ChatView {
     /// Hands the turn to the agent loop and renders its event stream:
     /// deltas stream into an assistant row, tool calls become cards, and
     /// results persist as tool rows the model also sees on reload.
-    fn drive_turn(&mut self, user_text: String, user_images: Vec<String>, cx: &mut Context<Self>) {
+    fn drive_turn(
+        &mut self,
+        user_text: String,
+        user_attachments: Vec<String>,
+        cx: &mut Context<Self>,
+    ) {
         let Some(provider) = self.provider.clone() else {
             self.turns.push(Turn::Message {
                 role: Role::Assistant,
@@ -886,7 +1049,7 @@ impl ChatView {
             tools: self.tools.clone(),
             history: self.history.clone(),
             user_message: user_text,
-            user_images,
+            user_attachments,
             snapshots: self.snapshots.clone(),
             context_window,
             steer: Some(steer_rx),
@@ -1500,9 +1663,16 @@ impl ChatView {
                 // The one status that earns a place outside the
                 // transcript: the chat is blocked on you. Everything
                 // else — thinking, writing, tool work — lives in the
-                // transcript, where the user is looking anyway.
+                // transcript, where the user is looking anyway. At
+                // rest, the identity line leads with the folder the
+                // agent's tools run in — "which project am I talking
+                // about" is answered without opening anything.
                 Some(status) => status.to_string(),
-                None => self.endpoint_label.clone(),
+                None => format!(
+                    "{} · {}",
+                    tildify(&self.workspace_root),
+                    self.endpoint_label
+                ),
             });
         h_flex()
             .justify_between()
@@ -1966,7 +2136,9 @@ impl Render for ChatView {
                                     .small()
                                     .w_full()
                                     .tooltip("Start a new conversation in this tab")
-                                    .on_click(cx.listener(Self::new_session)),
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.new_session(window, cx)
+                                    })),
                             )
                             .child(
                                 div()
@@ -2075,7 +2247,9 @@ impl Render for ChatView {
                                     .ghost()
                                     .w_full()
                                     .tooltip("Worker runs dispatched from this chat")
-                                    .on_click(cx.listener(Self::toggle_agents)),
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.toggle_agents(cx)
+                                    })),
                             )
                             .child(
                                 Button::new("toggle-settings")
@@ -2084,7 +2258,9 @@ impl Render for ChatView {
                                     .ghost()
                                     .w_full()
                                     .tooltip("Configuration, theme, and token totals")
-                                    .on_click(cx.listener(Self::toggle_settings)),
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.toggle_settings(cx)
+                                    })),
                             ),
                     ),
             )
@@ -2299,15 +2475,15 @@ impl Render for ChatView {
                                         },
                                     )
                                     .when(!self.attachments.is_empty(), |composer| {
-                                        // Pending images: one removable chip
-                                        // per attachment, above the input.
+                                        // Pending attachments: one removable
+                                        // chip per file, above the input.
                                         composer.child(
                                             h_flex().px_4().pt_2().gap_2().flex_wrap().children(
                                                 self.attachments.iter().map(|attachment| {
                                                     let id = attachment.id;
                                                     let name = attachment.name.clone();
                                                     Button::new(format!("attach-{id}"))
-                                                        .label(format!("🖼 {name} ✕"))
+                                                        .label(format!("{name} ✕"))
                                                         .small()
                                                         .ghost()
                                                         .tooltip("Remove attachment")
@@ -2326,20 +2502,37 @@ impl Render for ChatView {
                                             .py_3()
                                             .gap_2()
                                             .child(
-                                                Button::new("attach-image")
-                                                    .label("🖼")
+                                                Button::new("attach-file")
+                                                    // A word, not a glyph: the
+                                                    // emoji-only label rasterized
+                                                    // as nothing on Linux — the
+                                                    // button was there and no one
+                                                    // could see it.
+                                                    .label("attach file")
                                                     .small()
                                                     .ghost()
-                                                    .tooltip("Attach the clipboard's image")
+                                                    .tooltip(
+                                                        "Attach images, PDFs, or text files",
+                                                    )
                                                     .on_click(cx.listener(|this, _, _, cx| {
-                                                        this.attach_from_clipboard(cx);
+                                                        this.attach_from_picker(cx);
                                                     })),
                                             )
                                             .child(div().flex_1().child(
                                                 // Auto-grown by the state: one
                                                 // row at rest, up to six with
-                                                // content.
-                                                Textarea::new(&self.input),
+                                                // content. Paste is hooked:
+                                                // images and copied files
+                                                // become chips, text pastes
+                                                // as text.
+                                                Textarea::new(&self.input).on_paste({
+                                                    let view = cx.entity();
+                                                    move |item, _, cx| {
+                                                        view.update(cx, |this, cx| {
+                                                            this.attach_paste(item, cx)
+                                                        })
+                                                    }
+                                                }),
                                             )),
                                     )
                                     .child(self.render_token_footer(status, cx)),
@@ -2365,18 +2558,41 @@ const NO_ENDPOINT_NOTICE: &str = "No endpoint configured. Run `gertie doctor` to
     api_key_env = \"PPQ_API_KEY\"\n\n\
     …set PPQ_API_KEY in your environment, then restart gertie.";
 
-/// Stored text as display text: image markers become a quiet note —
-/// the bytes live in the attachments dir, not the transcript.
+/// Stored text as display text: attachment markers become a quiet note
+/// naming the files — the bytes live in the attachments dir, not the
+/// transcript. File names, not paths: the dir is gertie's own.
 fn display_text(text: &str) -> String {
     let (clean, images) = gertie_core::extract_image_markers(text);
     if images.is_empty() {
         clean
     } else {
-        format!(
-            "{clean}\n\n🖼 {} image{} attached",
-            images.len(),
-            if images.len() == 1 { "" } else { "s" }
-        )
+        let names: Vec<String> = images
+            .iter()
+            .map(|path| {
+                std::path::Path::new(path)
+                    .file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| path.clone())
+            })
+            .collect();
+        format!("\n\n[attached: {}]", names.join(", "))
+    }
+}
+
+/// `/home/martin/x/y` → `~/x/y` — the footer's folder stays short. No
+/// `HOME`, or a path outside it: printed whole.
+fn tildify(path: &std::path::Path) -> String {
+    let home = std::env::var("HOME").ok().filter(|home| !home.is_empty());
+    match home {
+        Some(home) if path.starts_with(&home) => {
+            let tail = path.strip_prefix(&home).unwrap_or(path);
+            if tail.as_os_str().is_empty() {
+                "~".into()
+            } else {
+                format!("~/{}", tail.display())
+            }
+        }
+        _ => path.display().to_string(),
     }
 }
 
@@ -2412,6 +2628,18 @@ fn slash_matches(input: &str, templates: &[gertie_tools::templates::Template]) -
         matches.push(SlashMatch::Builtin(
             "export",
             "Write this conversation out as JSONL",
+        ));
+    }
+    if "new".starts_with(name.as_str()) {
+        matches.push(SlashMatch::Builtin("new", "Start a fresh chat in this tab"));
+    }
+    if "settings".starts_with(name.as_str()) {
+        matches.push(SlashMatch::Builtin("settings", "Open the settings panel"));
+    }
+    if "agents".starts_with(name.as_str()) {
+        matches.push(SlashMatch::Builtin(
+            "agents",
+            "Show the worker runs dispatched from this chat",
         ));
     }
     for (index, template) in templates.iter().enumerate() {
