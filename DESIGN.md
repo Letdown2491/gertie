@@ -254,6 +254,16 @@ the Provider trait's second adapter (`wire = "anthropic"` per endpoint); the tok
 persists per-session spend. Nothing left open from the original row — see "The original
 'Deferred' row" above for what shipped and what was decided against, and why.)
 
+The composer grew the t3code set: a command palette (Ctrl+K, or the sidebar's search
+button) that answers with FTS5 hits from the store — every session's memory, ranked, with
+confirm jumping to the hit's turn (a cross-session hit switches first; the jump breaks
+tail-follow, scrolling back to the bottom re-engages it). Attachments broadened past
+images: "attach file" opens the picker, paste intercepts images and copied files, PDFs
+ride the wire as typed document/file blocks, and text files inline into the message — the
+extension table refuses (with a reason) what no endpoint can read. The footer's identity
+line leads with the working folder. Slash builtins cover the panel actions (/compact,
+/export, /new, /settings, /agents) beside file templates.
+
 ## Onboarding
 
 First run with the default path writes a working starter `config.toml` (one endpoint,

@@ -5,6 +5,7 @@ pub mod config;
 pub mod doctor;
 pub mod headless;
 pub mod markdown;
+pub mod palette;
 pub mod settings;
 pub mod settings_edit;
 pub mod tabs;

@@ -22,6 +22,9 @@ pub fn run_with(config_path: Option<std::path::PathBuf>) {
     let app = application().with_assets(gpui_kit::assets::Assets);
     app.run(move |cx: &mut App| {
         gpui_kit::init(cx);
+        // The palette's global trigger; the component's own keys bind
+        // themselves when it renders.
+        crate::palette::bind_palette_keys(cx);
         // The persisted theme choice — dark unless the user said
         // otherwise (UI state, not config-file material).
         let theme = crate::settings::load_theme().unwrap_or(gpui_kit::component::ThemeMode::Dark);

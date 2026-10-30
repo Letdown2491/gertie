@@ -10,6 +10,7 @@ use gertie_core::{
 };
 use gertie_providers::AnyProvider;
 use gpui_kit::component::button::{Button, ButtonCustomVariant, ButtonVariants as _};
+use gpui_kit::component::command::{Command, CommandState};
 use gpui_kit::component::input::{Input, InputEvent, InputState, Textarea, TextareaState};
 use gpui_kit::component::spinner::Spinner;
 use gpui_kit::component::{ActiveTheme, Sizable as _, h_flex, v_flex};
@@ -68,6 +69,9 @@ enum Turn {
         auto_approved: bool,
         /// Subagent asks get labeled — same card, provenance visible.
         worker: bool,
+        /// The persisted row for this tool's result, once it exists —
+        /// how a palette hit lands on the right card.
+        db_id: Option<MessageId>,
     },
 }
 
@@ -120,6 +124,14 @@ pub struct ChatView {
     /// The folder the agent's tools run in — shown in the footer so
     /// "which project am I talking about" is always answered on screen.
     workspace_root: std::path::PathBuf,
+    /// The command palette (Ctrl+K): the kit's field + keyboard nav,
+    /// pointed at the store's FTS index by the callbacks in render.
+    palette: Entity<CommandState>,
+    /// Whether the palette is on screen.
+    palette_open: bool,
+    /// The hits behind the palette's rows, in search-rank order — the
+    /// row index a confirm hands back indexes this vector.
+    palette_hits: Vec<gertie_core::HistoryHit>,
     /// Shared approval registry: leader and worker asks, one answer path.
     broker: Arc<PermissionBroker>,
     /// The front's current session, read by subagent dispatch to link
@@ -193,6 +205,9 @@ impl ChatView {
         // Shift+Enter is a newline (long prompts, pasted snippets).
         // One row at rest, growing with content up to a cap — a tall
         // empty box made the attach button look lost beside it.
+        // The palette is a component entity like the input: created
+        // once, parked until Ctrl+K puts it on screen.
+        let palette = cx.new(|cx| CommandState::new(window, cx));
         let input = cx.new(|cx| {
             TextareaState::new(window, cx)
                 .placeholder("Message gertie… — / for commands")
@@ -267,6 +282,9 @@ impl ChatView {
             system_prompt,
             templates,
             workspace_root,
+            palette,
+            palette_open: false,
+            palette_hits: Vec::new(),
             sessions,
             session_id,
             turns: Vec::new(),
@@ -318,6 +336,22 @@ impl ChatView {
         self.turns.len()
     }
 
+    /// Whether the palette is on screen, for tests.
+    pub fn palette_open_for_test(&self) -> bool {
+        self.palette_open
+    }
+
+    /// How many hits the palette is showing, for tests.
+    pub fn palette_hits_for_test(&self) -> usize {
+        self.palette_hits.len()
+    }
+
+    /// Where the transcript's virtual list is scrolled, for tests —
+    /// the first visible turn index.
+    pub fn scroll_top_for_test(&self) -> usize {
+        self.list_state.logical_scroll_top().item_ix
+    }
+
     /// The open session's title, for the tab bar. Blank chats say so.
     pub fn tab_title(&self) -> SharedString {
         match self
@@ -347,6 +381,7 @@ impl ChatView {
                             status: ToolStatus::Done(row.content.clone()),
                             auto_approved: false,
                             worker: false,
+                            db_id: Some(row.id),
                         },
                         role => Turn::Message {
                             role,
@@ -428,6 +463,13 @@ impl ChatView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.switch_session_state(session_id, cx);
+        window.focus(&self.input.read(cx).focus_handle(cx), cx);
+    }
+
+    /// The window-free body of a session switch — the palette's confirm
+    /// callback runs with an App handle, not a window, and jumps here.
+    fn switch_session_state(&mut self, session_id: SessionId, cx: &mut Context<Self>) {
         if self.streaming {
             return;
         }
@@ -448,7 +490,69 @@ impl ChatView {
         self.context_used = summary.map(|summary| summary.context_tokens).unwrap_or(0);
         self.refresh_agent_runs(cx);
         self.reload_session(cx);
-        window.focus(&self.input.read(cx).focus_handle(cx), cx);
+    }
+
+    /// Ctrl+K (or the sidebar's search button): open the palette over
+    /// the store's memory. A fresh query — last time's hits are last
+    /// time's; and focus the field so typing starts immediately.
+    fn open_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.palette_open = true;
+        self.palette_hits.clear();
+        self.palette.update(cx, |palette, cx| {
+            palette.set_query("", window, cx);
+        });
+        let handle = Focusable::focus_handle(self.palette.read(cx), cx);
+        window.focus(&handle, cx);
+        cx.notify();
+    }
+
+    fn close_palette(&mut self, cx: &mut Context<Self>) {
+        if !self.palette_open {
+            return;
+        }
+        self.palette_open = false;
+        cx.notify();
+    }
+
+    /// The palette's query callback: the store's FTS index answers,
+    /// bounded — twenty hits is a page a human can actually scan.
+    fn palette_search(&mut self, query: &str, cx: &mut Context<Self>) {
+        self.palette_hits.clear();
+        if !query.trim().is_empty() {
+            self.palette_hits = self.store.search(query, 20).unwrap_or_default();
+        }
+        cx.notify();
+    }
+
+    /// Confirming a hit: land on that turn. A hit from another session
+    /// switches first; either way the matching row scrolls into view.
+    fn palette_jump(&mut self, row: usize, cx: &mut Context<Self>) {
+        let Some(hit) = self.palette_hits.get(row) else {
+            self.close_palette(cx);
+            return;
+        };
+        let session_id = hit.session_id;
+        let message_id = hit.message_id;
+        if self.session_id != Some(session_id) {
+            self.switch_session_state(session_id, cx);
+        }
+        let turn_index = self.turns.iter().position(|turn| match turn {
+            Turn::Message {
+                db_id: Some(db_id), ..
+            }
+            | Turn::Tool {
+                db_id: Some(db_id), ..
+            } => *db_id == message_id,
+            _ => false,
+        });
+        if let Some(index) = turn_index {
+            // The jump is navigation: drop tail-follow first, or the
+            // next layout snaps back to the end and the reveal never
+            // shows. Scrolling back to the bottom re-engages it.
+            self.list_state.pause_following_tail();
+            self.list_state.scroll_to_reveal_item(index);
+        }
+        self.close_palette(cx);
     }
 
     /// The agents panel toggle: opens/closes and refreshes the run list.
@@ -1258,6 +1362,7 @@ impl ChatView {
             status: ToolStatus::Running,
             auto_approved: true,
             worker: false,
+            db_id: None,
         });
         if dispatches_workers {
             // The worker run's child session exists once the tool starts
@@ -1279,6 +1384,7 @@ impl ChatView {
             status: ToolStatus::Pending(id),
             auto_approved: false,
             worker: false,
+            db_id: None,
         });
         self.sync_list(cx);
     }
@@ -1295,6 +1401,7 @@ impl ChatView {
             status: ToolStatus::Pending(id),
             auto_approved: false,
             worker: true,
+            db_id: None,
         });
         // A worker is mid-run: its child session exists by now.
         self.refresh_agent_runs(cx);
@@ -1323,11 +1430,16 @@ impl ChatView {
             })
             .unwrap_or_default();
 
-        for turn in &mut self.turns {
+        // Mark the card done, remembering which one it is — the
+        // persisted row's id lands on it below, so a palette hit on
+        // this result can find the card after a reload too.
+        let mut done_index: Option<usize> = None;
+        for (index, turn) in self.turns.iter_mut().enumerate() {
             if let Turn::Tool { call, status, .. } = turn
                 && call.id == call_id
             {
                 *status = ToolStatus::Done(result.to_string());
+                done_index = Some(index);
             }
         }
 
@@ -1342,6 +1454,13 @@ impl ChatView {
             )
         {
             self.last_db_id = Some(db_id);
+            if let Some(index) = done_index
+                && let Turn::Tool {
+                    db_id: turn_db_id, ..
+                } = &mut self.turns[index]
+            {
+                *turn_db_id = Some(db_id);
+            }
         }
         // The thinking row appears here (item count grew by one), so a
         // reset — not just a scroll — keeps the tail pinned.
@@ -1548,6 +1667,7 @@ impl ChatView {
                 status,
                 auto_approved,
                 worker,
+                ..
             } => self.render_tool(index, call, status, *auto_approved, *worker, cx),
         };
         // Fork affordance: persisted user turns only — "branch from this
@@ -1681,6 +1801,69 @@ impl ChatView {
             .pb_2()
             .child(ledger)
             .child(ident)
+            .into_any_element()
+    }
+
+    /// The palette, floating over the whole chat: a backdrop that
+    /// eats stray clicks, the card centered above the fold. The
+    /// kit's Command owns the field and the keyboard nav; the
+    /// callbacks here own what a row means.
+    fn render_palette_overlay(&self, view: Entity<Self>, cx: &Context<Self>) -> AnyElement {
+        let search_view = view.clone();
+        let jump_view = view.clone();
+        let cancel_view = view;
+        div()
+            .absolute()
+            .inset_0()
+            .bg(cx.theme().overlay)
+            // Backdrop click dismisses; the card stops propagation so
+            // choosing text or moving focus never closes it.
+            .on_mouse_down(
+                gpui_kit::MouseButton::Left,
+                cx.listener(|this, _, _, cx| this.close_palette(cx)),
+            )
+            .child(
+                div()
+                    .absolute()
+                    .left_0()
+                    .right_0()
+                    .top_12()
+                    .flex()
+                    .justify_center()
+                    .child(
+                        div()
+                            .w(px(640.))
+                            .on_mouse_down(gpui_kit::MouseButton::Left, |_, _, cx| {
+                                cx.stop_propagation();
+                            })
+                            .child(
+                                Command::new(&self.palette)
+                                    .items(crate::palette::search_items(&self.palette_hits))
+                                    .filterable(false)
+                                    .placeholder("Search your history…")
+                                    .empty(|_, _, cx| {
+                                        div()
+                                            .px_4()
+                                            .py_3()
+                                            .text_size(px(12.))
+                                            .text_color(cx.theme().muted_foreground)
+                                            .child("Nothing in memory matches.")
+                                            .into_any_element()
+                                    })
+                                    .on_query(move |query, _, cx| {
+                                        search_view
+                                            .update(cx, |chat, cx| chat.palette_search(query, cx));
+                                    })
+                                    .on_confirm(move |path, _, cx| {
+                                        jump_view
+                                            .update(cx, |chat, cx| chat.palette_jump(path.row, cx));
+                                    })
+                                    .on_cancel(move |_, cx| {
+                                        cancel_view.update(cx, |chat, cx| chat.close_palette(cx));
+                                    }),
+                            ),
+                    ),
+            )
             .into_any_element()
     }
 
@@ -2108,10 +2291,18 @@ impl Render for ChatView {
             .size_full()
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
+            // The palette's trigger fires from wherever focus sits —
+            // the root catches it on the way up the dispatch path.
+            .on_action(cx.listener(
+                |this, _: &crate::palette::OpenPalette, window, cx| {
+                    this.open_palette(window, cx);
+                },
+            ))
             // h_flex centers children on the cross axis by default —
             // stretch instead, so the main row fills the window height
             // and the transcript list keeps its flex sizing.
             .items_stretch()
+            .relative()
             .child(
                 // Session sidebar: sessions scroll, the utility
                 // buttons stay put at the foot.
@@ -2232,7 +2423,7 @@ impl Render for ChatView {
                             })),
                     )
                     .child(
-                        // The two utilities: stacked at the
+                        // The utilities: stacked at the
                         // sidebar's foot — findable, never
                         // in the way.
                         v_flex()
@@ -2240,6 +2431,17 @@ impl Render for ChatView {
                             .px_3()
                             .pt_2()
                             .pb_3()
+                            .child(
+                                Button::new("search-history")
+                                    .label("search")
+                                    .small()
+                                    .ghost()
+                                    .w_full()
+                                    .tooltip("Search every session — Ctrl+K")
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.open_palette(window, cx)
+                                    })),
+                            )
                             .child(
                                 Button::new("toggle-agents")
                                     .label("agents")
@@ -2546,6 +2748,11 @@ impl Render for ChatView {
                         row.child(self.settings_panel.clone())
                     }),
             )
+            // The palette floats over everything, last child so it
+            // paints on top.
+            .when(self.palette_open, |root| {
+                root.child(self.render_palette_overlay(cx.entity(), cx))
+            })
     }
 }
 

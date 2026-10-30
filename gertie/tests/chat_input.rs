@@ -36,12 +36,17 @@ struct Fixture {
 
 fn fixture() -> Fixture {
     let store = Arc::new(SessionStore::open(Path::new(":memory:")).expect("memory store"));
+    fixture_with_store(store)
+}
+
+fn fixture_with_store(store: Arc<SessionStore>) -> Fixture {
     let mut cx = HeadlessAppContext::with_asset_source(
         Arc::new(NoopTextSystem),
         Arc::new(gpui_kit::assets::Assets),
     );
     cx.update(|cx| {
         gpui_kit::init(cx);
+        gertie::palette::bind_palette_keys(cx);
         gpui_kit::component::Theme::change(gpui_kit::component::ThemeMode::Dark, None, cx);
     });
     let mut view_entity = None;
@@ -249,4 +254,130 @@ fn markdown_and_tool_rows_draw_clean() {
             .turn_count_for_test()
     });
     assert!(turns >= 7, "expected the stored rows to load, got {turns}");
+}
+
+/// Seeds a session whose needle word appears once, deep in a long
+/// transcript, plus a newer session (so that's the one a fresh window
+/// resumes) without the needle.
+fn seeded_store() -> Arc<SessionStore> {
+    let store = Arc::new(SessionStore::open(Path::new(":memory:")).expect("memory store"));
+    let needle = store
+        .create_session("the flaky widget hunt")
+        .expect("needle");
+    for i in 0..40 {
+        // The one match sits at turn 6 — early enough that revealing
+        // it must move the scroll off the bottom anchor.
+        let content = if i == 3 {
+            "the flaky widget broke here"
+        } else {
+            &format!("note {i} about styling")
+        };
+        let parent = store
+            .append_message(needle, None, gertie_core::Role::User, content)
+            .expect("row");
+        store
+            .append_message(needle, Some(parent), gertie_core::Role::Assistant, "nod")
+            .expect("row");
+    }
+    // The newer session wins the resume.
+    let chatter = store.create_session("chatter").expect("chatter");
+    store
+        .append_message(chatter, None, gertie_core::Role::User, "hello again")
+        .expect("chatter row");
+    store
+}
+
+#[test]
+fn the_palette_jumps_to_a_hit_in_another_session() {
+    let store = seeded_store();
+    let mut fixture = fixture_with_store(store);
+
+    // The window resumed the newest session, not the needle's.
+    let resumed = fixture
+        .cx
+        .update(|cx| {
+            fixture
+                .view
+                .upgrade()
+                .expect("view alive")
+                .read(cx)
+                .session_id()
+        })
+        .expect("resumed session");
+    assert_ne!(resumed.0, 1, "the needle session must not be resumed");
+
+    // Ctrl+K opens the palette…
+    fixture.act(|window, cx| {
+        window.press("ctrl-k", cx);
+    });
+    assert!(
+        fixture.cx.update(|cx| fixture
+            .view
+            .upgrade()
+            .expect("view alive")
+            .read(cx)
+            .palette_open_for_test()),
+        "ctrl-k should open the palette"
+    );
+
+    // …typing fills it with the store's answer…
+    fixture.act(|window, cx| {
+        window.input("widget", cx);
+    });
+    assert_eq!(
+        fixture.cx.update(|cx| fixture
+            .view
+            .upgrade()
+            .expect("view alive")
+            .read(cx)
+            .palette_hits_for_test()),
+        1,
+        "the needle word should rank exactly one hit"
+    );
+
+    // …and Enter lands on that session with the turn in view.
+    fixture.act(|window, cx| {
+        window.press("enter", cx);
+    });
+    let (session, open, scroll) = fixture.cx.update(|cx| {
+        let view = fixture.view.upgrade().expect("view alive").read(cx);
+        (
+            view.session_id(),
+            view.palette_open_for_test(),
+            view.scroll_top_for_test(),
+        )
+    });
+    assert_eq!(
+        session.expect("jumped session").0,
+        1,
+        "confirm switched sessions"
+    );
+    assert!(!open, "confirm closes the palette");
+    // The transcript left the bottom anchor (40 items) to reveal turn
+    // 6 — the whole point of the jump.
+    assert!(
+        scroll < 40,
+        "the hit's turn should be scrolled into view, got {scroll}"
+    );
+}
+
+#[test]
+fn escape_leaves_the_palette_without_jumping() {
+    let store = seeded_store();
+    let mut fixture = fixture_with_store(store);
+
+    fixture.act(|window, cx| {
+        window.press("ctrl-k", cx);
+        window.input("widget", cx);
+    });
+    fixture.act(|window, cx| {
+        window.press("escape", cx);
+        window.press("escape", cx);
+    });
+    let (session, open) = fixture.cx.update(|cx| {
+        let view = fixture.view.upgrade().expect("view alive").read(cx);
+        (view.session_id(), view.palette_open_for_test())
+    });
+    assert_eq!(session.expect("still the resumed session").0, 2);
+    assert!(!open, "two escapes: one clears the query, one closes");
 }
