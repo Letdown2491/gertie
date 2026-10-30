@@ -5,8 +5,8 @@ use crate::bootstrap::Reloaded;
 use crate::settings_edit::{SettingsEvent, SettingsPanelView};
 use futures_util::StreamExt as _;
 use gertie_core::{
-    LoopEvent, MessageId, PermissionBroker, PermissionDecision, Role, SessionId, SessionStore,
-    SharedHistory, SnapshotStore, ToolCall, ToolRegistry, TurnSpec, run_turn,
+    AfterState, LoopEvent, MessageId, PermissionBroker, PermissionDecision, Role, SessionId,
+    SessionStore, SharedHistory, SnapshotStore, ToolCall, ToolRegistry, TurnSpec, run_turn,
 };
 use gertie_providers::AnyProvider;
 use gpui_kit::component::button::{Button, ButtonCustomVariant, ButtonVariants as _};
@@ -16,8 +16,8 @@ use gpui_kit::component::spinner::Spinner;
 use gpui_kit::component::{ActiveTheme, Sizable as _, h_flex, v_flex};
 use gpui_kit::{
     AnyElement, App, AppContext as _, Context, Entity, EventEmitter, Focusable, IntoElement,
-    ListAlignment, ListState, ParentElement, Render, SharedString, StatefulInteractiveElement as _,
-    Styled, Window, div, list, prelude::*, px,
+    KeyBinding, ListAlignment, ListState, ParentElement, Render, SharedString,
+    StatefulInteractiveElement as _, Styled, Window, actions, div, list, prelude::*, px,
 };
 use std::sync::Arc;
 use std::time::Duration;
@@ -73,6 +73,53 @@ enum Turn {
         /// how a palette hit lands on the right card.
         db_id: Option<MessageId>,
     },
+}
+
+actions!(gertie, [CloseTurnDiff]);
+
+/// The chat surface's key map, bound once at app start: escape closes
+/// the turn-diff panel while focus sits inside it. (The palette binds
+/// its own keys — `palette::bind_palette_keys` and the kit.)
+pub fn bind_chat_keys(cx: &mut App) {
+    cx.bind_keys([KeyBinding::new(
+        "escape",
+        CloseTurnDiff,
+        Some("TurnDiffPanel"),
+    )]);
+}
+
+/// One file's change in the turn-diff panel, resolved at open time —
+/// the panel never re-reads the ledger while it shows.
+struct TurnFileView {
+    path: std::path::PathBuf,
+    /// The checkpoint to restore this path's pre-turn content from.
+    checkpoint: gertie_core::CheckpointId,
+    diff: FileDiff,
+}
+
+/// Text files diff; binary files refuse — a lossy text rendering would
+/// lie about what changed.
+enum FileDiff {
+    Text(crate::diff::Patch),
+    Binary { before: usize, after: usize },
+}
+
+/// The open turn-diff modal: this turn's files, and a focus handle so
+/// escape closes it.
+struct TurnDiffPanel {
+    files: Vec<TurnFileView>,
+    focus: gpui_kit::FocusHandle,
+}
+
+/// One row of the panel's list, as data — `AnyElement` isn't `Clone`,
+/// so (like the transcript) rows re-render from data on every paint.
+enum TurnDiffRow {
+    /// A file's header: path, ± summary, expand toggle.
+    Header(usize),
+    /// A diff line, colored by its kind.
+    Diff(crate::diff::Line),
+    /// A muted note: unchanged, omitted count, binary refusal.
+    Note(String),
 }
 
 pub struct ChatView {
@@ -132,6 +179,13 @@ pub struct ChatView {
     /// The hits behind the palette's rows, in search-rank order — the
     /// row index a confirm hands back indexes this vector.
     palette_hits: Vec<gertie_core::HistoryHit>,
+    /// The turn-diff modal, when open — raised from a tool card's
+    /// "turn diff" button, dismissed by escape, backdrop, or restore.
+    turn_diff: Option<TurnDiffPanel>,
+    /// Which file's diff is expanded in the panel, one at a time.
+    turn_diff_open: Option<usize>,
+    /// The panel's scroll list, reset on each open.
+    turn_diff_list: ListState,
     /// Shared approval registry: leader and worker asks, one answer path.
     broker: Arc<PermissionBroker>,
     /// The front's current session, read by subagent dispatch to link
@@ -208,6 +262,7 @@ impl ChatView {
         // The palette is a component entity like the input: created
         // once, parked until Ctrl+K puts it on screen.
         let palette = cx.new(|cx| CommandState::new(window, cx));
+        let turn_diff_list = ListState::new(0, ListAlignment::Top, px(256.));
         let input = cx.new(|cx| {
             TextareaState::new(window, cx)
                 .placeholder("Message gertie… — / for commands")
@@ -285,6 +340,9 @@ impl ChatView {
             palette,
             palette_open: false,
             palette_hits: Vec::new(),
+            turn_diff: None,
+            turn_diff_open: None,
+            turn_diff_list,
             sessions,
             session_id,
             turns: Vec::new(),
@@ -350,6 +408,12 @@ impl ChatView {
     /// the first visible turn index.
     pub fn scroll_top_for_test(&self) -> usize {
         self.list_state.logical_scroll_top().item_ix
+    }
+
+    /// The turn-diff panel's file count — `None` when closed, `Some(n)`
+    /// when open with n files listed, for tests.
+    pub fn turn_diff_for_test(&self) -> Option<usize> {
+        self.turn_diff.as_ref().map(|panel| panel.files.len())
     }
 
     /// The open session's title, for the tab bar. Blank chats say so.
@@ -453,6 +517,7 @@ impl ChatView {
         self.last_db_id = None;
         self.streaming_assistant = None;
         self.history.blocking_lock().clear();
+        self.close_turn_diff(cx);
         self.sync_list(cx);
         window.focus(&self.input.read(cx).focus_handle(cx), cx);
     }
@@ -474,8 +539,10 @@ impl ChatView {
             return;
         }
         // Pending attachments are composer state, not session state —
-        // they don't hop conversations.
+        // they don't hop conversations. Neither does the turn-diff
+        // panel: it answers for the session it was opened in.
         self.attachments.clear();
+        self.close_turn_diff(cx);
         self.session_id = Some(session_id);
         self.session_scope.set(Some(session_id));
         let summary = self
@@ -553,6 +620,370 @@ impl ChatView {
             self.list_state.scroll_to_reveal_item(index);
         }
         self.close_palette(cx);
+    }
+
+    /// "turn diff" on a done tool card: anchor to the card's turn —
+    /// the latest user message at or before it — and open the ledger's
+    /// answer. Works from any card in the turn; the diff is the turn's,
+    /// not the call's.
+    fn open_turn_diff(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let end = (index + 1).min(self.turns.len());
+        let anchor = self.turns[..end].iter().rev().find_map(|turn| match turn {
+            Turn::Message {
+                role: Role::User,
+                db_id: Some(db_id),
+                ..
+            } => Some(*db_id),
+            _ => None,
+        });
+        let Some(anchor) = anchor else {
+            self.push_notice("This turn has no user message to anchor a diff to.", cx);
+            return;
+        };
+        self.open_turn_diff_for_message(anchor, cx);
+        if let Some(focus) = self.turn_diff.as_ref().map(|panel| panel.focus.clone()) {
+            window.focus(&focus, cx);
+        }
+    }
+
+    /// The panel body, window-free — tests call this directly. The
+    /// ledger resolves the turn from the user message row, and every
+    /// file's before/after is read once, here.
+    pub fn open_turn_diff_for_message(&mut self, message_id: MessageId, cx: &mut Context<Self>) {
+        let Some(session_id) = self.session_id else {
+            return;
+        };
+        let Some(snapshots) = &self.snapshots else {
+            return;
+        };
+        let Some(turn) = snapshots
+            .turn_for_message(session_id, message_id)
+            .ok()
+            .flatten()
+        else {
+            self.push_notice(
+                "No checkpoint ledger for this turn — it predates turn diffs.",
+                cx,
+            );
+            return;
+        };
+        let changes = snapshots.turn_changes(&turn).unwrap_or_default();
+        let files = changes
+            .into_iter()
+            .map(|change| {
+                let before = snapshots
+                    .read_object(&change.before_hash)
+                    .unwrap_or_default();
+                let after = match &change.after {
+                    AfterState::Object(hash) => snapshots.read_object(hash).unwrap_or_default(),
+                    // Never touched again: disk is the answer, resolved
+                    // against the workspace like every tool path.
+                    AfterState::Disk => {
+                        std::fs::read(resolve_tool_path(&self.workspace_root, &change.path))
+                            .unwrap_or_default()
+                    }
+                };
+                let diff = match (std::str::from_utf8(&before), std::str::from_utf8(&after)) {
+                    (Ok(before), Ok(after)) => FileDiff::Text(crate::diff::lines(before, after)),
+                    _ => FileDiff::Binary {
+                        before: before.len(),
+                        after: after.len(),
+                    },
+                };
+                TurnFileView {
+                    path: change.path,
+                    checkpoint: change.checkpoint,
+                    diff,
+                }
+            })
+            .collect();
+        // One modal at a time: the panel replaces the palette.
+        self.palette_open = false;
+        self.turn_diff_open = None;
+        self.turn_diff_list.reset(0);
+        let focus = cx.focus_handle();
+        self.turn_diff = Some(TurnDiffPanel { files, focus });
+        cx.notify();
+    }
+
+    fn close_turn_diff(&mut self, cx: &mut Context<Self>) {
+        if self.turn_diff.take().is_some() {
+            self.turn_diff_open = None;
+            cx.notify();
+        }
+    }
+
+    /// Restore: every touched path back to its pre-turn content — the
+    /// turn's own undo. Bounded local writes; gated on a quiet turn
+    /// because files changing under a running loop is chaos.
+    fn restore_turn(&mut self, cx: &mut Context<Self>) {
+        if self.streaming {
+            self.push_notice("A run is in flight — restoring waits for it.", cx);
+            return;
+        }
+        let Some(panel) = self.turn_diff.take() else {
+            return;
+        };
+        self.turn_diff_open = None;
+        let mut restored = 0;
+        if let Some(snapshots) = &self.snapshots {
+            for file in &panel.files {
+                if snapshots
+                    .restore_under(file.checkpoint, &self.workspace_root)
+                    .is_ok()
+                {
+                    restored += 1;
+                }
+            }
+        }
+        cx.notify();
+        self.push_notice(
+            format!(
+                "Restored {restored} of {} path(s) to their pre-turn state.",
+                panel.files.len()
+            ),
+            cx,
+        );
+    }
+
+    /// The turn-diff modal: what this turn changed in the workspace.
+    /// The ledger answered at open; the panel only shows.
+    fn render_turn_diff(
+        &self,
+        panel: &TurnDiffPanel,
+        view: Entity<Self>,
+        cx: &Context<Self>,
+    ) -> AnyElement {
+        // The rows as data; the list's closure paints them through the
+        // view (elements are rebuilt per paint — the transcript works
+        // the same way).
+        let mut rows: Vec<TurnDiffRow> = Vec::new();
+        for (index, file) in panel.files.iter().enumerate() {
+            rows.push(TurnDiffRow::Header(index));
+            if self.turn_diff_open == Some(index) {
+                match &file.diff {
+                    FileDiff::Text(patch) if patch.adds + patch.removes == 0 => {
+                        rows.push(TurnDiffRow::Note("unchanged".into()));
+                    }
+                    FileDiff::Text(patch) => {
+                        for line in &patch.lines {
+                            rows.push(TurnDiffRow::Diff(line.clone()));
+                        }
+                        if patch.omitted > 0 {
+                            rows.push(TurnDiffRow::Note(format!("… {} more lines", patch.omitted)));
+                        }
+                    }
+                    FileDiff::Binary { .. } => {
+                        rows.push(TurnDiffRow::Note("binary file — contents not shown".into()))
+                    }
+                }
+            }
+        }
+        self.turn_diff_list.reset(rows.len());
+        let paint = std::rc::Rc::new(rows);
+        div()
+            .absolute()
+            .inset_0()
+            .bg(cx.theme().overlay)
+            .on_mouse_down(
+                gpui_kit::MouseButton::Left,
+                cx.listener(|this, _, _, cx| this.close_turn_diff(cx)),
+            )
+            .child(
+                div()
+                    .absolute()
+                    .left_0()
+                    .right_0()
+                    .top_12()
+                    .flex()
+                    .justify_center()
+                    .child(
+                        div()
+                            .w(px(720.))
+                            .key_context("TurnDiffPanel")
+                            .track_focus(&panel.focus)
+                            .on_mouse_down(
+                                gpui_kit::MouseButton::Left,
+                                |_, _, cx| cx.stop_propagation(),
+                            )
+                            .bg(cx.theme().background)
+                            .border_1()
+                            .border_color(cx.theme().border)
+                            .rounded_lg()
+                            .child(
+                                v_flex()
+                                    .child(
+                                        h_flex()
+                                            .px_4()
+                                            .py_3()
+                                            .gap_2()
+                                            .items_center()
+                                            .justify_between()
+                                            .child(
+                                                div()
+                                                    .text_size(px(14.))
+                                                    .child("Turn changes"),
+                                            )
+                                            .child(
+                                                Button::new("close-turn-diff")
+                                                    .label("close")
+                                                    .xsmall()
+                                                    .ghost()
+                                                    .on_click(cx.listener(
+                                                        |this, _, _, cx| {
+                                                            this.close_turn_diff(cx)
+                                                        },
+                                                    )),
+                                            ),
+                                    )
+                                    .when(paint.is_empty(), |body| {
+                                        body.child(
+                                            div()
+                                                .px_4()
+                                                .py_3()
+                                                .text_size(px(12.))
+                                                .text_color(cx.theme().muted_foreground)
+                                                .child(
+                                                    "No workspace changes recorded this turn.",
+                                                ),
+                                        )
+                                    })
+                                    .when(!paint.is_empty(), |body| {
+                                        body.child(
+                                            div()
+                                                .h(px(420.))
+                                                .child(list(
+                                                    self.turn_diff_list.clone(),
+                                                    move |index, _, cx| {
+                                                        let rows = paint.clone();
+                                                        view.update(cx, |view, cx| {
+                                                            view.paint_diff_row(&rows[index], cx)
+                                                        })
+                                                    },
+                                                )),
+                                        )
+                                        .child(
+                                            h_flex()
+                                                .px_4()
+                                                .py_3()
+                                                .gap_2()
+                                                .justify_between()
+                                                .border_t_1()
+                                                .border_color(cx.theme().border)
+                                                .child(
+                                                    div()
+                                                        .text_size(px(11.))
+                                                        .text_color(
+                                                            cx.theme().muted_foreground,
+                                                        )
+                                                        .child(
+                                                            "Git's own churn (pulls, merges) never appears here — the diff is what the tools did.",
+                                                        ),
+                                                )
+                                                .child(
+                                                    Button::new("restore-turn")
+                                                        .label("restore turn")
+                                                        .xsmall()
+                                                        .outline()
+                                                        .on_click(cx.listener(
+                                                            |this, _, _, cx| {
+                                                                this.restore_turn(cx)
+                                                            },
+                                                        )),
+                                                ),
+                                        )
+                                    }),
+                            ),
+                    ),
+            )
+            .into_any_element()
+    }
+
+    /// Paints one panel row from its data. Runs per paint, per row —
+    /// nothing here touches the ledger.
+    fn paint_diff_row(&self, row: &TurnDiffRow, cx: &mut Context<Self>) -> AnyElement {
+        match row {
+            TurnDiffRow::Note(text) => div()
+                .px_4()
+                .pb_2()
+                .text_size(px(12.))
+                .text_color(cx.theme().muted_foreground)
+                .child(text.clone())
+                .into_any_element(),
+            TurnDiffRow::Diff(line) => {
+                let (text, color) = match line {
+                    crate::diff::Line::Same(text) => {
+                        (format!("  {text}"), cx.theme().muted_foreground)
+                    }
+                    crate::diff::Line::Add(text) => (format!("+ {text}"), cx.theme().success),
+                    crate::diff::Line::Remove(text) => (format!("− {text}"), cx.theme().danger),
+                };
+                div()
+                    .px_4()
+                    .font_family(cx.theme().mono_font_family.clone())
+                    .text_size(px(11.))
+                    .text_color(color)
+                    .child(text)
+                    .into_any_element()
+            }
+            TurnDiffRow::Header(index) => {
+                let Some(panel) = self.turn_diff.as_ref() else {
+                    return div().into_any_element();
+                };
+                let file = &panel.files[*index];
+                let summary = match &file.diff {
+                    FileDiff::Text(patch) => format!("+{} −{}", patch.adds, patch.removes),
+                    FileDiff::Binary { before, after } => {
+                        format!("{before} → {after} bytes")
+                    }
+                };
+                let index = *index;
+                h_flex()
+                    .px_4()
+                    .py_1()
+                    .gap_2()
+                    .items_center()
+                    .justify_between()
+                    .child(
+                        div()
+                            .text_size(px(13.))
+                            .max_w(px(480.))
+                            .truncate()
+                            .child(file.path.display().to_string()),
+                    )
+                    .child(
+                        h_flex()
+                            .gap_2()
+                            .items_center()
+                            .child(
+                                div()
+                                    .text_size(px(11.))
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child(summary),
+                            )
+                            .child(
+                                Button::new(SharedString::from(format!("diff-{index}")))
+                                    .label(if self.turn_diff_open == Some(index) {
+                                        "hide"
+                                    } else {
+                                        "diff"
+                                    })
+                                    .xsmall()
+                                    .ghost()
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.turn_diff_open = if this.turn_diff_open == Some(index)
+                                        {
+                                            None
+                                        } else {
+                                            Some(index)
+                                        };
+                                        cx.notify();
+                                    })),
+                            ),
+                    )
+                    .into_any_element()
+            }
+        }
     }
 
     /// The agents panel toggle: opens/closes and refreshes the run list.
@@ -1034,6 +1465,13 @@ impl ChatView {
             text: display_text(&stored),
             db_id,
         });
+        // The turn's window into the checkpoint ledger, minted before
+        // the loop runs: everything its mutating tools record from here
+        // is this turn's work, reviewable as one diff. A mint failure
+        // costs the diff view, never the turn.
+        if let (Some(snapshots), Some(db_id)) = (&self.snapshots, db_id) {
+            let _ = snapshots.begin_turn(session_id, db_id);
+        }
         self.drive_turn(text, images, cx);
     }
 
@@ -1155,6 +1593,8 @@ impl ChatView {
             user_message: user_text,
             user_attachments,
             snapshots: self.snapshots.clone(),
+            checkpoint_session: self.session_id,
+            workspace_root: Some(self.workspace_root.clone()),
             context_window,
             steer: Some(steer_rx),
             permission_broker: Some(self.broker.clone()),
@@ -2106,6 +2546,21 @@ impl ChatView {
                             })),
                     );
                 }
+                // The turn's own diff, from any done card in the turn:
+                // the ledger answers "what did the tools do" — the
+                // agent's work, not git's.
+                if self.snapshots.is_some() {
+                    inner = inner.child(
+                        Button::new(SharedString::from(format!("turn-diff-{index}")))
+                            .label("turn diff")
+                            .xsmall()
+                            .ghost()
+                            .tooltip("What this turn changed in the workspace")
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.open_turn_diff(index, window, cx)
+                            })),
+                    );
+                }
             }
         }
 
@@ -2222,6 +2677,17 @@ impl ChatView {
 /// For file-mutating calls, renders the change as +/- lines: edit shows
 /// old in red and new in green; write shows the content as additions.
 /// Returns None for tools without a natural diff.
+/// Where a stored tool path lives on disk: absolute as-is, relative
+/// against the workspace root — the same rule the loop's checkpoint
+/// hook applies before snapshotting.
+fn resolve_tool_path(root: &std::path::Path, path: &std::path::Path) -> std::path::PathBuf {
+    if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        root.join(path)
+    }
+}
+
 fn diff_lines(call: &ToolCall, cx: &App) -> Option<AnyElement> {
     let value: serde_json::Value = serde_json::from_str(&call.arguments).ok()?;
     let mut container = v_flex()
@@ -2297,6 +2763,11 @@ impl Render for ChatView {
                 |this, _: &crate::palette::OpenPalette, window, cx| {
                     this.open_palette(window, cx);
                 },
+            ))
+            // Escape inside the turn-diff panel closes it (focus is
+            // handed to the panel on open).
+            .on_action(cx.listener(
+                |this, _: &CloseTurnDiff, _, cx| this.close_turn_diff(cx),
             ))
             // h_flex centers children on the cross axis by default —
             // stretch instead, so the main row fills the window height
@@ -2752,6 +3223,11 @@ impl Render for ChatView {
             // paints on top.
             .when(self.palette_open, |root| {
                 root.child(self.render_palette_overlay(cx.entity(), cx))
+            })
+            // The turn-diff panel: same modal pattern, palette first
+            // (opening either closes the other).
+            .when_some(self.turn_diff.as_ref(), |root, panel| {
+                root.child(self.render_turn_diff(panel, cx.entity(), cx))
             })
     }
 }

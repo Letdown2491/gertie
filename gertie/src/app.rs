@@ -25,6 +25,9 @@ pub fn run_with(config_path: Option<std::path::PathBuf>) {
         // The palette's global trigger; the component's own keys bind
         // themselves when it renders.
         crate::palette::bind_palette_keys(cx);
+        // Escape-closes-the-turn-diff-panel, keyed to the panel's
+        // focus context.
+        crate::chat::bind_chat_keys(cx);
         // The persisted theme choice — dark unless the user said
         // otherwise (UI state, not config-file material).
         let theme = crate::settings::load_theme().unwrap_or(gpui_kit::component::ThemeMode::Dark);

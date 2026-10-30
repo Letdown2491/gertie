@@ -264,6 +264,17 @@ extension table refuses (with a reason) what no endpoint can read. The footer's 
 line leads with the working folder. Slash builtins cover the panel actions (/compact,
 /export, /new, /settings, /agents) beside file templates.
 
+Turn-scoped diffs came from the source-control chapter: every done tool card carries a
+"turn diff" button, and the panel answers with what *the tools did* — one entry per path
+the turn's checkpoints recorded, before-object against after-object (or disk when never
+touched again), bounded lines, plus "restore turn" to put each path back to its pre-turn
+content. Git's own churn (pulls, merges) is absent by construction — bash records no
+checkpoints. The ledger learned turn windows for this: the chat mints one per send
+(session, user-message id, checkpoint boundary), so attribution survives reloads and
+steered messages resolve to the turn they steered. The checkpoint hook also gained the
+workspace root — a relative tool argument now snapshots the file the tool will actually
+touch, not whatever the process CWD reads.
+
 ## Onboarding
 
 First run with the default path writes a working starter `config.toml` (one endpoint,
@@ -293,6 +304,10 @@ boundary:
   conversation: no message, tool result, or skill description can grant a permission.
 - **Stored events stay decodable.** Persisted rows load after every upgrade; the reload
   path is contract, not best-effort. `gertie doctor` replays old sessions as the smoke test.
+- **Answers are typed, not sentinel strings.** What can be empty, unknown, or errored
+  comes back as distinct variants — a turn file's "after" is the next checkpoint's object
+  or disk (`AfterState`), a refused file is a refusal with a reason, never `""` meaning
+  three things (research/t3code-ideas.md §6.1.4).
 
 ## Working agreements
 

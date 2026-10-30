@@ -378,6 +378,8 @@ impl Tool for AgentTool {
                      CONCERNS: anything the leader should know"
                 ),
                 snapshots: self.snapshots.clone(),
+                checkpoint_session: run,
+                workspace_root: Some(self.workspace_root.clone()),
                 context_window: self.context_window,
                 permission_broker: Some(self.broker.clone()),
                 prompt_source: PromptSource::Worker,

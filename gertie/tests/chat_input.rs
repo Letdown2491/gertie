@@ -32,6 +32,11 @@ struct Fixture {
     /// gpui's leak detector.
     view: WeakEntity<ChatView>,
     store: Arc<SessionStore>,
+    /// The checkpoint ledger behind the view, when the test wired one.
+    snapshots: Option<Arc<gertie_core::SnapshotStore>>,
+    /// TempDirs that must outlive the window (snapshot objects, the
+    /// workspace the view resolves paths against).
+    hold: Vec<tempfile::TempDir>,
 }
 
 fn fixture() -> Fixture {
@@ -40,6 +45,27 @@ fn fixture() -> Fixture {
 }
 
 fn fixture_with_store(store: Arc<SessionStore>) -> Fixture {
+    fixture_built(store, None, None)
+}
+
+/// A fixture whose view carries a real checkpoint ledger over a real
+/// (empty) workspace — the turn-diff path end to end.
+fn fixture_with_snapshots() -> Fixture {
+    let store = Arc::new(SessionStore::open(Path::new(":memory:")).expect("memory store"));
+    let snapshots_dir = tempfile::tempdir().expect("snapshots dir");
+    let snapshots =
+        Arc::new(gertie_core::SnapshotStore::open(snapshots_dir.path()).expect("snapshot store"));
+    let workspace = tempfile::tempdir().expect("workspace dir");
+    let mut fixture = fixture_built(store, Some(snapshots), Some(workspace.path().to_path_buf()));
+    fixture.hold = vec![snapshots_dir, workspace];
+    fixture
+}
+
+fn fixture_built(
+    store: Arc<SessionStore>,
+    snapshots: Option<Arc<gertie_core::SnapshotStore>>,
+    workspace: Option<std::path::PathBuf>,
+) -> Fixture {
     let mut cx = HeadlessAppContext::with_asset_source(
         Arc::new(NoopTextSystem),
         Arc::new(gpui_kit::assets::Assets),
@@ -47,6 +73,7 @@ fn fixture_with_store(store: Arc<SessionStore>) -> Fixture {
     cx.update(|cx| {
         gpui_kit::init(cx);
         gertie::palette::bind_palette_keys(cx);
+        gertie::chat::bind_chat_keys(cx);
         gpui_kit::component::Theme::change(gpui_kit::component::ThemeMode::Dark, None, cx);
     });
     let mut view_entity = None;
@@ -64,12 +91,12 @@ fn fixture_with_store(store: Arc<SessionStore>) -> Fixture {
                 ChatView::new(
                     store.clone(),
                     None,
-                    None,
+                    snapshots.clone(),
                     gertie_tools::builtin_tools(Path::new(".")),
                     "no endpoint configured".into(),
                     None,
                     Vec::new(),
-                    Path::new(".").to_path_buf(),
+                    workspace.unwrap_or_else(|| Path::new(".").to_path_buf()),
                     Arc::new(gertie_core::PermissionBroker::new()),
                     gertie_core::SessionScope::new(),
                     panel,
@@ -88,6 +115,8 @@ fn fixture_with_store(store: Arc<SessionStore>) -> Fixture {
         window,
         view: view_entity.expect("view entity"),
         store,
+        snapshots,
+        hold: Vec::new(),
     }
 }
 
@@ -380,4 +409,60 @@ fn escape_leaves_the_palette_without_jumping() {
     });
     assert_eq!(session.expect("still the resumed session").0, 2);
     assert!(!open, "two escapes: one clears the query, one closes");
+}
+
+#[test]
+fn a_sent_message_mints_a_turn_window_and_the_panel_opens() {
+    let mut fixture = fixture_with_snapshots();
+
+    // No provider configured: the turn still mints — the ledger
+    // anchors to the user row before the loop ever runs.
+    fixture.act(|window, cx| {
+        window.input("do a thing", cx);
+        window.press("enter", cx);
+    });
+    let session = fixture
+        .cx
+        .update(|cx| {
+            fixture
+                .view
+                .upgrade()
+                .expect("view alive")
+                .read(cx)
+                .session_id()
+        })
+        .expect("session born");
+    let user = fixture
+        .store
+        .load_messages(session)
+        .expect("rows")
+        .remove(0);
+
+    // The ledger answers for that message — the seam a tool card's
+    // "turn diff" resolves through, live or after a reload.
+    let snapshots = fixture.snapshots.as_ref().expect("wired ledger");
+    let turn = snapshots
+        .turn_for_message(session, user.id)
+        .expect("query")
+        .expect("turn minted by send");
+    assert_eq!(turn.user_message_id, user.id);
+
+    // The panel opens on it — empty, since nothing mutated yet —
+    // showing the no-changes answer rather than an error.
+    let view = fixture.view.clone();
+    fixture.act(|_, cx| {
+        view.upgrade()
+            .expect("view alive")
+            .update(cx, |view, cx| view.open_turn_diff_for_message(user.id, cx));
+    });
+    assert_eq!(
+        fixture.cx.update(|cx| fixture
+            .view
+            .upgrade()
+            .expect("view alive")
+            .read(cx)
+            .turn_diff_for_test()),
+        Some(0),
+        "panel open with zero files listed"
+    );
 }

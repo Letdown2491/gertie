@@ -23,7 +23,9 @@ pub use request::{
     extract_image_markers, file_to_data_url, media_type_for_extension,
 };
 use rusqlite::Connection;
-pub use snapshot::{Checkpoint, CheckpointId, SnapshotStore};
+pub use snapshot::{
+    AfterState, Checkpoint, CheckpointId, SnapshotStore, TurnBounds, TurnFileChange, TurnId,
+};
 use std::path::Path;
 pub use tool::{Tool, ToolResult};
 

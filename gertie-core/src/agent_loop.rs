@@ -104,6 +104,15 @@ pub struct TurnSpec {
     pub history: SharedHistory,
     pub user_message: String,
     pub snapshots: Option<Arc<SnapshotStore>>,
+    /// Checkpoint attribution: rows recorded for this turn's mutating
+    /// tools carry this session, so the ledger's turn windows can find
+    /// them. None leaves rows unattributed — they show in no turn diff.
+    pub checkpoint_session: Option<crate::SessionId>,
+    /// Where tool-relative paths resolve: the same root the tool
+    /// registry was built with. The checkpoint hook needs it to
+    /// snapshot the file the tool will actually touch — a relative
+    /// argument means workspace-relative, not CWD-relative.
+    pub workspace_root: Option<std::path::PathBuf>,
     pub context_window: Option<u64>,
     /// Shared approval registry. When set, every ask — this loop's or a
     /// sub-loop's — registers here so one UI can answer them all. None
@@ -152,6 +161,8 @@ pub fn run_turn(spec: TurnSpec) -> BoxStream<'static, LoopEvent> {
         history,
         user_message,
         snapshots,
+        checkpoint_session,
+        workspace_root,
         context_window,
         permission_broker,
         prompt_source,
@@ -312,9 +323,11 @@ pub fn run_turn(spec: TurnSpec) -> BoxStream<'static, LoopEvent> {
                                             // Checkpoint the file's prior
                                             // state before anything
                                             // mutates it.
-                                            if let (Some(store), Some(path)) =
-                                                (&snapshots, argument_path(&call.arguments))
-                                                && let Err(error) = store.record_file(None, &path)
+                                            if let (Some(store), Some(path)) = (
+                                                &snapshots,
+                                                checkpoint_path(&call.arguments, workspace_root.as_deref()),
+                                            ) && let Err(error) =
+                                                store.record_file(checkpoint_session, &path)
                                             {
                                                 yield LoopEvent::Error {
                                                     message: format!(
@@ -597,6 +610,18 @@ fn argument_path(arguments: &str) -> Option<std::path::PathBuf> {
         .map(std::path::PathBuf::from)
 }
 
+/// The path the checkpoint hook snapshots: the tool's argument, with a
+/// relative name resolved against the workspace root — the same
+/// resolution every path-naming tool applies. Absolute paths and a
+/// missing root pass through.
+fn checkpoint_path(arguments: &str, root: Option<&std::path::Path>) -> Option<std::path::PathBuf> {
+    let path = argument_path(arguments)?;
+    match root {
+        Some(root) if !path.is_absolute() => Some(root.join(path)),
+        _ => Some(path),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -716,6 +741,8 @@ mod tests {
                 history,
                 user_message: message.into(),
                 snapshots: None,
+                checkpoint_session: None,
+                workspace_root: None,
                 context_window: None,
                 permission_broker: Some(broker.clone()),
                 prompt_source: crate::PromptSource::Leader,
@@ -980,7 +1007,11 @@ mod tests {
     fn approved_mutations_checkpoint_the_target_file() {
         let tmp = tempfile::tempdir().unwrap();
         let snapshots = Arc::new(SnapshotStore::open(&tmp.path().join("snaps")).unwrap());
-        let target = tmp.path().join("thing.txt");
+        // The tool's argument is workspace-relative — the checkpoint
+        // hook must resolve it the way tools do, or it would snapshot
+        // the wrong file (an empty read against the process CWD).
+        let workspace = tempfile::tempdir().unwrap();
+        let target = workspace.path().join("thing.txt");
         std::fs::write(&target, "before").unwrap();
 
         let provider = Arc::new(ScriptedProvider {
@@ -1005,14 +1036,18 @@ mod tests {
             "",
         );
         spec.snapshots = Some(snapshots.clone());
+        spec.workspace_root = Some(workspace.path().to_path_buf());
         let events = drain(run_turn(spec), &broker, |_| PermissionDecision::Approve);
 
         assert_eq!(tool_result(&events, "edit_file"), "edited");
-        // Exactly one object: the "before" content, snapshotted pre-edit.
+        // Exactly one object, and it holds the file's real prior bytes —
+        // not an empty read from the process CWD.
         let objects: Vec<_> = std::fs::read_dir(tmp.path().join("snaps/objects"))
             .unwrap()
             .collect();
         assert_eq!(objects.len(), 1);
+        let object = objects[0].as_ref().unwrap().path();
+        assert_eq!(std::fs::read(object).unwrap(), b"before");
     }
 
     #[test]
