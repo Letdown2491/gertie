@@ -37,8 +37,12 @@ pub enum Command {
         yes: bool,
         config: Option<PathBuf>,
     },
-    /// The setup diagnostic.
-    Doctor { config: Option<PathBuf> },
+    /// The setup diagnostic. `clean_worktrees` applies the worktree
+    /// cleanup policy (otherwise the same sweep is report-only).
+    Doctor {
+        config: Option<PathBuf>,
+        clean_worktrees: bool,
+    },
     /// Print usage and exit 0.
     Help,
     /// Print version and exit 0.
@@ -55,6 +59,7 @@ pub fn parse(arguments: &[String]) -> Result<Command, UsageError> {
     let mut positional: Vec<String> = Vec::new();
     let mut run = false;
     let mut doctor = false;
+    let mut clean_worktrees = false;
 
     let mut index = 0;
     while index < arguments.len() {
@@ -63,6 +68,7 @@ pub fn parse(arguments: &[String]) -> Result<Command, UsageError> {
             "-h" | "--help" => return Ok(Command::Help),
             "-V" | "--version" => return Ok(Command::Version),
             "-y" | "--yes" => yes = true,
+            "--clean-worktrees" if !run => clean_worktrees = true,
             "doctor" if positional.is_empty() && !run && !doctor => doctor = true,
             "--config" => {
                 index += 1;
@@ -94,7 +100,16 @@ pub fn parse(arguments: &[String]) -> Result<Command, UsageError> {
                 positional[0]
             )));
         }
-        return Ok(Command::Doctor { config });
+        return Ok(Command::Doctor {
+            config,
+            clean_worktrees,
+        });
+    }
+
+    if clean_worktrees {
+        return Err(UsageError(
+            "--clean-worktrees belongs to doctor (the only command that cleans)".into(),
+        ));
     }
 
     if !run {
@@ -197,12 +212,27 @@ mod tests {
     #[test]
     fn doctor_takes_config_overrides() {
         let command = parse_arguments(&["doctor"]).unwrap();
-        assert_eq!(command, Command::Doctor { config: None });
+        assert_eq!(
+            command,
+            Command::Doctor {
+                config: None,
+                clean_worktrees: false
+            }
+        );
         let command = parse_arguments(&["doctor", "--config", "/tmp/x.toml"]).unwrap();
         assert_eq!(
             command,
             Command::Doctor {
-                config: Some("/tmp/x.toml".into())
+                config: Some("/tmp/x.toml".into()),
+                clean_worktrees: false
+            }
+        );
+        let command = parse_arguments(&["doctor", "--clean-worktrees"]).unwrap();
+        assert_eq!(
+            command,
+            Command::Doctor {
+                config: None,
+                clean_worktrees: true
             }
         );
     }

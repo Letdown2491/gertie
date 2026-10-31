@@ -4,7 +4,7 @@
 
 use std::path::{Path, PathBuf};
 
-pub fn run(config_override: Option<PathBuf>) -> i32 {
+pub fn run(config_override: Option<PathBuf>, clean_worktrees: bool) -> i32 {
     println!("gertie {}", crate::cli::VERSION);
     println!();
 
@@ -217,6 +217,51 @@ pub fn run(config_override: Option<PathBuf>) -> i32 {
         println!("data dir    {}", data_dir.display());
     } else {
         println!("sessions    (no data dir found)");
+    }
+
+    // The worktree ledger: every gertie-made worktree of this repo,
+    // removed or kept and why. Report-only until --clean-worktrees —
+    // a diagnostic never deletes; the flag is a deliberate choice.
+    let policy = crate::worktree::CleanupPolicy {
+        idle_days: config.worktree.as_ref().and_then(|w| w.cleanup_idle_days),
+    };
+    match crate::worktree::sweep(&workspace_root, &policy, clean_worktrees) {
+        Ok(report) if report.entries.is_empty() => {
+            println!(
+                "worktrees   none under {}/.gertie/worktrees",
+                workspace_root.display()
+            );
+        }
+        Ok(report) => {
+            println!(
+                "worktrees   {} under {}/.gertie/worktrees{}",
+                report.entries.len(),
+                workspace_root.display(),
+                if clean_worktrees {
+                    format!(" — {} removed", report.removed())
+                } else {
+                    String::new()
+                }
+            );
+            for entry in &report.entries {
+                let verdict = match &entry.verdict {
+                    crate::worktree::Verdict::Removed(why) => format!("removed ({why})"),
+                    crate::worktree::Verdict::Removable(why) => {
+                        format!("removable — rerun with --clean-worktrees ({why})")
+                    }
+                    crate::worktree::Verdict::Kept(why) => format!("kept: {why}"),
+                };
+                println!("  {} [{}] {}", entry.path.display(), entry.branch, verdict);
+            }
+            if clean_worktrees {
+                println!(
+                    "            a session streaming in a removed worktree fails its next tool call"
+                );
+            }
+        }
+        Err(error) => {
+            println!("worktrees   (not evaluated: {error})");
+        }
     }
 
     println!();

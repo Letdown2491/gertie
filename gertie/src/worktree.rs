@@ -76,6 +76,213 @@ pub fn create(repo_root: &Path, name: &str) -> Result<PathBuf, String> {
     }
 }
 
+/// The cleanup policy, from the user's config (`[worktree]
+/// cleanup_idle_days`). Absent or zero: nothing is ever removed —
+/// agent work is never deleted behind your back.
+#[derive(Clone, Debug, Default)]
+pub struct CleanupPolicy {
+    pub idle_days: Option<u64>,
+}
+
+/// What the sweep decided about one worktree, and why — the report
+/// spells both out, every entry, kept or removed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Verdict {
+    /// `git worktree remove` ran (the caller asked to apply). The
+    /// string is the reason the policy allowed it.
+    Removed(String),
+    /// Report-only mode: the policy allows removal, nothing ran yet.
+    Removable(String),
+    /// Stays, and here's why.
+    Kept(String),
+}
+
+#[derive(Clone, Debug)]
+pub struct CleanupEntry {
+    /// The worktree's path under `<repo>/.gertie/worktrees/`.
+    pub path: PathBuf,
+    /// Its checked-out branch (short name).
+    pub branch: String,
+    pub verdict: Verdict,
+}
+
+/// One sweep's full ledger: every gertie-managed worktree, removed or
+/// kept and why. Nothing outside gertie's own dir is ever a candidate.
+#[derive(Clone, Debug, Default)]
+pub struct CleanupReport {
+    pub entries: Vec<CleanupEntry>,
+}
+
+impl CleanupReport {
+    pub fn removed(&self) -> usize {
+        self.entries
+            .iter()
+            .filter(|entry| matches!(entry.verdict, Verdict::Removed(_)))
+            .count()
+    }
+}
+
+/// Evaluates every gertie-managed worktree of the repo against the
+/// policy. With `apply`, removable ones are actually removed (and
+/// their branch deleted); without, the same verdicts come back as
+/// `Removable` — the report you read before you let it delete.
+///
+/// The protections, in order a worktree is judged:
+/// - only worktrees gertie made (under `.gertie/worktrees/`) are
+///   candidates — anything else is Kept: "not gertie's checkout";
+/// - uncommitted changes → Kept (removal would lose them);
+/// - commits the main checkout's branch lacks → Kept (removal would
+///   orphan them);
+/// - then the idle-days gate: no policy → Kept ("no cleanup policy
+///   configured"); younger than the policy → Kept with its age.
+pub fn sweep(
+    repo_root: &Path,
+    policy: &CleanupPolicy,
+    apply: bool,
+) -> Result<CleanupReport, String> {
+    let mut report = CleanupReport::default();
+    let raw = std::process::Command::new("git")
+        .args(["worktree", "list", "--porcelain"])
+        .current_dir(repo_root)
+        .output()
+        .map_err(|error| error.to_string())?;
+    if !raw.status.success() {
+        return Err(String::from_utf8_lossy(&raw.stderr).trim().to_string());
+    }
+    let text = String::from_utf8_lossy(&raw.stdout);
+    let managed_root = repo_root.join(".gertie/worktrees");
+
+    // The base branch is the main checkout's: commits a worktree made
+    // that the main branch lacks are unmerged work.
+    let main_branch = text
+        .split("\n\n")
+        .next()
+        .and_then(|block| block.lines().find(|line| line.starts_with("branch ")))
+        .map(|line| line.trim_start_matches("branch refs/heads/").to_string());
+
+    for block in text.split("\n\n") {
+        let Some(path_line) = block.lines().find(|line| line.starts_with("worktree ")) else {
+            continue;
+        };
+        let path = PathBuf::from(path_line.trim_start_matches("worktree "));
+        // Bare entries and anything outside gertie's own dir are
+        // never candidates — the user's checkouts are theirs.
+        if !path.starts_with(&managed_root) {
+            continue;
+        }
+        let branch = block
+            .lines()
+            .find(|line| line.starts_with("branch "))
+            .map(|line| line.trim_start_matches("branch refs/heads/").to_string())
+            .unwrap_or_else(|| "(detached)".into());
+        let entry_path = path.clone();
+        let judge = |why: String| CleanupEntry {
+            path: entry_path.clone(),
+            branch: branch.clone(),
+            verdict: Verdict::Kept(why),
+        };
+
+        // Protection 1: uncommitted changes.
+        let status = std::process::Command::new("git")
+            .args(["status", "--porcelain"])
+            .current_dir(&path)
+            .output()
+            .map_err(|error| error.to_string())?;
+        if !status.status.success() || !String::from_utf8_lossy(&status.stdout).trim().is_empty() {
+            report.entries.push(judge("has uncommitted changes".into()));
+            continue;
+        }
+
+        // Protection 2: commits the main branch lacks.
+        if let Some(main_branch) = &main_branch {
+            let unmerged = std::process::Command::new("git")
+                .args(["rev-list", "--count", &format!("{main_branch}..{branch}")])
+                .current_dir(&path)
+                .output()
+                .map_err(|error| error.to_string())?;
+            let count = String::from_utf8_lossy(&unmerged.stdout)
+                .trim()
+                .parse::<u64>()
+                .unwrap_or(u64::MAX);
+            if unmerged.status.success() && count > 0 {
+                report.entries.push(judge(format!(
+                    "holds {count} commit{s} the {main_branch} branch lacks",
+                    s = if count == 1 { "" } else { "s" }
+                )));
+                continue;
+            }
+        }
+
+        // The idle gate: no policy, stay; too young, stay.
+        let Some(idle_days) = policy.idle_days.filter(|days| *days > 0) else {
+            report
+                .entries
+                .push(judge("no cleanup policy configured".into()));
+            continue;
+        };
+        let committed = std::process::Command::new("git")
+            .args(["log", "-1", "--format=%ct"])
+            .current_dir(&path)
+            .output()
+            .map_err(|error| error.to_string())?;
+        let stamp: u64 = String::from_utf8_lossy(&committed.stdout)
+            .trim()
+            .parse()
+            .unwrap_or(0);
+        let idle_for = now().saturating_sub(stamp) / 86_400;
+        if idle_for < idle_days {
+            report
+                .entries
+                .push(judge(format!("idle {idle_for} of {idle_days} days")));
+            continue;
+        }
+
+        // Everything allows it: remove, or report as removable.
+        let why =
+            format!("idle {idle_for} days (policy {idle_days}), nothing uncommitted or unmerged");
+        if !apply {
+            report.entries.push(CleanupEntry {
+                path,
+                branch,
+                verdict: Verdict::Removable(why),
+            });
+            continue;
+        }
+        let removed = std::process::Command::new("git")
+            .args(["worktree", "remove"])
+            .arg(&path)
+            .current_dir(repo_root)
+            .output()
+            .map_err(|error| error.to_string())?;
+        if !removed.status.success() {
+            report.entries.push(judge(format!(
+                "git refused to remove it: {}",
+                String::from_utf8_lossy(&removed.stderr).trim()
+            )));
+            continue;
+        }
+        // The branch too — `-d` (safe delete) can only refuse what
+        // the unmerged check already cleared.
+        let _ = std::process::Command::new("git")
+            .args(["branch", "-d", &branch])
+            .current_dir(repo_root)
+            .output();
+        report.entries.push(CleanupEntry {
+            path,
+            branch,
+            verdict: Verdict::Removed(why),
+        });
+    }
+    Ok(report)
+}
+
+fn now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|since| since.as_secs())
+        .unwrap_or(0)
+}
+
 /// Everything a worktree tab needs to name its branch after the
 /// session's first message: the worktree root and the prefix the
 /// repo's overlay configured (gertie/ when it says nothing).
@@ -409,5 +616,144 @@ mod tests {
         assert_eq!(sane_prefix("-steal"), "gertie/");
         assert_eq!(sane_prefix("a b"), "gertie/");
         assert_eq!(sane_prefix("a~b"), "gertie/");
+    }
+
+    /// A repo whose initial commit is backdated — the idle policy's
+    /// clock in tests.
+    fn old_repo() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let run = |args: &[&str]| {
+            std::process::Command::new("git")
+                .args(args)
+                .current_dir(dir.path())
+                .output()
+                .expect("git runs")
+        };
+        run(&["init"]);
+        std::fs::write(dir.path().join("f.txt"), "x").unwrap();
+        run(&["add", "-A"]);
+        std::process::Command::new("git")
+            .args(["commit", "-m", "init"])
+            .env("GIT_AUTHOR_DATE", "2020-01-01T00:00:00Z")
+            .env("GIT_COMMITTER_DATE", "2020-01-01T00:00:00Z")
+            .env("GIT_AUTHOR_NAME", "g")
+            .env("GIT_AUTHOR_EMAIL", "g@t")
+            .env("GIT_COMMITTER_NAME", "g")
+            .env("GIT_COMMITTER_EMAIL", "g@t")
+            .current_dir(dir.path())
+            .output()
+            .expect("commit runs");
+        dir
+    }
+
+    #[test]
+    fn a_clean_idle_worktree_is_reported_then_removed_under_the_policy() {
+        let repo = old_repo();
+        let root = create(repo.path(), "tab-0").expect("worktree created");
+        let policy = CleanupPolicy {
+            idle_days: Some(30),
+        };
+
+        // Report-only: removable, nothing deleted.
+        let report = sweep(repo.path(), &policy, false).expect("sweep");
+        assert_eq!(report.entries.len(), 1);
+        assert!(
+            matches!(report.entries[0].verdict, Verdict::Removable(ref why) if why.contains("idle")),
+            "the report names the idle reason: {:?}",
+            report.entries[0].verdict
+        );
+        assert!(root.is_dir(), "report-only never deletes");
+
+        // Applied: removed, worktree and branch both gone.
+        let report = sweep(repo.path(), &policy, true).expect("sweep");
+        assert_eq!(report.removed(), 1);
+        assert!(!root.exists(), "the worktree is gone from disk");
+        let branches = std::process::Command::new("git")
+            .args(["branch", "--list", "gertie/tab-0"])
+            .current_dir(repo.path())
+            .output()
+            .unwrap();
+        assert!(String::from_utf8_lossy(&branches.stdout).trim().is_empty());
+    }
+
+    #[test]
+    fn without_a_policy_nothing_is_ever_removable() {
+        let repo = old_repo();
+        let root = create(repo.path(), "tab-0").expect("worktree created");
+        let report = sweep(repo.path(), &CleanupPolicy { idle_days: None }, false).expect("sweep");
+        assert_eq!(report.entries.len(), 1);
+        assert!(
+            matches!(report.entries[0].verdict, Verdict::Kept(ref why) if why.contains("no cleanup policy"))
+        );
+        // Zero means never, same as absent.
+        let report =
+            sweep(repo.path(), &CleanupPolicy { idle_days: Some(0) }, false).expect("sweep");
+        assert!(matches!(report.entries[0].verdict, Verdict::Kept(_)));
+        assert!(root.is_dir());
+    }
+
+    #[test]
+    fn uncommitted_changes_and_unmerged_commits_are_always_kept() {
+        let repo = old_repo();
+        let root = create(repo.path(), "tab-0").expect("worktree created");
+        let policy = CleanupPolicy {
+            idle_days: Some(30),
+        };
+
+        // Uncommitted: kept even though idle and otherwise clean.
+        std::fs::write(root.join("wip.txt"), "half-done").unwrap();
+        let report = sweep(repo.path(), &policy, false).expect("sweep");
+        assert!(
+            matches!(report.entries[0].verdict, Verdict::Kept(ref why) if why.contains("uncommitted"))
+        );
+
+        // Unmerged: commit the work — it's old enough and clean now,
+        // but the main branch doesn't have it.
+        let run = |args: &[&str]| {
+            std::process::Command::new("git")
+                .args(args)
+                .current_dir(&root)
+                .output()
+                .expect("git runs")
+        };
+        run(&["add", "-A"]);
+        run(&[
+            "-c",
+            "user.email=g@t",
+            "-c",
+            "user.name=g",
+            "commit",
+            "-m",
+            "real work",
+        ]);
+        let report = sweep(repo.path(), &policy, true).expect("sweep");
+        assert!(
+            matches!(report.entries[0].verdict, Verdict::Kept(ref why) if why.contains("lacks")),
+            "unmerged work is never removed: {:?}",
+            report.entries[0].verdict
+        );
+        assert!(root.is_dir(), "the worktree with unmerged work survives");
+    }
+
+    #[test]
+    fn the_main_checkout_and_foreign_worktrees_are_never_candidates() {
+        let repo = old_repo();
+        // A worktree gertie didn't make (inside the repo, outside
+        // .gertie/worktrees).
+        std::process::Command::new("git")
+            .args(["worktree", "add", "-b", "user-branch"])
+            .arg(repo.path().join("user-wt"))
+            .current_dir(repo.path())
+            .output()
+            .expect("worktree add runs");
+        let report =
+            sweep(repo.path(), &CleanupPolicy { idle_days: Some(1) }, true).expect("sweep");
+        // Only gertie's own dir is walked: the main checkout and the
+        // user's worktree don't appear at all — not even as kept.
+        assert!(
+            report.entries.is_empty(),
+            "nothing outside .gertie/worktrees is a candidate: {:?}",
+            report.entries
+        );
     }
 }

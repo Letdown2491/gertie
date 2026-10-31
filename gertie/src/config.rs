@@ -40,6 +40,20 @@ pub struct Config {
     /// the auto-settle sweep never runs commands.
     #[serde(default)]
     pub settle_command: Option<String>,
+    /// Worktree cleanup policy. Absent = never remove (the default:
+    /// agent work is never deleted behind your back).
+    #[serde(default)]
+    pub worktree: Option<WorktreeConfig>,
+}
+
+#[derive(Deserialize, Debug, Clone, Default)]
+pub struct WorktreeConfig {
+    /// Remove a gertie-made worktree that has been idle this many
+    /// days — and only one that is clean (nothing uncommitted) and
+    /// holds no commits the main branch lacks (nothing unmerged).
+    /// Zero or absent = never.
+    #[serde(default)]
+    pub cleanup_idle_days: Option<u64>,
 }
 
 #[derive(Deserialize, Debug, Clone, Default)]
