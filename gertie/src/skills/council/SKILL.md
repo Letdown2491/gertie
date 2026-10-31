@@ -15,13 +15,13 @@ and explore new ideas, skip fixes to code being replaced.
 The seats are configured in `[[agents]]` in config.toml: custom agent types
 named `council-*`, each pinned to its own `endpoint` (its own provider or
 wire). They appear in the tool list as `agent_council_*`. Write one brief
-file per member and dispatch every seat in the same turn — they run one
+file per member and dispatch every seat in the same turn, they run one
 after another; that is fine. Give each seat the same brief.
 
 If fewer than three `agent_council_*` tools exist, or a seat failed to
 load (a startup warning said its endpoint is not configured), say so and
 stop. Never substitute another model or your own judgment for a missing
-seat — a council of substitutes is just you, three times.
+seat, a council of substitutes is just you, three times.
 
 ## The brief
 
@@ -52,14 +52,14 @@ returns only nits.
 
 Check each finding yourself before acting:
 
-- Agree: make the smallest fix — prefer deleting or narrowing over new
+- Agree: make the smallest fix, prefer deleting or narrowing over new
   locks, caches, helpers, or options. One focused test that fails without
   the fix, if the intent needs it.
 - Disagree: say why, with evidence (file:line, test, output).
 - Nit or out of scope: decline in one line; list as follow-up.
 
 Do not agree just to end the loop. Do not let repeated rounds become scope
-creep — it is your job to keep scope limited. Budget end is not approval.
+creep, it is your job to keep scope limited. Budget end is not approval.
 
 ## Reporting
 
@@ -70,6 +70,6 @@ each seat's scores forward:
 | --- | --- | --- |
 | council-anthropic | 7/10 | 9/10 |
 
-If a seat gave no score, write `no score` — do not invent one. When the
+If a seat gave no score, write `no score`, do not invent one. When the
 council is satisfied, make the changes and report: rounds, findings fixed
 and declined with reasons, and what changed.

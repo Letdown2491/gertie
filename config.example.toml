@@ -1,4 +1,4 @@
-# gertie config — copy to ~/.config/gertie/config.toml and edit.
+# gertie config: copy to ~/.config/gertie/config.toml and edit.
 # Keys resolve in order: api_key_env → GERTIE_<NAME>_API_KEY / <NAME>_API_KEY
 # env vars → a literal `api_key` (allowed, but gertie warns about it in the
 # status line, and the file should be chmod 600 if you use one).
@@ -18,7 +18,7 @@ api_key_env = "MY_API_KEY"
 # model = "qwen3-coder"
 # context_window = 32768
 
-# Replay: scripted scenarios instead of a model — dev/test only, zero
+# Replay: scripted scenarios instead of a model, dev/test only, zero
 # tokens. The model name picks the scenario: "showcase" and "approval"
 # ship embedded; any other name loads <base_url>/<model>.toml. Drivers
 # the real loop, permission cards and all; nothing leaves the machine.
@@ -28,8 +28,8 @@ api_key_env = "MY_API_KEY"
 # wire = "replay"
 # model = "showcase"
 
-# MCP servers — either a spawned process (stdio) or a remote URL
-# (Streamable HTTP). Every MCP tool call prompts — third-party tools
+# MCP servers: either a spawned process (stdio) or a remote URL
+# (Streamable HTTP). Every MCP tool call prompts, third-party tools
 # are untrusted by default.
 # [[mcp_servers]]
 # name = "filesystem"
@@ -52,7 +52,7 @@ api_key_env = "MY_API_KEY"
 # The permission mode new sessions open in: "supervised" (every write
 # and command prompts), "accept_edits" (checkpointed file edits run
 # unasked; commands still prompt), "auto" (sandboxed work runs unasked
-# too — with sandbox_bash off this prompts like accept_edits), or
+# too, with sandbox_bash off this prompts like accept_edits), or
 # "full_access" (nothing prompts). Sessions keep whatever mode you set
 # in the composer; this only sets the starting posture.
 # [permissions]
@@ -62,12 +62,12 @@ api_key_env = "MY_API_KEY"
 # out of the active list; opening it brings it back.
 #
 # Auto-settle chats idle for at least this many days, on startup.
-# Absent = off — settle stays manual until you opt in. The sweep only
+# Absent = off: settle stays manual until you opt in. The sweep only
 # changes state; it never runs the settle command.
 # auto_settle_days = 3
 #
 # A shell command a MANUAL settle runs in the settling session's
-# recorded workspace — reclaim the checkout's disk. Never run by the
+# recorded workspace, reclaiming the checkout's disk. Never run by the
 # auto sweep: a human pressed the button.
 # settle_command = "cargo clean"
 
@@ -78,7 +78,7 @@ api_key_env = "MY_API_KEY"
 # base_url = "https://searx.example"   # searxng only; must allow format=json
 
 # Subagent types. Each model-invoked type becomes an agent_{name} tool
-# the leader can spawn (depth 1 — workers never get agent tools).
+# the leader can spawn (depth 1, workers never get agent tools).
 # Dispatch is by brief file: the leader writes a self-contained brief
 # and passes its workspace path.
 #
@@ -97,11 +97,11 @@ api_key_env = "MY_API_KEY"
 # file and line. Verify claims by reading, never by assuming.
 # """
 #
-# A worker can also live on a different endpoint — the name of any
+# A worker can also live on a different endpoint, the name of any
 # [[endpoints]] entry above, its wire included. That is what makes a
 # council possible: several models, one diff, one verdict each (the
 # bundled `council` skill runs the loop). A pin to a missing endpoint
-# warns at startup and the agent is skipped — no silent substitution.
+# warns at startup and the agent is skipped: no silent substitution.
 #
 # [[endpoints]]
 # name = "anthropic"

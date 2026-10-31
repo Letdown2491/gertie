@@ -1,4 +1,4 @@
-//! `gertie doctor` — the first-run diagnostic. Prints what gertie
+//! `gertie doctor`, the first-run diagnostic. Prints what gertie
 //! sees: where the config is, which endpoint and key resolved (and
 //! from where), MCP servers, the session ledger. Exit 0 means ready.
 
@@ -37,7 +37,7 @@ pub fn run(config_override: Option<PathBuf>, clean_worktrees: bool) -> i32 {
         Err(error) => {
             println!("            ✗ {error}");
             println!();
-            println!("✗ not ready — fix the config file above");
+            println!("✗ not ready, fix the config file above");
             return 1;
         }
     };
@@ -64,7 +64,7 @@ pub fn run(config_override: Option<PathBuf>, clean_worktrees: bool) -> i32 {
         {
             Some(("env", variable)) => println!("api key     ✓ resolved from env {variable}"),
             Some(_source) => {
-                println!("api key     ✓ resolved from config.toml (inline — prefer an env var)")
+                println!("api key     ✓ resolved from config.toml (inline, prefer an env var)")
             }
             None => {
                 let variable = config
@@ -79,7 +79,7 @@ pub fn run(config_override: Option<PathBuf>, clean_worktrees: bool) -> i32 {
                                 .unwrap_or_default()
                         )
                     });
-                println!("api key     ✗ missing — export {variable}=<your key> and restart");
+                println!("api key     ✗ missing, export {variable}=<your key> and restart");
                 ready = false;
             }
         }
@@ -109,7 +109,7 @@ pub fn run(config_override: Option<PathBuf>, clean_worktrees: bool) -> i32 {
         }
     }
 
-    // Agent types — custom `[[agents]]` entries, pins called out. A
+    // Agent types, custom `[[agents]]` entries, pins called out. A
     // seat on a missing endpoint is skipped at bootstrap; doctor is
     // where that's spelled out, not at dispatch time.
     if config.agents.is_empty() {
@@ -131,7 +131,7 @@ pub fn run(config_override: Option<PathBuf>, clean_worktrees: bool) -> i32 {
                     .any(|endpoint| &endpoint.name == name)
             {
                 println!(
-                    "            ✗ endpoint {name:?} is not configured — this agent is skipped"
+                    "            ✗ endpoint {name:?} is not configured, this agent is skipped"
                 );
                 ready = false;
             }
@@ -139,7 +139,7 @@ pub fn run(config_override: Option<PathBuf>, clean_worktrees: bool) -> i32 {
     }
 
     // Search, sandbox, sessions. The sandbox resolves through the
-    // chain — your config, else the repo's overlay, else off — and
+    // chain, your config, else the repo's overlay, else off, and
     // the doctor says which tier decided.
     match &config.search {
         Some(search) => println!("search      {}", search.backend),
@@ -169,7 +169,7 @@ pub fn run(config_override: Option<PathBuf>, clean_worktrees: bool) -> i32 {
 
     // The permission mode's honest reach: what the default mode can
     // and cannot enforce. gertie owns every tool, so enforcement is
-    // uniform — the caveats are the mode's real edges, not per-provider
+    // uniform, the caveats are the mode's real edges, not per-provider
     // fallbacks; a mode is never silently downgraded.
     let mode = config.resolve_default_mode(overlay.as_ref()).value;
     let (promise, caveat) = match mode {
@@ -188,13 +188,13 @@ pub fn run(config_override: Option<PathBuf>, clean_worktrees: bool) -> i32 {
                 )
             } else {
                 (
-                    "file edits run unasked; bash still asks — the sandbox is off",
+                    "file edits run unasked; bash still asks, the sandbox is off",
                     Some("auto without the kernel is accept-edits, and says so"),
                 )
             }
         }
         gertie_core::PermissionMode::FullAccess => (
-            "nothing asks — every tool runs to completion",
+            "nothing asks, every tool runs to completion",
             Some("the destructive-command vet still fires beneath it"),
         ),
     };
@@ -220,7 +220,7 @@ pub fn run(config_override: Option<PathBuf>, clean_worktrees: bool) -> i32 {
     }
 
     // The worktree ledger: every gertie-made worktree of this repo,
-    // removed or kept and why. Report-only until --clean-worktrees —
+    // removed or kept and why. Report-only until --clean-worktrees,
     // a diagnostic never deletes; the flag is a deliberate choice.
     let policy = crate::worktree::CleanupPolicy {
         idle_days: config.worktree.as_ref().and_then(|w| w.cleanup_idle_days),
@@ -238,7 +238,7 @@ pub fn run(config_override: Option<PathBuf>, clean_worktrees: bool) -> i32 {
                 report.entries.len(),
                 workspace_root.display(),
                 if clean_worktrees {
-                    format!(" — {} removed", report.removed())
+                    format!(", {} removed", report.removed())
                 } else {
                     String::new()
                 }
@@ -247,7 +247,7 @@ pub fn run(config_override: Option<PathBuf>, clean_worktrees: bool) -> i32 {
                 let verdict = match &entry.verdict {
                     crate::worktree::Verdict::Removed(why) => format!("removed ({why})"),
                     crate::worktree::Verdict::Removable(why) => {
-                        format!("removable — rerun with --clean-worktrees ({why})")
+                        format!("removable, rerun with --clean-worktrees ({why})")
                     }
                     crate::worktree::Verdict::Kept(why) => format!("kept: {why}"),
                 };
@@ -266,10 +266,10 @@ pub fn run(config_override: Option<PathBuf>, clean_worktrees: bool) -> i32 {
 
     println!();
     if ready {
-        println!("✓ ready — `gertie` for the desktop app, `gertie run \"prompt\"` headlessly");
+        println!("✓ ready, `gertie` for the desktop app, `gertie run \"prompt\"` headlessly");
         0
     } else {
-        println!("✗ not ready — fix the ✗ items above");
+        println!("✗ not ready, fix the ✗ items above");
         1
     }
 }

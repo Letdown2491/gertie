@@ -12,7 +12,7 @@ pub struct ToolSpec {
     pub parameters: serde_json::Value,
 }
 
-/// A tool call the model wants executed, whole — deltas never leave the
+/// A tool call the model wants executed, whole, deltas never leave the
 /// provider layer.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ToolCall {
@@ -36,9 +36,9 @@ pub struct WireMessage {
     /// Tool-only: the tool's name.
     pub name: Option<String>,
     /// User-only: attachments riding with the text, as data URLs
-    /// (`data:image/png;base64,…`). Images and PDFs — the provider
+    /// (`data:image/png;base64,…`). Images and PDFs, the provider
     /// adapters pick the block shape per media type. Empty = text-only
-    /// — the common case, and the only shape the wires emit today for
+    ///, the common case, and the only shape the wires emit today for
     /// other roles.
     pub attachments: Vec<String>,
 }
@@ -94,7 +94,7 @@ impl WireMessage {
 /// the attachments dir). A load expands markers back into images.
 pub const IMAGE_MARKER_PREFIX: &str = "{{image:";
 
-/// Splits stored content into `(clean text, image paths)` — every
+/// Splits stored content into `(clean text, image paths)`, every
 /// `{{image:path}}` marker is lifted out; what remains is the prose
 /// around the images. An unterminated marker is kept as text: it was
 /// never a marker to begin with.
@@ -129,7 +129,7 @@ pub fn extract_image_markers(content: &str) -> (String, Vec<String>) {
 /// The attachment extension table: what the picker accepts and what
 /// the wire calls each kind. Images and PDFs ride the multimodal
 /// blocks as base64 data URLs; text-likes are read as UTF-8 and sent
-/// inline (one shared media type — the extension is cosmetic from
+/// inline (one shared media type, the extension is cosmetic from
 /// here down). `None` = gertie can't attach it: office documents and
 /// other opaque formats have no wire representation the endpoints
 /// accept, and a silent attach that the model never sees is the worst
@@ -148,7 +148,7 @@ pub fn media_type_for_extension(extension: &str) -> Option<&'static str> {
     })
 }
 
-/// Splits a data URL into `(media_type, base64 payload)` — what the
+/// Splits a data URL into `(media_type, base64 payload)`, what the
 /// Anthropic wire wants for an image block. The OpenAI wire passes the
 /// data URL through whole.
 pub fn data_url_parts(data_url: &str) -> Option<(&str, &str)> {
@@ -157,7 +157,7 @@ pub fn data_url_parts(data_url: &str) -> Option<(&str, &str)> {
     Some((media_type, payload))
 }
 
-/// Reads an attachment file into a data URL — the load-path inverse of
+/// Reads an attachment file into a data URL, the load-path inverse of
 /// the send path's write. A missing or unknown-format file returns
 /// None; the caller degrades to a text note. Text-likes return None
 /// too: they ride inline in the message text and never get storage
@@ -255,7 +255,7 @@ mod tests {
             ("application/pdf", "JVBERi0xLjQ=")
         );
 
-        // Text-likes never become data URLs — they ride inline, so a
+        // Text-likes never become data URLs, they ride inline, so a
         // stray marker pointing at one has nothing to reload into.
         let text = dir.path().join("notes.md");
         std::fs::write(&text, b"# hi").unwrap();

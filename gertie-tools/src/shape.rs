@@ -1,11 +1,11 @@
 //! Result shaping: rtk's insight, domesticated. Tool output competes for
-//! the model's context, and most dev commands produce mostly noise —
+//! the model's context, and most dev commands produce mostly noise,
 //! passing tests, unchanged files, progress bars. A shaper rewrites a
 //! tool result to what the model needs, per command shape.
 //!
 //! Invariants (rtk's design principles, adopted as gertie-core rules):
 //! 1. Fail-open: any doubt returns the original output unchanged.
-//! 2. Exit status and error text are never dropped — only de-emphasized.
+//! 2. Exit status and error text are never dropped, only de-emphasized.
 //! 3. Shape once, at execution time: the shaped string is what enters
 //!    history and the session DB, so the prompt cache and reloads agree.
 //!
@@ -80,7 +80,7 @@ pub fn shape(command: &str, raw: &str) -> String {
         Shape::Pass => return raw.to_string(),
     };
     // Fail-open: an overzealous transform that dropped everything is
-    // worse than noise — fall back to the truth.
+    // worse than noise, fall back to the truth.
     if shaped.trim().is_empty() {
         raw.to_string()
     } else {

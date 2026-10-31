@@ -1,6 +1,6 @@
 ---
 name: writing
-description: Draft or edit prose the reader will keep — README and docs pages, ADRs, design notes, commit messages, PR descriptions, emails, posts — so it reads like an expert human wrote it, not a chatbot. Also use when asked to fix text that sounds AI-written. Chat replies are covered by the system prompt's voice rules; this skill is for kept prose.
+description: Draft or edit prose the reader will keep (README and docs pages, ADRs, design notes, commit messages, PR descriptions, emails, posts) so it reads like an expert human wrote it, not a chatbot. Also use when asked to fix text that sounds AI-written. Chat replies are covered by the system prompt's voice rules; this skill is for kept prose.
 ---
 
 # Writing: prose that reads like a person wrote it

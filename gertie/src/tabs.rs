@@ -1,4 +1,4 @@
-//! Tabs: parallel chats in one window. Each tab is a full `ChatView` —
+//! Tabs: parallel chats in one window. Each tab is a full `ChatView`,
 //! its own session, transcript, and stream; store, provider, broker,
 //! and the root-independent tools are shared, so worker asks land on
 //! one approval queue no matter which tab dispatched them. A worktree
@@ -39,7 +39,7 @@ pub struct WorkspaceView {
 const CLOSE_CONFIRM_WINDOW: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// Whether a window close goes through. A turn running anywhere holds
-/// the first close — an accidental quit kills a running agent turn —
+/// the first close, an accidental quit kills a running agent turn,
 /// and arms the second.
 fn close_confirmed(
     any_streaming: bool,
@@ -62,7 +62,7 @@ struct TabState {
 }
 
 /// The rewind safety guard every chat shares: a file restore refuses
-/// while another tab's turn is streaming in the same checkout — the
+/// while another tab's turn is streaming in the same checkout, the
 /// workspace is what knows every tab, so it builds the closure.
 /// Fail-closed: if the workspace itself is unreachable, nothing
 /// restores.
@@ -104,7 +104,7 @@ fn switch_to_root(boot: &Arc<Bootstrap>) -> crate::chat::SwitchWorkspace {
 
 impl WorkspaceView {
     /// The first tab resumes the newest stored session; every later tab
-    /// starts blank — two views on one session would diverge their
+    /// starts blank, two views on one session would diverge their
     /// in-memory histories against one database.
     pub fn new(boot: Arc<Bootstrap>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let panel = cx.new(|_| boot.settings_panel());
@@ -150,7 +150,7 @@ impl WorkspaceView {
         };
         this.subscribe_config_saved(0, window, cx);
         // The window-close gate: registered once, asked on every close
-        // attempt (titlebar ✕, Alt+F4, WM gesture — there is no other
+        // attempt (titlebar ✕, Alt+F4, WM gesture, there is no other
         // quit). Returning false holds the window open.
         let handle = cx.entity();
         window.on_window_should_close(cx, move |_, cx| {
@@ -170,14 +170,14 @@ impl WorkspaceView {
             self.armed_close = None;
         } else {
             self.armed_close = Some(now);
-            // Say why in every tab that's running — the refused close
+            // Say why in every tab that's running, the refused close
             // leaves no other trace, and the running tab may be in
             // the background.
             for tab in &self.tabs {
                 if tab.view.read(cx).is_streaming() {
                     tab.view.update(cx, |chat, cx| {
                         chat.warn(
-                            "A turn is still running — close the window again to stop it \
+                            "A turn is still running, close the window again to stop it \
                              and quit.",
                             cx,
                         );
@@ -203,7 +203,7 @@ impl WorkspaceView {
 
     fn reload_and_apply(&mut self, cx: &mut Context<Self>) {
         if let Err(error) = self.boot.reload() {
-            // The written config doesn't parse — leave the live state
+            // The written config doesn't parse, leave the live state
             // alone and say so where the worktree errors show.
             self.last_error = Some(format!("config: {error}"));
             cx.notify();
@@ -255,7 +255,7 @@ impl WorkspaceView {
                 cx,
             )
         });
-        // Subscribing needs &mut self — the caller does it (add_tab /
+        // Subscribing needs &mut self, the caller does it (add_tab /
         // add_worktree_tab / new).
         view
     }
@@ -279,11 +279,11 @@ impl WorkspaceView {
         cx.notify();
     }
 
-    /// A worktree tab: parallel chat in its own checkout of the repo —
+    /// A worktree tab: parallel chat in its own checkout of the repo,
     /// the DESIGN promise, "parallel sessions run against separate
     /// worktrees". The worktree persists on disk after the run.
     fn add_worktree_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        // `git worktree add` is a subprocess against the object store —
+        // `git worktree add` is a subprocess against the object store,
         // hundreds of ms on a big repo, so it runs on the background
         // pool and the tab opens when the checkout exists. The tab-N
         // name is reserved up front: a failed create leaves a gap in
@@ -332,7 +332,7 @@ impl WorkspaceView {
             .detach();
     }
 
-    /// Closes the tab at `index`. The last tab stays — an empty window
+    /// Closes the tab at `index`. The last tab stays, an empty window
     /// is a broken state, not a feature. A worktree tab's checkout
     /// persists on disk (the DESIGN note on worktree tabs).
     fn close_tab(&mut self, index: usize, cx: &mut Context<Self>) {
@@ -368,7 +368,7 @@ impl Render for WorkspaceView {
                     .label("+")
                     .xsmall()
                     .ghost()
-                    .tooltip("New tab — parallel chat, shared workspace")
+                    .tooltip("New tab, parallel chat, shared workspace")
                     .on_click(cx.listener(|this, _, window, cx| {
                         this.add_tab(window, cx);
                     })),
@@ -378,7 +378,7 @@ impl Render for WorkspaceView {
                     .label("⎇")
                     .xsmall()
                     .ghost()
-                    .tooltip("New worktree tab — its own git checkout of this repo")
+                    .tooltip("New worktree tab, its own git checkout of this repo")
                     .on_click(cx.listener(|this, _, window, cx| {
                         this.add_worktree_tab(window, cx);
                     })),
@@ -421,7 +421,7 @@ impl Render for WorkspaceView {
                         };
                         // A live turn marks its tab: the attention
                         // signal for work running while another tab is
-                        // up. Static glyph — no repaint to say busy.
+                        // up. Static glyph, no repaint to say busy.
                         let label = if tab.view.read(cx).is_streaming() {
                             format!("● {label}")
                         } else {
@@ -446,7 +446,7 @@ mod tests {
         assert!(close_confirmed(false, None, now));
         assert!(close_confirmed(false, Some(now), now));
         // Turn running: the first close holds, the second inside the
-        // confirm window means it, and a late one holds again — the
+        // confirm window means it, and a late one holds again, the
         // arm expires with the notice it came from.
         assert!(!close_confirmed(true, None, now));
         assert!(close_confirmed(true, Some(now), now + CLOSE_CONFIRM_WINDOW));

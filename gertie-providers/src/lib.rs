@@ -1,8 +1,8 @@
 //! gertie-providers: adapts model vendors to gertie's typed event stream.
 //!
 //! The [`Provider`] trait is gertie's most important API. It is designed
-//! around an agent harness's needs — typed events, whole normalized tool
-//! calls, usage accounting, cancellation — never around a vendor's wire
+//! around an agent harness's needs (typed events, whole normalized tool
+//! calls, usage accounting, cancellation), never around a vendor's wire
 //! format. OpenAI's schema is just the first adapter.
 
 use futures_core::stream::BoxStream;
@@ -18,7 +18,7 @@ pub use gertie_core::{Provider, ToolCall, ToolSpec};
 
 /// Which wire protocol an endpoint speaks. OpenAI's chat/completions
 /// schema is the default and the most universal (ppq.ai, OpenRouter,
-/// Ollama, vLLM); Anthropic's Messages API is the first second adapter —
+/// Ollama, vLLM); Anthropic's Messages API is the first second adapter:
 /// the honest test of whether the Provider trait is really
 /// vendor-neutral; Replay is the dev/test wire that streams scripted
 /// scenarios through the real loop.
@@ -43,11 +43,11 @@ impl Wire {
 
 /// One configured endpoint: where to POST, how to authenticate, what model
 /// to ask for. Keys resolve from config values or the environment at
-/// construction time — never stored in logs or events.
+/// construction time, never stored in logs or events.
 #[derive(Clone)]
 pub struct Endpoint {
     pub name: String,
-    /// e.g. `https://api.ppq.ai/v1` — the wire appends its own path
+    /// e.g. `https://api.ppq.ai/v1`: the wire appends its own path
     /// (`/chat/completions`, `/v1/messages`).
     pub base_url: String,
     pub model: String,
@@ -59,7 +59,7 @@ pub struct Endpoint {
 
 // Debug is hand-rolled for one reason: the key. A struct that carries
 // a secret must not print it because someone logged the request
-// pipeline — no `{:?}` of an Endpoint ever shows more than the key's
+// pipeline. No `{:?}` of an Endpoint ever shows more than the key's
 // presence.
 impl std::fmt::Debug for Endpoint {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -130,7 +130,7 @@ impl gertie_core::Provider for AnyProvider {
 pub struct OpenAICompatible {
     /// Ordered: [0] is preferred; the rest are tried in sequence when an
     /// endpoint dies before producing any content. Once an endpoint
-    /// streams content the turn is committed to it — a model switch
+    /// streams content the turn is committed to it. A model switch
     /// mid-reply would orphan what the user already saw.
     endpoints: Vec<Endpoint>,
     client: reqwest::Client,
@@ -160,14 +160,14 @@ pub(crate) struct RequestScoped {
 
 /// What one HTTP attempt decided.
 pub(crate) enum Outcome {
-    /// Stream completed (however it ended — errors were already sent).
+    /// Stream completed (however it ended, errors were already sent).
     Done,
     /// Auth/config problem: never retried.
     Fatal(String),
     /// Worth retrying per the policy.
     Transient(String),
     /// The usage/rate limit refused the call (HTTP 429). Retried like a
-    /// transient — brief blips recover — but the terminal outcome is
+    /// transient (brief blips recover), but the terminal outcome is
     /// Limited, not Error: the turn ends with a Resume affordance, not
     /// a failure report.
     Limited(String),
@@ -197,8 +197,8 @@ impl OpenAICompatible {
     }
 
     /// Preferred endpoint plus fallbacks. When an endpoint fails before
-    /// producing any content — auth rejected, connection refused, 5xx
-    /// after retries — the next endpoint is tried, invisibly: an
+    /// producing any content (auth rejected, connection refused, 5xx
+    /// after retries), the next endpoint is tried, invisibly: an
     /// Event::Error is terminal for the turn (the loop stops on the
     /// first one), so nothing is emitted until every endpoint is
     /// exhausted.
@@ -234,7 +234,7 @@ impl Provider for OpenAICompatible {
                 let driver =
                     tokio::spawn(async move { run_with_retries(&scoped, &request, &proxy).await });
                 // Forward live, but hold everything back until this
-                // endpoint has produced content — pre-content, the only
+                // endpoint has produced content: pre-content, the only
                 // events are Started (the loop ignores it), Done (which
                 // would end the turn early), and errors (held for the
                 // fallback decision).
@@ -250,8 +250,8 @@ impl Provider for OpenAICompatible {
                     let _ = sender.send(event);
                 }
                 if produced {
-                    // Committed to this endpoint; its whole stream —
-                    // errors after content included — already passed.
+                    // Committed to this endpoint; its whole stream
+                    // (errors after content included) already passed.
                     return;
                 }
                 let outcome = driver
@@ -266,11 +266,11 @@ impl Provider for OpenAICompatible {
                     }
                     Err(Terminal::Error(message)) => last_error = Some(message),
                     // A limit isn't an endpoint failure to fall back
-                    // from — other endpoints share the same account.
+                    // from. Other endpoints share the same account.
                     // End the turn limited.
                     Err(Terminal::Limited(message)) => {
                         let _ = sender.send(Event::Limited {
-                            message: format!("rate limited — {message}"),
+                            message: format!("rate limited: {message}"),
                         });
                         return;
                     }
@@ -278,7 +278,7 @@ impl Provider for OpenAICompatible {
             }
             let detail = last_error.unwrap_or_else(|| "no endpoints configured".into());
             let _ = sender.send(Event::Error {
-                message: format!("all endpoints failed — {detail}"),
+                message: format!("all endpoints failed: {detail}"),
             });
         });
         Box::pin(UnboundedReceiverStream::new(receiver))
@@ -288,7 +288,7 @@ impl Provider for OpenAICompatible {
 /// One endpoint's full retry policy. Returns the terminal outcome: Ok
 /// when the stream completed, Err with the reason once retries are
 /// exhausted (auth/config errors return immediately). Retry delays are
-/// silent — an Event::Error is terminal for the turn (the loop stops
+/// silent. An Event::Error is terminal for the turn (the loop stops
 /// on the first one), so a "retrying" note would kill the turn it was
 /// trying to save.
 async fn run_with_retries(
@@ -367,9 +367,9 @@ impl RequestScoped {
 
         let status = response.status();
         if status.as_u16() == 401 || status.as_u16() == 403 {
-            return Outcome::Fatal(format!("auth rejected ({status}) — check the API key"));
+            return Outcome::Fatal(format!("auth rejected ({status}): check the API key"));
         }
-        // The rate limit is a 4xx, not a server error — but it gets its
+        // The rate limit is a 4xx, not a server error, but it gets its
         // own outcome: retried like a transient, terminal as Limited.
         if status.as_u16() == 429 {
             let detail = response.text().await.unwrap_or_default();
@@ -537,7 +537,7 @@ fn wire_messages(messages: &[WireMessage]) -> Vec<serde_json::Value> {
                 }
                 role => {
                     // Attachments ride only on user turns: the content
-                    // becomes a parts array — text first, then one part
+                    // becomes a parts array: text first, then one part
                     // per attachment, shaped by media type: images as
                     // `image_url` parts (data URLs pass through whole),
                     // PDFs as `file` parts. No attachments: the plain
@@ -558,7 +558,7 @@ fn wire_messages(messages: &[WireMessage]) -> Vec<serde_json::Value> {
                                     })
                                 }
                                 // The one document format the endpoint
-                                // reads natively; the name is cosmetic —
+                                // reads natively; the name is cosmetic:
                                 // the model sees the data.
                                 Some(("application/pdf", _)) => serde_json::json!({
                                     "type": "file",
@@ -758,7 +758,7 @@ mod tests {
         assert_eq!(content[0]["text"], "what is in this picture");
         assert_eq!(content[1]["type"], "image_url");
         assert_eq!(content[1]["image_url"]["url"], "data:image/png;base64,QUJD");
-        // Text-only messages stay plain strings — the overwhelmingly
+        // Text-only messages stay plain strings. The overwhelmingly
         // common shape must not grow a parts wrapper.
         let plain = wire_messages(&[WireMessage::user("just words")]);
         assert_eq!(plain[0]["content"], "just words");
@@ -800,7 +800,7 @@ mod tests {
         assert_eq!(events.last(), Some(&Event::Done));
     }
 
-    /// A 429 that answers every retry ends the turn Limited — its own
+    /// A 429 that answers every retry ends the turn Limited: its own
     /// event, not an error. The ask is "wait, then continue", so the UI
     /// must be able to tell the two apart without string-matching.
     #[test]
@@ -844,7 +844,7 @@ mod tests {
             !events
                 .iter()
                 .any(|event| matches!(event, Event::Done | Event::Error { .. })),
-            "a limit is terminal — no Done, no Error riding along"
+            "a limit is terminal: no Done, no Error riding along"
         );
     }
 
@@ -948,7 +948,7 @@ mod tests {
     #[test]
     fn once_content_flows_the_turn_is_committed() {
         // A token, then an in-stream server error: the error passes
-        // through — no silent model switch after the user has seen a
+        // through. No silent model switch after the user has seen a
         // reply already forming.
         let server = FakeServer::start(
             "data: {\"choices\":[{\"delta\":{\"content\":\"partial\"}}]}\n\n\

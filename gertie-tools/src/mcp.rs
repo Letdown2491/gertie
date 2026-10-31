@@ -1,8 +1,8 @@
-//! MCP (Model Context Protocol) client, tools-only — stdio and
+//! MCP (Model Context Protocol) client, tools-only, stdio and
 //! Streamable HTTP transports.
 //!
 //! **stdio**: a server is an external process gertie spawns and speaks
-//! JSON-RPC to over stdin/stdout (line-delimited JSON — MCP's original
+//! JSON-RPC to over stdin/stdout (line-delimited JSON, MCP's original
 //! transport). At connect time gertie performs the `initialize`
 //! handshake and lists the server's tools; each becomes an [`McpTool`]
 //! in the registry.
@@ -17,12 +17,12 @@
 //!
 //! Trust posture (from the M3 research): an MCP server is third-party
 //! code talking to the model. Its tool descriptions are *untrusted
-//! input* — a prompt-injection surface — so they are sanitized and
+//! input*, a prompt-injection surface, so they are sanitized and
 //! capped before entering the registry, and every MCP call goes through
 //! the permission prompt (gertie can't know whether a foreign tool
 //! mutates; the user is the capability system).
 //!
-//! Boring choices for v1: requests are serialized (one at a time — MCP
+//! Boring choices for v1: requests are serialized (one at a time, MCP
 //! allows concurrency, but correctness first), each stdio request waits
 //! at most `RESPONSE_TIMEOUT` on a reader thread (a hung server must
 //! not hang the UI), HTTP requests carry the same timeout, and stdio
@@ -72,7 +72,7 @@ type Waiter = std::sync::mpsc::Sender<Result<Value, String>>;
 pub struct McpClient {
     server_name: String,
     inner: Arc<std::sync::Mutex<Inner>>,
-    /// stdio only — the spawned server process, killed on drop. None
+    /// stdio only, the spawned server process, killed on drop. None
     /// for HTTP (nothing to reap; the server outlives the client).
     child: Option<Arc<std::sync::Mutex<std::process::Child>>>,
 }
@@ -87,7 +87,7 @@ enum Transport {
         stdin: std::process::ChildStdin,
         /// Requests waiting on their answers, shared with the reader
         /// thread: it routes every line by its `id`. Keyed dispatch is
-        /// what lets two tool calls run at once — each waits on its
+        /// what lets two tool calls run at once, each waits on its
         /// own answer instead of whoever spoke first.
         pending: Arc<std::sync::Mutex<std::collections::HashMap<u64, Waiter>>>,
     },
@@ -145,7 +145,7 @@ impl McpClient {
 
         // Reader thread: the child owns the pipe's read side. Each
         // line is parsed here and routed by its `id` to whoever is
-        // waiting on it — notifications and unparseable noise are
+        // waiting on it, notifications and unparseable noise are
         // dropped, model-visible output stays clean. When the server
         // dies, every waiter learns immediately instead of at its
         // timeout.
@@ -166,10 +166,10 @@ impl McpClient {
                         Ok(0) | Err(_) => break,
                         Ok(_) => {
                             let Ok(value) = serde_json::from_str::<Value>(line.trim_end()) else {
-                                continue; // not JSON — server noise
+                                continue; // not JSON, server noise
                             };
                             let Some(id) = value.get("id").and_then(Value::as_u64) else {
-                                continue; // a notification — nothing waits on it
+                                continue; // a notification, nothing waits on it
                             };
                             let answer = Self::rpc_result(&reader_name, id, &value);
                             let waiter = reader_pending.lock().unwrap().remove(&id);
@@ -286,7 +286,7 @@ impl McpClient {
                 client,
                 session_id,
             } => {
-                // A notification has no id and expects no response —
+                // A notification has no id and expects no response,
                 // 202 Accepted or an empty body both count.
                 let mut request = client
                     .post(url.as_str())
@@ -317,7 +317,7 @@ impl McpClient {
         }
         // The lock guards the send and session-id state only. The wait
         // happens on the request's own channel (the reader routes by
-        // id), and the HTTP round trip runs after the lock is dropped —
+        // id), and the HTTP round trip runs after the lock is dropped,
         // so two tool calls may be in flight at once against either
         // transport.
         enum Sent {
@@ -352,8 +352,8 @@ impl McpClient {
                 } => {
                     // Snapshot what the round trip needs and get out of
                     // the lock's way: it is network I/O, bounded by the
-                    // client's own timeout, and no other request —
-                    // stdio or HTTP — should queue behind it. The lock
+                    // client's own timeout, and no other request,
+                    // stdio or HTTP, should queue behind it. The lock
                     // returns only to remember a session id, below.
                     Sent::Http {
                         url: url.clone(),
@@ -463,7 +463,7 @@ impl McpClient {
             .unwrap_or_default()
             .to_string();
         // Cap the read: a hostile or broken server's answer does not
-        // eat memory. 8 MiB matches web_fetch's ceiling — far past any
+        // eat memory. 8 MiB matches web_fetch's ceiling, far past any
         // honest tool payload.
         let mut raw = Vec::new();
         response
@@ -525,7 +525,7 @@ impl Tool for McpTool {
     }
 
     // Third-party code: gertie cannot know whether it mutates, so every
-    // call prompts. The user is the capability system — and the mode
+    // call prompts. The user is the capability system, and the mode
     // machinery honours this too: accept-edits' pre-approval stops at
     // gertie's own tools (see `third_party`).
     fn mutates(&self) -> bool {
@@ -545,7 +545,7 @@ impl Tool for McpTool {
         let arguments = arguments.to_string();
         blocking(move || {
             // Arguments arrive as a JSON string; tools/call wants an
-            // object. Unparseable arguments are the model's mistake —
+            // object. Unparseable arguments are the model's mistake,
             // reported back, not a panic.
             let parsed: Value = serde_json::from_str(&arguments)
                 .map_err(|error| format!("bad arguments for {remote_name}: {error}"))?;
@@ -601,7 +601,7 @@ mod tests {
 
     /// A minimal MCP server in sh: answers initialize, tools/list, and
     /// tools/call in request order with fixed ids (matching our client's
-    /// 1, 2, 3 sequence). Real framing, real child process — the parts
+    /// 1, 2, 3 sequence). Real framing, real child process, the parts
     /// worth testing are exactly the parts a mock object wouldn't cover.
     const FAKE_SERVER: &str = r#"
         while IFS= read -r line; do
@@ -679,7 +679,7 @@ mod tests {
     /// A fake Streamable HTTP MCP server: accepts repeated connections,
     /// answers initialize / notifications/initialized / tools/list /
     /// tools/call in request order, records the `Mcp-Session-Id` header
-    /// of every request. Real HTTP over a real socket — the parts worth
+    /// of every request. Real HTTP over a real socket, the parts worth
     /// testing (framing, session echo, SSE wrapping) are exactly the
     /// parts a mock wouldn't cover.
     struct FakeHttpServer {
@@ -763,7 +763,7 @@ mod tests {
                         )
                     } else if body.contains("notifications/initialized") {
                         // A notification: acknowledged, no body.
-                        // `connection: close` matters — without it the
+                        // `connection: close` matters, without it the
                         // client may pool the socket this test server
                         // is about to drop, and the next request dies
                         // with a reset (the flake).
@@ -837,7 +837,7 @@ mod tests {
     #[test]
     fn http_server_refusing_sessionless_requests_is_survived() {
         // A strict server (drops sessionless tools/list) proves gertie
-        // echoes the session id — the handshake succeeds only because
+        // echoes the session id, the handshake succeeds only because
         // of the echo.
         let server = FakeHttpServer::start_with("application/json", true);
         let client = Arc::new(McpClient::connect_url("fake", &server.url).expect("handshake"));

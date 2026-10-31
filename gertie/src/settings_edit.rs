@@ -1,5 +1,5 @@
 //! The settings panel as its own view: a summary of the live config
-//! plus an editor over the five sections it owns — endpoints (with
+//! plus an editor over the five sections it owns, endpoints (with
 //! keys), the default endpoint, the bash sandbox, MCP servers, and
 //! agent types.
 //!
@@ -26,13 +26,13 @@ use gpui_kit::{
     App, Context, Entity, EventEmitter, IntoElement, Render, SharedString, Window, div, px,
 };
 
-/// Emitted after a successful save — the workspace reloads the
+/// Emitted after a successful save, the workspace reloads the
 /// bootstrap and pushes the new provider into every open tab.
 pub enum SettingsEvent {
     Saved,
 }
 
-/// One endpoint as the editor holds it — a plain-data copy of
+/// One endpoint as the editor holds it, a plain-data copy of
 /// `EndpointConfig` so the form never touches parse types.
 #[derive(Clone)]
 struct EndpointDraft {
@@ -90,7 +90,7 @@ impl McpDraft {
 }
 
 /// One agent type as the editor holds it. `invocation` rides along
-/// unedited — the form can't create `user` types (UI dispatch doesn't
+/// unedited, the form can't create `user` types (UI dispatch doesn't
 /// exist yet), but a hand-written one must survive a save.
 #[derive(Clone)]
 struct AgentDraft {
@@ -156,7 +156,7 @@ struct AgentForm {
 
 pub struct SettingsPanelView {
     summary: SettingsSummary,
-    /// Pending edits — the desired next state of the config.
+    /// Pending edits, the desired next state of the config.
     endpoints: Vec<EndpointDraft>,
     default_endpoint: Option<String>,
     sandbox: bool,
@@ -218,7 +218,7 @@ impl SettingsPanelView {
             .collect();
         self.default_endpoint = config.default_endpoint.clone();
         // The sandbox draft starts from what's in force (the summary
-        // is resolved against the repo's overlay) — flipping the
+        // is resolved against the repo's overlay), flipping the
         // switch then saves your own choice into your config, which
         // outranks the overlay from then on.
         self.sandbox = self.summary.sandbox;
@@ -267,7 +267,7 @@ impl SettingsPanelView {
             api_key_env: field(api_key_env, "env var, e.g. PPQ_API_KEY", false),
             // A key on screen is a key over the user's shoulder: the
             // input masks, like a password field.
-            api_key: field(api_key, "literal key — prefer the env var", true),
+            api_key: field(api_key, "literal key, prefer the env var", true),
             context_window: field(
                 draft
                     .context_window
@@ -390,14 +390,14 @@ impl SettingsPanelView {
             ),
             endpoint: field(
                 draft.endpoint.clone(),
-                "endpoint name — blank = the leader's",
+                "endpoint name, blank = the leader's",
             ),
-            model: field(draft.model.clone(), "model override — blank = endpoint's"),
+            model: field(draft.model.clone(), "model override, blank = endpoint's"),
             tools: field(
                 joined(draft.tools),
-                "allowlist, comma-separated — blank = all",
+                "allowlist, comma-separated, blank = all",
             ),
-            prompt: field(draft.prompt.clone(), "system prompt — blank = default"),
+            prompt: field(draft.prompt.clone(), "system prompt, blank = default"),
         });
         cx.notify();
     }
@@ -420,7 +420,7 @@ impl SettingsPanelView {
         }
         if name.contains(char::is_whitespace) {
             self.status = Some((
-                "agent name must be one word — letters, digits, dashes".into(),
+                "agent name must be one word, letters, digits, dashes".into(),
                 true,
             ));
             cx.notify();
@@ -470,7 +470,7 @@ impl SettingsPanelView {
         cx.notify();
     }
 
-    /// Theme switch: applies immediately and persists — UI state, kept
+    /// Theme switch: applies immediately and persists, UI state, kept
     /// out of the user's config.toml.
     fn set_theme(&mut self, mode: ThemeMode, cx: &mut Context<Self>) {
         gpui_kit::component::Theme::change(mode, None, cx);
@@ -488,7 +488,7 @@ impl SettingsPanelView {
     ) {
         let Some(path) = self.summary.config_path.clone() else {
             self.status = Some((
-                "no config file location — create ~/.config/gertie/config.toml".into(),
+                "no config file location, create ~/.config/gertie/config.toml".into(),
                 true,
             ));
             cx.notify();
@@ -514,7 +514,7 @@ impl SettingsPanelView {
         match edits.save(&path) {
             Ok(()) => {
                 self.status = Some((
-                    "saved — endpoints apply to open chats; sandbox, MCP, and agents on restart"
+                    "saved, endpoints apply to open chats; sandbox, MCP, and agents on restart"
                         .into(),
                     false,
                 ));
@@ -554,7 +554,7 @@ fn endpoint_row(
                     button
                         .custom(ButtonCustomVariant::new(cx).color(cx.theme().accent.opacity(0.14)))
                 })
-                .tooltip(format!("{key_note} — click to edit"))
+                .tooltip(format!("{key_note}, click to edit"))
                 .on_click(cx.listener(move |this, _, window, cx| {
                     this.open_form(Some(index), window, cx);
                 })),
@@ -586,7 +586,7 @@ fn endpoint_row(
         )
 }
 
-/// One agent row: edit on click, ✕ to remove. The pin is the point —
+/// One agent row: edit on click, ✕ to remove. The pin is the point,
 /// a seat without its endpoint visible is just a name.
 fn agent_row(
     index: usize,
@@ -609,7 +609,7 @@ fn agent_row(
                 .small()
                 .flex_1()
                 .min_w_0()
-                .tooltip(format!("{} — click to edit", draft.description))
+                .tooltip(format!("{}, click to edit", draft.description))
                 .on_click(cx.listener(move |this, _, window, cx| {
                     this.open_agent_form(Some(index), window, cx);
                 })),
@@ -843,7 +843,7 @@ impl Render for SettingsPanelView {
                     div()
                         .text_size(px(12.))
                         .text_color(theme.muted_foreground)
-                        .child("none configured — add one below"),
+                        .child("none configured, add one below"),
                 )
             })
             .children(self.endpoints.iter().enumerate().map(|(index, draft)| {
@@ -869,14 +869,14 @@ impl Render for SettingsPanelView {
             .child(
                 Switch::new("sandbox-switch")
                     .label(format!(
-                        "Landlock-isolate bash children — from {}",
+                        "Landlock-isolate bash children, from {}",
                         self.summary.sandbox_origin.as_str()
                     ))
                     .small()
                     .checked(self.sandbox)
                     .tooltip(concat!(
                         "Restart to apply. Your config sets this; while it",
-                        " doesn't, the repo's .gertie/config.toml may —",
+                        " doesn't, the repo's .gertie/config.toml wins, and",
                         " that file may also write \"inherit\" to stand down."
                     ))
                     .on_click({
@@ -955,7 +955,7 @@ impl Render for SettingsPanelView {
                     div()
                         .text_size(px(12.))
                         .text_color(theme.muted_foreground)
-                        .child("none configured — the eight built-ins need none"),
+                        .child("none configured, the eight built-ins need none"),
                 )
             })
             .children(
@@ -982,7 +982,7 @@ impl Render for SettingsPanelView {
                     .text_color(theme.muted_foreground)
                     .child(match &self.summary.config_path {
                         Some(path) => format!(
-                            "written on save: {} — comments and unknown keys are kept",
+                            "written on save: {}, comments and unknown keys are kept",
                             path.display()
                         ),
                         None => "no config file location".into(),

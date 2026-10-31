@@ -5,7 +5,7 @@ use std::future::Future;
 use std::pin::Pin;
 
 /// A tool result: Ok(text) becomes the tool message content; Err(text) is
-/// still surfaced to the model (as an error report) — the model decides
+/// still surfaced to the model (as an error report), the model decides
 /// what to do about it. Tools only hard-fail the turn via panics/cancel.
 pub type ToolResult = Result<String, String>;
 
@@ -30,7 +30,7 @@ pub trait Tool: Send + Sync {
     }
 
     /// Hard policy vet, consulted *before* the permission prompt: an Err
-    /// blocks the call outright — no approve button exists for it. This is
+    /// blocks the call outright, no approve button exists for it. This is
     /// for things no user should have to see a card for (fork bombs,
     /// `rm -rf /`, wiping block devices); anything debatable belongs in
     /// the prompt, not here.
@@ -38,7 +38,7 @@ pub trait Tool: Send + Sync {
         Ok(())
     }
 
-    /// Whether the capability comes from outside gertie — an MCP server,
+    /// Whether the capability comes from outside gertie, an MCP server,
     /// whose path handling and side effects gertie cannot vouch for.
     /// Third-party tools face the prompt in every mode except the one
     /// where the human asked for nothing to ask (full_access): a mode

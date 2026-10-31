@@ -4,10 +4,10 @@
 //! prior bytes here. Objects live under `<dir>/objects/<sha256>` and are
 //! deduplicated by hash; the ledger ties (session, path) to the object the
 //! file had before the edit. Restoring is reading a hash-addressed blob
-//! back — no diffs to compute, no git repo required.
+//! back, no diffs to compute, no git repo required.
 //!
 //! Turns: the front mints a turn row when it hands work to the loop, so
-//! the checkpoints recorded during that turn — and only those — can be
+//! the checkpoints recorded during that turn, and only those, can be
 //! reviewed as one diff. Membership is checkpoint ids in the turn's
 //! window `(before, next turn's before]`, session-filtered; the ledger
 //! answers "what did this turn change" from objects alone, so a past
@@ -34,7 +34,7 @@ pub struct TurnId(pub i64);
 pub struct TurnBounds {
     pub id: TurnId,
     pub session_id: crate::SessionId,
-    /// The user message row that started the turn — how a tool card in
+    /// The user message row that started the turn, how a tool card in
     /// the transcript finds its turn again after a reload.
     pub user_message_id: crate::MessageId,
     pub before: CheckpointId,
@@ -48,7 +48,7 @@ pub enum AfterState {
     /// The path was touched again after this turn; its next checkpoint
     /// object holds the content as this turn left it.
     Object(String),
-    /// Never touched again — current disk content is what this turn
+    /// Never touched again, current disk content is what this turn
     /// left. (Reading disk is the caller's job: it owns the root the
     /// tool-relative paths resolve against.)
     Disk,
@@ -58,7 +58,7 @@ pub enum AfterState {
 #[derive(Clone, Debug)]
 pub struct TurnFileChange {
     pub path: PathBuf,
-    /// The turn's first checkpoint for this path — its object is the
+    /// The turn's first checkpoint for this path, its object is the
     /// before content, and the restore point for undoing the turn.
     pub checkpoint: CheckpointId,
     /// sha256 of the before object.
@@ -84,7 +84,7 @@ pub struct SnapshotStore {
 }
 
 impl SnapshotStore {
-    /// Opens (creating if needed) the store rooted at `dir` — typically
+    /// Opens (creating if needed) the store rooted at `dir`, typically
     /// `~/.local/share/gertie/snapshots`.
     pub fn open(dir: &Path) -> Result<Self, SnapshotError> {
         let objects = dir.join("objects");
@@ -115,7 +115,7 @@ impl SnapshotStore {
                 ON turns(session_id, user_message_id);",
         )?;
         // A checkpoint remembers the workspace its turn ran in, so a
-        // restore writes back where the turn wrote — even after the
+        // restore writes back where the turn wrote, even after the
         // chat moved to another workspace mid-session. Legacy rows
         // answer NULL and fall back to the caller's root. The store
         // was opened by us, so the only expected failure here is the
@@ -130,7 +130,7 @@ impl SnapshotStore {
     /// Records `content_before` as the prior state of `path`. Callers
     /// snapshot *before* running a mutating tool; content is deduplicated
     /// by hash, so re-recording unchanged files costs one hash. The
-    /// workspace is the root the calling turn runs in — the restore's
+    /// workspace is the root the calling turn runs in, the restore's
     /// address for this row, however far the chat travels afterwards.
     pub fn record(
         &self,
@@ -166,7 +166,7 @@ impl SnapshotStore {
         Ok(CheckpointId(connection.last_insert_rowid() as u64))
     }
 
-    /// The workspace a checkpoint's turn ran in — the restore address
+    /// The workspace a checkpoint's turn ran in, the restore address
     /// for its row. `None` for legacy rows (recorded before the
     /// column existed); their caller's root decides, as it always did.
     pub fn workspace_of(&self, checkpoint: CheckpointId) -> Option<std::path::PathBuf> {
@@ -210,7 +210,7 @@ impl SnapshotStore {
         rows.collect()
     }
 
-    /// Restores with tool-relative paths resolved against `root` — the
+    /// Restores with tool-relative paths resolved against `root`, the
     /// workspace the tools ran in, which is not always the caller's
     /// process CWD. A checkpoint recorded its turn's own workspace (see
     /// [`Self::record`]); that address wins, and `root` is only the
@@ -244,8 +244,8 @@ impl SnapshotStore {
             root.join(path)
         };
         // Containment: the restore's root is the workspace the caller
-        // says these tools ran in, and the target — relative joined, or
-        // absolute as recorded — must live inside it. The nearest
+        // says these tools ran in, and the target, relative joined, or
+        // absolute as recorded, must live inside it. The nearest
         // existing ancestor is canonicalized, so a symlink inside the
         // workspace pointing out of it refuses too. Nothing outside the
         // workspace is ever written.
@@ -284,7 +284,7 @@ impl SnapshotStore {
 
     /// Mints a turn window: the front calls this the moment before it
     /// hands the user's message to the loop. Everything the loop's
-    /// mutating tools record from here — for this session — belongs to
+    /// mutating tools record from here, for this session, belongs to
     /// the turn, until the next mint.
     pub fn begin_turn(
         &self,
@@ -345,7 +345,7 @@ impl SnapshotStore {
         }
     }
 
-    /// A session's minted turn windows, oldest first — the rewind's
+    /// A session's minted turn windows, oldest first, the rewind's
     /// file question iterates them.
     pub fn turns_for_session(
         &self,
@@ -371,7 +371,7 @@ impl SnapshotStore {
     /// recorded, oldest state first. "Before" is the turn's first
     /// checkpoint object for the path; "after" is the path's next
     /// checkpoint object in the ledger, or [`AfterState::Disk`] when
-    /// nothing touched it again — a past turn's diff never shifts under
+    /// nothing touched it again, a past turn's diff never shifts under
     /// later edits.
     pub fn turn_changes(&self, turn: &TurnBounds) -> Result<Vec<TurnFileChange>, rusqlite::Error> {
         let connection = self.connection.lock().unwrap();
@@ -399,7 +399,7 @@ impl SnapshotStore {
                 ))
             },
         )?;
-        // Rows borrow the statement — collect inside the arm.
+        // Rows borrow the statement, collect inside the arm.
         let recorded: Vec<(CheckpointId, PathBuf, String)> = rows.collect::<Result<_, _>>()?;
         drop(statement);
 
@@ -432,7 +432,7 @@ impl SnapshotStore {
         Ok(changes)
     }
 
-    /// Reads a checkpoint object's bytes back — the diff view's "before".
+    /// Reads a checkpoint object's bytes back, the diff view's "before".
     pub fn read_object(&self, hash: &str) -> std::io::Result<Vec<u8>> {
         std::fs::read(self.objects.join(hash))
     }
@@ -443,7 +443,7 @@ pub enum SnapshotError {
     Io(std::io::Error),
     Db(rusqlite::Error),
     /// The checkpoint's recorded path resolves outside the workspace
-    /// the restore was asked to write into — refused, never written.
+    /// the restore was asked to write into, refused, never written.
     /// A checkpoint can only cover what the containment rules let a
     /// tool touch; a restore that could reach further would turn the
     /// ledger into a write-anything primitive.
@@ -596,7 +596,7 @@ mod tests {
         store.record_file(Some(session), &a, None).unwrap();
 
         // Turn 1 touched two paths; a's before is its first checkpoint,
-        // and its after lives in turn 2's checkpoint — not disk.
+        // and its after lives in turn 2's checkpoint, not disk.
         let changes1 = store.turn_changes(&turn1).unwrap();
         assert_eq!(changes1.len(), 2);
         let a1 = changes1
@@ -639,7 +639,7 @@ mod tests {
         assert!(store.turn_for_message(session, first).unwrap().is_none());
 
         let turn = store.begin_turn(session, first).unwrap();
-        // Steered pushes land after the mint — they resolve to the turn
+        // Steered pushes land after the mint, they resolve to the turn
         // they steered, not to nothing.
         let resolved = store
             .turn_for_message(session, crate::MessageId(first.0 + 3))
@@ -682,7 +682,7 @@ mod tests {
         let store = store_in(tmp.path());
         let workspace = tempfile::tempdir().unwrap();
         // The ledger holds a checkpoint recorded against an absolute
-        // path outside the workspace the restore targets — a row from
+        // path outside the workspace the restore targets, a row from
         // an older run, another checkout, wherever. Restoring it must
         // refuse, not write.
         let outside = tempfile::tempdir().unwrap();

@@ -1,5 +1,5 @@
 //! The [`Provider`] contract. Lives in core because the agent loop drives
-//! providers directly — implementations sit in gertie-providers (and
+//! providers directly, implementations sit in gertie-providers (and
 //! anywhere else: a test fake is a provider too).
 
 use crate::request::Request;

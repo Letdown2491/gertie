@@ -1,5 +1,5 @@
 //! Layered TOML config: the user's file, plus the repo's own overlay
-//! (`<repo>/.gertie/config.toml`) for a safe subset — the overlay
+//! (`<repo>/.gertie/config.toml`) for a safe subset, the overlay
 //! suggests, the user's file decides, and every resolved value says
 //! which tier it came from.
 
@@ -35,7 +35,7 @@ pub struct Config {
     /// Absent or zero = off: settle is manual until you opt in.
     #[serde(default)]
     pub auto_settle_days: Option<u64>,
-    /// Shell command run in a settling session's recorded workspace —
+    /// Shell command run in a settling session's recorded workspace,
     /// the reclaim hook (e.g. `cargo clean`). Manual settles only;
     /// the auto-settle sweep never runs commands.
     #[serde(default)]
@@ -49,7 +49,7 @@ pub struct Config {
 #[derive(Deserialize, Debug, Clone, Default)]
 pub struct WorktreeConfig {
     /// Remove a gertie-made worktree that has been idle this many
-    /// days — and only one that is clean (nothing uncommitted) and
+    /// days, and only one that is clean (nothing uncommitted) and
     /// holds no commits the main branch lacks (nothing unmerged).
     /// Zero or absent = never.
     #[serde(default)]
@@ -64,7 +64,7 @@ pub struct SecurityConfig {
     /// set it; `None` = unset, a lower tier decides.
     #[serde(default)]
     pub sandbox_bash: Option<bool>,
-    /// Let web_fetch reach private-network targets — localhost dev
+    /// Let web_fetch reach private-network targets, localhost dev
     /// servers, the LAN, tailnets. Off by default: the model has no
     /// business probing a router or a cloud-metadata endpoint. `Some`
     /// = the user's file set it; `None` = unset, a lower tier decides.
@@ -84,7 +84,7 @@ pub struct PermissionsConfig {
 }
 
 /// Explicit inheritance as a value: a project overlay field may hold
-/// a value, or the string `"inherit"` — the next tier (the user's
+/// a value, or the string `"inherit"`, the next tier (the user's
 /// config, then the built-in default) decides. Inheritance is a
 /// state you can select and the UI can show, not an absence to
 /// infer.
@@ -121,10 +121,10 @@ impl<'de, T: Deserialize<'de>> Deserialize<'de> for Inheritable<T> {
 }
 
 /// The repo's own overlay: `<repo>/.gertie/config.toml`. Deliberately
-/// a subset — posture, not process: no endpoints, keys, MCP servers,
+/// a subset, posture, not process: no endpoints, keys, MCP servers,
 /// or agent types, because a cloned repo never gets to configure what
 /// runs on your machine. The settle command is *not* here either: a
-/// shell command is process, not posture — it stays the user's.
+/// shell command is process, not posture, it stays the user's.
 /// The overlay sits below the user's config: it suggests, you decide.
 #[derive(Deserialize, Debug, Clone, Default)]
 pub struct ProjectOverlay {
@@ -156,13 +156,13 @@ pub struct ProjectSecurity {
 pub struct ProjectWorktree {
     /// The prefix on the branch a worktree tab's session names from
     /// its first message ("feat/", "gertie/"). Repo-owned policy;
-    /// validated, not rewritten — anything git-hostile falls back to
+    /// validated, not rewritten, anything git-hostile falls back to
     /// "gertie/".
     #[serde(default)]
     pub branch_prefix: Option<String>,
 }
 
-/// Where a resolved setting's value came from — the label the
+/// Where a resolved setting's value came from, the label the
 /// settings panel and doctor show.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Origin {
@@ -192,7 +192,7 @@ pub struct Resolved<T> {
     pub origin: Origin,
 }
 
-/// Every overlay-resolvable field's origin at once — for the
+/// Every overlay-resolvable field's origin at once, for the
 /// settings summary and the doctor's report.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Origins {
@@ -245,7 +245,7 @@ impl SearchConfig {
 pub struct AgentConfig {
     /// Slug; the tool is `agent_{name}`.
     pub name: String,
-    /// Triggers only ("Use when…") — never a workflow summary. Context
+    /// Triggers only ("Use when…"), never a workflow summary. Context
     /// load paid on every leader turn.
     pub description: String,
     /// `model` (default) = the leader may spawn it; `user` = future UI
@@ -255,7 +255,7 @@ pub struct AgentConfig {
     /// Model override on the same endpoint (None = the endpoint's model).
     #[serde(default)]
     pub model: Option<String>,
-    /// Named endpoint (`[[endpoints]].name`) this worker talks to — a
+    /// Named endpoint (`[[endpoints]].name`) this worker talks to, a
     /// different provider or wire than the leader's. None = the leader's
     /// endpoint. This is what makes a multi-model council possible.
     #[serde(default)]
@@ -310,13 +310,13 @@ pub struct EndpointConfig {
     #[serde(default)]
     pub api_key_env: Option<String>,
     /// Model context window in tokens. Unset means compaction stays
-    /// disabled — gertie doesn't guess windows it doesn't know.
+    /// disabled, gertie doesn't guess windows it doesn't know.
     #[serde(default)]
     pub context_window: Option<u64>,
 }
 
 /// `~` or `~/…` at the start of an endpoint's base_url expands to the
-/// home directory — a replay endpoint points at a scenario directory
+/// home directory, a replay endpoint points at a scenario directory
 /// on this machine, not at a network host. Everything else (https://…)
 /// passes through untouched; `$HOME` unset leaves the value as written.
 fn expand_tilde(base_url: &str) -> String {
@@ -397,7 +397,7 @@ impl EndpointConfig {
 /// What the settings panel writes back: the full endpoint list, the
 /// default, the sandbox flag, the MCP server list, and the agent
 /// types. Deliberately whole-section replacement rather than a
-/// key-by-key diff — the panel owns these five sections; every other
+/// key-by-key diff, the panel owns these five sections; every other
 /// key, table, and comment in the file is untouchable.
 #[derive(Debug, Default)]
 pub struct ConfigEdits {
@@ -410,7 +410,7 @@ pub struct ConfigEdits {
 
 impl ConfigEdits {
     /// Comments above a section header are the user's voice about the
-    /// section — when the section is rebuilt wholesale, carry that
+    /// section, when the section is rebuilt wholesale, carry that
     /// prefix decor onto the first new table.
     fn carry_header_comment(root: &toml_edit::Table, key: &str, first: &mut toml_edit::Table) {
         let comment = root
@@ -498,7 +498,7 @@ impl ConfigEdits {
         root.insert("mcp_servers", toml_edit::Item::ArrayOfTables(servers));
 
         // Agents: same whole-array replacement. Every field the panel
-        // knows about is written back — a hand-written `invocation`
+        // knows about is written back, a hand-written `invocation`
         // survives because the draft carries it, not because toml_edit
         // round-trips the table.
         let mut agents = toml_edit::ArrayOfTables::new();
@@ -540,7 +540,7 @@ impl ConfigEdits {
         let raw = std::fs::read_to_string(path).unwrap_or_default();
         let mut doc: toml_edit::DocumentMut = raw.parse().map_err(|error| {
             format!(
-                "{} does not parse, so it can't be edited from the panel — fix it by hand: {error}",
+                "{} does not parse, so it can't be edited from the panel, fix it by hand: {error}",
                 path.display()
             )
         })?;
@@ -566,7 +566,7 @@ impl Config {
     }
 
     /// Loads the user config. A missing file is an empty config; a file
-    /// that fails to parse is a *reported* error, never a silent fallback —
+    /// that fails to parse is a *reported* error, never a silent fallback,
     /// the caller shows it in the UI.
     pub fn load() -> Result<Self, String> {
         match Self::path() {
@@ -587,7 +587,7 @@ impl Config {
     /// Loads the repo's overlay: `<workspace>/.gertie/config.toml`.
     /// A missing file is no overlay and no error; an unreadable or
     /// unparseable one is a reported error (never fatal, never
-    /// silent — the label and the doctor carry it).
+    /// silent, the label and the doctor carry it).
     pub fn load_project_overlay(workspace_root: &Path) -> (Option<ProjectOverlay>, Option<String>) {
         let path = workspace_root.join(".gertie").join("config.toml");
         let raw = match std::fs::read_to_string(&path) {
@@ -602,7 +602,7 @@ impl Config {
         };
         match toml::from_str::<ProjectOverlay>(&raw) {
             Ok(overlay) => {
-                // The overlay is the repo speaking — untrusted input.
+                // The overlay is the repo speaking, untrusted input.
                 // Unknown keys do nothing silently; a typo that does
                 // nothing and a key that stopped meaning something both
                 // deserve a word. (The user's config accepts unknown
@@ -614,7 +614,7 @@ impl Config {
                 );
                 let warning = match unknown.as_slice() {
                     [] => None,
-                    [one] => Some(format!("unrecognized key {one:?} — ignored")),
+                    [one] => Some(format!("unrecognized key {one:?}, ignored")),
                     many => Some(format!(
                         "unrecognized keys {}: ignored",
                         many.iter()
@@ -675,8 +675,8 @@ impl Config {
             .and_then(|overlay| overlay.security.as_ref())
             .and_then(|security| security.sandbox_bash.as_ref())
             .map(|inheritable| match inheritable {
-                // Explicit Inherit: the next tier — the built-in
-                // default — decides.
+                // Explicit Inherit: the next tier, the built-in
+                // default, decides.
                 Inheritable::Inherit => Resolved {
                     value: false,
                     origin: Origin::Default,
@@ -708,8 +708,8 @@ impl Config {
             .and_then(|overlay| overlay.security.as_ref())
             .and_then(|security| security.allow_private_fetch.as_ref())
             .map(|inheritable| match inheritable {
-                // Explicit Inherit: the next tier — the built-in
-                // default — decides.
+                // Explicit Inherit: the next tier, the built-in
+                // default, decides.
                 Inheritable::Inherit => Resolved {
                     value: false,
                     origin: Origin::Default,
@@ -722,8 +722,8 @@ impl Config {
     }
 
     /// The private-fetch gate: your config, else the repo's overlay,
-    /// else closed. Open is a *posture* the repo may suggest — its dev
-    /// server may be the whole point of the checkout — but only the
+    /// else closed. Open is a *posture* the repo may suggest, its dev
+    /// server may be the whole point of the checkout, but only the
     /// user's config or the overlay says so, never a model ask.
     pub fn resolve_allow_private_fetch(&self, overlay: Option<&ProjectOverlay>) -> Resolved<bool> {
         if let Some(value) = self.security.allow_private_fetch {
@@ -793,7 +793,7 @@ impl Config {
     }
 
     /// The settle reclaim command in force.
-    /// The settle reclaim command in force. The user's config only —
+    /// The settle reclaim command in force. The user's config only,
     /// the repo's overlay may not set a shell command (posture, not
     /// process), so the overlay parameter is accepted for chain
     /// symmetry and deliberately unread.
@@ -825,7 +825,7 @@ impl Config {
     }
 
     /// The branch prefix the repo's overlay asks for on worktree
-    /// branches — "gertie/" when it says nothing (or something
+    /// branches, "gertie/" when it says nothing (or something
     /// git-hostile).
     pub fn overlay_branch_prefix(overlay: Option<&ProjectOverlay>) -> String {
         crate::worktree::sane_prefix(
@@ -884,7 +884,7 @@ impl Config {
             .any(|endpoint| endpoint.api_key.is_some())
         {
             warnings
-                .push("a literal API key is set in config.toml — prefer api_key_env".to_string());
+                .push("a literal API key is set in config.toml, prefer api_key_env".to_string());
         }
         if let Some(path) = Self::path()
             && let Ok(metadata) = std::fs::metadata(&path)
@@ -893,7 +893,7 @@ impl Config {
             let mode = metadata.permissions().mode() & 0o777;
             if mode & 0o077 != 0 {
                 warnings.push(format!(
-                    "config.toml is readable by others (mode {mode:o}) — chmod 600 it"
+                    "config.toml is readable by others (mode {mode:o}), chmod 600 it"
                 ));
             }
         }
@@ -902,27 +902,27 @@ impl Config {
                 && gertie_providers::Wire::parse(wire).is_none()
             {
                 warnings.push(format!(
-                    "endpoint {}: unknown wire {:?} — speaking openai; \
+                    "endpoint {}: unknown wire {:?}, speaking openai; \
                   valid wires are openai | anthropic | replay",
                     endpoint.name, wire
                 ));
             }
         }
         // An agent pinned to an endpoint that isn't configured is skipped
-        // at bootstrap — say so here, where the fix is still one edit away.
+        // at bootstrap, say so here, where the fix is still one edit away.
         for agent in &self.agents {
             if let Some(name) = &agent.endpoint
                 && !self.endpoints.iter().any(|endpoint| &endpoint.name == name)
             {
                 warnings.push(format!(
-                    "agent {}: endpoint {name:?} is not configured — the agent is \
+                    "agent {}: endpoint {name:?} is not configured, the agent is \
                  skipped; add an [[endpoints]] entry with that name",
                     agent.name
                 ));
             }
         }
         // A key that resolves to nothing means a guaranteed 401 on the
-        // first request — say so up front, with the exact fix, not after.
+        // first request, say so up front, with the exact fix, not after.
         if let Some(selected) = self.selected_endpoint_config()
             && selected.resolve().api_key.is_none()
         {
@@ -931,7 +931,7 @@ impl Config {
                 .clone()
                 .unwrap_or_else(|| format!("GERTIE_{}_API_KEY", selected.env_name()));
             warnings.push(format!(
-                "endpoint {}: no API key resolved — export {variable}=<your key> and restart",
+                "endpoint {}: no API key resolved, export {variable}=<your key> and restart",
                 selected.name
             ));
         }
@@ -952,17 +952,17 @@ impl Config {
 
     /// First-run experience: if the default config file does not
     /// exist, write a starter and return the message to surface in
-    /// the status line. The starter names nothing — no endpoint,
+    /// the status line. The starter names nothing, no endpoint,
     /// provider, model, or key is built in; the comments point at the
     /// in-app settings and a generic shape. Never called for an
-    /// explicit `--config` path — an override pointing at nothing
+    /// explicit `--config` path, an override pointing at nothing
     /// means the user knows what they're doing.
     pub fn ensure_skeleton(path: &std::path::Path) -> Option<String> {
         if path.exists() {
             return None;
         }
         let skeleton = r#"# gertie's config. Nothing here is pre-configured: endpoints, models,
-# and keys are all yours to name. The easiest path is in the app —
+# and keys are all yours to name. The easiest path is in the app,
 # type /settings in the composer (the settings panel owns endpoints
 # and keys). Or add one by hand, any OpenAI-compatible server:
 #
@@ -980,13 +980,13 @@ impl Config {
             && let Err(error) = std::fs::create_dir_all(parent)
         {
             return Some(format!(
-                "could not create starter config: {error} — config dir {}",
+                "could not create starter config: {error}, config dir {}",
                 parent.display()
             ));
         }
         match write_private(path, skeleton) {
             Ok(()) => Some(format!(
-                "starter config created at {} — add an endpoint: /settings in the app, or edit the file",
+                "starter config created at {}, add an endpoint: /settings in the app, or edit the file",
                 path.display()
             )),
             Err(error) => Some(format!("could not write starter config: {error}")),
@@ -995,7 +995,7 @@ impl Config {
 }
 
 /// Writes a config file owner-only: the file may hold a literal API
-/// key, and a umask is not a promise — the reader warns on loose
+/// key, and a umask is not a promise, the reader warns on loose
 /// modes, so the writer must never create one. 0600 at creation
 /// (umask can only strip bits, never add them) and by decree for a
 /// pre-existing file, whose mode `open` would otherwise keep.
@@ -1044,7 +1044,7 @@ mod tests {
         }
     }
 
-    /// Explicit Inherit parses as a value-state, not an absence —
+    /// Explicit Inherit parses as a value-state, not an absence,
     /// and a typo'd marker is an error, never a silent stand-down.
     #[test]
     fn inheritable_holds_a_value_or_the_inherit_marker() {
@@ -1112,11 +1112,11 @@ default_mode = "accept_edits"
             (Some(3), Origin::Project)
         );
         // The private-fetch gate is posture: the repo's overlay may
-        // open it — the user's config still outranks it.
+        // open it, the user's config still outranks it.
         let resolved = empty_user.resolve_allow_private_fetch(Some(&overlay));
         assert_eq!((resolved.value, resolved.origin), (true, Origin::Project));
 
-        // The settle command is the user's alone — an overlay that
+        // The settle command is the user's alone, an overlay that
         // writes one is ignored (a shell command is process, not
         // posture; a cloned repo never configures what runs).
         let resolved = empty_user.resolve_settle_command(Some(&overlay));
@@ -1125,7 +1125,7 @@ default_mode = "accept_edits"
             (None, Origin::Default)
         );
 
-        // The user's config outranks the overlay — even when it sets
+        // The user's config outranks the overlay, even when it sets
         // the opposite.
         let mut user = Config::default();
         user.security.sandbox_bash = Some(false);
@@ -1185,7 +1185,7 @@ default_mode = "accept_edits"
         );
     }
 
-    /// Unknown keys in the repo's overlay are named, not swallowed —
+    /// Unknown keys in the repo's overlay are named, not swallowed,
     /// the file is untrusted input, and a typo that does nothing (or a
     /// key that no longer means anything) should say so.
     #[test]
@@ -1279,7 +1279,7 @@ default_mode = "accept_edits"
         assert_eq!(config.selected_endpoint().unwrap().name, "local");
         assert_eq!(config.resolved_endpoints().len(), 2);
 
-        // Deleting everything removes the default too — "first one
+        // Deleting everything removes the default too, "first one
         // wins" is the absence semantics, not a stale name.
         ConfigEdits::default().save(&path).unwrap();
         let raw = std::fs::read_to_string(&path).unwrap();
@@ -1318,7 +1318,7 @@ default_mode = "accept_edits"
         assert_eq!(config.mcp_servers[0].args, vec!["--verbose"]);
     }
 
-    /// An unparseable file must never be clobbered by a save — the
+    /// An unparseable file must never be clobbered by a save, the
     /// user's hand-edited config survives a bad paste.
     #[test]
     fn save_refuses_to_edit_an_unparseable_file() {
@@ -1334,9 +1334,9 @@ default_mode = "accept_edits"
         );
     }
 
-    /// The panel owns the agents section: every field round-trips —
+    /// The panel owns the agents section: every field round-trips,
     /// including a hand-written `invocation = "user"`, which the form
-    /// doesn't edit but must not drop — and the comment above the
+    /// doesn't edit but must not drop, and the comment above the
     /// section survives like any other user voice.
     #[test]
     fn edits_round_trip_agents_with_pins_and_invocation() {
@@ -1390,7 +1390,7 @@ default_mode = "accept_edits"
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
 
-        // First run: a starter lands, it parses, and it names nothing —
+        // First run: a starter lands, it parses, and it names nothing,
         // no endpoint, provider, model, or key is built in.
         let note = Config::ensure_skeleton(&path).expect("created");
         assert!(note.contains("starter config created"));
@@ -1404,7 +1404,7 @@ default_mode = "accept_edits"
             "skeleton carries no provider or model"
         );
 
-        // Second run: silence — the user's edits are untouchable.
+        // Second run: silence, the user's edits are untouchable.
         std::fs::write(&path, "[[endpoints]]\nname = \"mine\"").unwrap();
         assert!(Config::ensure_skeleton(&path).is_none());
         let raw = std::fs::read_to_string(&path).unwrap();
@@ -1424,7 +1424,7 @@ default_mode = "accept_edits"
             context_window: None,
         });
         config.default_endpoint = Some("ppq".into());
-        // No env mutation (unsafe under edition 2024) — the variable is
+        // No env mutation (unsafe under edition 2024), the variable is
         // simply too improbable for anything to set it.
 
         let warnings = config.key_warnings();

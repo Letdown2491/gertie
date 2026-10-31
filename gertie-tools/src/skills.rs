@@ -1,16 +1,16 @@
-//! Skills: runtime SKILL.md support — the Agent Skills format (name,
+//! Skills: runtime SKILL.md support, the Agent Skills format (name,
 //! description-as-triggers, markdown body), installed as directories and
 //! loaded on demand. Progressive disclosure in three levels:
 //!
 //! 1. the system prompt carries each skill's name + one-line description
-//!    (the context-load budget — description text says *when to use*,
+//!    (the context-load budget, description text says *when to use*,
 //!    never a workflow summary),
 //! 2. `load_skill` returns the full body when the model (or the user,
 //!    via the model) wants the discipline,
 //! 3. supporting files next to SKILL.md are read through the same tool,
 //!    sandboxed to the skill's directory.
 //!
-//! Trust posture: skills are user-installed files — config-level trust —
+//! Trust posture: skills are user-installed files, config-level trust,
 //! but nothing here executes anything. A skill that tells the model to
 //! run a command sends it through `bash` and its permission gate like
 //! any other instruction.
@@ -36,7 +36,7 @@ const MAX_DESCRIPTION: usize = 1024;
 const MAX_BODY_LINES: usize = 500;
 
 /// Parses one SKILL.md. Frontmatter is the two fields we use, scanned
-/// line by line — no YAML dependency, and unknown fields are tolerated.
+/// line by line, no YAML dependency, and unknown fields are tolerated.
 fn parse_skill(dir: &Path) -> Result<Skill, String> {
     let raw = std::fs::read_to_string(dir.join("SKILL.md"))
         .map_err(|error| format!("{}: {error}", dir.display()))?;
@@ -85,7 +85,7 @@ fn parse_skill(dir: &Path) -> Result<Skill, String> {
 
 /// Discovers skills from two roots: the user dir first, the project dir
 /// overriding by name (a project pins its own discipline). A directory
-/// that fails to parse is a warning, never a failed launch — same
+/// that fails to parse is a warning, never a failed launch, same
 /// posture as MCP servers.
 pub fn discover(user_dir: &Path, project_dir: &Path) -> (Vec<Skill>, Vec<String>) {
     let mut warnings = Vec::new();
@@ -100,7 +100,7 @@ pub fn discover(user_dir: &Path, project_dir: &Path) -> (Vec<Skill>, Vec<String>
                 continue;
             }
             match parse_skill(&entry.path()) {
-                // Sort key below: project first, then name — so the
+                // Sort key below: project first, then name, so the
                 // dedup keeps the project's version of a shared name.
                 Ok(skill) => discovered.push((is_project, skill)),
                 Err(error) => warnings.push(format!(
@@ -134,7 +134,7 @@ pub fn index_prompt(skills: &[Skill]) -> String {
          situation matches:\n\n",
     );
     for skill in skills {
-        index.push_str(&format!("- **{}** — {}\n", skill.name, skill.description));
+        index.push_str(&format!("- **{}**, {}\n", skill.name, skill.description));
     }
     index
 }
@@ -212,7 +212,7 @@ impl Tool for LoadSkill {
                 Some(path) => {
                     let target = dir.join(path);
                     // Sandbox: canonicalized target must stay inside the
-                    // skill dir — same escape rule as every other tool.
+                    // skill dir, same escape rule as every other tool.
                     let canonical = target
                         .canonicalize()
                         .map_err(|error| format!("skill file {path}: {error}"))?;
@@ -231,7 +231,7 @@ impl Tool for LoadSkill {
                 let lines = body.lines().count();
                 if lines > MAX_BODY_LINES {
                     return Err(format!(
-                        "SKILL.md is {lines} lines (budget {MAX_BODY_LINES}) — refusing to load; the skill needs trimming"
+                        "SKILL.md is {lines} lines (budget {MAX_BODY_LINES}), refusing to load; the skill needs trimming"
                     ));
                 }
             }

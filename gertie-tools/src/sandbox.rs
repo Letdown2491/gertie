@@ -1,13 +1,13 @@
 //! Kernel sandboxing for bash children, via Landlock.
 //!
-//! Opt-in (`[security] sandbox_bash = true`), default off — the
+//! Opt-in (`[security] sandbox_bash = true`), default off, the
 //! permission gate plus the deny list are the everyday safety net; this
 //! adds a kernel-enforced floor for the approved commands that still
 //! misbehave (or were approved carelessly).
 //!
 //! Posture, fail-closed on purpose: read access to the system, write
 //! access to the workspace and /tmp only. When the kernel can't enforce
-//! (too old, blocked in a container), the spawn **fails** — gertie
+//! (too old, blocked in a container), the spawn **fails**, gertie
 //! never runs a sandboxed command unsandboxed just because the sandbox
 //! was unavailable. `CompatLevel::HardRequirement` is what makes that
 //! guarantee: best-effort would silently downgrade to no sandbox.
@@ -19,7 +19,7 @@ use landlock::{
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 
-/// System paths the child may read. Everything else is unreadable —
+/// System paths the child may read. Everything else is unreadable,
 /// including the workspace, which gets explicit write access below.
 /// Missing paths are filtered out first: with HardRequirement, a rule
 /// for a path that can't be opened is an error, and not every distro
@@ -41,7 +41,7 @@ impl Sandbox {
 
     /// Installs the sandbox into a child command via `pre_exec`: the
     /// ruleset is built and enforced in the child, after fork, before
-    /// exec — restrictions survive exec, so `sh` and everything it
+    /// exec, restrictions survive exec, so `sh` and everything it
     /// runs inherits them. Any error aborts the spawn (fail-closed).
     pub fn apply(&self, command: &mut std::process::Command) -> Result<(), String> {
         let root = self.root.clone();
@@ -83,7 +83,7 @@ fn enforce(root: &Path) -> Result<(), String> {
     if status.ruleset != RulesetStatus::FullyEnforced {
         // Unreachable under HardRequirement (incompatibilities error
         // out), but the check documents the contract and costs nothing.
-        return Err("landlock not fully enforced — refusing to run unsandboxed".into());
+        return Err("landlock not fully enforced, refusing to run unsandboxed".into());
     }
     Ok(())
 }
@@ -108,7 +108,7 @@ mod tests {
         let output = match sandboxed("ls /usr/bin > out.txt && echo ok") {
             Ok(output) => output,
             // Kernel or container without Landlock: not a failure of
-            // the tool — recorded as skipped.
+            // the tool, recorded as skipped.
             Err(_) => {
                 eprintln!("skipped: sandbox unavailable");
                 return;

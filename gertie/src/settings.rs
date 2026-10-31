@@ -1,5 +1,5 @@
 //! Settings: the live configuration, visible and editable in-app.
-//! The config file stays the single source of truth — the panel edits
+//! The config file stays the single source of truth: the panel edits
 //! it in place through `toml_edit` (comments and unknown keys
 //! preserved, see `config::ConfigEdits`), then the workspace reloads
 //! the bootstrap so endpoint changes apply to open chats. MCP and
@@ -26,10 +26,10 @@ pub struct EndpointInfo {
 #[derive(Clone)]
 pub struct SettingsSummary {
     pub endpoints: Vec<EndpointInfo>,
-    /// Landlock sandbox for bash children, as resolved — the user's
-    /// config, else the repo overlay's, else off.
+    /// Landlock sandbox for bash children, as resolved (the user's
+    /// config, else the repo overlay's, else off).
     pub sandbox: bool,
-    /// Where the sandbox setting came from — the label beside the
+    /// Where the sandbox setting came from: the label beside the
     /// switch.
     pub sandbox_origin: crate::config::Origin,
     /// Search backend in force ("brave", "searxng", or "none").
@@ -85,7 +85,7 @@ impl SettingsSummary {
                 .iter()
                 .filter(|agent| agent.invocation == crate::config::Invocation::Model)
                 .map(|agent| match &agent.endpoint {
-                    // A pinned worker announces where it answers from —
+                    // A pinned worker announces where it answers from;
                     // a council seat is meaningless without its endpoint.
                     Some(endpoint) => format!("{}@{}", agent.name, endpoint),
                     None => agent.name.clone(),

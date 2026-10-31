@@ -1,5 +1,5 @@
 # The showcase scenario: prose, a real tool call, and a markdown answer.
-# It exists so UI work never needs a paid model — point a replay
+# It exists so UI work never needs a paid model. Point a replay
 # endpoint's model at this name and watch a full turn render.
 
 [[steps]]
@@ -12,7 +12,7 @@ arguments = '{"path": "README.md"}'
 [[steps]]
 text = """## What I found
 
-The README describes a **native coding-agent harness** — GPU-rendered
+The README describes a **native coding-agent harness**: GPU-rendered
 UI, a headless core that is a plain library, everything local.
 
 | Property | Value |
@@ -25,4 +25,4 @@ The turn you are watching is scripted: the tools really ran, only the
 model is a recording."""
 
 [[steps]]
-text = "All done — zero tokens spent."
+text = "All done, zero tokens spent."

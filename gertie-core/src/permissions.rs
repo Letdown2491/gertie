@@ -1,13 +1,13 @@
 //! The permission broker: one shared registry of pending approval
-//! requests, so prompts from *any* loop — the leader's or a worker's —
+//! requests, so prompts from *any* loop, the leader's or a worker's,
 //! reach the same UI.
 //!
 //! Why this exists: the leader's loop communicates prompts by yielding
 //! `ToolCallRequested`, which works because the UI drains that stream.
-//! A subagent's loop runs *inside a tool* — nobody drains its stream.
+//! A subagent's loop runs *inside a tool*, nobody drains its stream.
 //! Both loops register asks here; the UI subscribes once and answers by
 //! request id. The loop still holds a plain oneshot receiver and awaits
-//! it exactly as before — the broker is the queue in front.
+//! it exactly as before, the broker is the queue in front.
 //!
 //! A dropped request (no answer ever) resolves as a deny in the loop:
 //! when the UI goes away, doing nothing is the safe move.
@@ -36,7 +36,7 @@ pub struct PendingAsk {
 
 pub struct PermissionBroker {
     state: Arc<Mutex<BrokerState>>,
-    /// Worker asks fan out to every subscriber — one per surface
+    /// Worker asks fan out to every subscriber, one per surface
     /// (multiple tabs, a panel, a headless monitor).
     subscribers: Mutex<Vec<tokio::sync::mpsc::UnboundedSender<PendingAsk>>>,
 }
@@ -96,7 +96,7 @@ impl PermissionBroker {
     }
 
     /// The UI answers by id. Returns false if the id is unknown or
-    /// already answered (double click) — harmless either way.
+    /// already answered (double click), harmless either way.
     pub fn respond(&self, id: u64, decision: PermissionDecision) -> bool {
         let sender = {
             let mut state = self.state.lock().unwrap();
@@ -119,7 +119,7 @@ impl PermissionBroker {
     }
 }
 
-/// How a turn's mutating-tool asks resolve. A property of the turn —
+/// How a turn's mutating-tool asks resolve. A property of the turn,
 /// carried on the `TurnSpec`, fixed for its whole life: flipping the
 /// mode mid-turn would change the rules under a running agent, so a
 /// flip applies to the next turn instead.
@@ -134,12 +134,12 @@ pub enum PermissionMode {
     /// base layer.
     #[default]
     Supervised,
-    /// Edit-class work runs unasked — exactly what the checkpoint hook
+    /// Edit-class work runs unasked, exactly what the checkpoint hook
     /// snapshots, so every auto-approved change is reversible. Bash
     /// still asks: it touches the world outside any single file.
     AcceptEdits,
     /// Edits as in AcceptEdits, plus bash that runs inside the Landlock
-    /// sandbox — contained, so contained work needs no chaperone. With
+    /// sandbox, contained, so contained work needs no chaperone. With
     /// the sandbox off, this mode asks like AcceptEdits; it never
     /// pretends a kernel that isn't enforcing is enforcing.
     Auto,
@@ -159,14 +159,14 @@ impl PermissionMode {
     }
 
     /// Whether this mode settles a mutating-tool ask without the
-    /// broker. `checkpointed` — the checkpoint hook will snapshot
+    /// broker. `checkpointed`, the checkpoint hook will snapshot
     /// what the call touches, so the change is reversible;
-    /// `sandboxed_bash` — the process runs bash inside the Landlock
-    /// sandbox; `third_party` — an MCP tool, whose side effects
+    /// `sandboxed_bash`, the process runs bash inside the Landlock
+    /// sandbox; `third_party`, an MCP tool, whose side effects
     /// gertie cannot vouch for. The reversibility argument only
     /// covers gertie's own tools: a third-party tool's notion of a
     /// "path" is its own, so accept-edits and auto never pre-approve
-    /// one — every mode short of full_access asks.
+    /// one, every mode short of full_access asks.
     pub fn auto_allows(&self, checkpointed: bool, sandboxed_bash: bool, third_party: bool) -> bool {
         match self {
             PermissionMode::Supervised => false,
@@ -197,7 +197,7 @@ impl std::str::FromStr for PermissionMode {
 /// The front's active permission mode, shared so worker dispatch can
 /// inherit the leader's turn mode (a worker's `TurnSpec` is built
 /// inside the agent tool, which sees no turn of its own). Set once at
-/// turn start, read at dispatch — never mutated mid-turn.
+/// turn start, read at dispatch, never mutated mid-turn.
 #[derive(Clone, Default)]
 pub struct ModeScope(std::sync::Arc<std::sync::atomic::AtomicU8>);
 

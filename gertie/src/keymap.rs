@@ -3,7 +3,7 @@
 //! The file is a list of `{key, command, when}` rules. Last match wins
 //! (rules bind in file order, and gpui resolves a tie by the rule
 //! added later). The file is created with the defaults on first run;
-//! on later startups new defaults are appended — never replacing a
+//! on later startups new defaults are appended, never replacing a
 //! rule you wrote. Invalid rules (an unknown command, a key gpui can't
 //! parse, an unknown `when`) are ignored at runtime and left in the
 //! file for you to fix; an unparseable file falls back to the
@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Rule {
-    /// The keystroke, gpui syntax — "ctrl-k", "shift-f6".
+    /// The keystroke, gpui syntax, "ctrl-k", "shift-f6".
     key: String,
     /// A command name (see [`COMMANDS`]) or "none" to claim the key
     /// and bind nothing to it.
@@ -33,7 +33,7 @@ const WHEN_CONTEXTS: &[(&str, &str)] = &[
     // Focus is in the composer's input (or a control inside the
     // composer column).
     ("composerFocus", "Composer"),
-    // Focus is in any editable field — the composer, a rename field,
+    // Focus is in any editable field, the composer, a rename field,
     // a settings input.
     ("editableFocus", "Input"),
     // A turn is driving (the context renders only while streaming).
@@ -43,7 +43,7 @@ const WHEN_CONTEXTS: &[(&str, &str)] = &[
 ];
 
 /// Every command a rule may name, with its default binding. `none`
-/// is not here — it is valid in a rule but binds nothing.
+/// is not here, it is valid in a rule but binds nothing.
 pub const COMMANDS: &[&str] = &[
     "palette",
     "close-turn-diff",
@@ -54,7 +54,7 @@ pub const COMMANDS: &[&str] = &[
     "cycle-focus-back",
 ];
 
-/// The default rules, in binding order — the file is created with
+/// The default rules, in binding order, the file is created with
 /// these, and later startups append any the file is missing.
 pub fn default_rules() -> Vec<Rule> {
     [
@@ -87,7 +87,7 @@ fn rule_is_valid(rule: &Rule) -> bool {
     command_ok && when_ok && gpui_kit::Keystroke::parse(&rule.key).is_ok()
 }
 
-/// The binding a rule produces — None for a rule that binds nothing
+/// The binding a rule produces, None for a rule that binds nothing
 /// ("none") or one that failed validation (ignored).
 fn rule_to_binding(rule: &Rule) -> Option<KeyBinding> {
     if !rule_is_valid(rule) || rule.command == "none" {
@@ -111,7 +111,7 @@ fn rule_to_binding(rule: &Rule) -> Option<KeyBinding> {
     })
 }
 
-/// Binds the rules in order — later rules outrank earlier ones at the
+/// Binds the rules in order, later rules outrank earlier ones at the
 /// same context depth (gpui resolves a tie by the binding added
 /// later).
 pub fn bind_rules(rules: &[Rule], cx: &mut App) {
@@ -120,14 +120,14 @@ pub fn bind_rules(rules: &[Rule], cx: &mut App) {
 }
 
 /// Parses the file's rules. A structurally broken file (not TOML, or
-/// `rules` not a list of tables) is an Err — the caller falls back to
+/// `rules` not a list of tables) is an Err, the caller falls back to
 /// the defaults. Invalid rules (unknown command, unparsable key,
-/// unknown `when`, a stray field) are dropped here — ignored, never
-/// fatal — and left in the file untouched for the user to fix.
+/// unknown `when`, a stray field) are dropped here, ignored, never
+/// fatal, and left in the file untouched for the user to fix.
 fn parse_rules(source: &str) -> Result<Vec<Rule>, String> {
     let doc: toml::Table = toml::from_str(source).map_err(|error| error.to_string())?;
     let Some(rules) = doc.get("rules").and_then(|rules| rules.as_array()) else {
-        // No rules at all: a valid file that binds nothing — the
+        // No rules at all: a valid file that binds nothing, the
         // merge decides what to add. (A `rules` key of the wrong
         // shape is structural: `as_array` already said no above only
         // for non-array; a missing key is the same "empty" case.)
@@ -145,7 +145,7 @@ fn parse_rules(source: &str) -> Result<Vec<Rule>, String> {
 
 /// The startup merge: the file's rules, plus any default the file
 /// doesn't cover. A default is not added when
-/// - a rule already names its command (you customized that command —
+/// - a rule already names its command (you customized that command,
 ///   where it lives is your business), or
 /// - a rule claims the same key and `when` (defaults never steal a
 ///   key you've bound, even to "none").
@@ -231,7 +231,7 @@ fn render_file(rules: &[Rule]) -> String {
 
 const HEADER: &str = r#"# gertie keymap. Rules are {key, command, when}; the last matching
 # rule wins. `when` is one of: composerFocus, editableFocus,
-# turnRunning, turnDiffFocus — omit it to match everywhere.
+# turnRunning, turnDiffFocus, omit it to match everywhere.
 # gertie adds new defaults here on upgrade; rules you write are
 # never replaced. Set command = "none" to claim a key and bind
 # nothing to it.
@@ -350,7 +350,7 @@ command = "palette"
 
     #[test]
     fn a_default_never_steals_a_key_a_user_rule_holds() {
-        // The user claimed the f6 slot with "none" — the cycle-focus
+        // The user claimed the f6 slot with "none", the cycle-focus
         // default must not come back.
         let file_rules = vec![Rule {
             key: "f6".into(),

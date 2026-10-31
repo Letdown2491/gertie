@@ -1,4 +1,4 @@
-//! Shared bootstrap for both fronts — the desktop app and `gertie run`:
+//! Shared bootstrap for both fronts, the desktop app and `gertie run`:
 //! config, session store, provider, the tool registry (built-ins,
 //! skills, web, MCP, agent types), broker, snapshots. Everything that
 //! must exist identically no matter which surface you talk to.
@@ -13,21 +13,21 @@ use std::sync::mpsc::channel;
 /// (and its fallback chain), the preferred agent endpoint, the status
 /// label, and the settings snapshot. Tabs re-read these on apply; MCP
 /// connections, the store, and already-built worker agents keep their
-/// setup until restart — the label and the panel say so.
+/// setup until restart, the label and the panel say so.
 #[derive(Clone)]
 pub struct Reloaded {
-    /// The full config as re-read — the settings editor edits the
+    /// The full config as re-read, the settings editor edits the
     /// real fields, not a summary of them.
     pub config: Arc<crate::config::Config>,
     pub provider: Option<Arc<AnyProvider>>,
     pub agent_endpoint: Option<gertie_providers::Endpoint>,
     pub label: String,
 
-    /// Just the identity — `endpoint · model` — for the footer,
+    /// Just the identity, `endpoint · model`, for the footer,
     /// where the capability suffix (skills, agents) and key warnings
     /// would be noise. Headless keeps the full label on stderr.
     pub model_label: String,
-    /// Discovered prompt templates — `/name` expands from the
+    /// Discovered prompt templates, `/name` expands from the
     /// composer. Reload keeps the load-time set (templates don't
     /// depend on endpoint config).
     pub templates: Vec<gertie_tools::templates::Template>,
@@ -36,7 +36,7 @@ pub struct Reloaded {
 
 pub struct Bootstrap {
     pub config: crate::config::Config,
-    /// The `--config` override, if any — reload reads the same file
+    /// The `--config` override, if any, reload reads the same file
     /// the original load did.
     config_path: Option<PathBuf>,
     /// Config load/parse failure, if any. The GUI reports it in the
@@ -49,10 +49,10 @@ pub struct Bootstrap {
     reloaded: std::sync::RwLock<Reloaded>,
     pub tools: gertie_core::ToolRegistry,
     pub broker: Arc<gertie_core::PermissionBroker>,
-    /// The front's current session — subagent dispatch reads it to link
+    /// The front's current session, subagent dispatch reads it to link
     /// worker runs to the chat that dispatched them.
     pub session_scope: gertie_core::SessionScope,
-    /// The front's active permission mode — the chat sets it per turn,
+    /// The front's active permission mode, the chat sets it per turn,
     /// worker dispatch reads it so workers inherit the posture.
     pub mode_scope: gertie_core::ModeScope,
     /// Whether bash runs inside the Landlock sandbox. Static config,
@@ -60,10 +60,10 @@ pub struct Bootstrap {
     pub sandbox_bash: bool,
     /// The mode new sessions open in (`[permissions] default_mode`).
     pub default_mode: gertie_core::PermissionMode,
-    /// The repo's own overlay file, if one loads — re-resolved
+    /// The repo's own overlay file, if one loads, re-resolved
     /// against the live config on every reload.
     overlay: Option<crate::config::ProjectOverlay>,
-    /// The overlay's load/parse failure, if any — reported in the
+    /// The overlay's load/parse failure, if any, reported in the
     /// label and the doctor, never fatal.
     pub overlay_error: Option<String>,
     pub snapshots: Option<Arc<gertie_core::SnapshotStore>>,
@@ -71,17 +71,17 @@ pub struct Bootstrap {
     /// Human-readable status line: endpoint, warnings, capability counts.
     pub workspace_root: PathBuf,
     /// The label tail that doesn't change on an endpoint switch:
-    /// skills, MCP connections, agent types — set up once at load.
+    /// skills, MCP connections, agent types, set up once at load.
     capability_suffix: String,
     skill_count: usize,
     /// Tool names that don't capture the workspace root (web, history,
-    /// MCP, skills) — a re-rooted registry carries these over as-is
+    /// MCP, skills), a re-rooted registry carries these over as-is
     /// instead of rebuilding or reconnecting them.
     root_independent: Vec<String>,
     /// The skills index prompt section, shared by every registry's
     /// system prompt (skills are repo content, identical per worktree).
     skill_index: String,
-    /// Discovered prompt templates — `/name` expansion in the
+    /// Discovered prompt templates, `/name` expansion in the
     /// composer. Load-time setup; reload carries the same set.
     pub templates: Vec<gertie_tools::templates::Template>,
 }
@@ -92,14 +92,14 @@ pub struct Bootstrap {
 pub struct Switched {
     pub tools: gertie_core::ToolRegistry,
     pub system_prompt: Option<String>,
-    /// The canonicalized root — containment checks and the footer's
+    /// The canonicalized root, containment checks and the footer's
     /// word mean the one true path.
     pub workspace_root: PathBuf,
     pub templates: Vec<gertie_tools::templates::Template>,
     /// Whether bash sandboxes in the new root (the live config's
     /// answer, resolved against the *new* root's overlay).
     pub sandbox_bash: bool,
-    /// Overlay and discovery problems for the new root — the chat
+    /// Overlay and discovery problems for the new root, the chat
     /// surfaces them as transcript notices, never silently.
     pub warnings: Vec<String>,
 }
@@ -123,7 +123,7 @@ impl Bootstrap {
         self.reloaded.read().unwrap().model_label.clone()
     }
 
-    /// The settle reclaim command in force — the live config's, else
+    /// The settle reclaim command in force, the live config's, else
     /// the repo overlay's (your config outranks the project's).
     pub fn settle_command(&self) -> Option<String> {
         self.live_config()
@@ -183,7 +183,7 @@ impl Bootstrap {
         self.reloaded.read().unwrap().clone()
     }
 
-    /// Rebuilds the live parts from the config file — what a settings
+    /// Rebuilds the live parts from the config file, what a settings
     /// save calls to make endpoint changes apply to open chats without
     /// a restart. MCP servers, sandbox, and existing worker agents are
     /// load-time setup; the label keeps saying what's live.
@@ -199,7 +199,7 @@ impl Bootstrap {
             .unwrap_or_else(|| "no endpoint configured".to_string());
         let mut label = model_label.clone();
         for warning in config.key_warnings() {
-            label.push_str(&format!(" — ⚠ {warning}"));
+            label.push_str(&format!(", ⚠ {warning}"));
         }
         label.push_str(&self.capability_suffix);
         let (provider, agent_endpoint) = provider_chain(&config);
@@ -246,13 +246,13 @@ impl Bootstrap {
         };
         // The workspace is wherever gertie was launched; tools resolve
         // paths against it and checkpoints land beside the session
-        // store. The repo's own overlay is found (or not) here —
+        // store. The repo's own overlay is found (or not) here,
         // before the label, so its problems surface with the rest.
         let workspace_root = std::env::current_dir().unwrap_or_else(|_| ".".into());
         let (overlay, overlay_error) = crate::config::Config::load_project_overlay(&workspace_root);
         let endpoint = config.selected_endpoint();
         let model_label = if let Some(error) = &config_error {
-            format!("config error — {error}")
+            format!("config error, {error}")
         } else if let Some(note) = &skeleton_note {
             note.clone()
         } else {
@@ -263,13 +263,13 @@ impl Bootstrap {
         };
         let mut label = model_label.clone();
         for warning in config.key_warnings() {
-            label.push_str(&format!(" — ⚠ {warning}"));
+            label.push_str(&format!(", ⚠ {warning}"));
         }
         if let Some(error) = &overlay_error {
-            label.push_str(&format!(" — ⚠ project overlay: {error}"));
+            label.push_str(&format!(", ⚠ project overlay: {error}"));
         }
         // Everything appended from here on (skills, MCP, agents) is
-        // load-time setup — the reload path reuses it verbatim as the
+        // load-time setup, the reload path reuses it verbatim as the
         // label tail, since only endpoints change live.
         let capability_start = label.len();
 
@@ -304,9 +304,9 @@ impl Bootstrap {
         };
 
         // The startup sweep: chats idle past the configured days come
-        // back settled — state only, never the reclaim command (that
+        // back settled, state only, never the reclaim command (that
         // runs when a human presses settle). Skipped entirely until
-        // something opts in — your config or the repo's overlay.
+        // something opts in, your config or the repo's overlay.
         let auto_settle = config.resolve_auto_settle_days(overlay.as_ref());
         if let Some(days) = auto_settle.value
             && days > 0
@@ -324,7 +324,7 @@ impl Bootstrap {
                 }
             }
         });
-        // Sandbox: opt-in Landlock isolation for bash children —
+        // Sandbox: opt-in Landlock isolation for bash children,
         // yours, else the repo overlay's, else off.
         let sandbox = config
             .resolve_sandbox_bash(overlay.as_ref())
@@ -367,10 +367,10 @@ impl Bootstrap {
             root_independent.push("load_skill".into());
         }
         for warning in &skill_warnings {
-            label.push_str(&format!(" — ⚠ {warning}"));
+            label.push_str(&format!(", ⚠ {warning}"));
         }
 
-        // Prompt templates: the same two-root convention as skills —
+        // Prompt templates: the same two-root convention as skills,
         // `/name` in the composer expands from a file; the builtins
         // /compact and /export are UI-side and always win. Discovery
         // problems are warnings, never a failed launch.
@@ -385,16 +385,16 @@ impl Bootstrap {
         let (templates, template_warnings) =
             gertie_tools::templates::discover(&templates_user, &templates_project);
         for warning in builtin_template_warnings.iter().chain(&template_warnings) {
-            label.push_str(&format!(" — ⚠ {warning}"));
+            label.push_str(&format!(", ⚠ {warning}"));
         }
 
         // The system prompt: identity, the one policy paragraph the model
-        // must know, the skill index. Terse by the two-loads rule — every
+        // must know, the skill index. Terse by the two-loads rule, every
         // line is context paid on every turn.
         let system_prompt = system_prompt_for(&workspace_root, &skill_index);
 
         // Web tools: fetch always (private-network targets gated by
-        // the user's config — the model may not choose to open them);
+        // the user's config, the model may not choose to open them);
         // search gracefully-disabled unless a backend resolves; history
         // search rides the session store.
         let map = Arc::get_mut(&mut tools).expect("registry not yet shared");
@@ -409,7 +409,7 @@ impl Bootstrap {
             Some(search) => match search.to_backend() {
                 Ok(backend) => backend,
                 Err(error) => {
-                    label.push_str(&format!(" — ⚠ search: {error}"));
+                    label.push_str(&format!(", ⚠ search: {error}"));
                     gertie_tools::web::WebSearch::unconfigured()
                 }
             },
@@ -424,12 +424,12 @@ impl Bootstrap {
         root_independent.push("search_history".into());
 
         // MCP servers connect at startup; a server that won't start is a
-        // status-line warning, never a failed launch — gertie's local
+        // status-line warning, never a failed launch, gertie's local
         // tools carry the session alone if needed.
         if !config.mcp_servers.is_empty() {
             // MCP servers connect in parallel: startup costs the
             // slowest server's own connect time, not the sum. npm-based
-            // servers legitimately take tens of seconds to boot —
+            // servers legitimately take tens of seconds to boot,
             // serially, each added one to the wait. Each thread owns
             // its server's config (cheap clones); answers come back
             // through a channel and apply in config order, so the
@@ -497,13 +497,13 @@ impl Bootstrap {
                         }
                         label.push_str(&format!(" · mcp:{}×{count}", server.name));
                     }
-                    Err(error) => label.push_str(&format!(" — ⚠ {error}")),
+                    Err(error) => label.push_str(&format!(", ⚠ {error}")),
                 }
             }
         }
 
         // Constructing the provider spins up its tokio runtime; do it
-        // once. Every configured endpoint rides the provider — the
+        // once. Every configured endpoint rides the provider, the
         // selected one first, then same-wire endpoints as fallbacks
         // when an endpoint dies before producing content (model names
         // don't translate across wires, so the chain never switches).
@@ -519,7 +519,7 @@ impl Bootstrap {
 
         // read_session: the model's way back into the record a context
         // compaction selected away. Scoped to the front's open session
-        // — the same scope worker dispatch uses for lineage — and
+        //, the same scope worker dispatch uses for lineage, and
         // read-only, so it auto-runs.
         {
             let map = Arc::get_mut(&mut tools).expect("registry not yet shared");
@@ -534,7 +534,7 @@ impl Bootstrap {
         }
 
         // Agent types: each model-invoked type becomes an agent_{name}
-        // tool. Construction order is safe either way — worker registries
+        // tool. Construction order is safe either way, worker registries
         // strip every agent_* tool, so workers can never see each other.
         if let (Some(endpoint), Some(leader_provider)) = (&agent_endpoint, &provider) {
             // The shipped registry first; a config `[[agents]]` entry with
@@ -543,7 +543,7 @@ impl Bootstrap {
             // inherit the leader provider.
             let (types, type_warnings) = agent_types(&config, endpoint);
             for warning in type_warnings {
-                label.push_str(&format!(" — ⚠ {warning}"));
+                label.push_str(&format!(", ⚠ {warning}"));
             }
             // Build first (borrowing `tools` immutably), insert after.
             let mut additions: Vec<(String, Arc<dyn gertie_core::Tool>)> = Vec::new();
@@ -553,7 +553,7 @@ impl Bootstrap {
                         Ok(backend) => backend,
                         Err(error) => {
                             label.push_str(&format!(
-                                " — ⚠ agent {}: {error}",
+                                ", ⚠ agent {}: {error}",
                                 target.agent_type.name
                             ));
                             continue;
@@ -653,7 +653,7 @@ impl Bootstrap {
 
         // Skills: the user dir rides along; the project dir is the new
         // root's. The index and the load_skill tool rebuild from the
-        // fresh discovery — the prompt must promise what the registry
+        // fresh discovery, the prompt must promise what the registry
         // can deliver.
         let skills_user = self.skills_user_dir();
         let builtin_warnings = materialize_builtin_skills(&skills_user, skills_user.parent());
@@ -687,7 +687,7 @@ impl Bootstrap {
         );
 
         // Agent tools rebuild against the new base, exactly as a
-        // worktree tab's do — a worker dispatched from this chat
+        // worktree tab's do, a worker dispatched from this chat
         // works in the tree the chat works in.
         if let (Some(endpoint), Some(leader_provider)) = (self.agent_endpoint(), self.provider()) {
             let (types, type_warnings) = agent_types(&self.config, &endpoint);
@@ -738,7 +738,7 @@ impl Bootstrap {
     /// built-ins are rebuilt (they capture the workspace root), agent
     /// tools are rebuilt against the new base (a worker dispatched from
     /// this registry works in the same tree), and root-independent
-    /// tools — web, history, MCP connections, skills — are carried over
+    /// tools, web, history, MCP connections, skills, are carried over
     /// as-is rather than duplicated. Shared infrastructure (broker,
     /// store, snapshots) is untouched: one approval queue, one history.
     pub fn registry_for_root(&self, root: &Path) -> (gertie_core::ToolRegistry, Option<String>) {
@@ -797,7 +797,7 @@ impl Bootstrap {
 
 /// The provider over every configured endpoint (selected first, then
 /// same-wire fallbacks), plus the preferred endpoint for agent-type
-/// model overrides. Shared by `load` and `reload` — an endpoint
+/// model overrides. Shared by `load` and `reload`, an endpoint
 /// switch must produce exactly what a restart would have.
 fn provider_chain(
     config: &crate::config::Config,
@@ -824,7 +824,7 @@ fn provider_chain(
 
 /// An agent type plus the endpoint its worker talks to. `None` = the
 /// leader's provider (built-ins, and config agents that pin nothing);
-/// `Some` = a dedicated single-endpoint provider — a model override on
+/// `Some` = a dedicated single-endpoint provider, a model override on
 /// the leader's endpoint, or a pin to a different configured endpoint
 /// (a different provider or wire) entirely.
 struct AgentTarget {
@@ -835,7 +835,7 @@ struct AgentTarget {
 /// The shipped agent types first; a config `[[agents]]` entry with a
 /// matching name replaces the built-in (and may pin its own model or
 /// endpoint), extras are added on top. A pin to an endpoint that isn't
-/// configured is a warning and the entry is skipped — the built-in
+/// configured is a warning and the entry is skipped, the built-in
 /// keeps its slot, because a council member that silently answers as
 /// some other model is worse than a missing one. Warnings come back
 /// for the caller to surface.
@@ -867,7 +867,7 @@ fn agent_types(
                 }
                 None => {
                     warnings.push(format!(
-                        "agent {}: endpoint {name:?} is not configured — skipping",
+                        "agent {}: endpoint {name:?} is not configured, skipping",
                         agent.name
                     ));
                     continue;
@@ -904,7 +904,7 @@ fn agent_types(
 
 /// What a dispatched worker talks to: its provider and the context
 /// window its compaction should assume. A pinned worker gets exactly
-/// its own endpoint — no fallback chain — so a council member fails
+/// its own endpoint, no fallback chain, so a council member fails
 /// loudly instead of quietly answering as some other model.
 fn worker_backend(
     target: &AgentTarget,
@@ -922,7 +922,7 @@ fn worker_backend(
 }
 
 /// The voice block: always on, part of every request. This is what
-/// keeps chat replies from reading like chatbot output — the writing
+/// keeps chat replies from reading like chatbot output, the writing
 /// skill carries the full discipline for kept prose, but a two-line
 /// answer never loads a skill, so the default lives here.
 const VOICE_SECTION: &str = "## Voice\n\n\
@@ -932,14 +932,14 @@ const VOICE_SECTION: &str = "## Voice\n\n\
      hope this helps\"). No \"it's not X, it's Y\" contrasts. No forced \
      triples. Em dashes: at most one per paragraph, never in a row. No \
      bold labels on list items; headings in sentence case. Plain verbs \
-     (is, has — not \"serves as\", \"boasts\"). Specifics beat \
+     (is, has, not \"serves as\", \"boasts\"). Specifics beat \
      significance: a fact, never a testament. Vary sentence length. For \
-     prose the reader will keep — docs, READMEs, commit messages — load \
+     prose the reader will keep, docs, READMEs, commit messages, load \
      the writing skill.";
 
 /// The system prompt: identity, the one policy paragraph the model
 /// must know, the voice block, the skill index. Terse by the two-loads
-/// rule — every line is context paid on every turn.
+/// rule, every line is context paid on every turn.
 fn system_prompt_for(root: &Path, skill_index: &str) -> Option<String> {
     let mut prompt = format!(
         "You are gertie, a coding agent working in {}.\n\
@@ -958,7 +958,7 @@ fn system_prompt_for(root: &Path, skill_index: &str) -> Option<String> {
 }
 
 /// The built-in writing skill, embedded at compile time and
-/// materialized into the user skills dir on launch — write-if-absent,
+/// materialized into the user skills dir on launch, write-if-absent,
 /// so from the first run the file is the user's to edit or shadow
 /// (a project skill named `writing` overrides it, same rule as for
 /// any other skill). Same posture as the starter config.toml.
@@ -967,7 +967,7 @@ const COUNCIL_SKILL: &str = include_str!("skills/council/SKILL.md");
 const EXPLAIN_TEMPLATE: &str = include_str!("templates/explain.md");
 const COMMIT_TEMPLATE: &str = include_str!("templates/commit.md");
 
-/// Writes the built-in templates if absent — same write-if-absent
+/// Writes the built-in templates if absent, same write-if-absent
 /// contract as the writing skill: a user edit is theirs, and survives
 /// every launch. Returns warnings, never a failed launch.
 fn materialize_builtin_templates(templates_user: &Path) -> Vec<String> {
@@ -989,7 +989,7 @@ fn materialize_builtin_templates(templates_user: &Path) -> Vec<String> {
     warnings
 }
 
-/// Write-if-absent materialization of one built-in skill directory —
+/// Write-if-absent materialization of one built-in skill directory,
 /// same contract as the starter config.toml: the user's edit (or a
 /// project shadow) is theirs and survives every launch. Returns
 /// warnings, never a failed launch.
@@ -1029,7 +1029,7 @@ fn materialize_builtin_skills(skills_user: &Path, user_config_dir: Option<&Path>
             }
         }
         // No user sample: a stale cache would speak in a deleted
-        // voice — remove it.
+        // voice, remove it.
         _ => {
             if let Err(error) = std::fs::remove_file(&cache)
                 && error.kind() != std::io::ErrorKind::NotFound
@@ -1118,7 +1118,7 @@ mod tests {
         assert!(prompt.contains("## Voice"));
 
         // The skill index still appends when present.
-        let prompt = system_prompt_for(Path::new("/w"), "## Skills\n\n- **x** — y\n").unwrap();
+        let prompt = system_prompt_for(Path::new("/w"), "## Skills\n\n- **x**, y\n").unwrap();
         assert!(prompt.contains("## Voice"));
         assert!(prompt.contains("**x**"));
     }
@@ -1190,7 +1190,7 @@ mod tests {
         assert_eq!(pinned.model, "glm-5.3-flash");
 
         // The broken pin: a warning, and the built-in review keeps its
-        // slot on the leader's provider — never a silent substitute.
+        // slot on the leader's provider, never a silent substitute.
         assert!(
             warnings
                 .iter()

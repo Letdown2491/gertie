@@ -1,4 +1,4 @@
-//! Anthropic Messages API adapter — the second wire, and the honest
+//! Anthropic Messages API adapter, the second wire, and the honest
 //! test of whether the [`Provider`] trait is vendor-neutral. Everything
 //! vendor-specific dies here: the request body (system is top-level,
 //! `max_tokens` is required, tool results ride user messages), the SSE
@@ -78,7 +78,7 @@ pub(crate) fn wire_messages(request: &Request) -> (Option<String>, serde_json::V
                 }
             }
             gertie_core::Role::User => {
-                // Attachments ride as typed blocks, text first —
+                // Attachments ride as typed blocks, text first,
                 // Anthropic's multimodal order. Images go as image
                 // blocks, PDFs as document blocks. A data URL that
                 // doesn't parse (shouldn't happen; the UI builds them)
@@ -131,7 +131,7 @@ pub(crate) fn wire_messages(request: &Request) -> (Option<String>, serde_json::V
                 }
                 for call in &message.tool_calls {
                     // `input` must be an object; an unparseable arguments
-                    // string is the model's mistake — hand it through as
+                    // string is the model's mistake. Hand it through as
                     // an empty one rather than inventing content.
                     let input = serde_json::from_str::<serde_json::Value>(&call.arguments)
                         .ok()
@@ -219,10 +219,10 @@ impl Anthropic {
 
         let status = response.status();
         if status.as_u16() == 401 || status.as_u16() == 403 {
-            return Outcome::Fatal(format!("auth rejected ({status}) — check the API key"));
+            return Outcome::Fatal(format!("auth rejected ({status}): check the API key"));
         }
         // 429 is the rate limit: own outcome, terminal as Limited. 529
-        // is Anthropic's overloaded signal — a server blip, retried as
+        // is Anthropic's overloaded signal (a server blip), retried as
         // a transient.
         if status.as_u16() == 429 {
             let detail = response.text().await.unwrap_or_default();
@@ -256,7 +256,7 @@ impl gertie_core::Provider for Anthropic {
                 let (proxy, mut proxy_rx) = tokio::sync::mpsc::unbounded_channel();
                 let request = request.clone();
                 let driver = tokio::spawn(async move {
-                    // One endpoint's full retry policy — silent retries
+                    // One endpoint's full retry policy: silent retries
                     // (an Event::Error is terminal for the turn), the
                     // same contract as the OpenAI envelope. The proxy
                     // sender is owned here so its drop marks the end of
@@ -314,10 +314,10 @@ impl gertie_core::Provider for Anthropic {
                     }
                     Err(Terminal::Error(message)) => last_error = Some(message),
                     // A limit isn't an endpoint failure to fall back
-                    // from — other endpoints share the same account.
+                    // from. Other endpoints share the same account.
                     Err(Terminal::Limited(message)) => {
                         let _ = sender.send(Event::Limited {
-                            message: format!("rate limited — {message}"),
+                            message: format!("rate limited: {message}"),
                         });
                         return;
                     }
@@ -325,7 +325,7 @@ impl gertie_core::Provider for Anthropic {
             }
             let detail = last_error.unwrap_or_else(|| "no endpoints configured".into());
             let _ = sender.send(Event::Error {
-                message: format!("all endpoints failed — {detail}"),
+                message: format!("all endpoints failed: {detail}"),
             });
         });
         Box::pin(UnboundedReceiverStream::new(receiver))

@@ -15,7 +15,7 @@ pub fn run() {
 
 /// `run`, with the `--config` override from the CLI.
 pub fn run_with(config_path: Option<std::path::PathBuf>) {
-    // The bootstrap carries config errors in its label — a GUI user
+    // The bootstrap carries config errors in its label; a GUI user
     // never sees stderr, so the window reports them.
     let boot = Arc::new(crate::bootstrap::Bootstrap::load(config_path.as_deref()));
 
@@ -24,12 +24,12 @@ pub fn run_with(config_path: Option<std::path::PathBuf>) {
         gpui_kit::init(cx);
         // The user-editable keymap: gertie's own bindings (the
         // palette trigger, recall, the focus cycle, …) come from
-        // keymap.toml — created with the defaults on first run, new
+        // keymap.toml, created with the defaults on first run; new
         // defaults appended on upgrade, user rules never replaced.
         // The kit's own component keys bind themselves in init.
         crate::keymap::load_and_bind(cx);
-        // The persisted theme choice — dark unless the user said
-        // otherwise (UI state, not config-file material).
+        // The persisted theme choice (dark unless the user said
+        // otherwise; UI state, not config-file material).
         let theme = crate::settings::load_theme().unwrap_or(gpui_kit::component::ThemeMode::Dark);
         gpui_kit::component::Theme::change(theme, None, cx);
         open_chat_window(boot.clone(), cx);

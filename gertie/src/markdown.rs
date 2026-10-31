@@ -1,7 +1,7 @@
 //! Markdown rendering for the transcript.
 //!
-//! A streaming coding agent emits real markdown — headings, lists, tables,
-//! fences, emphasis, links — and reading raw asterisks in the chat pane is
+//! A streaming coding agent emits real markdown, headings, lists, tables,
+//! fences, emphasis, links, and reading raw asterisks in the chat pane is
 //! hostile. This module parses blocks (line-based, tolerant of partial
 //! input) and renders them as native elements; inline spans become styled
 //! text runs, so `**bold**` looks bold *while it streams*, not only after.
@@ -11,7 +11,7 @@
 //! Deliberately not a CommonMark engine: no reference links, no setext
 //! headings, no nested-block arbitrary depth. It covers what models
 //! actually emit, stays safe on unclosed constructs (an unclosed fence
-//! renders its tail as code — mid-stream that is exactly what it is), and
+//! renders its tail as code, mid-stream that is exactly what it is), and
 //! costs no dependency.
 
 use std::ops::Range;
@@ -123,7 +123,7 @@ pub fn parse_blocks(text: &str) -> Vec<Block> {
         }
 
         // Blockquote: consecutive `>` lines, marker stripped. The strip
-        // must always consume the `>` — falling back to the original row
+        // must always consume the `>`, falling back to the original row
         // would leave the inner text starting with `>`, and rendering
         // re-parses quote content, recursing forever (the stack overflow
         // of Oct 25). Nested markers flatten to one level.
@@ -159,7 +159,7 @@ pub fn parse_blocks(text: &str) -> Vec<Block> {
         }
 
         // List: consecutive item lines (plus indented continuations).
-        // The raw line goes in — `list_item` reads the indent itself to
+        // The raw line goes in, `list_item` reads the indent itself to
         // derive the nesting level.
         if let Some(item) = list_item(line) {
             let mut items = vec![item];
@@ -197,7 +197,7 @@ pub fn parse_blocks(text: &str) -> Vec<Block> {
         }
 
         // Paragraph: accumulate until a blank line or the start of
-        // another block. The first line is consumed unconditionally —
+        // another block. The first line is consumed unconditionally,
         // a line that "starts a block" no branch handled (a `|` row
         // with no separator line after it) is just paragraph text.
         let mut prose = String::new();
@@ -367,8 +367,8 @@ impl Flags {
 /// Scans one run of text for inline markers. Markers are *stripped*: the
 /// cleaned text is appended to `out_text` and the returned ranges index
 /// into it, so `**bold**` displays as `bold` with a bold range. Unmarked
-/// runs flush as maximal spans carrying the current flags — that is how
-/// plain text inside `**…**` or `[…](…)` inherits its treatment — and
+/// runs flush as maximal spans carrying the current flags, that is how
+/// plain text inside `**…**` or `[…](…)` inherits its treatment, and
 /// with no flags active they push nothing: plain is the absence of
 /// styling. Links and code suppress nesting inside them.
 fn scan_spans(
@@ -389,7 +389,7 @@ fn scan_spans(
         let rest = &text[i..];
 
         // Inline code: the ticks drop out; the span between them is kept
-        // verbatim — no nesting inside.
+        // verbatim, no nesting inside.
         if bytes[i] == b'`'
             && let Some(close) = rest[1..].find('`')
         {
@@ -416,7 +416,7 @@ fn scan_spans(
                 out.push((run_start..out_text.len(), flags.kind()));
             }
             let inner = &rest[2..2 + close];
-            // Emphasis content neither starts nor ends with a space —
+            // Emphasis content neither starts nor ends with a space,
             // `** bold**` is literal text, per CommonMark.
             if !inner.is_empty() && !inner.starts_with(' ') && !inner.ends_with(' ') {
                 let inner_flags = if flags.link {
@@ -438,7 +438,7 @@ fn scan_spans(
             continue;
         }
 
-        // ~~strikethrough~~: atomic — the outer markers drop, the inner
+        // ~~strikethrough~~: atomic, the outer markers drop, the inner
         // text keeps whatever markers it has, struck through whole.
         if rest.starts_with("~~")
             && let Some(close) = rest[2..].find("~~")
@@ -458,7 +458,7 @@ fn scan_spans(
         // *italic* / _italic_: `_` only at word boundaries, so
         // snake_case survives as plain text. `close` is the closer's
         // index in `rest`: the inner text is `rest[1..close]`, and the
-        // closer is one char — `close + 1` consumes it and nothing more.
+        // closer is one char, `close + 1` consumes it and nothing more.
         if (bytes[i] == b'*' || bytes[i] == b'_')
             && opens_emphasis(text, i, bytes[i])
             && let Some(close) = emphasis_close(rest, bytes[i])
@@ -481,7 +481,7 @@ fn scan_spans(
             continue;
         }
 
-        // Escaped punctuation: the backslash drops, the char stays — as
+        // Escaped punctuation: the backslash drops, the char stays, as
         // part of the surrounding run, so an escaped `*` inside bold
         // stays bold.
         if bytes[i] == b'\\' && i + 1 < bytes.len() {
@@ -530,7 +530,7 @@ fn scan_spans(
             continue;
         }
 
-        // Fall through: copy one whole character — a byte-wise advance
+        // Fall through: copy one whole character, a byte-wise advance
         // would slice multi-byte characters and panic on the next &text[i..].
         let char_len = text[i..].chars().next().map_or(1, char::len_utf8);
         out_text.push_str(&text[i..i + char_len]);
@@ -583,7 +583,7 @@ fn opens_emphasis(text: &str, at: usize, marker: u8) -> bool {
 
 /// Distance from `rest[1..]` to the matching emphasis closer, rejecting
 /// empty and whitespace-opened spans. Doubled markers (`**`) are skipped
-/// rather than treated as closers — they belong to the bold pass, and
+/// rather than treated as closers, they belong to the bold pass, and
 /// `*em **strong** tail*` must close on the final `*`.
 fn emphasis_close(rest: &str, marker: u8) -> Option<usize> {
     let bytes = rest.as_bytes();
@@ -617,7 +617,7 @@ fn emphasis_close(rest: &str, marker: u8) -> Option<usize> {
 // ---------------------------------------------------------------------------
 
 /// Renders markdown text as one element: blocks stacked with breathing
-/// room between them — a wall of flush paragraphs reads like a log, not
+/// room between them, a wall of flush paragraphs reads like a log, not
 /// prose.
 pub fn render(text: &str, cx: &App) -> AnyElement {
     let blocks = parse_blocks(text)
@@ -637,7 +637,7 @@ pub fn render(text: &str, cx: &App) -> AnyElement {
 }
 
 /// Per-row parse memoization for the transcript. The view re-renders
-/// every frame, and each frame used to re-parse every visible message —
+/// every frame, and each frame used to re-parse every visible message,
 /// during streaming, the whole parser ran on every row on every token.
 /// Turn text is append-only, so a (row, text length) match means the
 /// parse is still exactly this text's: the growing row re-parses per
@@ -668,7 +668,7 @@ impl ParseCache {
         render_parsed(&blocks, cx)
     }
 
-    /// A reload replaces every turn — no cached parse can survive it.
+    /// A reload replaces every turn, no cached parse can survive it.
     pub fn clear(&mut self) {
         self.rows.clear();
     }
@@ -817,7 +817,7 @@ fn render_table(header: &[String], rows: &[Vec<String>], cx: &App) -> AnyElement
     table.into_any_element()
 }
 
-/// One line of prose with inline markers resolved — headings, list items,
+/// One line of prose with inline markers resolved, headings, list items,
 /// and tool-card labels all flow through here.
 pub fn inline_element(text: &str, cx: &App) -> AnyElement {
     if text.is_empty() {
@@ -845,7 +845,7 @@ pub fn inline_element(text: &str, cx: &App) -> AnyElement {
                 }),
                 // Inline code keeps the surrounding font (HighlightStyle
                 // can't swap families) but gets a chip: tinted background,
-                // plain foreground — the accent on muted pairs badly in
+                // plain foreground, the accent on muted pairs badly in
                 // the light theme (the word vanished into the chip).
                 SpanKind::Code => Some(HighlightStyle {
                     background_color: Some(theme.muted),
@@ -1043,7 +1043,7 @@ mod tests {
         assert_eq!(spans[0].1, SpanKind::Bold);
         assert_eq!(&clean[spans[0].0.clone()], "Fleet-grade safety");
 
-        // A link's plumbing drops entirely — text and destination stay.
+        // A link's plumbing drops entirely, text and destination stay.
         let (clean, spans) = scan_inline("see [the docs](https://example.com/x) now");
         assert_eq!(clean, "see the docs now");
         let links: Vec<&str> = spans
@@ -1125,7 +1125,7 @@ mod tests {
             "…set the key",
             "étoile *em* étoile",
             "🦀 **bold** 🦀",
-            "café — *emphasised* — naïve",
+            "café, *emphasised*, naïve",
             "\\*escaped* then … more",
         ] {
             let (clean, spans) = scan_inline(text);

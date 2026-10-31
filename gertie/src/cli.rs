@@ -1,12 +1,12 @@
 //! Argument parsing, hand-rolled: the surface is four flags and one
-//! subcommand — a dependency would out-weigh the grammar.
+//! subcommand; a dependency would out-weigh the grammar.
 
 use std::path::PathBuf;
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 const USAGE: &str = "\
-gertie — a fast, native coding-agent harness
+gertie: a fast, native coding-agent harness
 
 USAGE:
     gertie [OPTIONS]                 launch the desktop app
@@ -23,7 +23,7 @@ OPTIONS:
     -V, --version      print version
 
 run approval: mutating calls print the tool and arguments on stderr and
-wait — Enter/y approves, anything else denies. Without a terminal, runs
+wait. Enter/y approves, anything else denies. Without a terminal, runs
 deny mutations unless --yes is given. Reads are always auto-approved.";
 
 /// What the command line asked for.
@@ -113,7 +113,7 @@ pub fn parse(arguments: &[String]) -> Result<Command, UsageError> {
     }
 
     if !run {
-        // Positional words without `run` are a mistake — the GUI takes
+        // Positional words without `run` are a mistake: the GUI takes
         // no prompt. Say so rather than silently ignoring them.
         if !positional.is_empty() {
             return Err(UsageError(format!(

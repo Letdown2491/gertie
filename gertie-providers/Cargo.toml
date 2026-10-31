@@ -13,11 +13,11 @@ bytes = "1"
 futures-core = { version = "0.3", features = ["alloc"] }
 futures-util = { version = "0.3", default-features = false, features = ["alloc"] }
 # gpui-kit's HTTP client is built on this reqwest fork; sharing it keeps one
-# build across the workspace. UI-free by itself — this is just reqwest.
+# build across the workspace. UI-free by itself: this is just reqwest.
 reqwest = { package = "gpui-pre-reqwest", version = "0.12.15", default-features = false, features = ["rustls-tls", "json", "stream"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-# Replay scenarios are TOML files — same format as everything else the
+# Replay scenarios are TOML files, same format as everything else the
 # user touches.
 toml = "0.9"
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "time"] }

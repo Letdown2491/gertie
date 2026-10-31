@@ -2,7 +2,7 @@
 //!
 //! M2 ships the six local tools (read_file, write_file, edit_file, bash,
 //! glob, grep). Web tools arrive with M1-leftover scope; MCP with M3.
-//! All paths are workspace-root-relative and may not escape the root —
+//! All paths are workspace-root-relative and may not escape the root,
 //! one sandbox rule, applied identically by every tool.
 
 pub mod mcp;
@@ -35,7 +35,7 @@ fn resolve(root: &Path, path: &str) -> Result<PathBuf, String> {
     };
     // Lexical containment: whatever remains after the root's prefix may
     // only use `..` to cancel normals it first added. (No symlink
-    // resolution — that is M3's finer-grained permissions work.)
+    // resolution, that is M3's finer-grained permissions work.)
     let suffix = joined
         .strip_prefix(root)
         .map_err(|_| format!("path escapes the workspace: {path}"))?;
@@ -55,7 +55,7 @@ fn resolve(root: &Path, path: &str) -> Result<PathBuf, String> {
     }
     // Symlink hardening: lexical containment is not enough. A symlink
     // inside the workspace pointing out of it would turn an auto-approved
-    // read — worse, an unapproved write — into filesystem access the
+    // read, worse, an unapproved write, into filesystem access the
     // permission gate never saw. Whatever exists must canonicalize back
     // into the root. New files take their (canonicalized) parent's place.
     let canonical_root = root
@@ -134,11 +134,11 @@ fn limit(text: String) -> String {
 
 /// Shared plumbing: every tool holds its workspace root and turns the
 /// model's JSON into a result. Local file/process I/O is short and
-/// synchronous by nature — but not *bounded* by anything but the
+/// synchronous by nature, but not *bounded* by anything but the
 /// tool's own ceiling (bash: 300 s). The closure runs on its own OS
 /// thread and hands the result back through a oneshot: a wedged call
 /// pins one anonymous thread, never the executor's polling loop.
-/// Cancellation drops the future and abandons the thread — each tool
+/// Cancellation drops the future and abandons the thread, each tool
 /// still bounds its own work, so an orphan self-terminates. The
 /// closure owns what it captures (call sites clone their roots and
 /// arguments; all cheap) because a detached thread outlives the poll.
@@ -221,13 +221,13 @@ struct EditArgs {
 pub struct Bash {
     root: PathBuf,
     /// Kernel sandbox (Landlock) for children; None = unsandboxed (the
-    /// default — the permission gate is the safety net).
+    /// default, the permission gate is the safety net).
     sandbox: Option<Arc<sandbox::Sandbox>>,
 }
 
 /// Hard-blocked command shapes, checked before the approval card. The
 /// bar: a pattern must be something *no* legitimate workspace command
-/// matches — a false positive here is worse than one more click, because
+/// matches, a false positive here is worse than one more click, because
 /// the vet result never reaches a human. Anything debatable stays in the
 /// prompt tier.
 const DENY_PATTERNS: &[(&str, &str)] = &[
@@ -425,7 +425,7 @@ impl Tool for EditFile {
 
     fn description(&self) -> String {
         "Replace exact text in a file. old_text must match exactly once \
-         unless replace_all is set — the edit is rejected otherwise, with \
+         unless replace_all is set, the edit is rejected otherwise, with \
          the match count, so you can correct the anchor. Checkpointed \
          automatically."
             .into()
@@ -466,7 +466,7 @@ impl Tool for EditFile {
             }
             if count == 0 {
                 return Err(format!(
-                    "edit_file: old_text not found in {} — read the file and anchor on exact text",
+                    "edit_file: old_text not found in {}, read the file and anchor on exact text",
                     args.path
                 ));
             }
@@ -697,7 +697,7 @@ impl Tool for Grep {
             for entry in walkdir::WalkDir::new(&base)
                 .follow_links(false)
                 .into_iter()
-                // Depth-0 is the search root itself — tempdir names start
+                // Depth-0 is the search root itself, tempdir names start
                 // with '.', and it must never filter itself out.
                 .filter_entry(|entry| {
                     entry.depth() == 0 || {
@@ -788,7 +788,7 @@ mod tests {
     #[test]
     fn a_new_path_resolves_through_the_nearest_existing_ancestor() {
         let dir = workspace();
-        // The root reached through a symlink — the spelling the caller
+        // The root reached through a symlink, the spelling the caller
         // uses is not the disk's.
         #[cfg(unix)]
         {
@@ -796,7 +796,7 @@ mod tests {
             std::os::unix::fs::symlink(dir.path(), &link).unwrap();
             // Deeply new: the path, its parent, and its grandparent do
             // not exist. The old fallback returned the uncanonicalized
-            // spelling — a window for a later-planted symlink. It must
+            // spelling, a window for a later-planted symlink. It must
             // come back canonicalized: nearest existing ancestor
             // (the root, through the link) with the tail joined on.
             let resolved = resolve(&link, "a/b/c.txt").unwrap();

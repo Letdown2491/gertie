@@ -4,7 +4,7 @@
 //! Boring choices: fetch is reqwest-blocking with a hard timeout and
 //! runs under the same blocking seam as every other tool; HTML is
 //! stripped to text (no headless browser, no JS); search backends are
-//! pluggable and **gracefully disabled** — an unconfigured backend is a
+//! pluggable and **gracefully disabled**, an unconfigured backend is a
 //! clear model-visible message, never a broken turn.
 
 use crate::{Tool, ToolResult, blocking};
@@ -20,7 +20,7 @@ const USER_AGENT: &str = concat!("gertie/", env!("CARGO_PKG_VERSION"));
 
 /// Strips HTML to readable text: noisy elements dropped whole, tags
 /// become newlines, entities decoded, whitespace collapsed. Best-effort
-/// — the goal is model-readable text, not typographic fidelity.
+///, the goal is model-readable text, not typographic fidelity.
 fn html_to_text(html: &str) -> String {
     let noisy_tag = |name: &str| matches!(name, "script" | "style" | "head" | "noscript" | "svg");
     let block_tag = |name: &str| {
@@ -105,8 +105,8 @@ fn html_to_text(html: &str) -> String {
 pub struct WebFetch {
     /// Whether private-network targets may be fetched: loopback, the
     /// RFC 1918 ranges, link-local (cloud metadata), and friends. Off
-    /// by default — the model has no business probing the user's
-    /// router or a metadata endpoint — but a localhost dev server is a
+    /// by default, the model has no business probing the user's
+    /// router or a metadata endpoint, but a localhost dev server is a
     /// legitimate target for a coding agent, so the user's config can
     /// open the gate (`security.allow_private_fetch`).
     allow_private: bool,
@@ -119,7 +119,7 @@ impl WebFetch {
 
     /// The URL-level gate: scheme already checked, now the host. A
     /// literal private IP is refused outright; a localhost-ish name
-    /// likewise; a public name is resolved and every answer checked —
+    /// likewise; a public name is resolved and every answer checked,
     /// a public name over a private address is the same request
     /// wearing a disguise. The gate re-opens nothing on redirect:
     /// every hop dials through the same checked resolver.
@@ -135,7 +135,7 @@ impl WebFetch {
         let bare = host.trim_start_matches('[').trim_end_matches(']');
         let reason = |what: &str| {
             format!(
-                "web_fetch refuses {host}: {what} — the open web only, \
+                "web_fetch refuses {host}: {what}, the open web only, \
                  unless your config sets security.allow_private_fetch = true"
             )
         };
@@ -271,7 +271,7 @@ fn publicly_fetchable(ip: std::net::IpAddr) -> bool {
         }
         std::net::IpAddr::V6(ip) => {
             // An IPv4 address in IPv6 clothes is still that IPv4
-            // address — mapped and NAT64-embedded forms are unwrapped
+            // address, mapped and NAT64-embedded forms are unwrapped
             // and judged as their v4 selves.
             if let Some(mapped) = ip.to_ipv4_mapped() {
                 return publicly_fetchable(std::net::IpAddr::V4(mapped));
@@ -308,7 +308,7 @@ fn resolve_checked(host: &str, allow_private: bool) -> Result<Vec<std::net::Sock
             if !publicly_fetchable(addr.ip()) {
                 return Err(format!(
                     "web_fetch refuses {host}: it resolves to {addr}, a \
-                     private-network address — the open web only, unless \
+                     private-network address, the open web only, unless \
                      your config sets security.allow_private_fetch = true"
                 ));
             }
@@ -318,8 +318,8 @@ fn resolve_checked(host: &str, allow_private: bool) -> Result<Vec<std::net::Sock
 }
 
 /// The DNS resolver behind the fetch client: it hands out only
-/// publicly routable addresses, so every connection — the first fetch
-/// and every redirect hop — is re-checked at the moment it dials. The
+/// publicly routable addresses, so every connection, the first fetch
+/// and every redirect hop, is re-checked at the moment it dials. The
 /// gap between "checked the name" and "dialed the address" has no
 /// room for a rebinding server to live in.
 struct PublicDnsOnly {
@@ -356,7 +356,7 @@ fn redirect_hop(attempt: reqwest::redirect::Attempt) -> reqwest::redirect::Actio
 
 /// Web search. Configured backends: Brave (API key) and SearXNG
 /// (self-hosted or public instance allowing JSON). Unconfigured, the
-/// tool exists and explains itself — the model can tell the user what
+/// tool exists and explains itself, the model can tell the user what
 /// to add rather than failing mysteriously.
 pub struct WebSearch {
     backend: Option<SearchBackend>,
@@ -455,7 +455,7 @@ impl Tool for WebSearch {
                         .map_err(|error| format!("web_search: {error}"))?;
                     if !status.is_success() {
                         return Err(format!(
-                            "web_search: brave returned {status} — {}",
+                            "web_search: brave returned {status}, {}",
                             body.get("error")
                                 .map(|error| error.to_string())
                                 .unwrap_or_default()
@@ -577,7 +577,7 @@ impl Tool for SearchHistory {
             let mut out = String::new();
             for hit in hits {
                 out.push_str(&format!(
-                    "[{}] {} — {} #{}\n   {}\n\n",
+                    "[{}] {}, {} #{}\n   {}\n\n",
                     hit.role, hit.session_title, hit.session_id.0, hit.message_id.0, hit.snippet
                 ));
             }
@@ -586,7 +586,7 @@ impl Tool for SearchHistory {
     }
 }
 
-/// Read back the open session's own record — the full text a context
+/// Read back the open session's own record, the full text a context
 /// compaction selected away, and everything before the model's current
 /// window. Scoped by the front's session scope (the same cell worker
 /// dispatch uses for lineage); read-only.
@@ -609,7 +609,7 @@ impl Tool for ReadSession {
     fn description(&self) -> String {
         "Read back earlier messages from the open session's record. \
          After a context compaction, the selection in your context is a \
-         table of contents — this returns the full text of omitted turns. \
+         table of contents, this returns the full text of omitted turns. \
          Without a query you get the most recent messages in order; with \
          one, full-text matches from this session."
             .into()
@@ -640,7 +640,7 @@ impl Tool for ReadSession {
             }
             let args: Args = crate::parse(&arguments, "read_session")?;
             let Some(session) = scope.get() else {
-                return Ok("no session is open — nothing to read".into());
+                return Ok("no session is open, nothing to read".into());
             };
             let query = args
                 .query
@@ -695,7 +695,7 @@ mod tests {
         assert!(out.contains("hello from the record"), "{out}");
 
         // The query path scopes full-text, and an absent term says so.
-        // Snippet markers (▶…◀) wrap the match — assert around them.
+        // Snippet markers (▶…◀) wrap the match, assert around them.
         let out = futures_now(tool.run(r#"{"query": "record"}"#)).unwrap();
         assert!(out.contains("hello from the"), "{out}");
         assert!(out.contains('▶'), "the match is marked: {out}");
@@ -817,7 +817,7 @@ mod tests {
     #[test]
     fn the_dns_resolver_refuses_private_answers() {
         // A literal loopback "resolves" from the local tables with no
-        // network — enough to prove the filter answers for the dial.
+        // network, enough to prove the filter answers for the dial.
         assert!(resolve_checked("127.0.0.1", false).is_err());
         assert!(resolve_checked("127.0.0.1", true).is_ok());
     }

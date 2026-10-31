@@ -3,7 +3,7 @@
 //! what a panel keeps in memory. Pure and UI-free so it can be tested
 //! without a window.
 
-/// One line of a diff — what it is decides its color.
+/// One line of a diff: what it is decides its color.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Line {
     Same(String),
@@ -27,7 +27,7 @@ pub struct Patch {
 
 /// Cells the LCS table may use (each a `u32`): a million is 4 MB and
 /// covers any file a review panel should open. Past it, the middle
-/// falls back to remove-all-then-add-all — never minimal, always
+/// falls back to remove-all-then-add-all: never minimal, always
 /// bounded, still honest about what changed.
 const MAX_CELLS: usize = 1_000_000;
 /// Diff lines a panel keeps for display.
@@ -94,7 +94,7 @@ pub fn lines(before: &str, after: &str) -> Patch {
         ..Patch::default()
     };
     // Assemble for display: common context, the middle, common context
-    // again — capped. When the middle doesn't fit whole, the tail
+    // again (capped). When the middle doesn't fit whole, the tail
     // context goes with it (it sits past the cut) and the counts of
     // what was dropped live in `omitted`.
     let mut display: Vec<Line> = (0..start)

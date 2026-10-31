@@ -3,7 +3,7 @@
 //! The transcript is for people. A card that says `⚙ read_file` and dumps
 //! twelve raw lines tells the user what the model sees; one that says
 //! "Reading `src/chat.rs`" with a one-line outcome tells them what is
-//! happening. The raw output stays available behind the expander — this
+//! happening. The raw output stays available behind the expander; this
 //! module only picks the friendly face.
 
 /// One tool call's friendly label. `running` picks the tense: gerund
@@ -107,7 +107,7 @@ pub fn action_label(name: &str, arguments: &str, running: bool) -> String {
     };
 
     // A missing argument leaves an empty slot in the label ("Reading ``",
-    // "Fetching " with nothing after) — usually because the arguments
+    // "Fetching " with nothing after), usually because the arguments
     // haven't streamed in yet. Read as a plain verb instead of a hole.
     let label =
         if label.contains("``") || label.contains("\u{201c}\u{201d}") || label.ends_with(' ') {
@@ -132,7 +132,7 @@ fn humanize_name(name: &str) -> String {
     name.replace('_', " ")
 }
 
-/// Whether a finished tool result reads as a failure — the card's
+/// Whether a finished tool result reads as a failure: the card's
 /// danger face and the collapsed-run counts share one predicate, so a
 /// failure can never round away into a success.
 pub fn result_failed(result: &str) -> bool {
@@ -143,7 +143,7 @@ pub fn result_failed(result: &str) -> bool {
 }
 
 /// The collapsed face of a run of finished tool calls: counts the
-/// cards themselves back, never guesses — a run of one tool reads
+/// cards themselves back, never guesses. A run of one tool reads
 /// "Ran 3× read_file", a mix reads "Ran 4 tool calls", and failures
 /// ride the line whenever there are any.
 pub fn tool_run_summary(names: &[&str], failed: usize) -> String {
@@ -159,7 +159,7 @@ pub fn tool_run_summary(names: &[&str], failed: usize) -> String {
     label
 }
 
-/// A friendly one-line outcome for a finished tool call — the summary
+/// A friendly one-line outcome for a finished tool call: the summary
 /// line under the label. Raw output stays behind the expander.
 pub fn result_summary(name: &str, result: &str) -> String {
     let failed = result_failed(result);
@@ -221,7 +221,7 @@ pub fn result_summary(name: &str, result: &str) -> String {
             }
         }
         _ => {
-            // write_file, edit_file, web_fetch, load_skill, MCP — the tool
+            // write_file, edit_file, web_fetch, load_skill, MCP: the tool
             // already speaks in outcomes ("edited src/x.rs (1 occurrence)").
             let first = result.lines().next().unwrap_or("");
             let mut summary: String = first.chars().take(120).collect();
@@ -282,7 +282,7 @@ mod tests {
     #[test]
     fn missing_arguments_degrade_to_the_generic_verb() {
         // Arguments that haven't arrived (or don't parse) leave an empty
-        // slot — the card should read as a plain verb, not a hole.
+        // slot; the card should read as a plain verb, not a hole.
         assert_eq!(action_label("read_file", "", true), "Running read file…");
         assert_eq!(action_label("bash", "not json", false), "Ran bash");
         assert_eq!(action_label("web_fetch", "{}", false), "Ran web fetch");
@@ -314,7 +314,7 @@ mod tests {
     #[test]
     fn run_summaries_count_honestly() {
         // A run of one tool speaks its name; a mix stays generic;
-        // failures are counted on the line — never rounded away into
+        // failures are counted on the line, never rounded away into
         // an unqualified "ran".
         assert_eq!(tool_run_summary(&["read_file"; 3], 0), "Ran 3× read_file");
         assert_eq!(

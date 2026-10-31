@@ -1,6 +1,6 @@
 //! Prompt templates: reusable prompts as flat files, invoked from the
-//! composer as `/name`. The same two-root convention as skills — user
-//! dir beside `config.toml`, project dir `.gertie/templates` — with the
+//! composer as `/name`. The same two-root convention as skills, user
+//! dir beside `config.toml`, project dir `.gertie/templates`, with the
 //! project shadowing the user by name. Discovery problems are
 //! warnings, never a failed launch.
 //!
@@ -42,7 +42,7 @@ impl Template {
 
 /// Splits a composer input into a slash invocation: `Some((name, args))`
 /// when the text starts with `/name` and the name is a slug. Anything
-/// else — a bare `/`, a path like `/usr/bin`, a leading space — is not
+/// else, a bare `/`, a path like `/usr/bin`, a leading space, is not
 /// an invocation and returns `None`, so it sends as a normal message.
 pub fn parse_invocation(input: &str) -> Option<(String, String)> {
     let input = input.strip_prefix('/')?;
@@ -112,7 +112,7 @@ fn parse_template(path: &Path) -> Result<Template, String> {
 
 /// Discovers templates from two roots: the user dir first, the project
 /// dir overriding by name. A file that fails to parse is a warning,
-/// never a failed launch — same posture as skills.
+/// never a failed launch, same posture as skills.
 pub fn discover(user_dir: &Path, project_dir: &Path) -> (Vec<Template>, Vec<String>) {
     let mut warnings = Vec::new();
     let mut discovered: Vec<(bool, Template)> = Vec::new(); // (is_project, template)
@@ -146,7 +146,7 @@ pub fn discover(user_dir: &Path, project_dir: &Path) -> (Vec<Template>, Vec<Stri
         }
         templates.push(template);
     }
-    // A stable, purely alphabetical listing — shadowing decided which
+    // A stable, purely alphabetical listing, shadowing decided which
     // body survives, not where it sits.
     templates.sort_by(|a, b| a.name.cmp(&b.name));
     (templates, warnings)

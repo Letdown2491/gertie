@@ -30,7 +30,7 @@ const SHOWCASE: &str = include_str!("replay/showcase.toml");
 const APPROVAL: &str = include_str!("replay/approval.toml");
 
 /// One assistant response: the text streamed as Token deltas, the tool
-/// calls emitted whole after it — the shape the normalized contract
+/// calls emitted whole after it: the shape the normalized contract
 /// demands of every adapter.
 #[derive(Debug, Deserialize)]
 struct Step {
@@ -38,8 +38,8 @@ struct Step {
     text: String,
     #[serde(default)]
     tool_calls: Vec<ScriptedCall>,
-    /// The limit rehearsal: the provider refuses the request outright —
-    /// no tokens, no usage — and the turn ends Limited. For testing the
+    /// The limit rehearsal: the provider refuses the request outright
+    /// (no tokens, no usage), and the turn ends Limited. For testing the
     /// resume affordance without a paid model anywhere.
     #[serde(default)]
     limited: bool,
@@ -48,7 +48,7 @@ struct Step {
 #[derive(Debug, Deserialize)]
 struct ScriptedCall {
     name: String,
-    /// A literal JSON arguments string — single-quoted TOML keeps it
+    /// A literal JSON arguments string. Single-quoted TOML keeps it
     /// painless (`arguments = '{"path": "x"}'`). What the wire carries
     /// is what you write.
     #[serde(default)]
@@ -98,7 +98,7 @@ impl ReplayProvider {
     }
 
     /// The scenario file for a non-embedded model name: base_url is the
-    /// directory. None when the endpoint names no directory — the error
+    /// directory. None when the endpoint names no directory; the error
     /// at load time explains the two ways out (embedded names, or a
     /// base_url).
     fn scenario_path(&self, model: &str) -> Option<String> {
@@ -124,7 +124,7 @@ fn load_scenario(model: &str, path: Option<&str>) -> Result<Scenario, String> {
         None => {
             let Some(path) = path else {
                 return Err(format!(
-                    "replay scenario {model:?} not found — set base_url to a scenario \
+                    "replay scenario {model:?} not found: set base_url to a scenario \
                      directory, or use the embedded \"showcase\" / \"approval\" scenarios"
                 ));
             };
@@ -259,7 +259,7 @@ mod tests {
         let events = drain(provider.stream(user_request()));
 
         assert_eq!(events.first(), Some(&Event::Started));
-        // The prose arrives in more than one delta — that's the
+        // The prose arrives in more than one delta. That's the
         // "simulated streaming" part.
         assert!(
             events
@@ -367,7 +367,7 @@ mod tests {
 
     #[test]
     fn chunks_never_tear_a_multibyte_character() {
-        let text = "héllo wörld — ünïcode ✓";
+        let text = "héllo wörld, ünïcode ✓";
         let joined: String = text_chunks(text, 4).collect();
         assert_eq!(joined, text);
     }

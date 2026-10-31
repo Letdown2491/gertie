@@ -1,25 +1,25 @@
 //! Per-tab git worktrees: a parallel chat that wants to edit files
 //! without colliding with the tab next door works in its own worktree
 //! of the same repo. Worktrees live under `<repo>/.gertie/worktrees/`
-//! — kept out of git via the local exclude (`.git/info/exclude`),
-//! never the user's `.gitignore` — and persist across runs: agent work
+//!, kept out of git via the local exclude (`.git/info/exclude`),
+//! never the user's `.gitignore`, and persist across runs: agent work
 //! is never deleted behind your back. Prune stale ones with
 //! `git worktree remove`.
 
 use std::path::{Path, PathBuf};
 
 /// Creates (or reopens) a worktree named `name`, branched from HEAD.
-/// Reuses an existing worktree or branch of the same name — tab ids
+/// Reuses an existing worktree or branch of the same name, tab ids
 /// are per-run, so a stale one from an earlier run is a legitimate
 /// continuation, not a collision. Fails with git's message if the repo
 /// isn't one or git is unavailable.
-/// Keeps `.gertie/` out of git status via the repo-local exclude —
+/// Keeps `.gertie/` out of git status via the repo-local exclude,
 /// never the user's `.gitignore`. Reversible and repo-private; the
 /// worktrees dir and the pastes dir both live behind it.
 pub fn ensure_local_exclude(repo_root: &Path) -> Result<(), String> {
     let exclude = repo_root.join(".git/info/exclude");
     if !exclude.is_file() {
-        return Ok(()); // not a repo, or bare — nothing to exclude from
+        return Ok(()); // not a repo, or bare, nothing to exclude from
     }
     let contents = std::fs::read_to_string(&exclude).map_err(|error| error.to_string())?;
     if contents.lines().any(|line| line.trim() == ".gertie/") {
@@ -34,7 +34,7 @@ pub fn ensure_local_exclude(repo_root: &Path) -> Result<(), String> {
 }
 
 /// Creates (or reopens) a worktree named `name`, branched from HEAD.
-/// Reuses an existing worktree or branch of the same name — tab ids
+/// Reuses an existing worktree or branch of the same name, tab ids
 /// are per-run, so a stale one from an earlier run is a legitimate
 /// continuation, not a collision. Fails with git's message if the repo
 /// isn't one or git is unavailable.
@@ -43,7 +43,7 @@ pub fn create(repo_root: &Path, name: &str) -> Result<PathBuf, String> {
 
     let target = repo_root.join(".gertie/worktrees").join(name);
     if target.join(".git").is_file() {
-        return Ok(target); // already a worktree — reuse it
+        return Ok(target); // already a worktree, reuse it
     }
     std::fs::create_dir_all(target.parent().expect("worktrees dir has a parent"))
         .map_err(|error| error.to_string())?;
@@ -60,7 +60,7 @@ pub fn create(repo_root: &Path, name: &str) -> Result<PathBuf, String> {
         Ok(output) => {
             // The branch may already exist from an earlier run: attach
             // to it instead of failing. If that also fails, report the
-            // original error — it names the real problem.
+            // original error, it names the real problem.
             let attached = std::process::Command::new("git")
                 .args(["worktree", "add"])
                 .arg(&target)
@@ -77,14 +77,14 @@ pub fn create(repo_root: &Path, name: &str) -> Result<PathBuf, String> {
 }
 
 /// The cleanup policy, from the user's config (`[worktree]
-/// cleanup_idle_days`). Absent or zero: nothing is ever removed —
+/// cleanup_idle_days`). Absent or zero: nothing is ever removed,
 /// agent work is never deleted behind your back.
 #[derive(Clone, Debug, Default)]
 pub struct CleanupPolicy {
     pub idle_days: Option<u64>,
 }
 
-/// What the sweep decided about one worktree, and why — the report
+/// What the sweep decided about one worktree, and why, the report
 /// spells both out, every entry, kept or removed.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Verdict {
@@ -125,11 +125,11 @@ impl CleanupReport {
 /// Evaluates every gertie-managed worktree of the repo against the
 /// policy. With `apply`, removable ones are actually removed (and
 /// their branch deleted); without, the same verdicts come back as
-/// `Removable` — the report you read before you let it delete.
+/// `Removable`, the report you read before you let it delete.
 ///
 /// The protections, in order a worktree is judged:
 /// - only worktrees gertie made (under `.gertie/worktrees/`) are
-///   candidates — anything else is Kept: "not gertie's checkout";
+///   candidates, anything else is Kept: "not gertie's checkout";
 /// - uncommitted changes → Kept (removal would lose them);
 /// - commits the main checkout's branch lacks → Kept (removal would
 ///   orphan them);
@@ -166,7 +166,7 @@ pub fn sweep(
         };
         let path = PathBuf::from(path_line.trim_start_matches("worktree "));
         // Bare entries and anything outside gertie's own dir are
-        // never candidates — the user's checkouts are theirs.
+        // never candidates, the user's checkouts are theirs.
         if !path.starts_with(&managed_root) {
             continue;
         }
@@ -261,7 +261,7 @@ pub fn sweep(
             )));
             continue;
         }
-        // The branch too — `-d` (safe delete) can only refuse what
+        // The branch too, `-d` (safe delete) can only refuse what
         // the unmerged check already cleared.
         let _ = std::process::Command::new("git")
             .args(["branch", "-d", &branch])
@@ -314,7 +314,7 @@ pub fn sane_prefix(prefix: &str) -> String {
 }
 
 /// The branch name from a message: lowercase, runs of
-/// non-alphanumerics to single dashes, trimmed, capped at 40 — a
+/// non-alphanumerics to single dashes, trimmed, capped at 40, a
 /// stable, readable, git-safe slug. ASCII only: a message that
 /// slugifies to nothing (emoji, scripts outside ASCII) leaves the
 /// branch on its temporary name rather than guessing.
@@ -346,10 +346,10 @@ pub fn slugify(message: &str) -> Option<String> {
 
 /// Names the worktree's branch after the session's first message:
 /// `fix-the-flaky-widget` under the configured prefix. Only the
-/// temporary branches gertie made (`gertie/tab-N`) are renamed — a
+/// temporary branches gertie made (`gertie/tab-N`) are renamed, a
 /// branch you checked out is yours, never ours. Any failure (the
-/// slug branch already exists — two tabs opened on the same first
-/// words — git refused, the root isn't a worktree) leaves the
+/// slug branch already exists, two tabs opened on the same first
+/// words, git refused, the root isn't a worktree) leaves the
 /// temporary name standing: the work works either way.
 pub fn name_branch_from_first_message(naming: &BranchNaming, message: &str) -> Result<(), String> {
     let BranchNaming { root, prefix } = naming;
@@ -392,7 +392,7 @@ pub fn name_branch_from_first_message(naming: &BranchNaming, message: &str) -> R
             Err(String::from_utf8_lossy(&output.stderr).trim().to_string())
         }
     });
-    // A failure keeps the temporary branch — say why on stderr, in
+    // A failure keeps the temporary branch, say why on stderr, in
     // case someone is reading, and let the work go on.
     if let Err(error) = &renamed {
         eprintln!("warning: branch stays {current}: {error}");
@@ -459,7 +459,7 @@ mod tests {
     fn reuses_an_existing_worktree_of_the_same_name() {
         let repo = repo();
         let first = create(repo.path(), "tab-0").expect("first");
-        // Uncommitted work marks the worktree as a real workspace —
+        // Uncommitted work marks the worktree as a real workspace,
         // reusing it must not clobber anything.
         std::fs::write(first.join("f.txt"), "changed").unwrap();
 
@@ -499,7 +499,7 @@ mod tests {
             "the branch is the message's slug under the prefix"
         );
 
-        // Naming again is a no-op — the branch is no longer gertie's
+        // Naming again is a no-op, the branch is no longer gertie's
         // temporary one, whatever the message says.
         name_branch_from_first_message(&naming, "a second message entirely").expect("quiet");
         let branch = std::process::Command::new("git")
@@ -542,7 +542,7 @@ mod tests {
         );
 
         // A message with nothing to slugify (emoji, CJK) doesn't
-        // rename either — the work goes on under the temporary name.
+        // rename either, the work goes on under the temporary name.
         name_branch_from_first_message(&naming, "🚀").expect("quiet");
         let branch = std::process::Command::new("git")
             .args(["-C"])
@@ -603,7 +603,7 @@ mod tests {
         assert!(long.len() <= 40, "the slug is capped: {long}");
         assert_eq!(slugify("🚀🎉"), None, "nothing sluggable is None");
         // A `.lock` suffix is structurally impossible: '.' slugifies
-        // to a dash, so "something.lock" is "something-lock" — which
+        // to a dash, so "something.lock" is "something-lock", which
         // git accepts.
         assert_eq!(slugify("something.lock").as_deref(), Some("something-lock"));
     }
@@ -618,7 +618,7 @@ mod tests {
         assert_eq!(sane_prefix("a~b"), "gertie/");
     }
 
-    /// A repo whose initial commit is backdated — the idle policy's
+    /// A repo whose initial commit is backdated, the idle policy's
     /// clock in tests.
     fn old_repo() -> tempfile::TempDir {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -707,7 +707,7 @@ mod tests {
             matches!(report.entries[0].verdict, Verdict::Kept(ref why) if why.contains("uncommitted"))
         );
 
-        // Unmerged: commit the work — it's old enough and clean now,
+        // Unmerged: commit the work, it's old enough and clean now,
         // but the main branch doesn't have it.
         let run = |args: &[&str]| {
             std::process::Command::new("git")
@@ -749,7 +749,7 @@ mod tests {
         let report =
             sweep(repo.path(), &CleanupPolicy { idle_days: Some(1) }, true).expect("sweep");
         // Only gertie's own dir is walked: the main checkout and the
-        // user's worktree don't appear at all — not even as kept.
+        // user's worktree don't appear at all, not even as kept.
         assert!(
             report.entries.is_empty(),
             "nothing outside .gertie/worktrees is a candidate: {:?}",

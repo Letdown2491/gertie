@@ -2,7 +2,7 @@
 //!
 //! The kit's `Command` component owns the field, the filtering knobs,
 //! and the keyboard nav (its own init binds enter/arrows/escape under
-//! its key context); this file owns the gertie half — the global
+//! its key context); this file owns the gertie half: the global
 //! trigger, what a row shows (an FTS hit: session, role, snippet), and
 //! what confirming one means (the chat jumps to that turn).
 
@@ -10,13 +10,13 @@ use gpui_kit::component::command::CommandItem;
 use gpui_kit::component::{ActiveTheme as _, h_flex};
 use gpui_kit::{actions, div, prelude::*, px};
 
-// Open the palette from anywhere in the chat window — no context
+// Open the palette from anywhere in the chat window: no context
 // filter, so it fires no matter which control holds focus (a binding
 // with no context matches at the deepest level of the dispatch path).
 // Its ctrl-k default lives in the keymap's default rules.
 actions!(gertie, [OpenPalette]);
 
-/// The palette's commands — the `>` filter's rows. One per action the
+/// The palette's commands: the `>` filter's rows. One per action the
 /// chat surface actually offers (the same set the slash commands
 /// drive), spelled the way a person would search for them. No registry
 /// hunting: the chat maps each variant straight onto its handler.
@@ -25,12 +25,11 @@ pub enum PaletteCommand {
     NewChat,
     Compact,
     Export,
-    Agents,
     Settings,
 }
 
 /// Every command: (search name, what it does, the action). The match
-/// is a case-insensitive substring over the name AND the description —
+/// is a case-insensitive substring over the name AND the description:
 /// ">export" and ">markdown" both find the export.
 pub const COMMANDS: &[(&str, &str, PaletteCommand)] = &[
     (
@@ -49,11 +48,6 @@ pub const COMMANDS: &[(&str, &str, PaletteCommand)] = &[
         PaletteCommand::Export,
     ),
     (
-        "agents",
-        "show this chat's worker runs",
-        PaletteCommand::Agents,
-    ),
-    (
         "settings",
         "open the settings editor",
         PaletteCommand::Settings,
@@ -61,7 +55,7 @@ pub const COMMANDS: &[(&str, &str, PaletteCommand)] = &[
 ];
 
 /// The `>`-filtered command rows: name or description contains the
-/// term (empty term = everything), search order — the constant's
+/// term (empty term = everything); search order is the constant's
 /// order, which reads most-used-first.
 pub fn command_matches(term: &str) -> Vec<(&'static str, &'static str, PaletteCommand)> {
     let term = term.trim().to_lowercase();
@@ -115,7 +109,7 @@ pub fn command_items(
 }
 
 /// One palette row per search hit: where it lives (session title, who
-/// said it) and what it says (the FTS snippet, markers left in — they
+/// said it) and what it says (the FTS snippet, markers left in; they
 /// bracket the match). Ordered as `search` ranked them, best first;
 /// the row position is the index into the chat's hit vector, which is
 /// what confirming hands back.
@@ -153,7 +147,7 @@ pub fn search_items(hits: &[gertie_core::HistoryHit]) -> Vec<CommandItem> {
         .collect()
 }
 
-/// Who said it, in one word — the palette's rows answer "who" at a
+/// Who said it, in one word: the palette's rows answer "who" at a
 /// glance without a legend. Role strings are the store's spelling.
 fn role_word(role: &str) -> &'static str {
     match role {
@@ -188,7 +182,7 @@ mod tests {
         ];
         let items = search_items(&hits);
         assert_eq!(items.len(), 2);
-        // Row order is hit order — the palette's confirm hands the row
+        // Row order is hit order: the palette's confirm hands the row
         // index back, and that must point at the same hit search ranked.
         assert_eq!(role_word(&hits[0].role), "you");
         assert_eq!(role_word(&hits[1].role), "tool");
@@ -209,7 +203,7 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["export"]
         );
-        // Description substring too — "markdown" finds the export.
+        // Description substring too: "markdown" finds the export.
         let markdown: Vec<&str> = command_matches("markdown")
             .iter()
             .map(|(name, _, _)| *name)
