@@ -271,34 +271,52 @@ impl WorkspaceView {
     /// the DESIGN promise, "parallel sessions run against separate
     /// worktrees". The worktree persists on disk after the run.
     fn add_worktree_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // `git worktree add` is a subprocess against the object store —
+        // hundreds of ms on a big repo, so it runs on the background
+        // pool and the tab opens when the checkout exists. The tab-N
+        // name is reserved up front: a failed create leaves a gap in
+        // the numbering, which is cosmetic.
         let name = format!("tab-{}", self.next_worktree);
-        match crate::worktree::create(&self.boot.workspace_root, &name) {
-            Ok(root) => {
-                self.next_worktree += 1;
-                let (tools, system_prompt) = self.boot.registry_for_root(&root);
-                let naming = crate::worktree::BranchNaming {
-                    root: root.clone(),
-                    prefix: self.boot.worktree_branch_prefix(),
-                };
-                let view = self.make_view(
-                    tools.clone(),
-                    system_prompt.clone(),
-                    Some(naming),
-                    window,
-                    cx,
-                );
-                self.tabs.push(TabState {
-                    view,
-                    worktree: Some(root),
-                });
-                let index = self.tabs.len() - 1;
-                self.active = index;
-                self.subscribe_config_saved(index, window, cx);
-                self.last_error = None;
-            }
-            Err(error) => self.last_error = Some(error),
-        }
-        cx.notify();
+        self.next_worktree += 1;
+        let repo_root = self.boot.workspace_root.clone();
+        let prefix = self.boot.worktree_branch_prefix();
+        let this = cx.entity();
+        window.spawn(cx, async move |cx| {
+            let created = cx
+                .background_executor()
+                .spawn(async move { crate::worktree::create(&repo_root, &name) })
+                .await;
+            let _ = this.update_in(cx, |this, window, cx| match created {
+                Ok(root) => {
+                    let (tools, system_prompt) = this.boot.registry_for_root(&root);
+                    let naming = crate::worktree::BranchNaming {
+                        root: root.clone(),
+                        prefix,
+                    };
+                    let view = this.make_view(
+                        tools.clone(),
+                        system_prompt.clone(),
+                        Some(naming),
+                        window,
+                        cx,
+                    );
+                    this.tabs.push(TabState {
+                        view,
+                        worktree: Some(root),
+                    });
+                    let index = this.tabs.len() - 1;
+                    this.active = index;
+                    this.subscribe_config_saved(index, window, cx);
+                    this.last_error = None;
+                    cx.notify();
+                }
+                Err(error) => {
+                    this.last_error = Some(error);
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
     }
 
     /// Closes the tab at `index`. The last tab stays — an empty window

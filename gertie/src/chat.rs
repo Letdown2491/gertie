@@ -2278,10 +2278,21 @@ impl ChatView {
         // before any state moves. Only the first: the branch name is
         // the opening request's slug, fixed once. Failures are
         // swallowed (the temporary tab-N name remains, the work goes
-        // on) — the branch name is a courtesy, never a gate.
+        // on) — the branch name is a courtesy, never a gate. The git
+        // subprocesses run on the background pool: the send must not
+        // wait on `git branch -m`.
         let is_first = self.last_db_id.is_none();
         if is_first && let Some(naming) = &self.branch_naming {
-            let _ = crate::worktree::name_branch_from_first_message(naming, &stored);
+            let naming = crate::worktree::BranchNaming {
+                root: naming.root.clone(),
+                prefix: naming.prefix.clone(),
+            };
+            let stored = stored.clone();
+            cx.background_executor()
+                .spawn(async move {
+                    let _ = crate::worktree::name_branch_from_first_message(&naming, &stored);
+                })
+                .detach();
         }
         let db_id = self
             .store
