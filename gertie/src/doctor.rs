@@ -152,6 +152,43 @@ pub fn run(config_override: Option<PathBuf>) -> i32 {
         }
     );
 
+    // The permission mode's honest reach: what the default mode can
+    // and cannot enforce. gertie owns every tool, so enforcement is
+    // uniform — the caveats are the mode's real edges, not per-provider
+    // fallbacks; a mode is never silently downgraded.
+    let mode = config.permissions.default_mode;
+    let (promise, caveat) = match mode {
+        gertie_core::PermissionMode::Supervised => (
+            "every write, bash, and MCP call asks; reads run free",
+            None,
+        ),
+        gertie_core::PermissionMode::AcceptEdits => (
+            "checkpointed file edits run unasked (the ledger holds their before-state)",
+            Some("bash and MCP calls still ask"),
+        ),
+        gertie_core::PermissionMode::Auto => {
+            if config.security.sandbox_bash {
+                (
+                    "file edits and Landlock-sandboxed bash run unasked",
+                    Some("MCP calls still ask"),
+                )
+            } else {
+                (
+                    "file edits run unasked; bash still asks — the sandbox is off",
+                    Some("auto without the kernel is accept-edits, and says so"),
+                )
+            }
+        }
+        gertie_core::PermissionMode::FullAccess => (
+            "nothing asks — every tool runs to completion",
+            Some("the destructive-command vet still fires beneath it"),
+        ),
+    };
+    println!("mode        default {}: {promise}", mode.as_str());
+    if let Some(caveat) = caveat {
+        println!("            {caveat}");
+    }
+
     if let Some(data_dir) = crate::config::Config::data_dir() {
         let store = data_dir.join("sessions.db");
         if store.exists()
