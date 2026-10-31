@@ -244,8 +244,12 @@ impl SettingsPanelView {
                 api_key_env: None,
                 context_window: None,
             });
-        let mut field = |value: String, placeholder: &'static str| {
-            let state = cx.new(|cx| InputState::new(window, cx).placeholder(placeholder));
+        let mut field = |value: String, placeholder: &'static str, masked: bool| {
+            let state = cx.new(|cx| {
+                InputState::new(window, cx)
+                    .placeholder(placeholder)
+                    .masked(masked)
+            });
             if !value.is_empty() {
                 state.update(cx, |state, cx| state.set_value(value.clone(), window, cx));
             }
@@ -256,18 +260,21 @@ impl SettingsPanelView {
         let api_key = draft.api_key.clone().unwrap_or_default();
         self.form = Some(EndpointForm {
             editing: index,
-            name: field(draft.name.clone(), "name"),
-            base_url: field(draft.base_url.clone(), "https://…/v1"),
-            model: field(draft.model.clone(), "model"),
-            wire: field(wire, "openai | anthropic | replay"),
-            api_key_env: field(api_key_env, "env var, e.g. PPQ_API_KEY"),
-            api_key: field(api_key, "literal key — prefer the env var"),
+            name: field(draft.name.clone(), "name", false),
+            base_url: field(draft.base_url.clone(), "https://…/v1", false),
+            model: field(draft.model.clone(), "model", false),
+            wire: field(wire, "openai | anthropic | replay", false),
+            api_key_env: field(api_key_env, "env var, e.g. PPQ_API_KEY", false),
+            // A key on screen is a key over the user's shoulder: the
+            // input masks, like a password field.
+            api_key: field(api_key, "literal key — prefer the env var", true),
             context_window: field(
                 draft
                     .context_window
                     .map(|window| window.to_string())
                     .unwrap_or_default(),
                 "context window, tokens",
+                false,
             ),
         });
         cx.notify();

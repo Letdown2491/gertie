@@ -44,7 +44,7 @@ impl Wire {
 /// One configured endpoint: where to POST, how to authenticate, what model
 /// to ask for. Keys resolve from config values or the environment at
 /// construction time — never stored in logs or events.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct Endpoint {
     pub name: String,
     /// e.g. `https://api.ppq.ai/v1` — the wire appends its own path
@@ -55,6 +55,23 @@ pub struct Endpoint {
     /// Model context window in tokens; None disables compaction.
     pub context_window: Option<u64>,
     pub wire: Wire,
+}
+
+// Debug is hand-rolled for one reason: the key. A struct that carries
+// a secret must not print it because someone logged the request
+// pipeline — no `{:?}` of an Endpoint ever shows more than the key's
+// presence.
+impl std::fmt::Debug for Endpoint {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Endpoint")
+            .field("name", &self.name)
+            .field("base_url", &self.base_url)
+            .field("model", &self.model)
+            .field("api_key", &self.api_key.as_ref().map(|_| "…"))
+            .field("context_window", &self.context_window)
+            .field("wire", &self.wire)
+            .finish()
+    }
 }
 
 /// Retry policy per DESIGN.md: auto-retry transient failures with

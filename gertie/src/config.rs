@@ -550,8 +550,7 @@ impl ConfigEdits {
         {
             return Err(format!("could not create {}: {error}", parent.display()));
         }
-        std::fs::write(path, doc.to_string())
-            .map_err(|error| format!("could not write {}: {error}", path.display()))
+        write_private(path, &doc.to_string())
     }
 }
 
@@ -924,7 +923,7 @@ impl Config {
                 parent.display()
             ));
         }
-        match std::fs::write(path, skeleton) {
+        match write_private(path, skeleton) {
             Ok(()) => Some(format!(
                 "starter config created at {} — add an endpoint: /settings in the app, or edit the file",
                 path.display()
@@ -932,6 +931,40 @@ impl Config {
             Err(error) => Some(format!("could not write starter config: {error}")),
         }
     }
+}
+
+/// Writes a config file owner-only: the file may hold a literal API
+/// key, and a umask is not a promise — the reader warns on loose
+/// modes, so the writer must never create one. 0600 at creation
+/// (umask can only strip bits, never add them) and by decree for a
+/// pre-existing file, whose mode `open` would otherwise keep.
+fn write_private(path: &std::path::Path, contents: &str) -> Result<(), String> {
+    use std::io::Write as _;
+    #[cfg(unix)]
+    let mut file = {
+        use std::os::unix::fs::OpenOptionsExt;
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(path)
+            .map_err(|error| format!("could not write {}: {error}", path.display()))?
+    };
+    #[cfg(not(unix))]
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(path)
+        .map_err(|error| format!("could not write {}: {error}", path.display()))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+    }
+    file.write_all(contents.as_bytes())
+        .map_err(|error| format!("could not write {}: {error}", path.display()))
 }
 
 #[cfg(test)]
