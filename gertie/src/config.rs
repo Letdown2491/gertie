@@ -26,6 +26,15 @@ pub struct Config {
     /// Security posture. Absent = defaults (sandbox off).
     #[serde(default)]
     pub security: SecurityConfig,
+    /// Auto-settle chats idle for at least this many days, on startup.
+    /// Absent or zero = off: settle is manual until you opt in.
+    #[serde(default)]
+    pub auto_settle_days: Option<u64>,
+    /// Shell command run in a settling session's recorded workspace —
+    /// the reclaim hook (e.g. `cargo clean`). Manual settles only;
+    /// the auto-settle sweep never runs commands.
+    #[serde(default)]
+    pub settle_command: Option<String>,
 }
 
 #[derive(Deserialize, Debug, Clone)]

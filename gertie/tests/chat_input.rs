@@ -45,7 +45,7 @@ fn fixture() -> Fixture {
 }
 
 fn fixture_with_store(store: Arc<SessionStore>) -> Fixture {
-    fixture_built(store, None, None)
+    fixture_built(store, None, None, None)
 }
 
 /// A fixture whose view carries a real checkpoint ledger over a real
@@ -56,7 +56,12 @@ fn fixture_with_snapshots() -> Fixture {
     let snapshots =
         Arc::new(gertie_core::SnapshotStore::open(snapshots_dir.path()).expect("snapshot store"));
     let workspace = tempfile::tempdir().expect("workspace dir");
-    let mut fixture = fixture_built(store, Some(snapshots), Some(workspace.path().to_path_buf()));
+    let mut fixture = fixture_built(
+        store,
+        Some(snapshots),
+        Some(workspace.path().to_path_buf()),
+        None,
+    );
     fixture.hold = vec![snapshots_dir, workspace];
     fixture
 }
@@ -65,6 +70,7 @@ fn fixture_built(
     store: Arc<SessionStore>,
     snapshots: Option<Arc<gertie_core::SnapshotStore>>,
     workspace: Option<std::path::PathBuf>,
+    settle_command: Option<String>,
 ) -> Fixture {
     let mut cx = HeadlessAppContext::with_asset_source(
         Arc::new(NoopTextSystem),
@@ -97,6 +103,7 @@ fn fixture_built(
                     None,
                     Vec::new(),
                     workspace.unwrap_or_else(|| Path::new(".").to_path_buf()),
+                    settle_command,
                     Arc::new(gertie_core::PermissionBroker::new()),
                     gertie_core::SessionScope::new(),
                     panel,
@@ -258,6 +265,7 @@ fn markdown_and_tool_rows_draw_clean() {
                     None,
                     Vec::new(),
                     Path::new(".").to_path_buf(),
+                    None,
                     Arc::new(gertie_core::PermissionBroker::new()),
                     gertie_core::SessionScope::new(),
                     panel,
@@ -651,4 +659,50 @@ fn the_folds_restore_button_unsettles_without_opening() {
         .cx
         .update(|cx| view.upgrade().expect("view alive").read(cx).tab_title());
     assert_eq!(active, "the newer chat");
+}
+
+/// The settle command (config: settle_command) runs in the settling
+/// session's recorded workspace — the reclaim hook end to end: send
+/// records the root, ✓ runs the command off the UI thread, the
+/// transcript reports the outcome.
+#[test]
+fn settling_runs_the_reclaim_command_in_the_recorded_workspace() {
+    let store = Arc::new(SessionStore::open(Path::new(":memory:")).expect("memory store"));
+    let workspace = tempfile::tempdir().expect("workspace dir");
+    let marker = workspace.path().join("reclaimed.marker");
+    let command = format!("touch '{}'", marker.display());
+    let mut fixture = fixture_built(
+        store,
+        None,
+        Some(workspace.path().to_path_buf()),
+        Some(command),
+    );
+
+    // A send records the workspace on the session — the settle hook's
+    // anchor. (No provider: the turn fails loudly and ends; the
+    // session and its root are real either way.)
+    fixture.act(|window, cx| {
+        window.input("hello", cx);
+        window.press("enter", cx);
+    });
+    let session_id = fixture
+        .cx
+        .update(|cx| {
+            fixture
+                .view
+                .upgrade()
+                .expect("view alive")
+                .read(cx)
+                .session_id()
+        })
+        .expect("session created by send");
+
+    // Settle it: the command touches a marker inside the recorded root.
+    fixture.act(|window, cx| {
+        window.click(format!("settle-{}", session_id.0), cx);
+    });
+    assert!(
+        marker.exists(),
+        "the settle command ran in the recorded workspace"
+    );
 }

@@ -284,10 +284,16 @@ The sidebar became a lifecycle machine (t3code's inbox chapter): the ✓ on a se
 settles it — the human put the work down — folding it into a collapsed "settled"
 section (muted rows, ↩ to restore) while the record keeps everything; opening a
 settled session is activity and un-settles it. Settling refuses a session with a turn
-in flight, and settle is manual for now: auto-settle needs pending-work state for
-*closed* sessions (only open ones know), and snooze waits for the Limited state that
-gives it a clock. The tab strip carries the working marker — a live turn shows ● on
-its tab, the attention signal for work running while another tab is up.
+in flight. Auto-settle ships opt-in (`auto_settle_days = 3`): the startup sweep lays
+chats idle that long down as settled — state only, run before any view loads, so a
+live turn can't race it. `settle_command = "cargo clean"` is the reclaim hook: a
+manual settle runs it in the settling session's recorded workspace (recorded at first
+send, so whichever tab presses ✓ later, the command lands in the right checkout) —
+off the UI thread, outcome surfaced in the transcript; the sweep never runs commands,
+and a session older than the recording says so instead of guessing a folder. Snooze
+still waits for the Limited state that gives it a clock. The tab strip carries the
+working marker — a live turn shows ● on its tab, the attention signal for work
+running while another tab is up.
 
 ## Onboarding
 

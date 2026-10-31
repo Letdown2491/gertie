@@ -90,6 +90,11 @@ impl Bootstrap {
         self.reloaded.read().unwrap().model_label.clone()
     }
 
+    /// The settle reclaim command from the live config.
+    pub fn settle_command(&self) -> Option<String> {
+        self.live_config().settle_command.clone()
+    }
+
     pub fn settings(&self) -> Arc<crate::settings::SettingsSummary> {
         self.reloaded.read().unwrap().settings.clone()
     }
@@ -148,9 +153,9 @@ impl Bootstrap {
     /// decide what their surface does with warnings.
     pub fn load(config_path: Option<&Path>) -> Self {
         // First run with the default path: no config file yet means
-        // gertie writes a working starter (one endpoint, env key) and
-        // says so — the user edits instead of staring at a blank wall.
-        // An explicit --config override never gets one written.
+        // gertie writes a starter of comments and pointers (no endpoint
+        // is built in) and says so. An explicit --config override never
+        // gets one written.
         let skeleton_note = match config_path {
             None => crate::config::Config::path()
                 .and_then(|path| crate::config::Config::ensure_skeleton(&path)),
@@ -215,6 +220,17 @@ impl Bootstrap {
             eprintln!("error: no session store; refusing to run without persistence");
             std::process::exit(1);
         };
+
+        // The startup sweep: chats idle past the configured days come
+        // back settled — state only, never the reclaim command (that
+        // runs when a human presses settle). Skipped entirely until
+        // the config opts in.
+        if let Some(days) = config.auto_settle_days
+            && days > 0
+            && let Err(error) = store.settle_idle_sessions(days)
+        {
+            eprintln!("warning: auto-settle sweep failed: {error}");
+        }
 
         // The workspace is wherever gertie was launched; tools resolve
         // paths against it and checkpoints land beside the session store.

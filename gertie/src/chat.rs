@@ -180,6 +180,9 @@ pub struct ChatView {
     /// The folder the agent's tools run in — shown in the footer so
     /// "which project am I talking about" is always answered on screen.
     workspace_root: std::path::PathBuf,
+    /// The reclaim command a manual settle runs in the settling
+    /// session's recorded workspace (config: settle_command).
+    settle_command: Option<String>,
     /// The command palette (Ctrl+K): the kit's field + keyboard nav,
     /// pointed at the store's FTS index by the callbacks in render.
     palette: Entity<CommandState>,
@@ -258,6 +261,9 @@ impl ChatView {
         templates: Vec<gertie_tools::templates::Template>,
         // The folder the agent's tools run in, shown in the footer.
         workspace_root: std::path::PathBuf,
+        // The reclaim command a manual settle runs in the settling
+        // session's recorded workspace (config: settle_command).
+        settle_command: Option<String>,
         broker: Arc<PermissionBroker>,
         session_scope: gertie_core::SessionScope,
         // The settings editor over the live config.
@@ -320,10 +326,16 @@ impl ChatView {
         .detach();
 
         let sessions = store.list_sessions().unwrap_or_default();
-        // Resume the newest session if there is one; otherwise the first
-        // message creates the session (lazy, so no empty rows accumulate).
+        // Resume the newest unsettled session if there is one; settled
+        // work stays folded (opening it is the un-settle door, and a
+        // cold open shouldn't shove put-down work back in your face).
+        // Otherwise the first message creates the session (lazy, so no
+        // empty rows accumulate).
         let session_id = if resume {
-            sessions.first().map(|summary| summary.id)
+            sessions
+                .iter()
+                .find(|summary| !summary.settled)
+                .map(|summary| summary.id)
         } else {
             None
         };
@@ -350,6 +362,7 @@ impl ChatView {
             system_prompt,
             templates,
             workspace_root,
+            settle_command,
             palette,
             palette_open: false,
             palette_hits: Vec::new(),
@@ -1216,7 +1229,56 @@ impl ChatView {
         if self.store.set_session_settled(session_id, settled).is_ok() {
             self.sessions = self.store.list_sessions().unwrap_or_default();
         }
+        if settled {
+            self.run_reclaim(session_id, cx);
+        }
         cx.notify();
+    }
+
+    /// The settle_command (config), run in the settling session's
+    /// recorded workspace — the reclaim hook (`cargo clean` in a
+    /// worktree checkout, say). The command never blocks the UI and
+    /// never runs from the auto-settle sweep: a human pressed ✓ here.
+    /// A session with no recorded root (older than the column) says so
+    /// instead of guessing a folder.
+    fn run_reclaim(&mut self, session_id: SessionId, cx: &mut Context<Self>) {
+        let Some(command) = self.settle_command.clone() else {
+            return;
+        };
+        let Some(root) = self.store.session_workspace(session_id) else {
+            self.push_notice(
+                "no workspace recorded for this session — settle command skipped",
+                cx,
+            );
+            return;
+        };
+        cx.spawn(async move |this, cx| {
+            let notice_command = command.clone();
+            let output = cx
+                .background_executor()
+                .spawn(async move {
+                    std::process::Command::new("sh")
+                        .arg("-c")
+                        .arg(&command)
+                        .current_dir(&root)
+                        .output()
+                })
+                .await;
+            let _ = this.update(cx, |this, cx| match output {
+                Ok(output) if output.status.success() => {
+                    this.push_notice(format!("settle: `{notice_command}` — done"), cx);
+                }
+                Ok(output) => {
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    let tail = stderr.lines().next_back().unwrap_or("no output");
+                    this.push_notice(format!("settle: `{notice_command}` failed — {tail}"), cx);
+                }
+                Err(error) => {
+                    this.push_notice(format!("settle: `{notice_command}` failed — {error}"), cx)
+                }
+            });
+        })
+        .detach();
     }
 
     /// The attach affordance, three ways in, one destination:
@@ -1562,6 +1624,11 @@ impl ChatView {
             None => {
                 let title: String = typed.chars().take(48).collect();
                 let session_id = self.store.create_session(&title).expect("create session");
+                // The folder this session's tools run in — the settle
+                // hook's reclaim command runs there, whichever tab
+                // settles it later.
+                self.store
+                    .set_session_workspace(session_id, &self.workspace_root);
                 self.session_id = Some(session_id);
                 self.sessions = self.store.list_sessions().unwrap_or_default();
                 session_id

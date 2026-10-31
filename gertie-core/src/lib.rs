@@ -244,6 +244,8 @@ impl SessionStore {
             ("output_tokens", "INTEGER DEFAULT 0"),
             ("last_context_tokens", "INTEGER DEFAULT 0"),
             ("settled_at", "TEXT"),
+            ("last_activity_at", "TEXT"),
+            ("workspace_root", "TEXT"),
         ] {
             if !session_columns.contains(&column.to_string()) {
                 connection.execute(
@@ -252,6 +254,13 @@ impl SessionStore {
                 )?;
             }
         }
+        // Existing sessions predate the activity clock: "now" is the
+        // honest backfill — they were active when this column arrived.
+        connection.execute(
+            "UPDATE sessions SET last_activity_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
+             WHERE last_activity_at IS NULL",
+            [],
+        )?;
         Ok(Self {
             connection: std::sync::Mutex::new(connection),
         })
@@ -414,6 +423,52 @@ impl SessionStore {
         Ok(())
     }
 
+    /// Records the folder this session's tools run in — the chat sets
+    /// it once at the first send. The settle hook reads it back to run
+    /// a reclaim command in the right checkout.
+    pub fn set_session_workspace(&self, session_id: SessionId, root: &Path) {
+        let connection = self.connection.lock().unwrap();
+        let _ = connection.execute(
+            "UPDATE sessions SET workspace_root = ?2 WHERE id = ?1",
+            rusqlite::params![session_id.0 as i64, root.to_string_lossy()],
+        );
+    }
+
+    /// The folder recorded for a session, if any. Sessions older than
+    /// the column return None — there is no root to reclaim in.
+    pub fn session_workspace(&self, session_id: SessionId) -> Option<String> {
+        let connection = self.connection.lock().unwrap();
+        connection
+            .query_row(
+                "SELECT workspace_root FROM sessions WHERE id = ?1",
+                [session_id.0 as i64],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .ok()
+            .flatten()
+    }
+
+    /// Auto-settle: lays every chat idle for at least `idle_days` down
+    /// as settled — the sweep on startup, before any view loads. Only
+    /// state changes here: a `settle_command` runs on manual settle,
+    /// where a human pressed the button, never from this sweep.
+    /// Returns how many sessions settled.
+    pub fn settle_idle_sessions(&self, idle_days: u64) -> Result<u64, rusqlite::Error> {
+        let connection = self.connection.lock().unwrap();
+        // ISO timestamps compare lexicographically — the cutoff is the
+        // same format, computed server-side (SQLite) from the same
+        // clock the writes use.
+        let settled = connection.execute(
+            "UPDATE sessions SET settled_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
+             WHERE kind = 'chat' AND settled_at IS NULL
+               AND last_activity_at IS NOT NULL
+               AND last_activity_at <
+                   strftime('%Y-%m-%dT%H:%M:%fZ','now','-' || ?1 || ' days')",
+            [idle_days.to_string()],
+        )?;
+        Ok(settled as u64)
+    }
+
     /// Full-text search over every message ever recorded — the model's
     /// memory of past sessions. `query` is a plain phrase: it is quoted
     /// for FTS5, so model-written punctuation can't inject syntax.
@@ -521,6 +576,12 @@ impl SessionStore {
                 role.as_str(),
                 content,
             ])?;
+        // Every appended row is activity: the clock auto-settle reads.
+        connection.execute(
+            "UPDATE sessions SET last_activity_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
+             WHERE id = ?1",
+            [session_id.0 as i64],
+        )?;
         Ok(MessageId(connection.last_insert_rowid() as u64))
     }
 
@@ -548,6 +609,13 @@ impl SessionStore {
                 tool_name,
                 arguments,
             ])?;
+        // Tool results are activity too — the turn's work, not just
+        // its words.
+        connection.execute(
+            "UPDATE sessions SET last_activity_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
+             WHERE id = ?1",
+            [session_id.0 as i64],
+        )?;
         Ok(MessageId(connection.last_insert_rowid() as u64))
     }
 
@@ -1023,6 +1091,65 @@ mod tests {
         // Picking the work back up clears it.
         store.set_session_settled(session, false).unwrap();
         assert!(!store.list_sessions().unwrap()[0].settled);
+    }
+
+    #[test]
+    fn the_idle_sweep_settles_only_what_has_rested_long_enough() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("store.db");
+        let store = SessionStore::open(&path).unwrap();
+        let old = store.create_session("old work").unwrap();
+        let fresh = store.create_session("fresh work").unwrap();
+        store.append_message(old, None, Role::User, "x").unwrap();
+        store.append_message(fresh, None, Role::User, "y").unwrap();
+
+        // Age one session's clock by hand — the store file is plain
+        // SQLite; the test opens it beside the store.
+        let raw = rusqlite::Connection::open(&path).unwrap();
+        raw.execute(
+            "UPDATE sessions SET last_activity_at = '2020-01-01T00:00:00.000Z' WHERE id = ?1",
+            [old.0 as i64],
+        )
+        .unwrap();
+        drop(raw);
+
+        // Ten idle days: only the aged session has rested that long.
+        assert_eq!(store.settle_idle_sessions(10).unwrap(), 1);
+        let summaries = store.list_sessions().unwrap();
+        assert!(
+            summaries
+                .iter()
+                .find(|summary| summary.id == old)
+                .unwrap()
+                .settled
+        );
+        assert!(
+            !summaries
+                .iter()
+                .find(|summary| summary.id == fresh)
+                .unwrap()
+                .settled
+        );
+
+        // Settled is a resting state, not a re-stamp: the sweep has
+        // nothing left to do.
+        assert_eq!(store.settle_idle_sessions(10).unwrap(), 0);
+    }
+
+    #[test]
+    fn the_workspace_roots_the_reclaim_command() {
+        let store = memory_store();
+        let session = store.create_session("rooted").unwrap();
+        assert_eq!(
+            store.session_workspace(session),
+            None,
+            "no root before a send records one"
+        );
+        store.set_session_workspace(session, Path::new("/tmp/some-checkout"));
+        assert_eq!(
+            store.session_workspace(session).as_deref(),
+            Some("/tmp/some-checkout")
+        );
     }
 
     #[test]
