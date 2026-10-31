@@ -12,7 +12,6 @@ use gertie_providers::AnyProvider;
 use gpui_kit::component::button::{Button, ButtonCustomVariant, ButtonVariants as _};
 use gpui_kit::component::command::{Command, CommandState};
 use gpui_kit::component::input::{Input, InputEvent, InputState, Textarea, TextareaState};
-use gpui_kit::component::spinner::Spinner;
 use gpui_kit::component::{ActiveTheme, Sizable as _, h_flex, v_flex};
 use gpui_kit::{
     AnyElement, App, AppContext as _, Context, Entity, EventEmitter, Focusable, IntoElement,
@@ -2152,13 +2151,15 @@ impl ChatView {
         div().w_full().px_4().child(inner).into_any_element()
     }
 
-    /// The quiet-state row: spinner plus what's happening, in the flow
-    /// of the conversation where the user is actually looking.
+    /// The quiet-state row: what's happening, in the flow of the
+    /// conversation where the user is actually looking. No spinner —
+    /// a repeating animation repaints every frame to say what the
+    /// words already say (performance doctrine: no continuously
+    /// repainting animations).
     fn render_activity_row(&self, cx: &Context<Self>) -> AnyElement {
         h_flex()
             .gap_2()
             .items_center()
-            .child(Spinner::new().small().color(cx.theme().accent))
             .child(
                 div()
                     .text_size(px(13.))
@@ -2380,31 +2381,41 @@ impl ChatView {
         let running = matches!(status, ToolStatus::Running);
         let label = crate::tools_ui::action_label(&call.name, &call.arguments, running);
 
-        let mut inner = v_flex().gap_2().child(
-            h_flex()
-                .gap_2()
-                .items_center()
-                .when(running, |row| {
-                    row.child(Spinner::new().xsmall().color(cx.theme().accent))
-                })
-                .child(
-                    div()
-                        .text_size(px(13.))
-                        .text_color(cx.theme().accent)
-                        // Labels carry `code` spans (paths, commands) —
-                        // through the inline renderer they become chips
-                        // instead of literal backticks.
-                        .child(crate::markdown::inline_element(&label, cx)),
-                )
-                .when(worker, |row| {
-                    row.child(
+        // No spinner on the running card: the accent label is the
+        // activity, and a repeating animation repaints every frame
+        // saying nothing the label doesn't (performance doctrine).
+        let mut inner = v_flex()
+            .gap_2()
+            .child(
+                h_flex()
+                    .gap_2()
+                    .items_center()
+                    .child(
                         div()
-                            .text_size(px(11.))
-                            .text_color(cx.theme().muted_foreground)
-                            .child("worker"),
+                            .text_size(px(13.))
+                            .text_color(cx.theme().accent)
+                            // Labels carry `code` spans (paths, commands) —
+                            // through the inline renderer they become chips
+                            // instead of literal backticks.
+                            .child(crate::markdown::inline_element(&label, cx)),
                     )
-                }),
-        );
+                    .when(running, |row| {
+                        row.child(
+                            div()
+                                .text_size(px(11.))
+                                .text_color(cx.theme().muted_foreground)
+                                .child("running"),
+                        )
+                    })
+                    .when(worker, |row| {
+                        row.child(
+                            div()
+                                .text_size(px(11.))
+                                .text_color(cx.theme().muted_foreground)
+                                .child("worker"),
+                        )
+                    }),
+            );
 
         match status {
             ToolStatus::Pending(_) => {
