@@ -18,7 +18,7 @@ use gpui_kit::component::input::{
 use gpui_kit::component::{ActiveTheme, Sizable as _, h_flex, v_flex};
 use gpui_kit::{
     Action, AnyElement, App, AppContext as _, Context, Entity, EventEmitter, Focusable,
-    IntoElement, KeyBinding, ListAlignment, ListState, ParentElement, Render, SharedString,
+    IntoElement, ListAlignment, ListState, ParentElement, Render, SharedString,
     StatefulInteractiveElement as _, Styled, Window, actions, div, list, prelude::*, px,
 };
 use std::sync::Arc;
@@ -164,24 +164,11 @@ enum FocusArea {
 pub type LiveElsewhere =
     Arc<dyn Fn(&mut App, &Entity<ChatView>, &std::path::Path) -> Result<(), String> + 'static>;
 
-/// The chat surface's key map, bound once at app start: escape closes
-/// the turn-diff panel while focus sits inside it, Ctrl+Z outside
-/// the composer undoes a sidebar delete inside its window (inside the
-/// composer it stays text undo — the input consumes the keystroke),
-/// ArrowUp/Down recall sent prompts from an empty composer —
-/// bound after gpui_kit::init so they outbid the input's own cursor
-/// move, and the handler re-dispatches the move whenever the
-/// keystroke shouldn't recall — and F6/Shift+F6 cycle the focus
-/// areas.
+/// Binds the keymap's default rules directly — the test-fixture
+/// path. The app binds through `keymap::load_and_bind` (the same
+/// defaults, plus the user's keymap.toml on top).
 pub fn bind_chat_keys(cx: &mut App) {
-    cx.bind_keys([
-        KeyBinding::new("escape", CloseTurnDiff, Some("TurnDiffPanel")),
-        KeyBinding::new("ctrl-z", UndoDeleteSession, None::<&str>),
-        KeyBinding::new("up", RecallUp, Some("Input")),
-        KeyBinding::new("down", RecallDown, Some("Input")),
-        KeyBinding::new("f6", CycleFocus, None::<&str>),
-        KeyBinding::new("shift-f6", CycleFocusBack, None::<&str>),
-    ]);
+    crate::keymap::bind_rules(&crate::keymap::default_rules(), cx);
 }
 
 /// One file's change in the turn-diff panel, resolved at open time —
@@ -4450,6 +4437,9 @@ impl Render for ChatView {
             .size_full()
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
+            // The turnRunning `when` context — present only while a
+            // turn drives, so keymap rules can gate on it.
+            .when(self.streaming, |root| root.key_context("TurnRunning"))
             // The palette's trigger fires from wherever focus sits —
             // the root catches it on the way up the dispatch path.
             .on_action(cx.listener(
@@ -5164,6 +5154,7 @@ impl Render for ChatView {
                                     })
                                     .child(
                                         h_flex()
+                                            .key_context("Composer")
                                             .px_4()
                                             .py_3()
                                             .gap_2()

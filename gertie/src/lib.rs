@@ -5,6 +5,7 @@ pub mod config;
 pub mod diff;
 pub mod doctor;
 pub mod headless;
+pub mod keymap;
 pub mod markdown;
 pub mod palette;
 pub mod settings;

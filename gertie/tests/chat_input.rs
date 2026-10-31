@@ -94,7 +94,8 @@ fn fixture_built(
     );
     cx.update(|cx| {
         gpui_kit::init(cx);
-        gertie::palette::bind_palette_keys(cx);
+        // The defaults the app would read from keymap.toml — the
+        // fixture binds them directly, no filesystem.
         gertie::chat::bind_chat_keys(cx);
         gpui_kit::component::Theme::change(gpui_kit::component::ThemeMode::Dark, None, cx);
     });

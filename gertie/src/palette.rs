@@ -8,18 +8,13 @@
 
 use gpui_kit::component::command::CommandItem;
 use gpui_kit::component::{ActiveTheme as _, h_flex};
-use gpui_kit::{App, KeyBinding, actions, div, prelude::*, px};
+use gpui_kit::{actions, div, prelude::*, px};
 
 // Open the palette from anywhere in the chat window — no context
 // filter, so it fires no matter which control holds focus (a binding
 // with no context matches at the deepest level of the dispatch path).
+// Its ctrl-k default lives in the keymap's default rules.
 actions!(gertie, [OpenPalette]);
-
-/// The palette's key map, bound once at app start. Only the trigger
-/// lives here — enter/arrows/escape inside the palette are the kit's.
-pub fn bind_palette_keys(cx: &mut App) {
-    cx.bind_keys([KeyBinding::new("ctrl-k", OpenPalette, None::<&str>)]);
-}
 
 /// The palette's commands — the `>` filter's rows. One per action the
 /// chat surface actually offers (the same set the slash commands
