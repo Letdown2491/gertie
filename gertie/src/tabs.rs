@@ -94,6 +94,14 @@ fn live_elsewhere(cx: &Context<WorkspaceView>) -> crate::chat::LiveElsewhere {
     })
 }
 
+/// The switch every chat shares: a bootstrap question, asked by the
+/// footer's word, answered with a full re-root. The closure shape
+/// keeps the chat free of the bootstrap.
+fn switch_to_root(boot: &Arc<Bootstrap>) -> crate::chat::SwitchWorkspace {
+    let boot = boot.clone();
+    Arc::new(move |root| boot.workspace_for_root(root))
+}
+
 impl WorkspaceView {
     /// The first tab resumes the newest stored session; every later tab
     /// starts blank — two views on one session would diverge their
@@ -101,6 +109,7 @@ impl WorkspaceView {
     pub fn new(boot: Arc<Bootstrap>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let panel = cx.new(|_| boot.settings_panel());
         let guard = live_elsewhere(cx);
+        let switch = switch_to_root(&boot);
         let first = cx.new(|cx| {
             ChatView::new(
                 boot.store.clone(),
@@ -123,6 +132,7 @@ impl WorkspaceView {
                 // branch to name.
                 None,
                 guard,
+                switch,
                 window,
                 cx,
             )
@@ -219,6 +229,7 @@ impl WorkspaceView {
     ) -> Entity<ChatView> {
         let panel = cx.new(|_| self.boot.settings_panel());
         let guard = live_elsewhere(cx);
+        let switch = switch_to_root(&self.boot);
         let view = cx.new(|cx| {
             ChatView::new(
                 self.boot.store.clone(),
@@ -239,6 +250,7 @@ impl WorkspaceView {
                 false,
                 naming,
                 guard,
+                switch,
                 window,
                 cx,
             )

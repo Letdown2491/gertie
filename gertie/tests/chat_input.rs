@@ -118,11 +118,16 @@ fn fixture_full(
                     store.clone(),
                     provider,
                     snapshots.clone(),
-                    merge_tools(extra_tools, workspace.as_deref().unwrap_or(Path::new("."))),
+                    merge_tools(
+                        extra_tools.clone(),
+                        workspace.as_deref().unwrap_or(Path::new(".")),
+                    ),
                     "no endpoint configured".into(),
                     None,
                     Vec::new(),
-                    workspace.unwrap_or_else(|| Path::new(".").to_path_buf()),
+                    workspace
+                        .clone()
+                        .unwrap_or_else(|| Path::new(".").to_path_buf()),
                     settle_command,
                     broker.unwrap_or_else(|| Arc::new(gertie_core::PermissionBroker::new())),
                     gertie_core::SessionScope::new(),
@@ -133,6 +138,19 @@ fn fixture_full(
                     true,
                     naming,
                     guard.clone(),
+                    // The switch, fixture-grade: the same rebuild the
+                    // bootstrap would answer with, over the fixture's
+                    // own tools.
+                    Arc::new(move |root: &Path| {
+                        Ok(gertie::bootstrap::Switched {
+                            tools: merge_tools(extra_tools.clone(), root),
+                            system_prompt: None,
+                            workspace_root: root.to_path_buf(),
+                            templates: Vec::new(),
+                            sandbox_bash: false,
+                            warnings: Vec::new(),
+                        })
+                    }),
                     window,
                     cx,
                 )
@@ -507,6 +525,16 @@ fn markdown_and_tool_rows_draw_clean() {
                     true,
                     None,
                     guard.clone(),
+                    Arc::new(|root: &Path| {
+                        Ok(gertie::bootstrap::Switched {
+                            tools: gertie_tools::builtin_tools(root),
+                            system_prompt: None,
+                            workspace_root: root.to_path_buf(),
+                            templates: Vec::new(),
+                            sandbox_bash: false,
+                            warnings: Vec::new(),
+                        })
+                    }),
                     window,
                     cx,
                 )
@@ -2188,6 +2216,116 @@ fn the_guard_refuses_a_file_restore_while_another_tab_streams() {
         std::fs::read(workspace_path.join("scratch.txt")).expect("kept"),
         b"auto",
         "keep means keep"
+    );
+}
+
+/// The workspace switch, end to end: turn 1 writes in the first
+/// folder, the chat moves to the second, turn 2 writes there — and
+/// rewinding turn 1 restores into the first, because the ledger
+/// recorded where its turn ran. The tools follow the switch (the
+/// second write landed in the new root), the history does not lie
+/// about the old one.
+#[test]
+fn a_workspace_switch_moves_the_tools_and_the_ledger_restores_where_it_ran() {
+    let scenarios = tempfile::tempdir().expect("scenario dir");
+    std::fs::write(
+        scenarios.path().join("edits.toml"),
+        "[[steps]]\ntext = ''\n\n\
+         [[steps.tool_calls]]\nname = \"write_file\"\n\
+         arguments = '{\"path\": \"scratch.txt\", \"content\": \"one\"}'\n\n\
+         [[steps]]\ntext = ''\n\n\
+         [[steps]]\ntext = ''\n\n\
+         [[steps.tool_calls]]\nname = \"write_file\"\n\
+         arguments = '{\"path\": \"scratch.txt\", \"content\": \"two\"}'\n\n\
+         [[steps]]\ntext = ''\n",
+    )
+    .expect("scenario file");
+    let first = tempfile::tempdir().expect("first workspace");
+    let second = tempfile::tempdir().expect("second workspace");
+    let snapshots_dir = tempfile::tempdir().expect("snapshots dir");
+    let snapshots =
+        Arc::new(gertie_core::SnapshotStore::open(snapshots_dir.path()).expect("snapshot store"));
+    let endpoint = gertie_providers::Endpoint {
+        name: "replay".into(),
+        base_url: scenarios.path().to_string_lossy().into_owned(),
+        model: "edits".into(),
+        api_key: None,
+        context_window: None,
+        wire: gertie_providers::Wire::Replay,
+    };
+    let provider = Arc::new(
+        gertie_providers::AnyProvider::with_endpoints(vec![endpoint]).expect("replay provider"),
+    );
+    let store = Arc::new(SessionStore::open(Path::new(":memory:")).expect("memory store"));
+    let first_path = first.path().to_path_buf();
+    let second_path = second.path().to_path_buf();
+    let mut fixture = fixture_built(
+        store,
+        Some(snapshots),
+        Some(first_path.clone()),
+        None,
+        Some(provider),
+        None,
+        Vec::new(),
+        None,
+    );
+    fixture.hold = vec![scenarios, first, second, snapshots_dir];
+
+    // Accept edits up front: the writes run unasked, no approvals in
+    // the way of the two turns.
+    fixture.act(|window, cx| window.click("mode-chip", cx));
+
+    // Turn 1 writes into the first folder.
+    fixture.act(|window, cx| {
+        window.input("one", cx);
+        window.press("enter", cx);
+    });
+    pump(&mut fixture, 40);
+    assert_eq!(
+        std::fs::read(first_path.join("scratch.txt")).expect("turn 1 wrote"),
+        b"one"
+    );
+
+    // The switch — the footer word's apply path, portal-free.
+    let view = fixture.view.clone();
+    fixture.act(|_window, cx| {
+        view.upgrade().expect("view alive").update(cx, |view, cx| {
+            view.switch_workspace_for_test(second_path.as_path(), cx);
+        });
+    });
+
+    // Turn 2 writes into the second folder; the first is untouched.
+    fixture.act(|window, cx| {
+        window.input("two", cx);
+        window.press("enter", cx);
+    });
+    pump(&mut fixture, 40);
+    assert_eq!(
+        std::fs::read(second_path.join("scratch.txt")).expect("turn 2 wrote"),
+        b"two",
+        "the tools followed the switch"
+    );
+    assert_eq!(
+        std::fs::read(first_path.join("scratch.txt")).expect("turn 1's file"),
+        b"one",
+        "the switch wrote nothing backward in time"
+    );
+
+    // Rewind turn 1, files included: rewind truncates both turns, and
+    // each file restores where its own turn ran — turn 1's into the
+    // first folder (the ledger's recorded workspace, though the caller
+    // now stands in the second), turn 2's into the second.
+    fixture.act(|window, cx| window.click("rewind-0", cx));
+    fixture.act(|window, cx| window.click("rewind-files", cx));
+    assert_eq!(
+        std::fs::read(first_path.join("scratch.txt")).expect("restored"),
+        b"",
+        "the restore wrote where the turn ran"
+    );
+    assert_eq!(
+        std::fs::read(second_path.join("scratch.txt")).expect("restored"),
+        b"",
+        "the second turn's undo followed its own recorded root"
     );
 }
 

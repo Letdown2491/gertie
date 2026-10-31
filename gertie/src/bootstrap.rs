@@ -86,6 +86,24 @@ pub struct Bootstrap {
     pub templates: Vec<gertie_tools::templates::Template>,
 }
 
+/// Everything a chat needs to move itself to another workspace: the
+/// re-rooted registry, the prompt that names it, and the per-root
+/// config answers. Built by [`Bootstrap::workspace_for_root`].
+pub struct Switched {
+    pub tools: gertie_core::ToolRegistry,
+    pub system_prompt: Option<String>,
+    /// The canonicalized root — containment checks and the footer's
+    /// word mean the one true path.
+    pub workspace_root: PathBuf,
+    pub templates: Vec<gertie_tools::templates::Template>,
+    /// Whether bash sandboxes in the new root (the live config's
+    /// answer, resolved against the *new* root's overlay).
+    pub sandbox_bash: bool,
+    /// Overlay and discovery problems for the new root — the chat
+    /// surfaces them as transcript notices, never silently.
+    pub warnings: Vec<String>,
+}
+
 impl Bootstrap {
     /// Live parts, for readers (tabs clone them per construction).
     pub fn provider(&self) -> Option<Arc<AnyProvider>> {
@@ -117,6 +135,26 @@ impl Bootstrap {
     /// against the live config.
     pub fn origins(&self) -> crate::config::Origins {
         self.live_config().resolve_origins(self.overlay.as_ref())
+    }
+
+    fn skills_user_dir(&self) -> PathBuf {
+        self.config_path
+            .as_ref()
+            .and_then(|path| path.parent().map(|parent| parent.join("skills")))
+            .or_else(|| {
+                crate::config::Config::path().map(|path| path.parent().unwrap().join("skills"))
+            })
+            .unwrap_or_else(|| PathBuf::from(".gertie-skills"))
+    }
+
+    fn templates_user_dir(&self) -> PathBuf {
+        self.config_path
+            .as_ref()
+            .and_then(|path| path.parent().map(|parent| parent.join("templates")))
+            .or_else(|| {
+                crate::config::Config::path().map(|path| path.parent().unwrap().join("templates"))
+            })
+            .unwrap_or_else(|| PathBuf::from(".gertie-templates"))
     }
 
     /// The branch prefix the repo's overlay asks for on worktree
@@ -586,6 +624,116 @@ impl Bootstrap {
             skill_index,
         }
     }
+    /// Everything a chat needs to move itself to another workspace:
+    /// the re-rooted registry, the prompt that names it, and the
+    /// per-root config answers. Built by [`Bootstrap::workspace_for_root`].
+    pub fn workspace_for_root(&self, root: &Path) -> Result<Switched, String> {
+        let root = root
+            .canonicalize()
+            .map_err(|error| format!("{}: {error}", root.display()))?;
+        let config = self.live_config();
+        let (overlay, overlay_error) = crate::config::Config::load_project_overlay(&root);
+        let mut warnings = Vec::new();
+        if let Some(error) = &overlay_error {
+            warnings.push(format!("project overlay: {error}"));
+        }
+
+        let sandbox_bash = config.resolve_sandbox_bash(overlay.as_ref()).value;
+        let sandbox = sandbox_bash
+            .then(|| std::sync::Arc::new(gertie_tools::sandbox::Sandbox::new(root.clone())));
+        let mut tools = gertie_tools::builtin_tools_with(&root, sandbox);
+        {
+            let map = Arc::get_mut(&mut tools).expect("registry not yet shared");
+            for name in &self.root_independent {
+                if let Some(tool) = self.tools.get(name) {
+                    map.insert(name.clone(), tool.clone());
+                }
+            }
+        }
+
+        // Skills: the user dir rides along; the project dir is the new
+        // root's. The index and the load_skill tool rebuild from the
+        // fresh discovery — the prompt must promise what the registry
+        // can deliver.
+        let skills_user = self.skills_user_dir();
+        let builtin_warnings = materialize_builtin_skills(&skills_user, skills_user.parent());
+        let (skills, skill_warnings) =
+            gertie_tools::skills::discover(&skills_user, &root.join(".gertie/skills"));
+        warnings.extend(skill_warnings);
+        warnings.extend(builtin_warnings);
+        let skill_index = gertie_tools::skills::index_prompt(&skills);
+        if !skills.is_empty() {
+            let map = Arc::get_mut(&mut tools).expect("registry not yet shared");
+            map.insert(
+                "load_skill".into(),
+                Arc::new(gertie_tools::skills::LoadSkill::new(&skills)),
+            );
+        }
+
+        // Templates: the same two-root convention as skills.
+        let templates_user = self.templates_user_dir();
+        let (templates, template_warnings) =
+            gertie_tools::templates::discover(&templates_user, &root.join(".gertie/templates"));
+        warnings.extend(template_warnings);
+
+        // The private-fetch gate is the new root's overlay's answer,
+        // not the startup one the carried tool captured.
+        let map = Arc::get_mut(&mut tools).expect("registry not yet shared");
+        map.insert(
+            "web_fetch".into(),
+            Arc::new(gertie_tools::web::WebFetch::new(
+                config.resolve_allow_private_fetch(overlay.as_ref()).value,
+            )),
+        );
+
+        // Agent tools rebuild against the new base, exactly as a
+        // worktree tab's do — a worker dispatched from this chat
+        // works in the tree the chat works in.
+        if let (Some(endpoint), Some(leader_provider)) = (self.agent_endpoint(), self.provider()) {
+            let (types, type_warnings) = agent_types(&self.config, &endpoint);
+            warnings.extend(type_warnings);
+            let mut additions: Vec<(String, Arc<dyn gertie_core::Tool>)> = Vec::new();
+            for target in &types {
+                let (worker_provider, context_window) =
+                    match worker_backend(target, &endpoint, &leader_provider) {
+                        Ok(backend) => backend,
+                        Err(error) => {
+                            warnings.push(format!("agent {}: {error}", target.agent_type.name));
+                            continue;
+                        }
+                    };
+                let tool = gertie_core::AgentTool::new(
+                    target.agent_type.clone(),
+                    worker_provider,
+                    &tools,
+                    self.snapshots.clone(),
+                    self.broker.clone(),
+                    context_window,
+                    root.clone(),
+                    Some(self.store.clone()),
+                    self.session_scope.clone(),
+                    self.mode_scope.clone(),
+                    sandbox_bash,
+                );
+                additions.push((tool.name().to_string(), Arc::new(tool)));
+            }
+            let map = Arc::get_mut(&mut tools).expect("registry not yet shared");
+            for (name, tool) in additions {
+                map.insert(name, tool);
+            }
+        }
+
+        let system_prompt = system_prompt_for(&root, &skill_index);
+        Ok(Switched {
+            tools,
+            system_prompt,
+            workspace_root: root,
+            templates,
+            sandbox_bash,
+            warnings,
+        })
+    }
+
     /// A registry re-rooted at `root`, plus its system prompt: the
     /// built-ins are rebuilt (they capture the workspace root), agent
     /// tools are rebuilt against the new base (a worker dispatched from

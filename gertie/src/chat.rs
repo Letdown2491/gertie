@@ -172,6 +172,15 @@ enum FocusArea {
 pub type LiveElsewhere =
     Arc<dyn Fn(&mut App, &Entity<ChatView>, &std::path::Path) -> Result<(), String> + 'static>;
 
+/// The workspace switch, as a chat asks for it: hand the closure a
+/// folder, get back everything the chat must re-root — registry,
+/// prompt, templates, sandbox posture. Built once by the workspace,
+/// which owns the bootstrap; the chat never sees it. The switch is a
+/// human gesture only: nothing on the model's side of the glass can
+/// call it.
+pub type SwitchWorkspace =
+    Arc<dyn Fn(&std::path::Path) -> Result<crate::bootstrap::Switched, String> + 'static>;
+
 /// Binds the keymap's default rules directly — the test-fixture
 /// path. The app binds through `keymap::load_and_bind` (the same
 /// defaults, plus the user's keymap.toml on top).
@@ -369,6 +378,10 @@ pub struct ChatView {
     /// The rewind safety guard, built by the workspace (see
     /// `LiveElsewhere`): consulted before any file restore.
     live_elsewhere: LiveElsewhere,
+    /// The workspace switch, built by the workspace (see
+    /// `SwitchWorkspace`): the footer's word asks it, the chat applies
+    /// what it returns.
+    switch: SwitchWorkspace,
     /// The worktree branch naming, when this chat works in its own
     /// worktree: the branch is renamed from the session's first
     /// message, so a tab reads `gertie/fix-the-flaky-widget` where it
@@ -446,6 +459,9 @@ impl ChatView {
         // The rewind safety guard, built by the workspace: refuses a
         // file restore while another tab streams in the same checkout.
         live_elsewhere: LiveElsewhere,
+        // The workspace switch, built by the workspace (see the type):
+        // the footer's word asks it, the chat applies the answer.
+        switch: SwitchWorkspace,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -603,6 +619,7 @@ impl ChatView {
             recall: None,
             pending_rewind: None,
             live_elsewhere,
+            switch,
             branch_naming,
             sidebar_focus: cx.focus_handle(),
             transcript_focus: cx.focus_handle(),
@@ -632,6 +649,13 @@ impl ChatView {
     /// paste was consumed as a file chip.
     pub fn attach_big_paste_for_test(&mut self, text: &str, cx: &mut Context<Self>) -> bool {
         self.attach_big_paste(text, cx)
+    }
+
+    /// The footer's switch, portal-free: the closure runs and the
+    /// answer lands, exactly as the picker path would.
+    pub fn switch_workspace_for_test(&mut self, root: &std::path::Path, cx: &mut Context<Self>) {
+        let switched = (self.switch)(root).expect("test switch should succeed");
+        self.apply_switch(switched, cx)
     }
 
     /// The composer's current text, for tests.
@@ -1263,10 +1287,14 @@ impl ChatView {
                 let after = match &change.after {
                     AfterState::Object(hash) => snapshots.read_object(hash).unwrap_or_default(),
                     // Never touched again: disk is the answer, resolved
-                    // against the workspace like every tool path.
+                    // against the workspace the turn ran in — the
+                    // ledger's record, not necessarily this chat's
+                    // current root.
                     AfterState::Disk => {
-                        std::fs::read(resolve_tool_path(&self.workspace_root, &change.path))
-                            .unwrap_or_default()
+                        let root = snapshots
+                            .workspace_of(change.checkpoint)
+                            .unwrap_or_else(|| self.workspace_root.clone());
+                        std::fs::read(resolve_tool_path(&root, &change.path)).unwrap_or_default()
                     }
                 };
                 let diff = match (std::str::from_utf8(&before), std::str::from_utf8(&after)) {
@@ -1313,6 +1341,21 @@ impl ChatView {
         self.turn_diff_open = None;
         let mut restored = 0;
         if let Some(snapshots) = &self.snapshots {
+            // The writes land where the turn ran — the ledger's
+            // recorded root, not this chat's current one — so that is
+            // the checkout the guard must see.
+            let restore_root = panel
+                .files
+                .first()
+                .and_then(|file| snapshots.workspace_of(file.checkpoint))
+                .unwrap_or_else(|| self.workspace_root.clone());
+            let caller = cx.entity();
+            let guard = self.live_elsewhere.clone();
+            if let Err(reason) = guard.as_ref()(cx, &caller, &restore_root) {
+                self.push_notice(format!("Files kept — {reason}."), cx);
+                self.turn_diff = Some(panel);
+                return;
+            }
             for file in &panel.files {
                 if snapshots
                     .restore_under(file.checkpoint, &self.workspace_root)
@@ -1823,6 +1866,82 @@ impl ChatView {
             });
         })
         .detach();
+    }
+
+    /// The footer's workspace word, clicked: a folder picker, then the
+    /// re-root. The rebuild (registry, prompt, overlay answers) is the
+    /// bootstrap closure's; the apply is atomic here, between turns —
+    /// a running turn keeps the root it started with, the same
+    /// doctrine as the permission mode, and the notice says so when
+    /// one is in flight.
+    fn switch_workspace(&mut self, cx: &mut Context<Self>) {
+        if self.branch_naming.is_some() {
+            // A worktree tab's root IS its checkout; moving it would
+            // break the branch-rename promise the tab was opened for.
+            self.push_notice("This tab works in its own worktree — it doesn't move.", cx);
+            return;
+        }
+        let picker = cx.prompt_for_paths(gpui_kit::PathPromptOptions {
+            files: false,
+            directories: true,
+            multiple: false,
+            prompt: Some("Choose a workspace folder".into()),
+        });
+        cx.spawn(async move |this, cx| {
+            let paths = match picker.await {
+                Ok(Ok(Some(paths))) => paths,
+                _ => return, // cancelled, or the portal is missing
+            };
+            let Some(root) = paths.first().cloned() else {
+                return;
+            };
+            let switched = match this.update(cx, |this, _| (this.switch)(&root)) {
+                Ok(Ok(switched)) => switched,
+                Ok(Err(error)) => {
+                    let _ = this.update(cx, |this, cx| {
+                        this.push_notice(format!("Workspace stays — {error}."), cx)
+                    });
+                    return;
+                }
+                Err(_) => return, // the chat is gone
+            };
+            let _ = this.update(cx, |this, cx| this.apply_switch(switched, cx));
+        })
+        .detach();
+    }
+
+    /// Lands a rebuilt workspace in this chat. The running turn is
+    /// safe by construction — its spec cloned the old root and
+    /// registry at send — so the swap is plain field assignment, and
+    /// the next send runs re-rooted. Steers included in the *old*
+    /// root: they join the running turn, which is what the notice's
+    /// "when this turn ends" owns.
+    fn apply_switch(&mut self, switched: crate::bootstrap::Switched, cx: &mut Context<Self>) {
+        self.workspace_root = switched.workspace_root;
+        self.tools = switched.tools;
+        self.system_prompt = switched.system_prompt;
+        self.templates = switched.templates;
+        self.sandbox_bash = switched.sandbox_bash;
+        for warning in switched.warnings {
+            self.push_notice(warning, cx);
+        }
+        // The one notice that states the move in the transcript's own
+        // sequence: the turns after this row ran there. It dies with
+        // the session's UI life (never stored) — the ledger's
+        // per-checkpoint workspace is the durable record.
+        self.push_notice(
+            format!(
+                "Workspace switched to {} — the next turn runs there{}.",
+                tildify(&self.workspace_root),
+                if self.streaming {
+                    " when this turn ends"
+                } else {
+                    ""
+                }
+            ),
+            cx,
+        );
+        cx.notify();
     }
 
     /// The paste hook body: image and file payloads become chips and
@@ -3301,18 +3420,25 @@ impl ChatView {
             return;
         }
         if restore_files {
-            // Safety first, and cheap: another tab streaming in this
-            // checkout refuses the restore before anything is touched.
-            let caller = cx.entity();
-            let guard = self.live_elsewhere.clone();
-            if let Err(reason) = guard.as_ref()(cx, &caller, &self.workspace_root) {
-                self.push_notice(format!("Files kept — {reason}."), cx);
-                return;
-            }
             let Some(snapshots) = &self.snapshots else {
                 self.push_notice("No checkpoint ledger — files can't be restored.", cx);
                 return;
             };
+            // The restores write where the turn ran (the ledger's
+            // recorded root), so that's the checkout the guard must
+            // see — not the live root, which a moved-on chat no
+            // longer points at.
+            let restore_root = pending
+                .restore_points
+                .first()
+                .and_then(|(checkpoint, _)| snapshots.workspace_of(*checkpoint))
+                .unwrap_or_else(|| self.workspace_root.clone());
+            let caller = cx.entity();
+            let guard = self.live_elsewhere.clone();
+            if let Err(reason) = guard.as_ref()(cx, &caller, &restore_root) {
+                self.push_notice(format!("Files kept — {reason}."), cx);
+                return;
+            }
             for (checkpoint, path) in &pending.restore_points {
                 if let Err(error) = snapshots.restore_under(*checkpoint, &self.workspace_root) {
                     self.push_notice(
@@ -3840,12 +3966,41 @@ impl ChatView {
                 // rest, the identity line leads with the folder the
                 // agent's tools run in — "which project am I talking
                 // about" is answered without opening anything.
-                Some(status) => status.to_string(),
-                None => format!(
-                    "{} · {}",
-                    tildify(&self.workspace_root),
-                    self.endpoint_label
-                ),
+                Some(status) => div().child(status.to_string()),
+                None => {
+                    // The word is the switch: click it, pick a folder,
+                    // the agent moves. A worktree tab's word stays
+                    // text — its root is the checkout it was opened
+                    // for, and the move would break the tab's
+                    // branch-rename promise.
+                    let word: AnyElement = if self.branch_naming.is_none() {
+                        div()
+                            .id("workspace-word")
+                            .cursor_pointer()
+                            .hover(|style| style.text_color(cx.theme().foreground))
+                            .tooltip(|window, cx| {
+                                Tooltip::new(
+                                    "Workspace — click to move the agent to another folder",
+                                )
+                                .build(window, cx)
+                            })
+                            .on_click(cx.listener(|this, _, _, cx| this.switch_workspace(cx)))
+                            .child(tildify(&self.workspace_root))
+                            .test_support()
+                            .into_any_element()
+                    } else {
+                        div()
+                            .child(tildify(&self.workspace_root))
+                            .into_any_element()
+                    };
+                    h_flex()
+                        .min_w_0()
+                        .gap_2()
+                        .justify_end()
+                        .child(word)
+                        .child("·")
+                        .child(div().truncate().child(self.endpoint_label.clone()))
+                }
             });
         h_flex()
             .justify_between()

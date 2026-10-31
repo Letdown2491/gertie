@@ -347,7 +347,14 @@ Queued messages are **rows in the session store**, rendered as dashed drafts tha
 be sent now, pulled back into the composer, or dropped; they survive stops, crashes,
 and restarts because they were never UI state, and the drain reads the rows, not the
 shadow. The footer's identity
-line leads with the working folder. Slash builtins cover the panel actions (/compact,
+line leads with the working folder — and the folder word is the workspace switch:
+clicking it opens a folder picker and the chat re-roots mid-session (tool registry,
+skills, templates, and the overlay's answers rebuilt for the new root; MCP connections
+and web backends carry over — they never captured the root). Mode-chip doctrine
+applies: a running turn keeps the root it started with, and the swap lands between
+turns (the transcript notes the move; the durable record is the ledger's, below). A
+worktree tab's word stays plain text — its root is the checkout it was opened for.
+Slash builtins cover the panel actions (/compact,
 /export, /new, /settings, /agents) beside file templates. Two templates ship,
 write-if-absent like the skills (a user edit is theirs, a project file shadows by
 name): `/explain`, and `/commit` — read the repo's recent subjects for its
@@ -377,7 +384,9 @@ checkpoints. The ledger learned turn windows for this: the chat mints one per se
 (session, user-message id, checkpoint boundary), so attribution survives reloads and
 steered messages resolve to the turn they steered. The checkpoint hook also gained the
 workspace root — a relative tool argument now snapshots the file the tool will actually
-touch, not whatever the process CWD reads.
+touch, not whatever the process CWD reads — and each checkpoint keeps the workspace its
+turn ran in, so after a mid-session switch a restore writes back where the turn wrote
+(not where the chat now stands), and the rewind guard watches that recorded checkout.
 
 Runs of finished tool calls collapse into one expandable summary, under honesty rules
 transcribed from t3code's activity-log chapter and binding on the collapse code: the
