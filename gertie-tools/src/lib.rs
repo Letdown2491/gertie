@@ -80,9 +80,44 @@ fn resolve(root: &Path, path: &str) -> Result<PathBuf, String> {
                 .ok_or_else(|| format!("unsupported path: {path}"))?;
             within(&resolved_parent.join(file_name))
         }
-        // Parent missing too: nothing exists to traverse through; the
-        // caller's own error (and create_dir_all) handles it.
-        _ => Ok(joined),
+        // Parent missing too: canonicalize through the nearest
+        // *existing* ancestor and join the nonexistent tail back on.
+        // Returning the uncanonicalized path would leave a window
+        // where a symlink planted in the not-yet-existing chain
+        // redirects the write after the check.
+        _ => {
+            let mut ancestor = joined.clone();
+            let mut tail = Vec::new();
+            let resolved = loop {
+                match ancestor.canonicalize() {
+                    Ok(existing) => {
+                        let mut resolved = existing;
+                        for part in tail.iter().rev() {
+                            resolved = resolved.join(part);
+                        }
+                        break resolved;
+                    }
+                    Err(_) => {
+                        let Some(last) =
+                            ancestor.file_name().map(std::path::PathBuf::from)
+                        else {
+                            // Walked past the root: nothing exists to
+                            // traverse through; the caller's own error
+                            // (and create_dir_all) handles it.
+                            return Ok(joined);
+                        };
+                        let Some(parent) =
+                            ancestor.parent().map(std::path::Path::to_path_buf)
+                        else {
+                            return Ok(joined);
+                        };
+                        tail.push(last);
+                        ancestor = parent;
+                    }
+                }
+            };
+            within(&resolved)
+        }
     }
 }
 
@@ -723,6 +758,33 @@ mod tests {
         assert!(resolve(&root, "/etc/passwd").is_err());
         // Absolute under the root is allowed.
         assert!(resolve(&root, &root.join("a.txt").to_string_lossy()).is_ok());
+    }
+
+    #[test]
+    fn a_new_path_resolves_through_the_nearest_existing_ancestor() {
+        let dir = workspace();
+        // The root reached through a symlink — the spelling the caller
+        // uses is not the disk's.
+        #[cfg(unix)]
+        {
+            let link = dir.path().join("link");
+            std::os::unix::fs::symlink(dir.path(), &link).unwrap();
+            // Deeply new: the path, its parent, and its grandparent do
+            // not exist. The old fallback returned the uncanonicalized
+            // spelling — a window for a later-planted symlink. It must
+            // come back canonicalized: nearest existing ancestor
+            // (the root, through the link) with the tail joined on.
+            let resolved = resolve(&link, "a/b/c.txt").unwrap();
+            let canonical_root = dir.path().canonicalize().unwrap();
+            assert!(
+                resolved.starts_with(&canonical_root),
+                "resolved through the link's spelling: {resolved:?}"
+            );
+            assert_eq!(
+                resolved,
+                canonical_root.join("a").join("b").join("c.txt")
+            );
+        }
     }
 
     #[test]
