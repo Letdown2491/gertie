@@ -179,15 +179,12 @@ impl SnapshotStore {
         rows.collect()
     }
 
-    /// Writes the checkpoint's object back to its path. Returns the path
-    /// that was restored.
-    pub fn restore(&self, checkpoint: CheckpointId) -> Result<PathBuf, SnapshotError> {
-        self.restore_under(checkpoint, Path::new("."))
-    }
-
     /// Restores with tool-relative paths resolved against `root` — the
     /// workspace the tools ran in, which is not always the caller's
-    /// process CWD.
+    /// process CWD. The restore target is contained within `root` (see
+    /// [`SnapshotError::EscapesWorkspace`]): there is no uncontained
+    /// restore, because a ledger that can write anywhere is not a
+    /// reversibility mechanism.
     pub fn restore_under(
         &self,
         checkpoint: CheckpointId,
@@ -210,6 +207,41 @@ impl SnapshotStore {
         } else {
             root.join(path)
         };
+        // Containment: the restore's root is the workspace the caller
+        // says these tools ran in, and the target — relative joined, or
+        // absolute as recorded — must live inside it. The nearest
+        // existing ancestor is canonicalized, so a symlink inside the
+        // workspace pointing out of it refuses too. Nothing outside the
+        // workspace is ever written.
+        let canonical_root = root.canonicalize()?;
+        let mut ancestor = path.clone();
+        let mut tail = Vec::new();
+        let resolved = loop {
+            match ancestor.canonicalize() {
+                Ok(existing) => {
+                    let mut resolved = existing;
+                    for part in tail.iter().rev() {
+                        resolved = resolved.join(part);
+                    }
+                    break resolved;
+                }
+                Err(_) => {
+                    let last = ancestor
+                        .file_name()
+                        .ok_or_else(|| SnapshotError::EscapesWorkspace(path.clone()))?
+                        .to_os_string();
+                    ancestor = ancestor
+                        .parent()
+                        .ok_or_else(|| SnapshotError::EscapesWorkspace(path.clone()))?
+                        .to_path_buf();
+                    tail.push(std::path::PathBuf::from(last));
+                }
+            }
+        };
+        if !resolved.starts_with(&canonical_root) {
+            return Err(SnapshotError::EscapesWorkspace(resolved));
+        }
+        let path = resolved;
         std::fs::copy(self.objects.join(hash), &path)?;
         Ok(path)
     }
@@ -374,6 +406,12 @@ impl SnapshotStore {
 pub enum SnapshotError {
     Io(std::io::Error),
     Db(rusqlite::Error),
+    /// The checkpoint's recorded path resolves outside the workspace
+    /// the restore was asked to write into — refused, never written.
+    /// A checkpoint can only cover what the containment rules let a
+    /// tool touch; a restore that could reach further would turn the
+    /// ledger into a write-anything primitive.
+    EscapesWorkspace(std::path::PathBuf),
 }
 
 impl From<std::io::Error> for SnapshotError {
@@ -393,6 +431,11 @@ impl std::fmt::Display for SnapshotError {
         match self {
             SnapshotError::Io(error) => write!(f, "{error}"),
             SnapshotError::Db(error) => write!(f, "{error}"),
+            SnapshotError::EscapesWorkspace(path) => write!(
+                f,
+                "refusing to write outside the workspace: {}",
+                path.display()
+            ),
         }
     }
 }
@@ -414,7 +457,9 @@ mod tests {
 
         let checkpoint = store.record_file(Some(crate::SessionId(1)), &file).unwrap();
         std::fs::write(&file, "after").unwrap();
-        store.restore(checkpoint).unwrap();
+        store
+            .restore_under(checkpoint, tmp.path())
+            .expect("contained restore");
         assert_eq!(std::fs::read_to_string(&file).unwrap(), "before");
     }
 
@@ -550,5 +595,53 @@ mod tests {
             "before",
             "relative paths resolve against the given root"
         );
+    }
+
+    #[test]
+    fn a_restore_never_writes_outside_its_workspace() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = store_in(tmp.path());
+        let workspace = tempfile::tempdir().unwrap();
+        // The ledger holds a checkpoint recorded against an absolute
+        // path outside the workspace the restore targets — a row from
+        // an older run, another checkout, wherever. Restoring it must
+        // refuse, not write.
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("victim.txt"), "kept").unwrap();
+        let checkpoint = store
+            .record(
+                Some(crate::SessionId(1)),
+                &outside.path().join("victim.txt"),
+                b"attacker content",
+            )
+            .unwrap();
+        match store.restore_under(checkpoint, workspace.path()) {
+            Err(SnapshotError::EscapesWorkspace(path)) => {
+                assert!(path.starts_with(outside.path()), "{path:?}");
+            }
+            other => panic!("expected a refusal, got {other:?}"),
+        }
+        assert_eq!(
+            std::fs::read_to_string(outside.path().join("victim.txt")).unwrap(),
+            "kept",
+            "nothing outside the workspace was written"
+        );
+
+        // And a symlink inside the workspace pointing out refuses too.
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(outside.path(), workspace.path().join("sneaky")).unwrap();
+            let checkpoint = store
+                .record(
+                    Some(crate::SessionId(1)),
+                    std::path::Path::new("sneaky/victim.txt"),
+                    b"attacker content",
+                )
+                .unwrap();
+            assert!(matches!(
+                store.restore_under(checkpoint, workspace.path()),
+                Err(SnapshotError::EscapesWorkspace(_))
+            ));
+        }
     }
 }
