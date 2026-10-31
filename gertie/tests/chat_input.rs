@@ -103,6 +103,19 @@ fn fixture_full(
     });
     let mut view_entity = None;
     let guard = guard.unwrap_or_else(|| Arc::new(|_, _, _| Ok(())));
+    let root = workspace
+        .clone()
+        .unwrap_or_else(|| Path::new(".").to_path_buf());
+    // A real session records its workspace at first send; the seeds
+    // below (and above — the store arrives pre-seeded) bypass send, so
+    // the fixture records for them: every seeded conversation ran in
+    // the view's workspace, which is what launch-resume matches on. A
+    // root a test already set on purpose is left alone.
+    for summary in store.list_sessions().expect("session list") {
+        if summary.workspace_root.is_none() {
+            store.set_session_workspace(summary.id, &root);
+        }
+    }
     let window = cx
         .open_window(size(px(900.), px(640.)), |window, cx| {
             let view = cx.new(|cx| {
@@ -125,9 +138,7 @@ fn fixture_full(
                     "no endpoint configured".into(),
                     None,
                     Vec::new(),
-                    workspace
-                        .clone()
-                        .unwrap_or_else(|| Path::new(".").to_path_buf()),
+                    root.clone(),
                     settle_command,
                     broker.unwrap_or_else(|| Arc::new(gertie_core::PermissionBroker::new())),
                     gertie_core::SessionScope::new(),
@@ -482,6 +493,9 @@ fn markdown_and_tool_rows_draw_clean() {
             "   1  fn main() {}\n   2  // three lines",
         )
         .expect("tool row");
+    // A real session records its workspace at first send — the seed
+    // bypasses send, so record it here: launch-resume matches on it.
+    store.set_session_workspace(session_id, Path::new("."));
 
     // Open the chat on the stored session and force full draws: every
     // row kind above goes through layout at least once.
@@ -660,6 +674,115 @@ fn the_palette_jumps_to_a_hit_in_another_session() {
     assert!(
         scroll < 40,
         "the hit's turn should be scrolled into view, got {scroll}"
+    );
+}
+
+/// Launch resume is workspace-scoped: the store is one global memory,
+/// but a conversation rooted in another folder must not open in this
+/// folder's first tab — that is how one chat's file paths ended up in
+/// a different directory's fresh window.
+#[test]
+fn launch_resume_matches_the_workspace() {
+    let store = Arc::new(SessionStore::open(Path::new(":memory:")).expect("memory store"));
+    let session = store.create_session("somewhere else").expect("session");
+    store
+        .append_message(session, None, gertie_core::Role::User, "hello")
+        .expect("row");
+    // The session ran in another folder; the view opens on ".".
+    store.set_session_workspace(session, Path::new("/tmp/gertie-elsewhere"));
+
+    let mut fixture = fixture_with_store(store);
+    let resumed = fixture.cx.update(|cx| {
+        fixture
+            .view
+            .upgrade()
+            .expect("view alive")
+            .read(cx)
+            .session_id()
+    });
+    assert!(
+        resumed.is_none(),
+        "another folder's chat must not resume here"
+    );
+
+    // The conversation is not gone: the sidebar keeps it, and opening
+    // it says which folder it started in before the paths surprise
+    // anyone.
+    fixture.act(|window, cx| {
+        window.click("session-1", cx);
+    });
+    let notices = fixture.cx.update(|cx| {
+        fixture
+            .view
+            .upgrade()
+            .expect("view alive")
+            .read(cx)
+            .notice_texts_for_test()
+    });
+    assert!(
+        notices
+            .iter()
+            .any(|notice| notice.contains("started in /tmp/gertie-elsewhere")),
+        "the cross-folder switch must say so, got: {notices:?}"
+    );
+}
+
+/// A conversation from this folder's root still resumes: the scoping
+/// is a match, not a ban.
+#[test]
+fn launch_resume_still_takes_this_workspaces_chat() {
+    let store = Arc::new(SessionStore::open(Path::new(":memory:")).expect("memory store"));
+    let session = store.create_session("this folder's chat").expect("session");
+    store
+        .append_message(session, None, gertie_core::Role::User, "hello")
+        .expect("row");
+    store.set_session_workspace(session, Path::new("."));
+
+    let mut fixture = fixture_with_store(store);
+    let resumed = fixture.cx.update(|cx| {
+        fixture
+            .view
+            .upgrade()
+            .expect("view alive")
+            .read(cx)
+            .session_id()
+    });
+    assert_eq!(
+        resumed.map(|resumed| resumed.0),
+        Some(1),
+        "this folder's own chat resumes"
+    );
+}
+
+/// A footer workspace switch re-roots the session at the next send:
+/// the conversation follows the tab, so launch resume and the settle
+/// hook land in the folder it now runs in — not the one it was born
+/// in.
+#[test]
+fn a_send_after_a_workspace_switch_re_roots_the_session() {
+    let store = Arc::new(SessionStore::open(Path::new(":memory:")).expect("memory store"));
+    let session = store.create_session("the traveling chat").expect("session");
+    store
+        .append_message(session, None, gertie_core::Role::User, "hello")
+        .expect("row");
+    store.set_session_workspace(session, Path::new("."));
+
+    let mut fixture = fixture_with_store(store.clone());
+    // The footer's switch — the apply path, portal-free.
+    let view = fixture.view.clone();
+    fixture.act(|_window, cx| {
+        view.upgrade().expect("view alive").update(cx, |view, cx| {
+            view.switch_workspace_for_test(Path::new("/tmp/gertie-moved"), cx);
+        });
+    });
+    fixture.act(|window, cx| {
+        window.input("after the move", cx);
+        window.press("enter", cx);
+    });
+    assert_eq!(
+        store.session_workspace(session).as_deref(),
+        Some("/tmp/gertie-moved"),
+        "the next send re-roots the session to the switched folder"
     );
 }
 
@@ -1123,6 +1246,119 @@ fn a_worker_ask_bubbles_into_the_transcript_and_the_answer_reaches_the_worker() 
             .iter()
             .map(|message| message.content.as_str())
             .collect::<Vec<_>>()
+    );
+}
+
+/// Quiet is the agent's silence, not the human's: while an approval
+/// card waits on an answer, the status line keeps "quiet" to itself —
+/// the ask's own clock tells that story. The gauge still speaks when
+/// nothing waits on anyone.
+#[test]
+fn the_quiet_gauge_holds_its_tongue_while_an_approval_waits() {
+    // The held-turn rig from the worker-ask test: a pending card with
+    // the turn alive underneath it.
+    let scenarios = tempfile::tempdir().expect("scenario dir");
+    std::fs::write(
+        scenarios.path().join("worker.toml"),
+        "[[steps]]\ntext = ''\n\
+         [[steps.tool_calls]]\nname = 'worker_ask'\narguments = '{}'\n\
+         [[steps]]\ntext = ''\n",
+    )
+    .expect("scenario file");
+    let endpoint = gertie_providers::Endpoint {
+        name: "replay".into(),
+        base_url: scenarios.path().to_string_lossy().into_owned(),
+        model: "worker".into(),
+        api_key: None,
+        context_window: None,
+        wire: gertie_providers::Wire::Replay,
+    };
+    let provider = Arc::new(
+        gertie_providers::AnyProvider::with_endpoints(vec![endpoint]).expect("replay provider"),
+    );
+    let broker = Arc::new(gertie_core::PermissionBroker::new());
+    let store = Arc::new(SessionStore::open(Path::new(":memory:")).expect("memory store"));
+    let mut fixture = fixture_built(
+        store,
+        None,
+        None,
+        None,
+        Some(provider),
+        Some(broker.clone()),
+        vec![Arc::new(WorkerAskTool {
+            broker: broker.clone(),
+        })],
+        None,
+    );
+    fixture.hold = vec![scenarios];
+
+    fixture.act(|window, cx| {
+        window.input("go", cx);
+        window.press("enter", cx);
+    });
+    pump(&mut fixture, 30);
+
+    // The card pends; the clocks age past the quiet threshold. The
+    // line must not call that quiet — the human is the quiet party.
+    let view = fixture.view.clone();
+    fixture.act(|_window, cx| {
+        view.upgrade().expect("view alive").update(cx, |view, _| {
+            view.age_status_clocks_for_test(std::time::Duration::from_secs(30));
+        });
+    });
+    let line = fixture.cx.update(|cx| {
+        fixture
+            .view
+            .upgrade()
+            .expect("view alive")
+            .read(cx)
+            .activity_line_for_test()
+    });
+    assert!(
+        !line.contains("quiet"),
+        "a waiting human is not agent quiet: {line}"
+    );
+
+    // The answer is an event: the waiting label and its clock retire
+    // with the card — no instant, un-reset quiet on the other side.
+    fixture.act(|window, cx| {
+        window.click("approve-2", cx);
+    });
+    let line = fixture.cx.update(|cx| {
+        fixture
+            .view
+            .upgrade()
+            .expect("view alive")
+            .read(cx)
+            .activity_line_for_test()
+    });
+    assert!(
+        !line.contains("Waiting for your approval"),
+        "the ask's clock retires on approval: {line}"
+    );
+    assert!(
+        !line.contains("quiet"),
+        "the clocks restart when the human acts: {line}"
+    );
+
+    // With no card waiting, aged clocks speak: the gauge itself works.
+    pump(&mut fixture, 30);
+    fixture.act(|_window, cx| {
+        view.upgrade().expect("view alive").update(cx, |view, _| {
+            view.age_status_clocks_for_test(std::time::Duration::from_secs(30));
+        });
+    });
+    let line = fixture.cx.update(|cx| {
+        fixture
+            .view
+            .upgrade()
+            .expect("view alive")
+            .read(cx)
+            .activity_line_for_test()
+    });
+    assert!(
+        line.contains("quiet"),
+        "agent-side silence is still reported: {line}"
     );
 }
 

@@ -181,6 +181,11 @@ pub struct SessionSummary {
     /// The session's permission mode, chosen in the composer and kept
     /// here — reopening a chat reopens its posture.
     pub mode: PermissionMode,
+    /// The folder this session's tools run in, recorded at first send
+    /// (None: never sent, or a row older than the column). Launch
+    /// resume matches on it — the store is one global memory, but a
+    /// chat opened in a folder is that folder's chat.
+    pub workspace_root: Option<String>,
 }
 
 /// One full-text search hit: which session, what role, and a marked
@@ -382,7 +387,7 @@ impl SessionStore {
     ) -> Result<Vec<SessionSummary>, rusqlite::Error> {
         let connection = self.connection.lock().unwrap();
         let mut statement = connection
-            .prepare("SELECT s.id, s.title, s.input_tokens, s.output_tokens, s.last_context_tokens, s.mode, s.limited_at IS NOT NULL FROM sessions s WHERE s.parent_id = ?1 ORDER BY s.id")?;
+            .prepare("SELECT s.id, s.title, s.input_tokens, s.output_tokens, s.last_context_tokens, s.mode, s.limited_at IS NOT NULL, s.workspace_root FROM sessions s WHERE s.parent_id = ?1 ORDER BY s.id")?;
         let rows = statement
             .query_map([parent.0 as i64], |row| {
                 Ok(SessionSummary {
@@ -402,6 +407,7 @@ impl SessionStore {
                         .ok()
                         .and_then(|raw| raw.parse::<PermissionMode>().ok())
                         .unwrap_or_default(),
+                    workspace_root: row.get::<_, Option<String>>(7).ok().flatten(),
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -473,7 +479,7 @@ impl SessionStore {
         let connection = self.connection.lock().unwrap();
         let mut statement = connection.prepare(
             "SELECT s.id, s.title, s.input_tokens, s.output_tokens, s.last_context_tokens,
-                    s.settled_at IS NOT NULL, s.limited_at IS NOT NULL, s.mode
+                    s.settled_at IS NOT NULL, s.limited_at IS NOT NULL, s.mode, s.workspace_root
              FROM sessions s
              LEFT JOIN messages m ON m.session_id = s.id
              WHERE s.kind = 'chat'
@@ -494,6 +500,7 @@ impl SessionStore {
                     .ok()
                     .and_then(|raw| raw.parse::<PermissionMode>().ok())
                     .unwrap_or_default(),
+                workspace_root: row.get::<_, Option<String>>(8).ok().flatten(),
             })
         })?;
         rows.collect()
@@ -551,7 +558,8 @@ impl SessionStore {
     }
 
     /// Records the folder this session's tools run in — the chat sets
-    /// it once at the first send. The settle hook reads it back to run
+    /// it at the first send and re-roots it on any send after a
+    /// footer workspace switch. The settle hook reads it back to run
     /// a reclaim command in the right checkout.
     pub fn set_session_workspace(&self, session_id: SessionId, root: &Path) {
         let connection = self.connection.lock().unwrap();

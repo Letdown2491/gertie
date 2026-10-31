@@ -342,7 +342,18 @@ blockquote (bounded — enough to pin the referent, never the whole answer back 
 the prompt) and the comment types under it; sending shows the model the exact words.
 Steer and queue are verbs with a visible stack: while a turn runs, Enter steers it
 (the model reads the words at the next round boundary) and the secondary Enter queues
-a follow-up for the next one — the footer names which action the send key fires.
+a follow-up for the next one — the composer's ghost text names which action the send
+key fires, swapped in only while a turn runs and the composer sits empty (a
+placeholder renders where the user is typing, and vanishes with anything typed).
+Launch resume is **workspace-scoped**: the session store is one global memory across
+every folder, but the newest unsettled session resumes only when its recorded root
+(the `workspace_root` set at first send) matches the folder the app opened in —
+otherwise a new folder's first tab starts blank, because one conversation's file
+paths must not open in another folder's window. Opening a conversation rooted
+elsewhere (sidebar click) says so in the transcript instead of letting the paths
+surprise anyone. A footer workspace switch re-roots the session at its next send —
+the conversation follows the tab, so resume and the settle hook land where it now
+runs, not where it was born.
 Queued messages are **rows in the session store**, rendered as dashed drafts that can
 be sent now, pulled back into the composer, or dropped; they survive stops, crashes,
 and restarts because they were never UI state, and the drain reads the rows, not the
@@ -506,7 +517,13 @@ Four more, from t3code's performance doctrines:
 - **No continuously repainting animations.** Motion repaints every frame for as long as
   it is visible; a state the words already state gains nothing from a spinner. Static
   text carries state ("running", "thinking…") — animation is for what only motion can
-  say.
+  say. One deliberate carve-out, the **working tick**: while a turn runs, the status
+  line steps a 2-fps half-moon spinner and a seconds clock (`Thinking… · 14s`), a
+  running tool's card ticks with its own clock (`◐ running · 2m 05s`), and past twenty
+  seconds without a loop event the line says `quiet 2m` — but not while an approval
+  card waits: that silence is the human's, and the ask's own clock tells it. The
+  difference between slow and stopped is information, not decoration, and the tick
+  dies with the turn: nothing animates at rest.
 - **Turn end ≠ settlement.** The loop yields `Done` and returns — no trailing
   persistence, no summary, nothing after the turn's last event (pinned by test). The
   caller owns any post-turn work, on its own schedule.

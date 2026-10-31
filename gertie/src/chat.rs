@@ -18,13 +18,14 @@ use gpui_kit::component::input::{
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{ActiveTheme, Icon, Sizable as _, h_flex, v_flex};
 use gpui_kit::{
-    Action, AnyElement, App, AppContext as _, Context, Entity, EventEmitter, Focusable,
-    IntoElement, ListAlignment, ListState, ParentElement, Render, SharedString,
+    Action, AnyElement, AnyWindowHandle, App, AppContext as _, Context, Entity, EventEmitter,
+    Focusable, IntoElement, ListAlignment, ListState, ParentElement, Render, SharedString,
     StatefulInteractiveElement as _, Styled, TestSupportExt as _, Window, actions, div, list,
     prelude::*, px,
 };
 use std::sync::Arc;
 use std::time::Duration;
+use std::time::Instant;
 
 /// Where the transcript is in a tool call's life: waiting on the human,
 /// executing, or finished (with the result the model will also see).
@@ -76,6 +77,32 @@ const RECENT_WINDOW: usize = 400;
 /// frame's cost, not a token-shaped pile of them. 16 ms is one frame —
 /// and the turn's transitions (flush_stream) notify regardless.
 const STREAM_NOTIFY_CADENCE: std::time::Duration = std::time::Duration::from_millis(16);
+
+/// The working tick: how often the status line wakes while a turn
+/// runs. Two ticks a second step the spinner and roll the elapsed
+/// clock's digits; the tick dies with the turn, so nothing animates
+/// at rest.
+const WORKING_TICK: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// How long without a loop event before the status line says so.
+/// Silence during a tool run is normal (tests take minutes); silence
+/// while the model chews is the difference between "slow" and
+/// "stopped", and only worth speaking when it exists.
+const QUIET_AFTER: std::time::Duration = std::time::Duration::from_secs(20);
+
+/// The status spinner's frames — half-moons, one step per working
+/// tick (2 fps). Geometric shapes on purpose: the emoji lesson
+/// (the paperclip below) — glyphs a bare Linux font stack actually
+/// carries.
+const SPINNER_FRAMES: [&str; 4] = ["◐", "◓", "◑", "◒"];
+
+/// The composer's ghost text at rest.
+const IDLE_PLACEHOLDER: &str = "Message gertie… — / for commands";
+
+/// The composer's ghost text while a turn runs: the send key's two
+/// meanings, stated where the keys are. Placeholders only render on
+/// an empty input, so the hint vanishes with anything typed.
+const STEER_PLACEHOLDER: &str = "Enter steers the running turn · Ctrl+Enter queues";
 
 /// One rendered turn in the transcript. Plain messages keep their row in
 /// the session store (streaming updates land in SQLite without a row per
@@ -263,6 +290,22 @@ pub struct ChatView {
     /// What the agent is up to right now, for the status line — the loop
     /// goes quiet between streaming rounds, and silence reads as a hang.
     activity: String,
+    /// When the current activity began. The status line's clock resets
+    /// with every change — thinking, a tool, thinking again — so the
+    /// number always answers "how long has THIS been going on".
+    activity_at: Instant,
+    /// The last event the loop delivered. The status line's quiet
+    /// gauge hangs off it: nothing new for [`QUIET_AFTER`] while the
+    /// model chews, and "slow" gets distinguished from "stopped".
+    last_event_at: Instant,
+    /// Running tool cards' clocks, keyed by wire call id. A tool can
+    /// outlive several silent minutes; its card's "running · 2m 05s"
+    /// is its own time, not the turn's.
+    tool_starts: std::collections::HashMap<String, Instant>,
+    /// This chat's window, captured at construction — the composer's
+    /// placeholder swaps from windowless async contexts (turn start
+    /// and end both live inside the turn driver's spawn).
+    window_handle: AnyWindowHandle,
     /// True while the turn is alive but nothing visible is happening —
     /// the request is in flight or the model is chewing on tool results.
     /// Drives the in-transcript "Thinking…" row: the header status alone
@@ -527,15 +570,25 @@ impl ChatView {
         .detach();
 
         let sessions = store.list_sessions().unwrap_or_default();
-        // Resume the newest unsettled session if there is one; settled
-        // work stays folded (opening it is the un-settle door, and a
-        // cold open shouldn't shove put-down work back in your face).
-        // Otherwise the first message creates the session (lazy, so no
-        // empty rows accumulate).
+        // Resume the newest unsettled session **of this workspace** if
+        // there is one; settled work stays folded (opening it is the
+        // un-settle door, and a cold open shouldn't shove put-down work
+        // back in your face). The store is one global memory across
+        // every folder, but a chat opened in a folder is that folder's
+        // chat — resuming the global newest is how one conversation's
+        // files end up in another folder's fresh window. Otherwise the
+        // first message creates the session (lazy, so no empty rows
+        // accumulate).
         let session_id = if resume {
             sessions
                 .iter()
-                .find(|summary| !summary.settled)
+                .find(|summary| {
+                    !summary.settled
+                        && summary
+                            .workspace_root
+                            .as_deref()
+                            .is_some_and(|stored| same_workspace(stored, &workspace_root))
+                })
                 .map(|summary| summary.id)
         } else {
             None
@@ -586,6 +639,10 @@ impl ChatView {
             streaming_assistant: None,
             last_db_id: None,
             activity: "starting…".into(),
+            activity_at: Instant::now(),
+            last_event_at: Instant::now(),
+            tool_starts: std::collections::HashMap::new(),
+            window_handle: window.window_handle(),
             thinking: false,
             usage: session_usage,
             total_usage,
@@ -680,6 +737,22 @@ impl ChatView {
     /// How many turns the transcript holds, for tests and tooling.
     pub fn turn_count_for_test(&self) -> usize {
         self.turns.len()
+    }
+
+    /// The status line's words, for tests.
+    pub fn activity_line_for_test(&self) -> String {
+        self.activity_line()
+    }
+
+    /// Ages the status clocks, for tests — quiet's threshold is real
+    /// seconds and no test waits them out. Instant arithmetic, not a
+    /// mocked clock: both clocks go back together, as a real quiet
+    /// stretch would leave them.
+    pub fn age_status_clocks_for_test(&mut self, ago: std::time::Duration) {
+        if let Some(past) = Instant::now().checked_sub(ago) {
+            self.activity_at = past;
+            self.last_event_at = past;
+        }
     }
 
     /// The text of the transcript's notice rows, for tests.
@@ -843,9 +916,11 @@ impl ChatView {
         };
         self.turns = turns;
         // The turn indexes name different turns now — no cached parse
-        // or card face may survive the reload.
+        // or card face may survive the reload. The running clocks go
+        // with them: a reloaded transcript has no live cards.
         self.markdown_cache.borrow_mut().clear();
         self.tool_face.borrow_mut().clear();
+        self.tool_starts.clear();
         self.history = Arc::new(tokio::sync::Mutex::new(history));
         self.last_db_id = last_db_id;
         // The archive behind the page — every row, every image
@@ -973,11 +1048,20 @@ impl ChatView {
         self.turns.len() + usize::from(self.show_activity_row())
     }
 
-    /// Whether the "Thinking…" row belongs at the bottom right now: the
-    /// turn is alive, but no card, prompt, or streaming text is telling
-    /// the story — the exact gaps that used to read as a hang.
-    fn show_activity_row(&self) -> bool {
-        let pending = self.turns.iter().any(|turn| {
+    /// The status line's text, with its clocks: every change restarts
+    /// the elapsed count (the number answers "how long has *this* been
+    /// going on") and the quiet gauge with it.
+    fn set_activity(&mut self, label: impl Into<String>) {
+        self.activity = label.into();
+        self.activity_at = Instant::now();
+        self.last_event_at = Instant::now();
+    }
+
+    /// Whether an approval card waits on the human. Quiet's gauge
+    /// holds its tongue then: the silence is ours to answer, not the
+    /// agent's to explain — and the ask's own clock already tells it.
+    fn waiting_on_human(&self) -> bool {
+        self.turns.iter().any(|turn| {
             matches!(
                 turn,
                 Turn::Tool {
@@ -985,8 +1069,14 @@ impl ChatView {
                     ..
                 }
             )
-        });
-        self.streaming && self.thinking && !pending
+        })
+    }
+
+    /// Whether the "Thinking…" row belongs at the bottom right now: the
+    /// turn is alive, but no card, prompt, or streaming text is telling
+    /// the story — the exact gaps that used to read as a hang.
+    fn show_activity_row(&self) -> bool {
+        self.streaming && self.thinking && !self.waiting_on_human()
     }
 
     /// The composer chip's click: the mode advances around the ring —
@@ -1035,9 +1125,36 @@ impl ChatView {
         self.streaming_assistant = None;
         self.queued.clear();
         self.history.blocking_lock().clear();
+        self.tool_starts.clear();
         self.close_turn_diff(cx);
         self.sync_list(cx);
         window.focus(&self.input.read(cx).focus_handle(cx), cx);
+    }
+
+    /// The composer's ghost text follows the turn: at rest it invites a
+    /// message; while a turn runs it names what Enter and Ctrl+Enter
+    /// do — steer the running turn, or queue for the next one. The old
+    /// static hint beside the attach button left the composer row
+    /// before the eyes ever got there; a placeholder renders exactly
+    /// where the user is typing, and only while the input is empty, so
+    /// the hint vanishes with anything typed. Swapped through the
+    /// window handle captured at construction: both call sites (turn
+    /// start, turn end) live in windowless async contexts.
+    fn sync_composer_placeholder(&mut self, cx: &mut Context<Self>) {
+        let hint = if self.streaming {
+            STEER_PLACEHOLDER
+        } else {
+            IDLE_PLACEHOLDER
+        };
+        if self.input.read(cx).presentation().placeholder().as_ref() == hint {
+            return;
+        }
+        let input = self.input.clone();
+        let handle = self.window_handle;
+        let app: &mut App = cx;
+        let _ = handle.update(app, move |_, window, cx| {
+            input.update(cx, |input, cx| input.set_placeholder(hint, window, cx));
+        });
     }
 
     fn switch_to_session(
@@ -1074,6 +1191,13 @@ impl ChatView {
             let _ = self.store.set_session_settled(session_id, false);
             self.sessions = self.store.list_sessions().unwrap_or_default();
         }
+        // The cross-folder check, decided before `summary` is
+        // consumed below: a session rooted elsewhere (or pre-dating
+        // the root column) is foreign.
+        let foreign_root = summary
+            .as_ref()
+            .and_then(|summary| summary.workspace_root.clone())
+            .filter(|stored| !same_workspace(stored, &self.workspace_root));
         self.usage = summary
             .as_ref()
             .map(|summary| (summary.input_tokens, summary.output_tokens))
@@ -1087,6 +1211,22 @@ impl ChatView {
         self.context_used = summary.map(|summary| summary.context_tokens).unwrap_or(0);
         self.refresh_agent_runs(cx);
         self.reload_session(cx);
+        // A conversation that started in another folder: the
+        // transcript's paths are about to say so — better the tab says
+        // it first. The tools stay rooted here; /new is the fresh
+        // chat. After the reload on purpose: the notice is a transcript
+        // row, and the reload just rebuilt the transcript.
+        if let Some(stored) = foreign_root {
+            self.push_notice(
+                format!(
+                    "This conversation started in {} — this tab's tools run in {}. \
+                     /new starts a fresh chat.",
+                    tildify(std::path::Path::new(&stored)),
+                    tildify(&self.workspace_root)
+                ),
+                cx,
+            );
+        }
     }
 
     /// Ctrl+K (or the sidebar's search button): open the palette over
@@ -2367,13 +2507,10 @@ impl ChatView {
             None => {
                 let title: String = typed.chars().take(48).collect();
                 let session_id = self.store.create_session(&title).expect("create session");
-                // The folder this session's tools run in — the settle
-                // hook's reclaim command runs there, whichever tab
-                // settles it later.
-                self.store
-                    .set_session_workspace(session_id, &self.workspace_root);
                 // The chip's posture at birth is the session's record —
-                // config default unless the chip moved first.
+                // config default unless the chip moved first. The
+                // workspace rides in with `deliver_message`'s re-root
+                // check (a fresh session's root reads None → written).
                 let _ = self.store.set_session_mode(session_id, self.mode);
                 self.session_id = Some(session_id);
                 self.sessions = self.store.list_sessions().unwrap_or_default();
@@ -2395,6 +2532,20 @@ impl ChatView {
         images: Vec<String>,
         cx: &mut Context<Self>,
     ) {
+        // The session runs where this tab runs: a workspace switched
+        // from the footer re-roots the session at the next send, so
+        // launch resume and the settle hook follow the conversation
+        // rather than the folder it was born in. Checked per send, not
+        // assumed — the common case (no switch) costs one small read.
+        let stored_root = self.store.session_workspace(session_id);
+        let moved = match stored_root.as_deref() {
+            Some(stored) => !same_workspace(stored, &self.workspace_root),
+            None => true,
+        };
+        if moved {
+            self.store
+                .set_session_workspace(session_id, &self.workspace_root);
+        }
         // The session's first message names the worktree's branch —
         // computed from the same text that's about to be persisted,
         // before any state moves. Only the first: the branch name is
@@ -2529,7 +2680,7 @@ impl ChatView {
             let _ = this.update(cx, |this, cx| match result {
                 Some((kept, total)) => {
                     this.on_compacted(kept, total, cx);
-                    this.activity = "Context compacted".into();
+                    this.set_activity("Context compacted");
                 }
                 None => this.push_notice("Nothing to compact — history is small.", cx),
             });
@@ -2648,10 +2799,37 @@ impl ChatView {
 
         self.streaming = true;
         self.streaming_assistant = None;
-        self.activity = "Thinking…".into();
+        self.set_activity("Thinking…");
         self.thinking = true;
         self.steer_tx = Some(steer_tx);
+        // The composer's ghost text names the steer/queue verbs while
+        // the turn runs.
+        self.sync_composer_placeholder(cx);
         self.sync_list(cx);
+
+        // The working tick: half a second, only while this turn runs.
+        // Deltas repaint by themselves; the quiet stretches — a model
+        // thinking, a two-minute test run — are what the tick serves,
+        // stepping the spinner and rolling the status line's clock.
+        // It dies with the turn, so nothing animates at rest.
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(WORKING_TICK).await;
+                let alive = this
+                    .update(cx, |this, cx| {
+                        if !this.streaming {
+                            return false;
+                        }
+                        cx.notify();
+                        true
+                    })
+                    .unwrap_or(false);
+                if !alive {
+                    break;
+                }
+            }
+        })
+        .detach();
 
         cx.spawn(async move |this, cx| {
             let mut stream = stream;
@@ -2688,6 +2866,10 @@ impl ChatView {
                         output_tokens,
                     } => {
                         let _ = this.update(cx, |this, cx| {
+                            // A round boundary landed: the quiet gauge
+                            // restarts even though the activity string
+                            // may not change.
+                            this.last_event_at = Instant::now();
                             this.usage.0 += input_tokens;
                             this.usage.1 += output_tokens;
                             // The last request's prompt + completion is
@@ -2741,6 +2923,12 @@ impl ChatView {
                 // over. A queued follow-up runs as its own turn, right
                 // now — the composer keeps whatever was typed meanwhile.
                 this.steer_tx = None;
+                // No running cards survive the turn, and the composer's
+                // ghost text goes back to inviting a message — unless a
+                // queued follow-up re-opens the turn below, which swaps
+                // it again.
+                this.tool_starts.clear();
+                this.sync_composer_placeholder(cx);
                 this.sessions = this.store.list_sessions().unwrap_or_default();
                 this.sync_list(cx);
                 if !this.queued.is_empty() {
@@ -2767,7 +2955,7 @@ impl ChatView {
     /// Streams a delta into the round's assistant turn, creating its row
     /// (and database row) on the first delta.
     fn on_delta(&mut self, delta: &str, cx: &mut Context<Self>) {
-        self.activity = "Writing a reply…".into();
+        self.set_activity("Writing a reply…");
         self.thinking = false;
         let index = match self.streaming_assistant {
             Some(index) => index,
@@ -2844,7 +3032,14 @@ impl ChatView {
     /// A read-only tool started executing: give it a running card so the
     /// quiet parts of a turn still look alive.
     fn on_tool_started(&mut self, call: ToolCall, cx: &mut Context<Self>) {
-        self.activity = crate::tools_ui::action_label(&call.name, &call.arguments, true);
+        self.set_activity(crate::tools_ui::action_label(
+            &call.name,
+            &call.arguments,
+            true,
+        ));
+        // The card's clock starts here: read-only tools never prompt,
+        // so their whole visible life is this card.
+        self.tool_starts.insert(call.id.clone(), Instant::now());
         self.thinking = false;
         self.flush_stream(cx);
         self.streaming_assistant = None;
@@ -2867,7 +3062,7 @@ impl ChatView {
     /// A mutating tool wants to run: park the request id on the card
     /// until the human answers through the broker.
     fn on_tool_requested(&mut self, id: u64, call: ToolCall, cx: &mut Context<Self>) {
-        self.activity = "Waiting for your approval…".into();
+        self.set_activity("Waiting for your approval…");
         self.thinking = false;
         self.flush_stream(cx);
         self.streaming_assistant = None;
@@ -2884,7 +3079,7 @@ impl ChatView {
     /// A subagent's ask, arriving via the broker subscription — same
     /// card, labeled.
     fn on_worker_ask(&mut self, id: u64, call: ToolCall, cx: &mut Context<Self>) {
-        self.activity = "A worker needs your approval…".into();
+        self.set_activity("A worker needs your approval…");
         self.thinking = false;
         self.flush_stream(cx);
         self.streaming_assistant = None;
@@ -2905,8 +3100,10 @@ impl ChatView {
     fn on_tool_result(&mut self, call_id: &str, name: &str, result: &str, cx: &mut Context<Self>) {
         // The tool is done, so the model is chewing on the result before
         // it writes the next thing — say so in the transcript.
-        self.activity = "Thinking…".into();
+        self.set_activity("Thinking…");
         self.thinking = true;
+        // The card's clock retires with the card.
+        self.tool_starts.remove(call_id);
         self.streaming_assistant = None;
         if name.starts_with("agent_") {
             // The worker's report row is on disk; the panel flips to done.
@@ -2966,7 +3163,7 @@ impl ChatView {
     /// compaction is the in-memory view (a reload restores full history
     /// and the loop re-compacts if the threshold trips again).
     fn on_compacted(&mut self, kept: usize, total: usize, cx: &mut Context<Self>) {
-        self.activity = "Compacting context…".into();
+        self.set_activity("Compacting context…");
         self.turns.push(Turn::Message {
             role: Role::System,
             text: format!(
@@ -2983,6 +3180,9 @@ impl ChatView {
     /// persist and bubble it exactly like a send-time row — the loop
     /// owns the in-memory history, the DB row is ours.
     fn on_steered(&mut self, text: &str, cx: &mut Context<Self>) {
+        // No activity change — a steer doesn't alter what's happening —
+        // but the quiet gauge restarts all the same: something happened.
+        self.last_event_at = Instant::now();
         let db_id = match self.session_id {
             Some(session_id) => {
                 let db_id = self
@@ -3006,7 +3206,7 @@ impl ChatView {
 
     fn on_error(&mut self, message: &str, cx: &mut Context<Self>) {
         self.flush_stream(cx);
-        self.activity = "Something went wrong".into();
+        self.set_activity("Something went wrong");
         self.thinking = false;
         self.persist_stream_note(format!("[error] {message}"));
         self.list_state.reset(self.item_count());
@@ -3020,7 +3220,7 @@ impl ChatView {
     /// comes back clear on resume or the next send.
     fn on_limited(&mut self, message: &str, cx: &mut Context<Self>) {
         self.flush_stream(cx);
-        self.activity = "Rate limited — pick it up when you're ready".into();
+        self.set_activity("Rate limited — pick it up when you're ready");
         self.thinking = false;
         // A fresh limit is a fresh decision: no stale snooze from the
         // round before survives it.
@@ -3134,14 +3334,26 @@ impl ChatView {
     /// request (UI closed) counts as a deny in the loop; here the human
     /// did answer.
     fn decide_tool(&mut self, index: usize, decision: PermissionDecision, cx: &mut Context<Self>) {
-        if let Some(Turn::Tool { status, .. }) = self.turns.get_mut(index) {
+        if let Some(Turn::Tool { call, status, .. }) = self.turns.get_mut(index) {
             match std::mem::replace(status, ToolStatus::Running) {
                 ToolStatus::Pending(id) => {
                     // The card is settled; its reply input goes with it.
                     self.approval_replies.remove(&index);
-                    if !self.broker.respond(id, decision) {
-                        // Unknown id (already answered): put nothing back;
-                        // the card was settled elsewhere.
+                    // The approved call starts executing now — its
+                    // clock starts here, not when the ask arrived.
+                    self.tool_starts.insert(call.id.clone(), Instant::now());
+                    if self.broker.respond(id, decision) {
+                        // The human's answer is an event: the status
+                        // line stops saying "waiting" and its clock
+                        // hands over to the call — otherwise a long
+                        // wait would surface, un-reset, as instant
+                        // quiet against a stale label.
+                        let label =
+                            crate::tools_ui::action_label(&call.name, &call.arguments, true);
+                        self.set_activity(label);
+                    } else {
+                        // Unknown id (already answered): put nothing
+                        // back; the card was settled elsewhere.
                     }
                 }
                 // Not actually pending (double click): put it back.
@@ -3872,12 +4084,32 @@ impl ChatView {
         div().w_full().px_4().child(inner).into_any_element()
     }
 
-    /// The quiet-state row: what's happening, in the flow of the
-    /// conversation where the user is actually looking. No spinner —
-    /// a repeating animation repaints every frame to say what the
-    /// words already say (performance doctrine: no continuously
-    /// repainting animations).
+    /// The status line's words, spinner aside: the activity, its
+    /// elapsed clock, and — past [`QUIET_AFTER`] of no loop events —
+    /// the quiet gauge. Quiet stays silent while an approval card
+    /// waits on the human: that silence is the human's, and the ask's
+    /// own clock tells it.
+    fn activity_line(&self) -> String {
+        let mut line = format!("{} · {}", self.activity, clock(self.activity_at.elapsed()));
+        let quiet = self.last_event_at.elapsed();
+        if quiet >= QUIET_AFTER && !self.waiting_on_human() {
+            line.push_str(&format!(" · quiet {}", clock(quiet)));
+        }
+        line
+    }
+
+    /// The quiet-state row: what's happening, for how long, and whether
+    /// anything has landed lately. The spinner is the no-animation
+    /// doctrine's one carve-out, time-derived so it needs no state of
+    /// its own: it steps at 2 fps on the working tick (which only runs
+    /// while a turn does — nothing animates at rest), because "is it
+    /// stuck or just slow" is a question the words alone answer too
+    /// late. The clock sits beside it, and past [`QUIET_AFTER`] of
+    /// silence the line says that too.
     fn render_activity_row(&self, cx: &Context<Self>) -> AnyElement {
+        let frame = SPINNER_FRAMES
+            [(self.activity_at.elapsed().as_millis() as usize / 500) % SPINNER_FRAMES.len()];
+        let line = self.activity_line();
         h_flex()
             .gap_2()
             .items_center()
@@ -3885,10 +4117,16 @@ impl ChatView {
                 div()
                     .text_size(px(13.))
                     .text_color(cx.theme().muted_foreground)
+                    .child(frame),
+            )
+            .child(
+                div()
+                    .text_size(px(13.))
+                    .text_color(cx.theme().muted_foreground)
                     // Activity strings carry `code` spans (tool labels
                     // quote paths and commands) — same treatment as
                     // the cards.
-                    .child(crate::markdown::inline_element(&self.activity, cx)),
+                    .child(crate::markdown::inline_element(&line, cx)),
             )
             .into_any_element()
     }
@@ -4173,9 +4411,6 @@ impl ChatView {
             )
         };
 
-        // No spinner on the running card: the accent label is the
-        // activity, and a repeating animation repaints every frame
-        // saying nothing the label doesn't (performance doctrine).
         let mut inner = v_flex().gap_2().child(
             h_flex()
                 .gap_2()
@@ -4189,12 +4424,24 @@ impl ChatView {
                         // instead of literal backticks.
                         .child(crate::markdown::inline_element(&label, cx)),
                 )
+                // The running tag carries the doctrine's one carve-out
+                // too: a spinner stepping on the working tick and the
+                // call's own clock — a two-minute test run says how
+                // long it has been saying nothing.
                 .when(running, |row| {
+                    let started = self.tool_starts.get(&call.id);
+                    let step = started
+                        .map(|clock_at| clock_at.elapsed().as_millis() as usize / 500)
+                        .unwrap_or(0);
+                    let frame = SPINNER_FRAMES[step % SPINNER_FRAMES.len()];
+                    let words = started
+                        .map(|clock_at| format!("running · {}", clock(clock_at.elapsed())))
+                        .unwrap_or_else(|| "running".to_string());
                     row.child(
                         div()
                             .text_size(px(11.))
                             .text_color(cx.theme().muted_foreground)
-                            .child("running"),
+                            .child(format!("{frame} {words}")),
                     )
                 })
                 .when(worker, |row| {
@@ -5466,24 +5713,11 @@ impl Render for ChatView {
                                             .px_4()
                                             .py_3()
                                             .gap_2()
-                                            // The verb the send key fires,
-                                            // stated where the key is used:
-                                            // Enter steers a running turn,
-                                            // the secondary queues for the
-                                            // next one. Nothing to say
-                                            // when nothing runs.
-                                            .when(self.streaming, |row| {
-                                                row.child(
-                                                    div()
-                                                        .text_size(px(11.))
-                                                        .text_color(cx.theme().muted_foreground)
-                                                        .child(if self.steer_tx.is_some() {
-                                                            "enter: steer · ctrl-enter: queue"
-                                                        } else {
-                                                            "enter: queue"
-                                                        }),
-                                                )
-                                            })
+                                            // The steer/queue hint lives in the
+                                            // composer's placeholder now — the
+                                            // sync keeps it true while a turn
+                                            // runs, and an empty input is the
+                                            // only state that ever shows it.
                                             .child(
                                                 Button::new("attach-file")
                                                     // A paperclip, the one word
@@ -5653,6 +5887,30 @@ fn tildify(path: &std::path::Path) -> String {
             }
         }
         _ => path.display().to_string(),
+    }
+}
+
+/// Whether a session's stored root and a tab's root are the same
+/// folder. Canonical compare when both resolve (symlinks, `..`
+/// segments, bind mounts); a folder that no longer exists falls back
+/// to the literal strings — the store recorded what the OS handed it.
+fn same_workspace(stored: &str, current: &std::path::Path) -> bool {
+    let stored = std::path::Path::new(stored);
+    match (stored.canonicalize(), current.canonicalize()) {
+        (Ok(stored), Ok(current)) => stored == current,
+        _ => stored == current,
+    }
+}
+
+/// Elapsed as the status line speaks it: `14s`, then `2m 05s`. The
+/// status line ticks at whole seconds; nobody times a model in
+/// milliseconds.
+fn clock(elapsed: std::time::Duration) -> String {
+    let whole = elapsed.as_secs();
+    if whole >= 60 {
+        format!("{}m {:02}s", whole / 60, whole % 60)
+    } else {
+        format!("{whole}s")
     }
 }
 
