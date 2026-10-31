@@ -292,7 +292,11 @@ images: "attach file" opens the picker, paste intercepts images and copied files
 ride the wire as typed document/file blocks, and text files inline into the message — the
 extension table refuses (with a reason) what no endpoint can read. The footer's identity
 line leads with the working folder. Slash builtins cover the panel actions (/compact,
-/export, /new, /settings, /agents) beside file templates.
+/export, /new, /settings, /agents) beside file templates. Two templates ship,
+write-if-absent like the skills (a user edit is theirs, a project file shadows by
+name): `/explain`, and `/commit` — read the repo's recent subjects for its
+conventions, read the working diff, hand back a message plus the exact command;
+the commit itself stays the human's.
 
 Turn-scoped diffs came from the source-control chapter: every done tool card carries a
 "turn diff" button, and the panel answers with what *the tools did* — one entry per path

@@ -737,22 +737,28 @@ fn system_prompt_for(root: &Path, skill_index: &str) -> Option<String> {
 const WRITING_SKILL: &str = include_str!("skills/writing/SKILL.md");
 const COUNCIL_SKILL: &str = include_str!("skills/council/SKILL.md");
 const EXPLAIN_TEMPLATE: &str = include_str!("templates/explain.md");
+const COMMIT_TEMPLATE: &str = include_str!("templates/commit.md");
 
 /// Writes the built-in templates if absent — same write-if-absent
 /// contract as the writing skill: a user edit is theirs, and survives
 /// every launch. Returns warnings, never a failed launch.
 fn materialize_builtin_templates(templates_user: &Path) -> Vec<String> {
-    let file = templates_user.join("explain.md");
-    if file.exists() {
-        return vec![];
+    let mut warnings = Vec::new();
+    for (name, contents) in [
+        ("explain.md", EXPLAIN_TEMPLATE),
+        ("commit.md", COMMIT_TEMPLATE),
+    ] {
+        let file = templates_user.join(name);
+        if file.exists() {
+            continue;
+        }
+        if let Err(error) =
+            std::fs::create_dir_all(templates_user).and_then(|_| std::fs::write(&file, contents))
+        {
+            warnings.push(format!("built-in {name} template: {error}"));
+        }
     }
-    if let Err(error) = std::fs::create_dir_all(templates_user)
-        .and_then(|_| std::fs::write(&file, EXPLAIN_TEMPLATE))
-    {
-        vec![format!("built-in explain template: {error}")]
-    } else {
-        vec![]
-    }
+    warnings
 }
 
 /// Write-if-absent materialization of one built-in skill directory —
