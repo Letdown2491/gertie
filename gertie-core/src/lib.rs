@@ -712,8 +712,13 @@ impl SessionStore {
         role: Role,
         content: &str,
     ) -> Result<MessageId, rusqlite::Error> {
-        let connection = self.connection.lock().unwrap();
-        connection
+        let mut connection = self.connection.lock().unwrap();
+        // One transaction: a row whose tip and activity stamps land
+        // separately is a half-written turn — a reader that walks
+        // parents from the tip between the commits sees a different
+        // conversation than the next one.
+        let transaction = connection.transaction()?;
+        transaction
             .prepare(
                 "INSERT INTO messages (session_id, parent_id, role, content) VALUES (?1, ?2, ?3, ?4)",
             )?
@@ -724,17 +729,18 @@ impl SessionStore {
                 content,
             ])?;
         // Every appended row is activity: the clock auto-settle reads.
-        connection.execute(
+        transaction.execute(
             "UPDATE sessions SET last_activity_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
              WHERE id = ?1",
             [session_id.0 as i64],
         )?;
-        let id = MessageId(connection.last_insert_rowid() as u64);
+        let id = MessageId(transaction.last_insert_rowid() as u64);
         // The new row is the tip: reads walk parents back from here.
-        connection.execute(
+        transaction.execute(
             "UPDATE sessions SET tip_id = ?1 WHERE id = ?2",
             rusqlite::params![id.0 as i64, session_id.0 as i64],
         )?;
+        transaction.commit()?;
         Ok(id)
     }
 
@@ -748,8 +754,11 @@ impl SessionStore {
         arguments: &str,
         content: &str,
     ) -> Result<MessageId, rusqlite::Error> {
-        let connection = self.connection.lock().unwrap();
-        connection
+        let mut connection = self.connection.lock().unwrap();
+        // Same transaction discipline as append_message: the row, its
+        // activity stamp, and the tip move together.
+        let transaction = connection.transaction()?;
+        transaction
             .prepare(
                 "INSERT INTO messages (session_id, parent_id, role, content, tool_call_id, tool_name, tool_arguments)
                  VALUES (?1, ?2, 'tool', ?3, ?4, ?5, ?6)",
@@ -764,16 +773,17 @@ impl SessionStore {
             ])?;
         // Tool results are activity too — the turn's work, not just
         // its words.
-        connection.execute(
+        transaction.execute(
             "UPDATE sessions SET last_activity_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
              WHERE id = ?1",
             [session_id.0 as i64],
         )?;
-        let id = MessageId(connection.last_insert_rowid() as u64);
-        connection.execute(
+        let id = MessageId(transaction.last_insert_rowid() as u64);
+        transaction.execute(
             "UPDATE sessions SET tip_id = ?1 WHERE id = ?2",
             rusqlite::params![id.0 as i64, session_id.0 as i64],
         )?;
+        transaction.commit()?;
         Ok(id)
     }
 
@@ -1269,46 +1279,52 @@ impl SessionStore {
         }
         chain.reverse();
 
-        let new_session = self
-            .create_session(title)
+        // One transaction: the fork exists whole or not at all — a
+        // half-copied fork (a session with some ancestors) is neither
+        // a transcript nor a lie a reader could spot. This is also the
+        // fork's speedup: the copies share one lock and one commit
+        // instead of two per message.
+        let mut connection = self.connection.lock().unwrap();
+        let transaction = connection
+            .transaction()
             .map_err(|error| error.to_string())?;
+        transaction
+            .prepare("INSERT INTO sessions (title, kind) VALUES (?1, 'chat')")
+            .and_then(|mut statement| statement.execute([title]))
+            .map_err(|error| error.to_string())?;
+        let new_session = SessionId(transaction.last_insert_rowid() as u64);
         let mut remap: std::collections::HashMap<MessageId, MessageId> =
             std::collections::HashMap::new();
         let mut fork_point = upto;
         for message in &chain {
-            let copied = {
-                let connection = self.connection.lock().unwrap();
-                let mapped_parent = message.parent_id.map(|parent| remap[&parent]);
-                connection
-                    .prepare(
-                        "INSERT INTO messages
-                             (session_id, parent_id, role, content, tool_call_id, tool_name, tool_arguments)
-                         SELECT ?1, ?2, role, content, tool_call_id, tool_name, tool_arguments
-                         FROM messages WHERE id = ?3",
-                    )
-                    .and_then(|mut statement| {
-                        statement.execute(rusqlite::params![
-                            new_session.0 as i64,
-                            mapped_parent.map(|parent| parent.0 as i64),
-                            message.id.0 as i64,
-                        ])
-                    })
-                    .map_err(|error| error.to_string())?;
-                MessageId(connection.last_insert_rowid() as u64)
-            };
+            let mapped_parent = message.parent_id.map(|parent| remap[&parent]);
+            transaction
+                .prepare(
+                    "INSERT INTO messages
+                         (session_id, parent_id, role, content, tool_call_id, tool_name, tool_arguments)
+                     SELECT ?1, ?2, role, content, tool_call_id, tool_name, tool_arguments
+                     FROM messages WHERE id = ?3",
+                )
+                .and_then(|mut statement| {
+                    statement.execute(rusqlite::params![
+                        new_session.0 as i64,
+                        mapped_parent.map(|parent| parent.0 as i64),
+                        message.id.0 as i64,
+                    ])
+                })
+                .map_err(|error| error.to_string())?;
+            let copied = MessageId(transaction.last_insert_rowid() as u64);
             remap.insert(message.id, copied);
             fork_point = copied;
         }
         // The fork's tip is its last copied row.
-        {
-            let connection = self.connection.lock().unwrap();
-            connection
-                .execute(
-                    "UPDATE sessions SET tip_id = ?1 WHERE id = ?2",
-                    rusqlite::params![fork_point.0 as i64, new_session.0 as i64],
-                )
-                .map_err(|error| error.to_string())?;
-        }
+        transaction
+            .execute(
+                "UPDATE sessions SET tip_id = ?1 WHERE id = ?2",
+                rusqlite::params![fork_point.0 as i64, new_session.0 as i64],
+            )
+            .map_err(|error| error.to_string())?;
+        transaction.commit().map_err(|error| error.to_string())?;
         Ok((new_session, fork_point))
     }
 
