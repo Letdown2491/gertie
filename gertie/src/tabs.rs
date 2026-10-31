@@ -38,6 +38,33 @@ pub struct WorkspaceView {
 /// again", and for this long, closing again is believed.
 const CLOSE_CONFIRM_WINDOW: std::time::Duration = std::time::Duration::from_secs(5);
 
+/// One tab's attention mark and the state it leaves behind, the
+/// tab bar's whole logic as a pure function. Loudest first: ● a live
+/// turn (work running while another tab is up, static glyph, no
+/// repaint to say busy), ⏸ a run paused on its rate limit (the tab
+/// waits for the human), ✓ a turn finished unseen (cleared when the
+/// tab activates, the falling streaming edge is how it's seen without
+/// a callback).
+fn tab_attention(
+    streaming: bool,
+    prev_streaming: bool,
+    limited: bool,
+    done_unseen: bool,
+    label: &str,
+) -> (String, bool, bool) {
+    if streaming {
+        return (format!("● {label}"), true, done_unseen);
+    }
+    let finished_unseen = prev_streaming || done_unseen;
+    if limited {
+        return (format!("⏸ {label}"), false, finished_unseen);
+    }
+    if finished_unseen {
+        return (format!("✓ {label}"), false, true);
+    }
+    (label.to_string(), false, false)
+}
+
 /// Whether a window close goes through. A turn running anywhere holds
 /// the first close, an accidental quit kills a running agent turn,
 /// and arms the second.
@@ -59,6 +86,12 @@ struct TabState {
     view: Entity<ChatView>,
     /// The tab's own checkout, if it has one (marks the ⎇ label).
     worktree: Option<PathBuf>,
+    /// The previous render's streaming state: the rising/falling edge
+    /// is how a finished turn is seen without a callback.
+    prev_streaming: bool,
+    /// A turn finished (or the run limited) while another tab was up.
+    /// The dot on this tab's label; cleared when the tab activates.
+    done_unseen: bool,
 }
 
 /// The rewind safety guard every chat shares: a file restore refuses
@@ -118,6 +151,13 @@ impl WorkspaceView {
                 boot.tools.clone(),
                 boot.model_label(),
                 boot.system_prompt.clone(),
+                boot.instructions.clone(),
+                boot.memory_index.clone(),
+                boot.memory_enabled(),
+                boot.memory.clone(),
+                boot.memory_extract_provider(),
+                boot.max_tool_rounds(),
+                boot.grace_rounds(),
                 boot.templates.clone(),
                 boot.workspace_root.clone(),
                 boot.settle_command(),
@@ -142,6 +182,8 @@ impl WorkspaceView {
             tabs: vec![TabState {
                 view: first,
                 worktree: None,
+                prev_streaming: false,
+                done_unseen: false,
             }],
             active: 0,
             next_worktree: 0,
@@ -219,10 +261,16 @@ impl WorkspaceView {
         cx.notify();
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn make_view(
         &self,
         tools: gertie_core::ToolRegistry,
         system_prompt: Option<String>,
+        instructions: Option<String>,
+        memory_index: Option<String>,
+        memory_enabled: bool,
+        memory: Option<Arc<gertie_core::MemoryStore>>,
+        memory_extract_provider: Option<Arc<dyn gertie_core::Provider>>,
         naming: Option<crate::worktree::BranchNaming>,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -238,6 +286,13 @@ impl WorkspaceView {
                 tools,
                 self.boot.model_label(),
                 system_prompt,
+                instructions,
+                memory_index,
+                memory_enabled,
+                memory,
+                memory_extract_provider,
+                self.boot.max_tool_rounds(),
+                self.boot.grace_rounds(),
                 self.boot.templates.clone(),
                 self.boot.workspace_root.clone(),
                 self.boot.settle_command(),
@@ -265,6 +320,11 @@ impl WorkspaceView {
         let view = self.make_view(
             self.boot.tools.clone(),
             self.boot.system_prompt.clone(),
+            self.boot.instructions.clone(),
+            self.boot.memory_index.clone(),
+            self.boot.memory_enabled(),
+            self.boot.memory.clone(),
+            self.boot.memory_extract_provider(),
             None,
             window,
             cx,
@@ -272,6 +332,8 @@ impl WorkspaceView {
         self.tabs.push(TabState {
             view,
             worktree: None,
+            prev_streaming: false,
+            done_unseen: false,
         });
         let index = self.tabs.len() - 1;
         self.active = index;
@@ -301,7 +363,8 @@ impl WorkspaceView {
                     .await;
                 let _ = this.update_in(cx, |this, window, cx| match created {
                     Ok(root) => {
-                        let (tools, system_prompt) = this.boot.registry_for_root(&root);
+                        let (tools, system_prompt, instructions, memory_index, memory) =
+                            this.boot.registry_for_root(&root);
                         let naming = crate::worktree::BranchNaming {
                             root: root.clone(),
                             prefix,
@@ -309,6 +372,11 @@ impl WorkspaceView {
                         let view = this.make_view(
                             tools.clone(),
                             system_prompt.clone(),
+                            instructions.clone(),
+                            memory_index.clone(),
+                            this.boot.memory_enabled(),
+                            memory,
+                            this.boot.memory_extract_provider(),
                             Some(naming),
                             window,
                             cx,
@@ -316,6 +384,8 @@ impl WorkspaceView {
                         this.tabs.push(TabState {
                             view,
                             worktree: Some(root),
+                            prev_streaming: false,
+                            done_unseen: false,
                         });
                         let index = this.tabs.len() - 1;
                         this.active = index;
@@ -410,24 +480,34 @@ impl Render for WorkspaceView {
                         let Some(this) = entity.upgrade() else { return };
                         this.update(cx, |this, cx| {
                             this.active = *index;
+                            if let Some(tab) = this.tabs.get_mut(*index) {
+                                tab.done_unseen = false;
+                            }
                             cx.notify();
                         });
                     })
-                    .children(self.tabs.iter().map(|tab| {
-                        let title = tab.view.read(cx).tab_title();
+                    .children(self.tabs.iter_mut().map(|tab| {
+                        let view = tab.view.read(cx);
+                        let title = view.tab_title();
                         let label = match &tab.worktree {
                             Some(_) => format!("⎇ {title}"),
                             None => title.to_string(),
                         };
-                        // A live turn marks its tab: the attention
-                        // signal for work running while another tab is
-                        // up. Static glyph, no repaint to say busy.
-                        let label = if tab.view.read(cx).is_streaming() {
-                            format!("● {label}")
-                        } else {
-                            label
-                        };
-                        Tab::new().label(label)
+                        // The attention marks, loudest first (see
+                        // tab_attention): ● running, ⏸ limited, ✓
+                        // finished unseen. The state machine rides
+                        // tab_attention so the tests own the logic and
+                        // the render only paints it.
+                        let (marked, prev_streaming, done_unseen) = tab_attention(
+                            view.is_streaming(),
+                            tab.prev_streaming,
+                            view.open_session_limited(),
+                            tab.done_unseen,
+                            &label,
+                        );
+                        tab.prev_streaming = prev_streaming;
+                        tab.done_unseen = done_unseen;
+                        Tab::new().label(marked)
                     }))
                     .suffix(suffix),
             )
@@ -438,6 +518,39 @@ impl Render for WorkspaceView {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_attention_marks_follow_the_work() {
+        // Running: the dot, and the rising edge is remembered.
+        let (marked, prev, done) = tab_attention(true, false, false, false, "chat");
+        assert_eq!(marked, "● chat");
+        assert!(prev);
+        assert!(!done);
+
+        // The falling edge turns the remembered streaming into a
+        // finished-unseen mark.
+        let (marked, prev, done) = tab_attention(false, true, false, false, "chat");
+        assert_eq!(marked, "✓ chat");
+        assert!(!prev);
+        assert!(done);
+
+        // The mark survives further quiet renders (a repaint without
+        // a focus must not lose the signal).
+        let (marked, _, done) = tab_attention(false, false, false, true, "chat");
+        assert_eq!(marked, "✓ chat");
+        assert!(done);
+
+        // Limited outranks the ✓: the tab waits for the human.
+        let (marked, prev, done) = tab_attention(false, true, true, false, "chat");
+        assert_eq!(marked, "⏸ chat");
+        assert!(!prev);
+        assert!(done, "limited clears unseen only on focus");
+
+        // Activating clears the mark: done=false renders plain.
+        let (marked, _, done) = tab_attention(false, false, false, false, "chat");
+        assert_eq!(marked, "chat");
+        assert!(!done);
+    }
 
     #[test]
     fn a_running_turn_holds_the_first_close_the_second_inside_the_window_goes() {

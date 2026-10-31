@@ -74,13 +74,22 @@ Shipped (M0–M5), in order:
   `gertie run` headless mode (piped-safe approvals, `--config`/`--yes`/`--help`), session
   rename + delete in the sidebar, and subagent runs persisted as child sessions (`parent_id` +
   `kind` columns, brief + report as rows).
-- **M6, memory + instructions** (designed, `research/M6-PLAN.md` is the plan; PR 0 is the
-  instruction layer, `research/MEMORY-RESEARCH.md` the survey behind it): markdown
-  memory tiers (project + global) with a derived SQLite/FTS5 sidecar, the `memory` tool
-  (`memory_20250818` surface, both wires), frozen-index injection after the static system
+- **M6, memory + instructions** (shipped 2026-10-31; `docs/memory.md` is the user guide):
+  markdown memory tiers (project + global) with a derived SQLite/FTS5 sidecar, the `memory`
+  tool (`memory_20250818` surface, both wires), frozen-index injection after the static system
   prompt, `search_memory`, compaction/settle-hooked extraction as review-inbox delta ops, and
-  the thin dreaming pass on the startup sweep. Ledger gains cached-token columns; the metric
-  is cached-input share.
+  the thin dreaming pass on the startup sweep (no-model, changelog-per-dream). Ledger gains
+  cached-token columns; the metric is cached-input share. Defaults amended in flight:
+  extraction and dreaming ship **on** (7-day cadence, empty-store cost is zero, discovery
+  beats caution); `auto_apply` stays off, the review inbox is what makes default-on safe.
+- **M7, the UI pass** (shipped 2026-10-31): posture-ring safety (de-escalation-only chip, the
+  palette + confirm card as full access's only path), the memory surface (footer word,
+  panel, ▲/▼ voting as the counters' only writer), the first-run state, composer
+  @-mentions, tab attention marks (● ⏸ ✓), Ctrl+F in-transcript find + copy on assistant
+  turns, the footer's compaction line, the `[turn]` budget dial (defaults 60 + 10,
+  panel-editable), and the polish items (popup arrow-key navigation, vote feedback in the
+  panel rows, find's row highlight). Full record in the Deferred row below.
+
 
 The original "Deferred" row, every item shipped or decided:
 
@@ -126,6 +135,24 @@ The original "Deferred" row, every item shipped or decided:
   (`generativelanguage.googleapis.com/v1beta/openai/`); gertie speaks it today with
   `wire = "openai"`. Anthropic's native wire shipped because its protocol genuinely
   differs; Google's compat layer makes an adapter dead weight.
+- *The UI pass (M7, shipped 2026-10-31)*: seven PRs amending earlier decisions on purpose. The posture ring is
+  de-escalation-only: clicking the chip can never reach full access (auto wraps home),
+  the palette command plus a confirm card is the only path, and the tooltip names each
+  mode's meaning. Rule: escalation costs a keystroke of intent, de-escalation is
+  frictionless. Memory has a surface: the footer's `memory N` word opens a panel with
+  ▲/▼ voting, the helpful/harmful counters' only writer and the input to dreaming's
+  retirement. First-run: the empty transcript names the blocking fact (no endpoint
+  offers "Add an endpoint") or gives the one-line tour, never a wizard. The composer
+  gains @-mentions (workspace file picker; arrows walk it, Enter takes the walked row,
+  the walk resets only when the query changes). Tabs carry attention marks (● running,
+  ⏸ limited, ✓ done-unseen, cleared on activation). Ctrl+F finds in the transcript with
+  a live count and wrapping walk; assistant turns carry copy beside quote. The footer
+  names the coming compaction's tail (imported from `KEEP_TAIL`, so footer and loop
+  cannot disagree). Turn budgets are config (`[turn] max_tool_rounds` default 60,
+  `grace_rounds` 10, shown and editable in the panel, empty field = the default) after
+  long sessions kept tripping the old 25-round stop; the pause valve stays. Polish:
+  popup arrow-key navigation shared by slash and mentions, votes speak through the
+  panel rows instead of notices, the find bar marks the current match's row.
 
 ## Providers
 
@@ -214,12 +241,14 @@ directories beyond the optional `gertie.toml`.
 
 ## Tools
 
-Nine built-ins, each done well; MCP fills the rest:
+Eleven built-ins, each done well; MCP fills the rest:
 
 `read_file` · `write_file` · `edit_file` (search/replace with occurrence validation) · `bash` ·
 `glob` · `grep` · `web_fetch` (reqwest + readability extraction) · `web_search` (pluggable
 backend: Brave/Exa/SearXNG; **gracefully disabled with a clear message when no backend is
-configured**) · `search_history` (native, FTS5 over our own session DB).
+configured**) · `search_history` (native, FTS5 over our own session DB) · `memory` (the
+`memory_20250818` command surface over both memory tiers, mutation audited to the index's
+own trail) · `search_memory` (FTS5 over the derived sidecar, ranked pointers).
 
 Explicitly out of v1: LSP, notebooks, native web browsing beyond fetch/search.
 
@@ -252,12 +281,11 @@ state, nothing that can fail on the provider. Hard-truncate oversized tool outpu
 
 ## Memory
 
-Long-term memory is plain markdown plus a derived SQLite index. The research survey
-(`research/MEMORY-RESEARCH.md`, two rounds: KG systems, ablation-backed mechanisms, cache
-economics, shipping-agent convergence) found the field's convergent answer is files, Letta's
-filesystem agent beat specialized memory tools on LoCoMo, every first-party agent (Claude Code,
-Devin, Codex, Gemini CLI, Cline) landed on markdown, and none uses embedding search, and its
-hard negative results are the budget caps below. Two tiers, both human-editable in any editor:
+Long-term memory is plain markdown plus a derived SQLite index. The field's convergent
+answer is files, Letta's filesystem agent beat specialized memory tools on LoCoMo, every
+first-party agent (Claude Code, Devin, Codex, Gemini CLI, Cline) landed on markdown, and
+none uses embedding search, and the hard negative results are the budget caps below.
+Two tiers, both human-editable in any editor:
 
 - **Project tier**: `<repo>/.gertie/memory/`, versionable, travels with clones.
 - **Global tier**: `~/.local/share/gertie/memory/`, per-user, cross-project (preferences,
@@ -311,9 +339,17 @@ session-end extraction may draft an abstract, placeholder-generalized workflow, 
 SKILL.md candidate, into the review inbox. The skills runtime is the destination; memory
 only nominates.
 
+**Defaults** (amended 2026-10-31): extraction on, dreaming on a 7-day cadence, the review
+inbox the only gate. The original default-off stance borrowed anti-evidence from
+unbounded-injection architectures gertie did not build; an empty store renders zero index
+tokens, and the discovery cost of an invisible feature outweighed the caution. `auto_apply`
+stays false: the review inbox is what makes default-on safe.
+
 **Posture**: memory is advisory. Instruction files and AGENTS.md stay the source of record
 for rules that must always apply; memory is recall, and Codex's own docs draw the same line.
-Wrong entries are corrected by the human in an editor, because the store is files.
+Wrong entries are corrected by the human in an editor, because the store is files. The
+memory surface (M7): a footer word and a right-column panel make the store visible and give
+the counters their writer, because a shipped feature with no surface is invisible.
 
 **Not built, on the evidence**: embeddings as the primary index (BM25 is mechanically stronger
 on identifier-dense text; sqlite-vec is the later add-on if paraphrase recall demonstrably

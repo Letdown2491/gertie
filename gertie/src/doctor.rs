@@ -209,8 +209,16 @@ pub fn run(config_override: Option<PathBuf>, clean_worktrees: bool) -> i32 {
             && let Ok(store) = gertie_core::SessionStore::open(&store)
         {
             let sessions = store.list_sessions().map(|list| list.len()).unwrap_or(0);
-            let (input, output) = store.total_usage();
-            println!("sessions    {sessions} saved · {input} tokens in / {output} out (all time)");
+            let (input, output, cached) = store.total_usage();
+            if cached > 0 {
+                println!(
+                    "sessions    {sessions} saved · {input} tokens in / {output} out, {cached} cached (all time)"
+                );
+            } else {
+                println!(
+                    "sessions    {sessions} saved · {input} tokens in / {output} out (all time)"
+                );
+            }
         } else {
             println!("sessions    none yet");
         }

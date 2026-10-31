@@ -44,6 +44,26 @@ pub struct Config {
     /// agent work is never deleted behind your back).
     #[serde(default)]
     pub worktree: Option<WorktreeConfig>,
+    /// Long-term memory. Absent = all defaults (extraction off).
+    #[serde(default)]
+    pub memory: Option<MemoryConfig>,
+    /// Turn budgets. Absent = the loop's built-in defaults.
+    #[serde(default)]
+    pub turn: Option<TurnConfig>,
+}
+
+/// The turn's round budgets: the safety valve's two numbers. A turn
+/// that loops past `max_tool_rounds` gets the wrap-up nudge, then
+/// `grace_rounds` more to land it before the turn pauses resumable.
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+pub struct TurnConfig {
+    /// Tool rounds before the wrap-up nudge. 0 = the built-in default.
+    #[serde(default)]
+    pub max_tool_rounds: Option<usize>,
+    /// Grace rounds after the nudge before the pause. 0 = the
+    /// built-in default.
+    #[serde(default)]
+    pub grace_rounds: Option<usize>,
 }
 
 #[derive(Deserialize, Debug, Clone, Default)]
@@ -70,6 +90,36 @@ pub struct SecurityConfig {
     /// = the user's file set it; `None` = unset, a lower tier decides.
     #[serde(default)]
     pub allow_private_fetch: Option<bool>,
+}
+
+#[derive(Deserialize, Debug, Clone, Default)]
+pub struct MemoryConfig {
+    /// Long-term memory (DESIGN.md "Memory"). On by default: the
+    /// read path costs nothing until the store has entries (an empty
+    /// index renders zero tokens), and the anti-evidence targeted
+    /// unbounded-injection architectures gertie did not build. Off
+    /// disables the session-end extraction AND dreaming; the
+    /// memory/search_memory tools stay available either way.
+    #[serde(default)]
+    pub enabled: Option<bool>,
+    /// The frozen index's token budget (roughly; chars/4). Over budget,
+    /// whole sections drop, lowest priority first.
+    #[serde(default)]
+    pub index_budget: Option<usize>,
+    /// Extraction model: the name of an endpoint to run the
+    /// session-end extraction call on. Absent = the session's own
+    /// endpoint.
+    #[serde(default)]
+    pub extract_endpoint: Option<String>,
+    /// Apply proposed ops without the review card. Off = the default
+    /// review inbox: proposals render as diffs you approve or deny.
+    #[serde(default)]
+    pub auto_apply: Option<bool>,
+    /// Dreaming cadence: consolidate (merge duplicates, archive
+    /// counter-dead entries, rebuild the index) at most this often,
+    /// riding the startup sweep. Absent or zero = never.
+    #[serde(default)]
+    pub dream_days: Option<u64>,
 }
 
 #[derive(Deserialize, Debug, Clone, Default)]
@@ -404,8 +454,14 @@ pub struct ConfigEdits {
     pub endpoints: Vec<EndpointConfig>,
     pub default_endpoint: Option<String>,
     pub sandbox_bash: bool,
+    pub memory_enabled: bool,
+    pub memory_dream_days: u64,
     pub mcp_servers: Vec<McpServerConfig>,
     pub agents: Vec<AgentConfig>,
+    /// The turn's round budgets (None = leave the file's keys alone,
+    /// the defaults read through).
+    pub max_tool_rounds: Option<usize>,
+    pub grace_rounds: Option<usize>,
 }
 
 impl ConfigEdits {
@@ -461,6 +517,45 @@ impl ConfigEdits {
             None => {
                 root.remove("default_endpoint");
             }
+        }
+
+        // Memory posture: the panel owns two keys of the [memory]
+        // table (the switch and the cadence). The table is mutated in
+        // place, so hand-written keys (index_budget, extract_endpoint,
+        // auto_apply) survive a panel save untouched.
+        if !matches!(root.get("memory"), Some(toml_edit::Item::Table(_))) {
+            root.insert("memory", toml_edit::Item::Table(toml_edit::Table::new()));
+        }
+        let Some(toml_edit::Item::Table(memory)) = root.get_mut("memory") else {
+            unreachable!("just inserted as a table")
+        };
+        memory.insert("enabled", toml_edit::value(self.memory_enabled));
+        if self.memory_dream_days > 0 {
+            memory.insert(
+                "dream_days",
+                toml_edit::value(self.memory_dream_days as i64),
+            );
+        } else {
+            // Zero means never: remove the key so the default (7)
+            // reads through, the panel switch off is the intent.
+            memory.remove("dream_days");
+        }
+
+        // Turn budgets: the panel owns two keys of the [turn] table,
+        // same mutate-in-place contract as [memory] (hand-written
+        // keys survive; None = the panel doesn't own the key, the
+        // file's value and the built-in default read through).
+        if !matches!(root.get("turn"), Some(toml_edit::Item::Table(_))) {
+            root.insert("turn", toml_edit::Item::Table(toml_edit::Table::new()));
+        }
+        let Some(toml_edit::Item::Table(turn)) = root.get_mut("turn") else {
+            unreachable!("just inserted as a table")
+        };
+        if let Some(rounds) = self.max_tool_rounds {
+            turn.insert("max_tool_rounds", toml_edit::value(rounds as i64));
+        }
+        if let Some(rounds) = self.grace_rounds {
+            turn.insert("grace_rounds", toml_edit::value(rounds as i64));
         }
 
         // Security posture: the flag lives under [security]; a
@@ -770,6 +865,43 @@ impl Config {
     }
 
     /// The auto-settle threshold in force.
+    pub fn memory_enabled(&self) -> bool {
+        self.memory
+            .as_ref()
+            .and_then(|m| m.enabled)
+            .unwrap_or(false)
+    }
+
+    pub fn memory_index_budget(&self) -> usize {
+        self.memory
+            .as_ref()
+            .and_then(|m| m.index_budget)
+            .unwrap_or(600)
+    }
+
+    pub fn memory_auto_apply(&self) -> bool {
+        self.memory
+            .as_ref()
+            .and_then(|m| m.auto_apply)
+            .unwrap_or(false)
+    }
+
+    pub fn memory_dream_days(&self) -> u64 {
+        self.memory.as_ref().and_then(|m| m.dream_days).unwrap_or(0)
+    }
+
+    /// The turn's tool-round budget: the user's value, else the loop's
+    /// built-in default (the loop holds the constant; this resolves
+    /// config's say).
+    pub fn resolve_max_tool_rounds(&self) -> Option<usize> {
+        self.turn.as_ref().and_then(|t| t.max_tool_rounds)
+    }
+
+    /// The grace window after the wrap-up nudge, same pattern.
+    pub fn resolve_grace_rounds(&self) -> Option<usize> {
+        self.turn.as_ref().and_then(|t| t.grace_rounds)
+    }
+
     pub fn resolve_auto_settle_days(
         &self,
         overlay: Option<&ProjectOverlay>,
@@ -1252,6 +1384,56 @@ default_mode = "accept_edits"
         assert_eq!(config.security.sandbox_bash, Some(true));
     }
 
+    /// The [turn] table: the panel owns two keys, mutates in place
+    /// (hand-written keys survive), and None leaves the keys alone.
+    #[test]
+    fn edits_own_turn_keys_and_preserve_hand_written_ones() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            "# my turn budgets, kept by hand\n[turn]\nmax_tool_rounds = 40\n\
+             warn_at_percent = 70\n",
+        )
+        .unwrap();
+
+        // Saving with None (the panel doesn't own the keys) leaves
+        // the file's values and the hand-written extra key intact.
+        ConfigEdits {
+            max_tool_rounds: None,
+            grace_rounds: None,
+            ..Default::default()
+        }
+        .save(&path)
+        .unwrap();
+        let config = Config::load_from(&path).unwrap();
+        assert_eq!(
+            config.turn.as_ref().and_then(|t| t.max_tool_rounds),
+            Some(40),
+            "None leaves the file's value"
+        );
+        let raw = std::fs::read_to_string(&path).unwrap();
+        assert!(raw.contains("warn_at_percent"), "hand-written key kept");
+        assert!(raw.contains("# my turn budgets"), "comment kept");
+
+        // Saving with values writes them; the file re-parses.
+        ConfigEdits {
+            max_tool_rounds: Some(60),
+            grace_rounds: Some(8),
+            ..Default::default()
+        }
+        .save(&path)
+        .unwrap();
+        let config = Config::load_from(&path).unwrap();
+        assert_eq!(
+            config.turn.as_ref().and_then(|t| t.max_tool_rounds),
+            Some(60)
+        );
+        assert_eq!(config.turn.as_ref().and_then(|t| t.grace_rounds), Some(8));
+        let raw = std::fs::read_to_string(&path).unwrap();
+        assert!(raw.contains("warn_at_percent = 70"), "still kept");
+    }
+
     #[test]
     fn edits_add_change_and_delete_endpoints() {
         let dir = tempfile::tempdir().unwrap();
@@ -1334,11 +1516,93 @@ default_mode = "accept_edits"
         );
     }
 
+    /// The panel owns [turn]: its two keys save, and a hand-written
+    /// budget the panel doesn't own this round (none today, but the
+    /// contract is mutate-in-place) survives.
+    #[test]
+    fn edits_preserve_hand_written_turn_keys() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "[turn]\nmax_tool_rounds = 30\ngrace_rounds = 4\n").unwrap();
+
+        ConfigEdits {
+            endpoints: vec![endpoint("ppq", "m1")],
+            default_endpoint: Some("ppq".into()),
+            sandbox_bash: false,
+            memory_enabled: false,
+            memory_dream_days: 7,
+            max_tool_rounds: Some(90),
+            grace_rounds: Some(12),
+            ..Default::default()
+        }
+        .save(&path)
+        .unwrap();
+
+        let raw = std::fs::read_to_string(&path).unwrap();
+        // The panel's two keys written, in place, nothing else touched.
+        assert!(raw.contains("max_tool_rounds = 90"), "{raw}");
+        assert!(raw.contains("grace_rounds = 12"), "{raw}");
+
+        // And a save that owns neither key leaves both keys standing.
+        ConfigEdits {
+            endpoints: vec![endpoint("ppq", "m1")],
+            default_endpoint: Some("ppq".into()),
+            sandbox_bash: false,
+            memory_enabled: false,
+            memory_dream_days: 7,
+            ..Default::default()
+        }
+        .save(&path)
+        .unwrap();
+        let raw = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            raw.contains("max_tool_rounds = 90") && raw.contains("grace_rounds = 12"),
+            "a None save leaves the file's turn keys standing: {raw}"
+        );
+    }
+
     /// The panel owns the agents section: every field round-trips,
     /// including a hand-written `invocation = "user"`, which the form
     /// doesn't edit but must not drop, and the comment above the
     /// section survives like any other user voice.
     #[test]
+    #[test]
+    fn edits_preserve_hand_written_memory_keys() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            "default_endpoint = \"ppq\"\n\n[endpoints]\nname = \"ppq\"\n\
+             model = \"m1\"\n\n[memory]\nenabled = true\nindex_budget = 900\n\
+             auto_apply = false\n",
+        )
+        .unwrap();
+
+        ConfigEdits {
+            endpoints: vec![endpoint("ppq", "m1")],
+            default_endpoint: Some("ppq".into()),
+            sandbox_bash: false,
+            memory_enabled: false,
+            memory_dream_days: 14,
+            ..Default::default()
+        }
+        .save(&path)
+        .unwrap();
+
+        let raw = std::fs::read_to_string(&path).unwrap();
+        // The panel's two keys written, the hand-written ones intact.
+        assert!(raw.contains("enabled = false"));
+        assert!(raw.contains("dream_days = 14"));
+        assert!(
+            raw.contains("index_budget = 900"),
+            "file-only key kept: {raw}"
+        );
+        assert!(
+            raw.contains("auto_apply = false"),
+            "file-only key kept: {raw}"
+        );
+    }
+
     fn edits_round_trip_agents_with_pins_and_invocation() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");

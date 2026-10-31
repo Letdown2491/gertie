@@ -105,9 +105,13 @@ pub fn run(prompt: Option<String>, yes: bool, config_path: Option<PathBuf>) -> i
         sandbox_bash: boot.sandbox_bash,
         prompt_source: gertie_core::PromptSource::Leader,
         system_prompt: boot.system_prompt.clone(),
+        instructions: boot.instructions.clone(),
+        memory_index: boot.memory_index.clone(),
         // One-shot prompt mode: no steering, nothing queues.
         steer: None,
         user_attachments: Vec::new(),
+        max_tool_rounds: boot.max_tool_rounds(),
+        grace_rounds: boot.grace_rounds(),
     });
     let worker_asks = boot.broker.subscribe();
 
@@ -280,10 +284,12 @@ pub(crate) fn pump(
                 LoopEvent::Usage {
                     input_tokens,
                     output_tokens,
+                    cached_input_tokens,
                 } => {
                     // Persist against the session so its totals survive
                     // the run, same ledger the GUI reads on resume.
-                    let _ = store.add_usage(session, input_tokens, output_tokens);
+                    let _ =
+                        store.add_usage(session, input_tokens, output_tokens, cached_input_tokens);
                     eprintln!("· tokens, {input_tokens} in / {output_tokens} out (this request)");
                 }
                 LoopEvent::Compacted { kept, total } => {
@@ -511,8 +517,12 @@ mod tests {
             sandbox_bash: false,
             prompt_source: gertie_core::PromptSource::Leader,
             system_prompt: None,
+            instructions: None,
+            memory_index: None,
             steer: None,
             user_attachments: Vec::new(),
+            max_tool_rounds: None,
+            grace_rounds: None,
         });
         let mut approvals = 0;
         let (outcome, text) = pump(
@@ -589,8 +599,12 @@ mod tests {
             sandbox_bash: false,
             prompt_source: gertie_core::PromptSource::Leader,
             system_prompt: None,
+            instructions: None,
+            memory_index: None,
             steer: None,
             user_attachments: Vec::new(),
+            max_tool_rounds: None,
+            grace_rounds: None,
         });
         let mut approvals = 0;
         let (outcome, _) = pump(

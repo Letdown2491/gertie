@@ -40,12 +40,16 @@ const WHEN_CONTEXTS: &[(&str, &str)] = &[
     ("turnRunning", "TurnRunning"),
     // Focus is inside the turn-diff modal.
     ("turnDiffFocus", "TurnDiffPanel"),
+    // Focus is in the transcript's find bar.
+    ("findBarFocus", "FindBar"),
 ];
 
 /// Every command a rule may name, with its default binding. `none`
 /// is not here, it is valid in a rule but binds nothing.
 pub const COMMANDS: &[&str] = &[
     "palette",
+    "find-transcript",
+    "find-close",
     "close-turn-diff",
     "undo-delete-session",
     "recall-up",
@@ -59,6 +63,8 @@ pub const COMMANDS: &[&str] = &[
 pub fn default_rules() -> Vec<Rule> {
     [
         ("ctrl-k", "palette", None),
+        ("ctrl-f", "find-transcript", None),
+        ("escape", "find-close", Some("findBarFocus")),
         ("escape", "close-turn-diff", Some("turnDiffFocus")),
         ("ctrl-z", "undo-delete-session", None),
         ("up", "recall-up", Some("editableFocus")),
@@ -101,6 +107,8 @@ fn rule_to_binding(rule: &Rule) -> Option<KeyBinding> {
     let key = rule.key.as_str();
     Some(match rule.command.as_str() {
         "palette" => KeyBinding::new(key, crate::palette::OpenPalette, context),
+        "find-transcript" => KeyBinding::new(key, crate::chat::FindInTranscript, context),
+        "find-close" => KeyBinding::new(key, crate::chat::FindClose, context),
         "close-turn-diff" => KeyBinding::new(key, crate::chat::CloseTurnDiff, context),
         "undo-delete-session" => KeyBinding::new(key, crate::chat::UndoDeleteSession, context),
         "recall-up" => KeyBinding::new(key, crate::chat::RecallUp, context),

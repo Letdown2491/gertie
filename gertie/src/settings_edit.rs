@@ -160,10 +160,19 @@ pub struct SettingsPanelView {
     endpoints: Vec<EndpointDraft>,
     default_endpoint: Option<String>,
     sandbox: bool,
+    memory_enabled: bool,
+    memory_dream_days: u64,
+    /// The round-budget drafts: raw text, empty = the panel doesn't
+    /// own the key (the file's value and the default read through).
+    max_tool_rounds_draft: String,
+    grace_rounds_draft: String,
     mcp_servers: Vec<McpDraft>,
     agents: Vec<AgentDraft>,
     form: Option<EndpointForm>,
     agent_form: Option<AgentForm>,
+    /// The turn budget fields' inputs, created once.
+    max_tool_rounds_input: Option<Entity<InputState>>,
+    grace_rounds_input: Option<Entity<InputState>>,
     /// The MCP add form's fields, when open.
     mcp_name: Option<Entity<InputState>>,
     mcp_url: Option<Entity<InputState>>,
@@ -179,10 +188,16 @@ impl SettingsPanelView {
             endpoints: Vec::new(),
             default_endpoint: None,
             sandbox: false,
+            memory_enabled: true,
+            memory_dream_days: 7,
+            max_tool_rounds_draft: String::new(),
+            grace_rounds_draft: String::new(),
             mcp_servers: Vec::new(),
             agents: Vec::new(),
             form: None,
             agent_form: None,
+            max_tool_rounds_input: None,
+            grace_rounds_input: None,
             mcp_name: None,
             mcp_url: None,
             mcp_command: None,
@@ -190,6 +205,60 @@ impl SettingsPanelView {
         };
         panel.reset_pending(config);
         panel
+    }
+
+    /// One budget field. The input is the source of truth from the
+    /// moment it exists: created once (seeded from the config draft,
+    /// placeholder naming the built-in default), every render copies
+    /// its value into the draft, one direction only. The old
+    /// reverse-sync forced the input back to the draft each frame,
+    /// which wiped every keystroke before Save could see it.
+    fn budget_field(
+        &mut self,
+        id: &'static str,
+        placeholder: String,
+        label: &'static str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let seed = match id {
+            "turn-max-rounds" => self.max_tool_rounds_draft.clone(),
+            _ => self.grace_rounds_draft.clone(),
+        };
+        let input = match id {
+            "turn-max-rounds" => self.max_tool_rounds_input.get_or_insert_with(|| {
+                let state = cx.new(|cx| InputState::new(window, cx).placeholder(placeholder));
+                if !seed.is_empty() {
+                    state.update(cx, |state, cx| state.set_value(&seed, window, cx));
+                }
+                state
+            }),
+            _ => self.grace_rounds_input.get_or_insert_with(|| {
+                let state = cx.new(|cx| InputState::new(window, cx).placeholder(placeholder));
+                if !seed.is_empty() {
+                    state.update(cx, |state, cx| state.set_value(&seed, window, cx));
+                }
+                state
+            }),
+        };
+        // The draft follows the input, one direction only: Save reads
+        // the drafts, and a click can land before this frame's redraw,
+        // so save_budgets also reads the inputs directly.
+        let current = input.read(cx).value().to_string();
+        match id {
+            "turn-max-rounds" => self.max_tool_rounds_draft = current,
+            _ => self.grace_rounds_draft = current,
+        }
+        v_flex()
+            .id(id)
+            .gap_0p5()
+            .child(
+                div()
+                    .text_size(px(10.5))
+                    .text_color(cx.theme().muted_foreground)
+                    .child(label),
+            )
+            .child(Input::new(input).small().w_full())
     }
 
     /// Pending state := the current config. Called on construction and
@@ -222,6 +291,28 @@ impl SettingsPanelView {
         // switch then saves your own choice into your config, which
         // outranks the overlay from then on.
         self.sandbox = self.summary.sandbox;
+        self.memory_enabled = self.summary.memory_enabled;
+        self.memory_dream_days = self.summary.memory_dream_days;
+        // The budget drafts pre-fill from the file's keys (absent =
+        // empty, the panel doesn't own them). The placeholder shows
+        // the built-in default, never a written value: writing the
+        // default into every config makes it look chosen. The input
+        // entities reset too, so the next render reseeds from the
+        // new drafts rather than keeping a stale save's text.
+        self.max_tool_rounds_input = None;
+        self.grace_rounds_input = None;
+        self.max_tool_rounds_draft = config
+            .turn
+            .as_ref()
+            .and_then(|t| t.max_tool_rounds)
+            .map(|rounds| rounds.to_string())
+            .unwrap_or_default();
+        self.grace_rounds_draft = config
+            .turn
+            .as_ref()
+            .and_then(|t| t.grace_rounds)
+            .map(|rounds| rounds.to_string())
+            .unwrap_or_default();
         self.mcp_servers = config
             .mcp_servers
             .iter()
@@ -486,6 +577,40 @@ impl SettingsPanelView {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // The budgets: parsed from the drafts, an empty or unparseable
+        // field means "the panel doesn't own this key" (None = the
+        // file's value and the built-in default read through).
+        let parse_rounds = |text: &str| -> Result<Option<usize>, String> {
+            let text = text.trim();
+            if text.is_empty() {
+                return Ok(None);
+            }
+            text.parse::<usize>()
+                .map(Some)
+                .map_err(|_| format!("{text:?} is not a round count"))
+        };
+        // A bad number shows the error and saves nothing (the parse
+        // runs again below for the value itself; both sides see the
+        // same drafts).
+        // The inputs are the source of truth while they exist: a
+        // click can land before the redraw that syncs the drafts.
+        let max_text = self
+            .max_tool_rounds_input
+            .as_ref()
+            .map(|entity| entity.read(cx).value().trim().to_string())
+            .unwrap_or_else(|| self.max_tool_rounds_draft.clone());
+        let grace_text = self
+            .grace_rounds_input
+            .as_ref()
+            .map(|entity| entity.read(cx).value().trim().to_string())
+            .unwrap_or_else(|| self.grace_rounds_draft.clone());
+        let max_parsed = parse_rounds(&max_text);
+        let grace_parsed = parse_rounds(&grace_text);
+        if let Err(error) = max_parsed.as_ref().or(grace_parsed.as_ref()) {
+            self.status = Some((error.clone(), true));
+            cx.notify();
+            return;
+        }
         let Some(path) = self.summary.config_path.clone() else {
             self.status = Some((
                 "no config file location, create ~/.config/gertie/config.toml".into(),
@@ -498,6 +623,8 @@ impl SettingsPanelView {
             endpoints: self.endpoints.iter().map(|d| d.to_config()).collect(),
             default_endpoint: self.default_endpoint.clone(),
             sandbox_bash: self.sandbox,
+            memory_enabled: self.memory_enabled,
+            memory_dream_days: self.memory_dream_days,
             mcp_servers: self
                 .mcp_servers
                 .iter()
@@ -510,6 +637,8 @@ impl SettingsPanelView {
                 })
                 .collect(),
             agents: self.agents.iter().map(|d| d.to_config()).collect(),
+            max_tool_rounds: max_parsed.unwrap_or(None),
+            grace_rounds: grace_parsed.unwrap_or(None),
         };
         match edits.save(&path) {
             Ok(()) => {
@@ -890,6 +1019,90 @@ impl Render for SettingsPanelView {
                             }
                         }
                     }),
+            )
+            .child(section_header("MEMORY", cx))
+            .child(
+                Switch::new("memory-switch")
+                    .label(format!(
+                        "Remember across sessions, from {}",
+                        self.summary.memory_origin.as_str()
+                    ))
+                    .small()
+                    .checked(self.memory_enabled)
+                    .tooltip(concat!(
+                        "Session-end extraction proposes memory entries",
+                        " as review cards on settle; dreaming consolidates",
+                        " the store on startup. Applies on restart; the",
+                        " files live in .gertie/memory/ and the data dir."
+                    ))
+                    .on_click({
+                        let panel = cx.entity().downgrade();
+                        move |checked, _, cx| {
+                            if let Some(panel) = panel.upgrade() {
+                                panel.update(cx, |panel, cx| {
+                                    panel.memory_enabled = *checked;
+                                    cx.notify();
+                                });
+                            }
+                        }
+                    }),
+            )
+            .child(
+                Switch::new("dream-switch")
+                    .label(format!(
+                        "Consolidate memory every {} days",
+                        self.memory_dream_days
+                    ))
+                    .small()
+                    .checked(self.memory_enabled && self.memory_dream_days > 0)
+                    .tooltip(concat!(
+                        "Startup pass that merges duplicate entries and",
+                        " archives counter-dead ones. A changelog lands in",
+                        " .gertie/memory/dreams/. Applies on restart."
+                    ))
+                    .on_click({
+                        let panel = cx.entity().downgrade();
+                        move |checked, _, cx| {
+                            if let Some(panel) = panel.upgrade() {
+                                panel.update(cx, |panel, cx| {
+                                    panel.memory_dream_days = if *checked { 7 } else { 0 };
+                                    cx.notify();
+                                });
+                            }
+                        }
+                    }),
+            )
+            .child(section_header("TURN BUDGETS", cx))
+            .child(
+                v_flex()
+                    .gap_1p5()
+                    .px_1()
+                    .child(
+                        div()
+                            .text_size(px(10.5))
+                            .text_color(theme.muted_foreground)
+                            .child(format!(
+                                "Tool rounds before a wrap-up nudge, then grace rounds before \
+                                 the turn pauses (resumable). Defaults {} + {}; empty = the \
+                                 default. Long work (a wide sweep, a migration) wants more.",
+                                gertie_core::DEFAULT_MAX_TOOL_ROUNDS,
+                                gertie_core::DEFAULT_GRACE_ROUNDS
+                            )),
+                    )
+                    .child(self.budget_field(
+                        "turn-max-rounds",
+                        format!("{} (default)", gertie_core::DEFAULT_MAX_TOOL_ROUNDS),
+                        "max tool rounds",
+                        _window,
+                        cx,
+                    ))
+                    .child(self.budget_field(
+                        "turn-grace-rounds",
+                        format!("{} (default)", gertie_core::DEFAULT_GRACE_ROUNDS),
+                        "grace rounds",
+                        _window,
+                        cx,
+                    )),
             )
             .child(section_header("MCP SERVERS", cx))
             .when(self.mcp_servers.is_empty(), |col| {

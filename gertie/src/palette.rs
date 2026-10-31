@@ -26,6 +26,11 @@ pub enum PaletteCommand {
     Compact,
     Export,
     Settings,
+    /// Reach full access: the chip never offers it, this command
+    /// opens the confirm card that does.
+    FullAccess,
+    /// The memory panel: read and vote on what gertie recalls.
+    Memory,
 }
 
 /// Every command: (search name, what it does, the action). The match
@@ -51,6 +56,16 @@ pub const COMMANDS: &[(&str, &str, PaletteCommand)] = &[
         "settings",
         "open the settings editor",
         PaletteCommand::Settings,
+    ),
+    (
+        "memory",
+        "open the memory panel (read and vote on what gertie recalls)",
+        PaletteCommand::Memory,
+    ),
+    (
+        "full access",
+        "disable every approval (edits and bash run unasked), asks for confirmation",
+        PaletteCommand::FullAccess,
     ),
 ];
 

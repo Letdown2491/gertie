@@ -75,6 +75,12 @@ api_key_env = "MY_API_KEY"
 Keys resolve from the environment first (`MY_API_KEY` above); a local server needs
 no key at all.
 
+**Memory and instructions**: gertie remembers across sessions. Facts it proposes at
+session end land as review cards you approve or deny; rules that must always apply go
+in `AGENTS.md` at the repo root (or `~/.config/gertie/AGENTS.md` for global ones).
+Both are plain markdown you can edit by hand. [docs/memory.md](docs/memory.md)
+explains the whole system, including the weekly cleanup pass ("dreaming").
+
 `config.example.toml` documents everything else: wire selection (`openai` |
 `anthropic`), fallback endpoints, MCP servers, custom agents, search backends,
 sandboxing. `gertie run` prompts for approval of mutating tool calls; pipe-safe mode
@@ -89,12 +95,14 @@ denies them unless `--yes` is given.
   Landlock-sandboxed at the kernel level (opt-in).
 - MCP tools are third-party code: descriptions are sanitized untrusted input and every
   call prompts: the user is the capability system.
+- Long-term memory is advisory and auditable: plain markdown files you can read and
+  edit, every entry traced to its source session, nothing enters memory without your
+  approval by default. See [docs/memory.md](docs/memory.md).
 
 ## Status
 
 Feature-complete against [DESIGN.md](DESIGN.md) (see "The original 'Deferred' row" for
-every decision and its rationale). [SESSION-REPORT.md](SESSION-REPORT.md) is the honest
-engineering log: what shipped, what bit, and why.
+every decision and its rationale).
 
 ## License
 

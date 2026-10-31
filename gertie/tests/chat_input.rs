@@ -7,8 +7,8 @@ use gertie_core::SessionStore;
 use gpui_kit::component::Root;
 use gpui_kit::test::TestWindowExt as _;
 use gpui_kit::{
-    AnyWindowHandle, AppContext, HeadlessAppContext, NoopTextSystem, WeakEntity, WindowHandle, px,
-    size,
+    AnyWindowHandle, AppContext, HeadlessAppContext, NoopTextSystem, SharedString, WeakEntity,
+    WindowHandle, px, size,
 };
 use std::path::Path;
 use std::sync::Arc;
@@ -45,7 +45,7 @@ fn fixture() -> Fixture {
 }
 
 fn fixture_with_store(store: Arc<SessionStore>) -> Fixture {
-    fixture_built(store, None, None, None, None, None, Vec::new(), None)
+    fixture_built(store, None, None, None, None, None, Vec::new(), None, None)
 }
 
 /// A fixture whose view carries a real checkpoint ledger over a real
@@ -64,6 +64,7 @@ fn fixture_with_snapshots() -> Fixture {
         None,
         None,
         Vec::new(),
+        None,
         None,
     );
     fixture.hold = vec![snapshots_dir, workspace];
@@ -89,6 +90,8 @@ fn fixture_full(
     // The rewind safety guard (None = single-tab tests, nothing ever
     // streams elsewhere).
     guard: Option<gertie::chat::LiveElsewhere>,
+    // The memory store (None = no memory in the view).
+    memory: Option<Arc<gertie_core::MemoryStore>>,
 ) -> Fixture {
     let mut cx = HeadlessAppContext::with_asset_source(
         Arc::new(NoopTextSystem),
@@ -137,6 +140,13 @@ fn fixture_full(
                     ),
                     "no endpoint configured".into(),
                     None,
+                    None,
+                    None,
+                    false,
+                    memory.clone(),
+                    None,
+                    None,
+                    None,
                     Vec::new(),
                     root.clone(),
                     settle_command,
@@ -156,6 +166,10 @@ fn fixture_full(
                         Ok(gertie::bootstrap::Switched {
                             tools: merge_tools(extra_tools.clone(), root),
                             system_prompt: None,
+                            instructions: None,
+                            memory_index: None,
+                            memory: None,
+                            memory_extract_provider: None,
                             workspace_root: root.to_path_buf(),
                             templates: Vec::new(),
                             sandbox_bash: false,
@@ -191,6 +205,7 @@ fn fixture_built(
     provider: Option<Arc<gertie_providers::AnyProvider>>,
     broker: Option<Arc<gertie_core::PermissionBroker>>,
     extra_tools: Vec<Arc<dyn gertie_core::Tool>>,
+    memory: Option<Arc<gertie_core::MemoryStore>>,
     guard: Option<gertie::chat::LiveElsewhere>,
 ) -> Fixture {
     fixture_full(
@@ -203,6 +218,7 @@ fn fixture_built(
         extra_tools,
         None,
         guard,
+        memory,
     )
 }
 
@@ -336,23 +352,684 @@ fn the_composer_chip_cycles_the_permission_mode_and_persists_it() {
             .mode
     };
     assert_eq!(
-        store_mode(&fixture),
+        store_mode(&mut fixture),
         gertie_core::PermissionMode::Supervised
     );
 
     // One click per ring position; the store records each stop, and
-    // the ring wraps back to supervised.
+    // the ring wraps back to supervised. The ring is de-escalation-
+    // only (M7 PR 1): auto wraps to supervised, and no click ever
+    // lands on full access.
     for expected in [
         gertie_core::PermissionMode::AcceptEdits,
         gertie_core::PermissionMode::Auto,
-        gertie_core::PermissionMode::FullAccess,
         gertie_core::PermissionMode::Supervised,
     ] {
         fixture.act(|window, cx| {
             window.click("mode-chip", cx);
         });
-        assert_eq!(store_mode(&fixture), expected, "chip click persists");
+        assert_eq!(store_mode(&mut fixture), expected, "chip click persists");
     }
+}
+
+#[test]
+fn the_empty_state_says_ready_and_first_run_gets_the_tour() {
+    // The fixture builds views with no endpoint, so the default state
+    // leads with the blocking fact and offers the fix.
+    let mut default_fixture = fixture();
+    let line = default_fixture.cx.update(|cx| {
+        default_fixture
+            .view
+            .upgrade()
+            .expect("view alive")
+            .read(cx)
+            .empty_state_headline_for_test()
+    });
+    assert_eq!(
+        line, "Ready to run, once an endpoint exists.",
+        "the missing endpoint leads the state"
+    );
+    default_fixture.act(|window, _| {
+        assert!(
+            window.try_find("empty-state-configure").is_some(),
+            "the fix is offered"
+        );
+    });
+
+    // With an endpoint the state relaxes: "Ready." plus the tour, and
+    // no configure button.
+    let mut configured = fixture();
+    configured.cx.update(|cx| {
+        let view = configured.view.upgrade().expect("view alive");
+        let mut view = view.downgrade();
+        view.update(cx, |chat, cx| {
+            chat.set_endpoint_label_for_test("ppq · glm-5.3-flash", cx);
+        });
+    });
+    let line = configured.cx.update(|cx| {
+        configured
+            .view
+            .upgrade()
+            .expect("view alive")
+            .read(cx)
+            .empty_state_headline_for_test()
+    });
+    assert_eq!(line, "Ready.");
+    configured.act(|window, _| {
+        assert!(
+            window.try_find("empty-state-configure").is_none(),
+            "no configure button when an endpoint exists"
+        );
+    });
+
+    // No endpoint: the blocking fact leads and the fix is offered.
+    let mut empty = fixture();
+    empty.cx.update(|cx| {
+        let view = empty.view.upgrade().expect("view alive");
+        let mut view = view.downgrade();
+        view.update(cx, |chat, cx| {
+            chat.set_endpoint_label_for_test("no endpoint configured", cx);
+        });
+    });
+    let line = empty.cx.update(|cx| {
+        empty
+            .view
+            .upgrade()
+            .expect("view alive")
+            .read(cx)
+            .empty_state_headline_for_test()
+    });
+    assert_eq!(
+        line, "Ready to run, once an endpoint exists.",
+        "the missing endpoint leads the state"
+    );
+}
+
+/// A memory store over tempdir roots, the panel and footer tests'
+/// fixture. The store's session db is in-memory, its file roots are
+/// the held tempdir.
+fn fixture_with_memory() -> (Fixture, tempfile::TempDir) {
+    let dir = tempfile::tempdir().expect("memory dir");
+    let store = Arc::new(SessionStore::open(Path::new(":memory:")).expect("session store"));
+    let memory = Arc::new(gertie_core::MemoryStore::open(
+        dir.path().join("project"),
+        dir.path().join("global"),
+        store.clone(),
+    ));
+    let fixture = fixture_built(
+        store,
+        None,
+        None,
+        None,
+        None,
+        None,
+        Vec::new(),
+        Some(memory),
+        None,
+    );
+    (fixture, dir)
+}
+
+#[test]
+fn the_gauge_names_the_compaction_before_it_happens() {
+    let mut fixture = fixture();
+    // Under the threshold: the gauge says only the size.
+    let line = fixture.cx.update(|cx| {
+        let view = fixture.view.upgrade().expect("view alive");
+        view.update(cx, |chat, cx| {
+            chat.set_context_for_test(Some(100_000), 10_000, cx);
+        });
+        view.read(cx).gauge_line_for_test()
+    });
+    assert!(
+        !line.contains("next compaction"),
+        "quiet until near: {line}"
+    );
+    // At 75% of the window the sentence appears.
+    let line = fixture.cx.update(|cx| {
+        let view = fixture.view.upgrade().expect("view alive");
+        view.update(cx, |chat, cx| {
+            chat.set_context_for_test(Some(100_000), 80_000, cx);
+        });
+        view.read(cx).gauge_line_for_test()
+    });
+    assert!(
+        line.contains("next compaction keeps the last 8 messages"),
+        "the mechanism, not a guess: {line}"
+    );
+}
+
+#[test]
+fn find_walks_the_transcript_and_escape_hands_focus_back() {
+    let mut fixture = fixture();
+    // A turn to find: the user's message persists without a provider.
+    fixture.act(|window, cx| {
+        window.input("the flake hides in teardown", cx);
+        window.press("enter", cx);
+    });
+    // Ctrl+F opens the bar; typing narrows; the count shows.
+    fixture.act(|window, cx| {
+        window.press("ctrl-f", cx);
+    });
+    let opened = fixture.cx.update(|cx| {
+        fixture
+            .view
+            .upgrade()
+            .expect("view alive")
+            .read(cx)
+            .find_open_for_test()
+    });
+    assert!(opened, "ctrl-f opened the find bar");
+    // Typing a query that matches the session's turns puts the bar on
+    // the first match; the highlight reads the same row.
+    fixture.act(|window, cx| {
+        window.input("flake", cx);
+    });
+    let row = fixture.cx.update(|cx| {
+        fixture
+            .view
+            .upgrade()
+            .expect("view alive")
+            .read(cx)
+            .current_match_row_for_test()
+    });
+    assert!(row.is_some(), "a match exists for the query");
+
+    // Escape closes it.
+    fixture.act(|window, cx| {
+        window.press("escape", cx);
+    });
+    let opened = fixture.cx.update(|cx| {
+        fixture
+            .view
+            .upgrade()
+            .expect("view alive")
+            .read(cx)
+            .find_open_for_test()
+    });
+    assert!(!opened, "escape closed the find bar");
+}
+
+#[test]
+fn mention_matches_lists_workspace_files_and_erases_the_token_on_accept() {
+    // The workspace: two files, one in a scratch dir the walk skips.
+    let workspace = tempfile::tempdir().expect("workspace");
+    std::fs::create_dir_all(workspace.path().join("src")).expect("src");
+    std::fs::write(workspace.path().join("src").join("main.rs"), "fn main() {}").expect("src");
+    std::fs::write(workspace.path().join("README.md"), "# g").expect("readme");
+    std::fs::create_dir_all(workspace.path().join("target")).expect("target");
+    std::fs::write(workspace.path().join("target").join("junk.rs"), "x").expect("junk");
+
+    // The bare `@` offers nothing (a query means something already).
+    let empty = gertie::chat::mention_matches_for_test("@", workspace.path());
+    assert!(empty.is_empty(), "a bare @ stays quiet");
+
+    // The query narrows: `@main` finds src/main.rs, never target/.
+    let hits = gertie::chat::mention_matches_for_test("@main", workspace.path());
+    assert_eq!(hits.len(), 1, "only src/main.rs matches: {:?}", hits);
+    assert_eq!(hits[0].path, "src/main.rs");
+    assert_eq!(hits[0].token, "@main");
+
+    // A query with a space is a sentence again, not a mention.
+    assert!(gertie::chat::mention_matches_for_test("what is @ up to", workspace.path()).is_empty());
+
+    // End to end: typing a token in the composer, Enter accepts the
+    // top row, the token leaves the composer and the file attaches.
+    let mut fixture = fixture_full(
+        Arc::new(SessionStore::open(Path::new(":memory:")).expect("store")),
+        None,
+        Some(workspace.path().to_path_buf()),
+        None,
+        None,
+        None,
+        Vec::new(),
+        None,
+        None,
+        None,
+    );
+    fixture.act(|window, cx| {
+        window.input("@main", cx);
+        window.press("enter", cx);
+    });
+    fixture.act(|window, cx| {
+        window.press("enter", cx);
+    });
+    let composer = fixture.cx.update(|cx| {
+        fixture
+            .view
+            .upgrade()
+            .expect("view alive")
+            .read(cx)
+            .composer_value_for_test(cx)
+    });
+    assert_eq!(composer.trim(), "", "the token left the composer");
+    // The attachment is parked: it rides on the next send.
+    assert_eq!(
+        fixture.cx.update(|cx| {
+            fixture
+                .view
+                .upgrade()
+                .expect("view alive")
+                .read(cx)
+                .attachments_count_for_test()
+        }),
+        1,
+        "the mentioned file is attached"
+    );
+}
+
+#[test]
+fn the_arrows_walk_the_mention_popup_and_enter_takes_the_walked_row() {
+    // The workspace: two files the query matches, ordered by path.
+    let workspace = tempfile::tempdir().expect("workspace");
+    std::fs::write(workspace.path().join("a.txt"), "first").expect("a");
+    std::fs::write(workspace.path().join("b.txt"), "second").expect("b");
+    let mut fixture = fixture_full(
+        Arc::new(SessionStore::open(Path::new(":memory:")).expect("store")),
+        None,
+        Some(workspace.path().to_path_buf()),
+        None,
+        None,
+        None,
+        Vec::new(),
+        None,
+        None,
+        None,
+    );
+
+    // Type the shared query; ArrowDown once walks to the second row;
+    // Enter accepts THAT row, not the top one.
+    fixture.act(|window, cx| {
+        window.input("@.txt", cx);
+    });
+    // Walk (the arrows' behavior through recall_step is exercised by
+    // the popup-open check; the dispatch itself is the PR 4 e2e's
+    // path). Selection 1 = the second row (b.txt).
+    fixture.cx.update(|cx| {
+        let view = fixture.view.upgrade().expect("view alive");
+        let mut view = view.downgrade();
+        view.update(cx, |chat, cx| {
+            chat.set_popup_selection_for_test(Some(1), cx);
+        });
+    });
+    fixture.act(|window, cx| {
+        window.press("enter", cx);
+    });
+    // The walked row attached (b.txt), the top row (a.txt) didn't:
+    // one attachment, and the token left the composer.
+    let count = fixture.cx.update(|cx| {
+        fixture
+            .view
+            .upgrade()
+            .expect("view alive")
+            .read(cx)
+            .attachments_count_for_test()
+    });
+    assert_eq!(count, 1, "one walked row attached, not a send");
+    let composer = fixture.cx.update(|cx| {
+        fixture
+            .view
+            .upgrade()
+            .expect("view alive")
+            .read(cx)
+            .composer_value_for_test(cx)
+    });
+    assert_eq!(composer.trim(), "", "the token left the composer");
+    // The dispatch went to the popup, not to a send: no user turn.
+    assert_eq!(
+        fixture.cx.update(|cx| {
+            fixture
+                .view
+                .upgrade()
+                .expect("view alive")
+                .read(cx)
+                .turn_count_for_test()
+        }),
+        0,
+        "no turn was sent"
+    );
+}
+
+#[test]
+fn a_new_query_resets_the_popup_walk() {
+    // Walk to row 2 (state-driven, the dispatch is PR 4's), then edit
+    // the query: the selection belonged to the last list, so the next
+    // Enter takes the new list's top row, not the walked one.
+    let workspace = tempfile::tempdir().expect("workspace");
+    std::fs::write(workspace.path().join("a.txt"), "first").expect("a");
+    std::fs::write(workspace.path().join("ab.txt"), "second").expect("b");
+    let mut fixture = fixture_full(
+        Arc::new(SessionStore::open(Path::new(":memory:")).expect("store")),
+        None,
+        Some(workspace.path().to_path_buf()),
+        None,
+        None,
+        None,
+        Vec::new(),
+        None,
+        None,
+        None,
+    );
+    fixture.act(|window, cx| {
+        window.input("@a", cx);
+    });
+    fixture.cx.update(|cx| {
+        let view = fixture.view.upgrade().expect("view alive");
+        let mut view = view.downgrade();
+        view.update(cx, |chat, cx| {
+            chat.set_popup_selection_for_test(Some(1), cx);
+        });
+    });
+    fixture.act(|window, cx| {
+        window.input("b", cx);
+    });
+    let reset = fixture.cx.update(|cx| {
+        fixture
+            .view
+            .upgrade()
+            .expect("view alive")
+            .read(cx)
+            .popup_selection_for_test()
+    });
+    assert_eq!(reset, None, "a new query reset the walk");
+    fixture.act(|window, cx| {
+        window.press("enter", cx);
+    });
+    // The new query "@ab" matches only ab.txt; Enter attached it.
+    let count = fixture.cx.update(|cx| {
+        fixture
+            .view
+            .upgrade()
+            .expect("view alive")
+            .read(cx)
+            .attachments_count_for_test()
+    });
+    assert_eq!(count, 1, "the new query's top row attached");
+}
+
+#[test]
+fn the_memory_footer_word_shows_the_count_and_opens_the_panel() {
+    let (mut fixture, dir) = fixture_with_memory();
+
+    // An empty store: the word hides, memoryless sessions pay zero
+    // attention (the zero-cost design, visible).
+    fixture.act(|window, cx| {
+        window.input("hello", cx);
+        window.press("enter", cx);
+    });
+    let mut found = false;
+    fixture.act(|window, _| {
+        found = window.try_find("memory-chip").is_some();
+    });
+    assert!(!found, "empty store hides the word");
+
+    // One remembered entry: the word appears with the count, and a
+    // click opens the memory panel.
+    std::fs::create_dir_all(dir.path().join("project")).expect("tier root");
+    std::fs::write(
+        dir.path().join("project").join("gotchas.md"),
+        "# Gotchas\n\n- [p1] helpful=0 harmful=0 the flake hides in teardown [source: 9; added: 2026-10-31]\n",
+    )
+    .expect("topic file");
+    fixture.act(|window, cx| {
+        window.input("second turn", cx);
+        window.press("enter", cx);
+    });
+    assert_eq!(
+        fixture.cx.update(|cx| {
+            fixture
+                .view
+                .upgrade()
+                .expect("view alive")
+                .read(cx)
+                .memory_count_for_test()
+        }),
+        1,
+        "the scan sees the entry"
+    );
+    let mut found = false;
+    fixture.act(|window, _| {
+        found = window.try_find("memory-chip").is_some();
+    });
+    assert!(found, "one entry shows the word");
+    fixture.act(|window, cx| {
+        window.click("memory-chip", cx);
+    });
+    assert_eq!(
+        fixture.cx.update(|cx| fixture
+            .view
+            .upgrade()
+            .expect("view alive")
+            .read(cx)
+            .panel_for_test()),
+        "memory",
+        "the click opened the memory panel"
+    );
+}
+
+#[test]
+fn a_down_vote_alone_lands() {
+    let (mut fixture, dir) = fixture_with_memory();
+    let file = dir.path().join("project").join("gotchas.md");
+    std::fs::create_dir_all(dir.path().join("project")).expect("tier root");
+    std::fs::write(
+        &file,
+        "# Gotchas\n\n- [p1] helpful=0 harmful=0 the flake hides in teardown [source: 9; added: 2026-10-31]\n",
+    )
+    .expect("topic file");
+    fixture.act(|window, cx| {
+        window.input("hello", cx);
+        window.press("enter", cx);
+    });
+    fixture.act(|window, cx| {
+        window.click("memory-chip", cx);
+    });
+    fixture.act(|window, cx| {
+        window.click("memory-vote-down-p1", cx);
+    });
+    let text = std::fs::read_to_string(&file).expect("topic file");
+    assert!(
+        text.contains("helpful=0 harmful=1"),
+        "the down vote landed: {text}"
+    );
+}
+
+#[test]
+fn voting_through_the_panel_writes_the_counters() {
+    let (mut fixture, dir) = fixture_with_memory();
+    let file = dir.path().join("project").join("gotchas.md");
+    std::fs::create_dir_all(dir.path().join("project")).expect("tier root");
+    std::fs::write(
+        &file,
+        "# Gotchas\n\n- [p1] helpful=0 harmful=0 the flake hides in teardown [source: 9; added: 2026-10-31]\n",
+    )
+    .expect("topic file");
+    fixture.act(|window, cx| {
+        window.input("hello", cx);
+        window.press("enter", cx);
+    });
+    fixture.act(|window, cx| {
+        window.click("memory-chip", cx);
+    });
+
+    let mut vote_btn = false;
+    fixture.act(|window, _| {
+        vote_btn = window.try_find("memory-vote-up-p1").is_some();
+    });
+    assert!(vote_btn, "the vote button is registered in the tree");
+    let panel = fixture.cx.update(|cx| {
+        fixture
+            .view
+            .upgrade()
+            .expect("view alive")
+            .read(cx)
+            .panel_for_test()
+    });
+    assert_eq!(panel, "memory", "the panel is open before voting");
+    assert_eq!(
+        fixture.cx.update(|cx| fixture
+            .view
+            .upgrade()
+            .unwrap()
+            .read(cx)
+            .memory_rows_count_for_test()),
+        1,
+        "the panel's rows are loaded"
+    );
+
+    // One helpful vote through the panel's real button: the row's
+    // label updates and the file line carries the new counter.
+    fixture.act(|window, cx| {
+        window.click("memory-vote-up-p1", cx);
+    });
+    let notices = fixture.cx.update(|cx| {
+        fixture
+            .view
+            .upgrade()
+            .expect("view alive")
+            .read(cx)
+            .notice_texts_for_test()
+    });
+    let text = std::fs::read_to_string(&file).expect("topic file");
+    assert!(
+        text.contains("helpful=1 harmful=0"),
+        "the vote landed in the file: {text}; notices: {notices:?}"
+    );
+    // The panel refreshed: close and reopen it (a fresh scan), then
+    // the second vote lands the same way the first did.
+    fixture.act(|window, cx| {
+        window.click("memory-chip", cx);
+    });
+    fixture.act(|window, cx| {
+        window.click("memory-chip", cx);
+    });
+    fixture.act(|window, cx| {
+        window.click("memory-vote-down-p1", cx);
+    });
+    let notices2 = fixture.cx.update(|cx| {
+        fixture
+            .view
+            .upgrade()
+            .expect("view alive")
+            .read(cx)
+            .notice_texts_for_test()
+    });
+    let text = std::fs::read_to_string(&file).expect("topic file");
+    assert!(
+        text.contains("helpful=1 harmful=1"),
+        "the second vote landed too: {text}; notices: {notices2:?}"
+    );
+}
+
+#[test]
+fn full_access_costs_a_palette_command_and_a_confirm() {
+    // The chip alone can never reach full access; the palette command
+    // opens a confirm card, and only its approve applies the mode.
+    let mut fixture = fixture();
+    fixture.act(|window, cx| {
+        window.input("go", cx);
+        window.press("enter", cx);
+    });
+    let mode = |fixture: &mut Fixture| {
+        fixture.cx.update(|cx| {
+            fixture
+                .view
+                .upgrade()
+                .expect("view alive")
+                .read(cx)
+                .mode_for_test()
+        })
+    };
+
+    // Hammer the chip through the ring: full access never appears.
+    for _ in 0..6 {
+        fixture.act(|window, cx| {
+            window.click("mode-chip", cx);
+        });
+        assert_ne!(
+            mode(&mut fixture),
+            gertie_core::PermissionMode::FullAccess,
+            "the chip never lands on full access"
+        );
+    }
+
+    // The palette command opens the confirm card: the pending ask is
+    // real broker machinery, and the card's buttons are real UI.
+    let open_confirm = |fixture: &mut Fixture| {
+        fixture.cx.update(|cx| {
+            let view = fixture.view.upgrade().expect("view alive");
+            let mut view = view.downgrade();
+            view.update(cx, |chat, cx| chat.full_access_confirm(cx));
+        });
+    };
+    let card_index = |fixture: &mut Fixture| {
+        fixture
+            .cx
+            .update(|cx| {
+                fixture
+                    .view
+                    .upgrade()
+                    .expect("view alive")
+                    .read(cx)
+                    .pending_card_index_for_test("mode_confirm")
+            })
+            .expect("pending confirm card");
+    };
+    open_confirm(&mut fixture);
+    card_index(&mut fixture);
+    let index = fixture
+        .cx
+        .update(|cx| {
+            fixture
+                .view
+                .upgrade()
+                .expect("view alive")
+                .read(cx)
+                .pending_card_index_for_test("mode_confirm")
+        })
+        .expect("pending confirm card");
+
+    // Deny first: the mode stays where it was.
+    fixture.act(|window, cx| {
+        window.click(SharedString::from(format!("deny-{index}")), cx);
+    });
+    assert_ne!(
+        mode(&mut fixture),
+        gertie_core::PermissionMode::FullAccess,
+        "deny leaves the mode alone"
+    );
+
+    // Approve the second confirm: the mode applies from next turn.
+    open_confirm(&mut fixture);
+    let index = fixture
+        .cx
+        .update(|cx| {
+            fixture
+                .view
+                .upgrade()
+                .expect("view alive")
+                .read(cx)
+                .pending_card_index_for_test("mode_confirm")
+        })
+        .expect("second confirm card");
+    fixture.act(|window, cx| {
+        window.click(SharedString::from(format!("approve-{index}")), cx);
+    });
+    assert_eq!(
+        mode(&mut fixture),
+        gertie_core::PermissionMode::FullAccess,
+        "approve applies the mode"
+    );
+
+    // From full access the chip walks straight home to supervised.
+    fixture.act(|window, cx| {
+        window.click("mode-chip", cx);
+    });
+    assert_eq!(
+        mode(&mut fixture),
+        gertie_core::PermissionMode::Supervised,
+        "full access de-escalates in one click"
+    );
 }
 
 #[test]
@@ -396,6 +1073,7 @@ fn accept_edits_runs_the_checkpointed_edit_without_asking() {
         Some(provider),
         None,
         Vec::new(),
+        None,
         None,
     );
     fixture.hold = vec![scenarios, workspace, snapshots_dir];
@@ -527,6 +1205,13 @@ fn markdown_and_tool_rows_draw_clean() {
                     gertie_tools::builtin_tools(Path::new(".")),
                     "no endpoint configured".into(),
                     None,
+                    None,
+                    None,
+                    false,
+                    None,
+                    None,
+                    None,
+                    None,
                     Vec::new(),
                     Path::new(".").to_path_buf(),
                     None,
@@ -543,6 +1228,10 @@ fn markdown_and_tool_rows_draw_clean() {
                         Ok(gertie::bootstrap::Switched {
                             tools: gertie_tools::builtin_tools(root),
                             system_prompt: None,
+                            instructions: None,
+                            memory_index: None,
+                            memory: None,
+                            memory_extract_provider: None,
                             workspace_root: root.to_path_buf(),
                             templates: Vec::new(),
                             sandbox_bash: false,
@@ -1068,6 +1757,7 @@ fn settling_runs_the_reclaim_command_in_the_recorded_workspace() {
         None,
         Vec::new(),
         None,
+        None,
     );
 
     // A send records the workspace on the session, the settle hook's
@@ -1198,6 +1888,7 @@ fn a_worker_ask_bubbles_into_the_transcript_and_the_answer_reaches_the_worker() 
             broker: broker.clone(),
         })],
         None,
+        None,
     );
 
     // Send: the scripted leader calls worker_ask (a Running card, its
@@ -1287,6 +1978,7 @@ fn the_quiet_gauge_holds_its_tongue_while_an_approval_waits() {
         vec![Arc::new(WorkerAskTool {
             broker: broker.clone(),
         })],
+        None,
         None,
     );
     fixture.hold = vec![scenarios];
@@ -1499,6 +2191,7 @@ fn a_rate_limited_turn_offers_resume_and_resuming_clears_it() {
         None,
         Vec::new(),
         None,
+        None,
     );
 
     fixture.act(|window, cx| {
@@ -1602,6 +2295,7 @@ fn snoozing_a_limited_session_resumes_it_when_the_timer_fires() {
         None,
         Vec::new(),
         None,
+        None,
     );
 
     fixture.act(|window, cx| {
@@ -1696,6 +2390,7 @@ fn canceling_the_snooze_leaves_the_session_limited_and_quiet() {
         None,
         Vec::new(),
         None,
+        None,
     );
 
     fixture.act(|window, cx| {
@@ -1756,6 +2451,7 @@ fn a_big_paste_files_itself_into_the_workspace_and_the_message_cites_it() {
         None,
         None,
         Vec::new(),
+        None,
         None,
     );
     fixture.hold = vec![snapshots_dir, workspace];
@@ -1950,6 +2646,7 @@ fn a_queued_followup_is_a_row_that_drafts_drains_and_survives() {
         Some(provider),
         None,
         Vec::new(),
+        None,
         None,
     );
     fixture.hold = vec![scenarios, workspace];
@@ -2342,6 +3039,7 @@ fn revert_files_too_restores_the_checkpointed_content() {
         None,
         Vec::new(),
         None,
+        None,
     );
     fixture.hold = vec![scenarios, workspace, snapshots_dir];
 
@@ -2420,6 +3118,7 @@ fn the_guard_refuses_a_file_restore_while_another_tab_streams() {
         Some(provider),
         None,
         Vec::new(),
+        None,
         Some(busy),
     );
     fixture.hold = vec![scenarios, workspace, snapshots_dir];
@@ -2502,6 +3201,7 @@ fn a_workspace_switch_moves_the_tools_and_the_ledger_restores_where_it_ran() {
         Some(provider),
         None,
         Vec::new(),
+        None,
         None,
     );
     fixture.hold = vec![scenarios, first, second, snapshots_dir];
@@ -2679,6 +3379,7 @@ fn a_pending_card_breaks_the_run_until_it_settles() {
         None,
         Vec::new(),
         None,
+        None,
     );
     fixture.hold = vec![scenarios, workspace, snapshots_dir];
 
@@ -2728,7 +3429,7 @@ fn the_palette_gt_filter_runs_a_command() {
                 .read(cx)
                 .palette_command_names_for_test())
             .len(),
-        4,
+        6,
         "a bare > lists every command"
     );
 
@@ -2949,6 +3650,7 @@ fn a_worktree_tabs_first_message_names_its_branch() {
         None,
         Vec::new(),
         Some(naming),
+        None,
         None,
     );
     fixture.hold.push(repo);

@@ -34,6 +34,12 @@ pub struct SettingsSummary {
     pub sandbox_origin: crate::config::Origin,
     /// Search backend in force ("brave", "searxng", or "none").
     pub search: String,
+    /// Long-term memory in force (extraction + dreaming gate) and
+    /// where the answer came from, the switch's label beside it.
+    pub memory_enabled: bool,
+    pub memory_origin: crate::config::Origin,
+    /// The dreaming cadence in force (default 7).
+    pub memory_dream_days: u64,
     pub mcp_servers: Vec<String>,
     pub skills: usize,
     /// Model-invocable agent type names.
@@ -73,6 +79,9 @@ impl SettingsSummary {
             // Honest until the bootstrap resolves it against the
             // repo's overlay (it always does, load and reload).
             sandbox_origin: crate::config::Origin::Default,
+            memory_enabled: config.memory_enabled(),
+            memory_origin: crate::config::Origin::Default,
+            memory_dream_days: config.memory_dream_days(),
             search,
             mcp_servers: config
                 .mcp_servers

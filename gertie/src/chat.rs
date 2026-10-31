@@ -23,6 +23,7 @@ use gpui_kit::{
     StatefulInteractiveElement as _, Styled, TestSupportExt as _, Window, actions, div, list,
     prelude::*, px,
 };
+use sha2::Digest;
 use std::sync::Arc;
 use std::time::Duration;
 use std::time::Instant;
@@ -173,7 +174,9 @@ actions!(
         RecallUp,
         RecallDown,
         CycleFocus,
-        CycleFocusBack
+        CycleFocusBack,
+        FindInTranscript,
+        FindClose
     ]
 );
 
@@ -275,6 +278,60 @@ pub struct ChatView {
     /// Per-turn request framing (identity, policy, skill index). Not
     /// part of history: the DB stays canonical.
     system_prompt: Option<String>,
+    /// Session instructions (AGENTS.md, the always-layer), framing
+    /// like the prompt, threaded through on every request.
+    instructions: Option<String>,
+    /// The memory index, snapshotted at session start, frozen for the
+    /// session. Swapped on workspace switch with the rest of the
+    /// framing.
+    memory_index: Option<String>,
+    /// Long-term memory (M6): the flag gates extraction and dreaming,
+    /// the store is the shared handle (both tiers), the extract model
+    /// name picks the endpoint for the session-end call (None = this
+    /// session's own endpoint). Filled from config at construction.
+    memory_enabled: bool,
+    memory_store: Option<Arc<gertie_core::MemoryStore>>,
+    /// The extraction provider, resolved at construction (the named
+    /// endpoint, else the session's own). None = extraction disabled.
+    memory_extract_provider: Option<Arc<dyn gertie_core::Provider>>,
+    /// Proposals awaiting a card answer, keyed by the broker ask id.
+    memory_proposals: std::collections::HashMap<u64, gertie_core::memory_extract::Proposal>,
+    /// Extraction debounce: last extraction trigger per session, the
+    /// compaction path can fire several times an hour.
+    last_memory_extract: std::collections::HashMap<u64, Instant>,
+    /// The memory panel's rows: a fresh scan at open and after every
+    /// vote. Empty when there is no store (headless, tests) or the
+    /// store is empty; the panel and the footer word both hide then.
+    memory_rows: Vec<gertie_core::MemoryEntry>,
+    /// The turn's round budgets, resolved from config at boot (None =
+    /// the loop's built-in defaults). Every TurnSpec carries them.
+    max_tool_rounds: Option<usize>,
+    grace_rounds: Option<usize>,
+    /// Proposals awaiting their card's answer: the call id routes the
+    /// decision to the store apply (approve) or the consumed mark (deny).
+    pending_memory_apply: std::collections::HashMap<
+        String,
+        (
+            gertie_core::memory_extract::Proposal,
+            Arc<gertie_core::MemoryStore>,
+            SessionId,
+        ),
+    >,
+    /// The palette's confirm-ask id, so the answer routes to the mode
+    /// change instead of a tool run. Set by `full_access_confirm`,
+    /// consumed in `decide_tool`.
+    pending_mode_confirm: Option<u64>,
+    /// The transcript's find bar: the query (Some = open) and which
+    /// match is current. Matches recompute from the turns on demand;
+    /// the bar walks them with Enter/Shift+Enter, Esc closes.
+    find: Option<(String, usize)>,
+    /// The composer popups' selected row (slash and mentions share
+    /// the grammar) with the query token it was walked under: the
+    /// walk resets when the token changes (a real edit), and
+    /// survives the newline insert Enter itself performs.
+    popup_selection: Option<(usize, String)>,
+    /// The find bar's input, a second InputState beside the composer's.
+    find_input: Entity<InputState>,
     sessions: Vec<gertie_core::SessionSummary>,
     /// None until the first message, empty chats don't exist as rows, so
     /// the sidebar shows only real conversations.
@@ -313,10 +370,10 @@ pub struct ChatView {
     thinking: bool,
     /// Session token totals from the provider's usage events, persisted
     /// per session, so a resumed chat shows what it spent before too.
-    usage: (u64, u64),
+    usage: (u64, u64, u64),
     /// Token totals across all sessions, for the settings panel.
     /// Refreshed when the panel opens, never per render.
-    total_usage: (u64, u64),
+    total_usage: (u64, u64, u64),
     /// The last request's context size (prompt + completion), what the
     /// next request carries, the number the compaction check watches.
     /// Shown as a live gauge under the composer.
@@ -472,6 +529,13 @@ impl ChatView {
         tools: ToolRegistry,
         endpoint_label: String,
         system_prompt: Option<String>,
+        instructions: Option<String>,
+        memory_index: Option<String>,
+        memory_enabled: bool,
+        memory_store: Option<Arc<gertie_core::MemoryStore>>,
+        memory_extract_provider: Option<Arc<dyn gertie_core::Provider>>,
+        max_tool_rounds: Option<usize>,
+        grace_rounds: Option<usize>,
         templates: Vec<gertie_tools::templates::Template>,
         // The folder the agent's tools run in, shown in the footer.
         workspace_root: std::path::PathBuf,
@@ -514,6 +578,8 @@ impl ChatView {
         // once, parked until Ctrl+K puts it on screen.
         let palette = cx.new(|cx| CommandState::new(window, cx));
         let turn_diff_list = ListState::new(0, ListAlignment::Top, px(256.));
+        let find_input =
+            cx.new(|cx| InputState::new(window, cx).placeholder("find in this transcript…"));
         let input = cx.new(|cx| {
             TextareaState::new(window, cx)
                 .placeholder("Message gertie…, / for commands")
@@ -525,20 +591,44 @@ impl ChatView {
                 shift: false,
             } = event
             {
-                // A slash popup being open means Enter accepts the top
-                // match instead of sending.
-                if !this.accept_slash_top(window, cx) {
+                // A popup being open (slash commands or @-mentions)
+                // means Enter accepts the top match instead of sending.
+                if !this.accept_slash_top(window, cx) && !this.accept_mention_top(window, cx) {
                     this.send(*secondary, window, cx)
                 }
             }
             // Typing ends the recall walk, but recall's own writes
             // don't: the set text is the walk's, until the user edits.
-            if let InputEvent::Change = event
-                && let Some(recall) = &this.recall
-            {
+            if let InputEvent::Change = event {
                 let value = this.input.read(cx).value().to_string();
-                if value != recall.set {
+                if let Some(recall) = &this.recall
+                    && value != recall.set
+                {
                     this.recall = None;
+                }
+                // A new query resets the popup walk: the selection
+                // belonged to the last state of the list. The token,
+                // not the raw value, decides: Enter's own newline
+                // insert keeps the token, so the walked row survives
+                // to the acceptor that runs right after.
+                let token = this
+                    .input
+                    .read(cx)
+                    .value()
+                    .to_string()
+                    .trim_end_matches('\n')
+                    .split('@')
+                    .next_back()
+                    .map(|query| format!("@{query}"));
+                if this
+                    .popup_selection
+                    .as_ref()
+                    .map(|(_, walked)| walked.clone())
+                    != token
+                {
+                    this.popup_selection = None;
+                } else if let Some((_, walked)) = this.popup_selection.as_mut() {
+                    *walked = token.unwrap_or_default();
                 }
             }
         })
@@ -553,6 +643,21 @@ impl ChatView {
                 if let InputEvent::PressEnter { .. } = event {
                     this.commit_rename(window, cx)
                 }
+            },
+        )
+        .detach();
+        // The find bar: typing recomputes matches, Enter walks
+        // forward, Shift+Enter back, Escape closes and refocuses
+        // the composer.
+        cx.subscribe_in(
+            &find_input,
+            window,
+            |this, _, event: &InputEvent, _window, cx| match event {
+                InputEvent::Change => this.find_changed(cx),
+                InputEvent::PressEnter { shift, .. } => {
+                    this.find_step(!*shift, cx);
+                }
+                _ => {}
             },
         )
         .detach();
@@ -604,11 +709,15 @@ impl ChatView {
             .and_then(|id| sessions.iter().find(|summary| summary.id == id))
             .map(|summary| {
                 (
-                    (summary.input_tokens, summary.output_tokens),
+                    (
+                        summary.input_tokens,
+                        summary.output_tokens,
+                        summary.cached_input_tokens,
+                    ),
                     summary.context_tokens,
                 )
             })
-            .unwrap_or(((0, 0), 0));
+            .unwrap_or(((0, 0, 0), 0));
         let total_usage = store.total_usage();
         let context_window = provider.as_ref().and_then(|p| p.context_window());
 
@@ -619,6 +728,21 @@ impl ChatView {
             tools,
             endpoint_label,
             system_prompt,
+            instructions,
+            memory_index,
+            memory_enabled,
+            memory_store,
+            memory_extract_provider,
+            max_tool_rounds,
+            grace_rounds,
+            memory_proposals: std::collections::HashMap::new(),
+            last_memory_extract: std::collections::HashMap::new(),
+            memory_rows: Vec::new(),
+            pending_memory_apply: std::collections::HashMap::new(),
+            pending_mode_confirm: None,
+            find: None,
+            popup_selection: None,
+            find_input,
             templates,
             workspace_root,
             settle_command,
@@ -727,6 +851,236 @@ impl ChatView {
         self.turns.len()
     }
 
+    /// The current permission mode, for tests.
+    pub fn mode_for_test(&self) -> PermissionMode {
+        self.mode
+    }
+
+    /// The footer's ledger words: spend, cached share, the gauge with
+    /// its compaction sentence. The footer renders these joined; the
+    /// tests read them joined. The compaction sentence (M7 PR 7) is
+    /// the mechanism's own words: the gauge shows pressure, the
+    /// sentence says what will happen, and the retained tail is the
+    /// loop's `KEEP_TAIL`, not a guess.
+    fn footer_parts(&self) -> Vec<String> {
+        let mut parts = Vec::new();
+        if self.usage.0 + self.usage.1 > 0 {
+            parts.push(format!(
+                "in {} · out {}",
+                human_tokens(self.usage.0),
+                human_tokens(self.usage.1)
+            ));
+        }
+        // The cached share is the memory layer's scoreboard: input the
+        // prefix cache absorbed, as a percent of all input. Zero or
+        // absent (no cache fields this wire) renders nothing.
+        if self.usage.0 > 0 && self.usage.2 > 0 {
+            let percent = self.usage.2 * 100 / self.usage.0;
+            parts.push(format!("cached {percent}%"));
+        }
+        let near_compaction = self
+            .context_window
+            .is_some_and(|window| self.context_used * 100 >= window.max(1) * 75);
+        if self.context_used > 0 {
+            let mut gauge = human_tokens(self.context_used);
+            if let Some(window) = self.context_window {
+                let percent = self.context_used.min(window) * 100 / window.max(1);
+                gauge = format!("{gauge} ({percent}%)");
+                if near_compaction {
+                    gauge.push_str(&format!(
+                        " · next compaction keeps the last {} messages",
+                        gertie_core::agent_loop::KEEP_TAIL
+                    ));
+                }
+            }
+            parts.push(gauge);
+        }
+        parts
+    }
+
+    /// The footer's ledger line, for tests.
+    pub fn gauge_line_for_test(&self) -> String {
+        self.footer_parts().join("  ·  ")
+    }
+
+    /// Sets the context window and usage, for tests (the gauge's
+    /// compaction sentence rides these).
+    pub fn set_context_for_test(&mut self, window: Option<u64>, used: u64, cx: &mut Context<Self>) {
+        self.context_window = window;
+        self.context_used = used;
+        cx.notify();
+    }
+
+    /// The find bar's current match row (None = closed or no
+    /// matches), for tests: the row highlight reads the same value.
+    pub fn current_match_row_for_test(&self) -> Option<usize> {
+        let (query, position) = self.find.as_ref()?;
+        self.find_matches(query).get(*position).copied()
+    }
+
+    /// Whether the find bar is open, for tests.
+    pub fn find_open_for_test(&self) -> bool {
+        self.find.is_some()
+    }
+
+    /// The popup's walked row, for tests.
+    pub fn popup_selection_for_test(&self) -> Option<usize> {
+        self.popup_selection.as_ref().map(|(index, _)| *index)
+    }
+
+    /// Sets the popup's walked row, for tests: the key-dispatch path
+    /// is exercised by the PR 4 e2e; what the walk changes is WHICH
+    /// row Enter takes, and this pins it.
+    pub fn set_popup_selection_for_test(&mut self, selection: Option<usize>, cx: &App) {
+        // The test pins the row without a walked token: the token is
+        // whatever the current query implies, computed the same way
+        // the Change handler computes it.
+        let token = self.last_popup_token_for_test(cx).unwrap_or_default();
+        self.popup_selection = selection.map(|index| (index, token));
+    }
+
+    /// The current query's popup token, for tests.
+    fn last_popup_token_for_test(&self, cx: &App) -> Option<String> {
+        crate::chat::popup_token_for_test(self.input.read(cx).value().as_ref())
+    }
+
+    /// How many attachments wait for the next send, for tests.
+    pub fn attachments_count_for_test(&self) -> usize {
+        self.attachments.len()
+    }
+
+    /// The view's workspace root, for tests (the mention matcher is
+    /// rooted here, the test needs to know what it walks).
+    pub fn workspace_root_for_test(&self) -> std::path::PathBuf {
+        self.workspace_root.clone()
+    }
+
+    /// Sets the endpoint label, for tests: the fixture builds views
+    /// without an endpoint, and the empty state has both variants.
+    pub fn set_endpoint_label_for_test(&mut self, label: &str, cx: &mut Context<Self>) {
+        self.endpoint_label = label.to_string();
+        cx.notify();
+    }
+
+    /// Opens the find bar (the keymap's find-transcript command).
+    fn open_find(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.find = Some((String::new(), 0));
+        self.find_input.update(cx, |input, cx| {
+            input.set_value("", window, cx);
+            input.focus(window, cx);
+        });
+        cx.notify();
+    }
+
+    /// Closes the find bar (Escape in the bar).
+    fn close_find(&mut self, cx: &mut Context<Self>) {
+        self.find = None;
+        cx.notify();
+    }
+
+    /// The matching turn indices for the query, case-insensitive,
+    /// over every turn's visible text (messages, tool labels,
+    /// notices: the bar searches what the transcript shows).
+    fn find_matches(&self, query: &str) -> Vec<usize> {
+        let query = query.to_lowercase();
+        if query.is_empty() {
+            return Vec::new();
+        }
+        self.turns
+            .iter()
+            .enumerate()
+            .filter(|(_, turn)| {
+                let text = match turn {
+                    Turn::Message { text, .. } => text.to_string(),
+                    Turn::Tool { call, .. } => format!("{} {}", call.name, call.arguments),
+                    Turn::LoadEarlier => String::new(),
+                };
+                text.to_lowercase().contains(&query)
+            })
+            .map(|(index, _)| index)
+            .collect()
+    }
+
+    /// Walks the matches (forward or back), scrolling the transcript
+    /// to the row and flipping the bar's input back to the composer
+    /// on close only.
+    fn find_step(&mut self, forward: bool, cx: &mut Context<Self>) {
+        let Some((query, position)) = self
+            .find
+            .as_ref()
+            .map(|(query, position)| (query.clone(), *position))
+        else {
+            return;
+        };
+        let matches = self.find_matches(&query);
+        if matches.is_empty() {
+            return;
+        }
+        // Position is an offset into the matches vec, wrapping.
+        let position = if forward {
+            (position + 1) % matches.len()
+        } else {
+            (position + matches.len() - 1) % matches.len()
+        };
+        if let Some((_, slot)) = self.find.as_mut() {
+            *slot = position;
+        }
+        let target = matches[position];
+        self.list_state.pause_following_tail();
+        self.list_state.scroll_to(gpui_kit::ListOffset {
+            item_ix: target,
+            offset_in_item: px(0.),
+        });
+        cx.notify();
+    }
+
+    /// The find bar's typed query: update the state and reset the
+    /// position (a new query starts at the first match).
+    fn find_changed(&mut self, cx: &mut Context<Self>) {
+        let Some((query, position)) = &mut self.find else {
+            return;
+        };
+        let value = self.find_input.read(cx).value().to_string();
+        *query = value;
+        *position = 0;
+        cx.notify();
+    }
+
+    /// The empty state's headline, for tests.
+    pub fn empty_state_headline_for_test(&self) -> &'static str {
+        if self.endpoint_label.starts_with("no endpoint configured") {
+            "Ready to run, once an endpoint exists."
+        } else {
+            "Ready."
+        }
+    }
+
+    /// The memory word's count as the footer computes it (a live
+    /// scan), for tests. Zero means the word is hidden.
+    pub fn memory_rows_count_for_test(&self) -> usize {
+        self.memory_rows.len()
+    }
+
+    pub fn memory_count_for_test(&self) -> usize {
+        self.memory_store
+            .as_ref()
+            .map(|store| store.scan().len())
+            .unwrap_or(0)
+    }
+
+    /// The transcript index of the oldest pending card whose call name
+    /// matches, for tests that drive the card's approve/deny buttons
+    /// by their rendered ids (`approve-{index}` / `deny-{index}`).
+    pub fn pending_card_index_for_test(&self, name: &str) -> Option<usize> {
+        self.turns.iter().position(|turn| {
+            matches!(
+                turn,
+                Turn::Tool { call, status, .. }
+                    if call.name == name && matches!(status, ToolStatus::Pending(_))
+            )
+        })
+    }
+
     /// The status line's words, for tests.
     pub fn activity_line_for_test(&self) -> String {
         self.activity_line()
@@ -797,6 +1151,7 @@ impl ChatView {
         match self.panel {
             Panel::None => "none",
             Panel::Settings => "settings",
+            Panel::Memory => "memory",
         }
     }
 
@@ -1067,18 +1422,53 @@ impl ChatView {
     }
 
     /// The composer chip's click: the mode advances around the ring,
-    /// supervised → accept edits → auto → full access, and persists
-    /// with the session. It applies from the next turn on; a running
-    /// turn keeps the posture it was built with, and the notice says
-    /// so when it matters.
+    /// and persists with the session. It applies from the next turn on;
+    /// a running turn keeps the posture it was built with, and the
+    /// notice says so when it matters.
+    ///
+    /// The ring is de-escalation-only: a click never lands on full
+    /// access (auto wraps to supervised), and leaving full access
+    /// returns to supervised. Reaching full access costs intent: the
+    /// palette command opens a confirm card (M7 plan, PR 1) that says
+    /// exactly what it removes. Escalation costs a keystroke of
+    /// intent; de-escalation is frictionless.
     fn cycle_mode(&mut self, cx: &mut Context<Self>) {
         let next = match self.mode {
             PermissionMode::Supervised => PermissionMode::AcceptEdits,
             PermissionMode::AcceptEdits => PermissionMode::Auto,
-            PermissionMode::Auto => PermissionMode::FullAccess,
+            PermissionMode::Auto => PermissionMode::Supervised,
             PermissionMode::FullAccess => PermissionMode::Supervised,
         };
         self.set_mode(next, cx);
+    }
+
+    /// The palette's "full access" command: the only path to the mode
+    /// that removes every guardrail. A confirm card states exactly
+    /// what it removes; approve applies (next turn), deny dismisses.
+    pub fn full_access_confirm(&mut self, cx: &mut Context<Self>) {
+        if self.mode == PermissionMode::FullAccess {
+            return;
+        }
+        let call = gertie_core::ToolCall {
+            id: "mode-full-access-ask".into(),
+            name: "mode_confirm".into(),
+            arguments: "Full access turns off every approval: edits and bash run \
+                        unasked, inside the sandbox when it is enforcing, outside it \
+                        when it is not. Resume nothing-asks on purpose?"
+                .into(),
+        };
+        let (id, _answer) = self
+            .broker
+            .request(call.clone(), gertie_core::PromptSource::Leader);
+        self.pending_mode_confirm = Some(id);
+        self.turns.push(Turn::Tool {
+            call,
+            status: ToolStatus::Pending(id),
+            auto_approved: false,
+            worker: false,
+            db_id: None,
+        });
+        self.sync_list(cx);
     }
 
     fn set_mode(&mut self, mode: PermissionMode, cx: &mut Context<Self>) {
@@ -1103,7 +1493,7 @@ impl ChatView {
         self.session_scope.set(None);
         // A fresh chat starts at the configured posture again.
         self.mode = self.default_mode;
-        self.usage = (0, 0);
+        self.usage = (0, 0, 0);
         self.context_used = 0;
         self.turns.clear();
         self.approval_replies.clear();
@@ -1186,8 +1576,14 @@ impl ChatView {
             .filter(|stored| !same_workspace(stored, &self.workspace_root));
         self.usage = summary
             .as_ref()
-            .map(|summary| (summary.input_tokens, summary.output_tokens))
-            .unwrap_or((0, 0));
+            .map(|summary| {
+                (
+                    summary.input_tokens,
+                    summary.output_tokens,
+                    summary.cached_input_tokens,
+                )
+            })
+            .unwrap_or((0, 0, 0));
         // The chip follows the session: its stored posture comes back
         // with the rest of it.
         self.mode = summary
@@ -1350,6 +1746,8 @@ impl ChatView {
             crate::palette::PaletteCommand::Compact => self.compact_now(cx),
             crate::palette::PaletteCommand::Export => self.export_now(cx),
             crate::palette::PaletteCommand::Settings => self.toggle_settings(cx),
+            crate::palette::PaletteCommand::FullAccess => self.full_access_confirm(cx),
+            crate::palette::PaletteCommand::Memory => self.toggle_memory(cx),
         }
     }
 
@@ -1748,6 +2146,176 @@ impl ChatView {
         cx.notify();
     }
 
+    /// The memory panel toggle: entries from both tiers as rows, each
+    /// with its votes. Refreshed on every open, votes write through.
+    fn toggle_memory(&mut self, cx: &mut Context<Self>) {
+        self.panel = if self.panel == Panel::Memory {
+            Panel::None
+        } else {
+            Panel::Memory
+        };
+        self.refresh_memory_rows();
+        cx.notify();
+    }
+
+    /// The panel's data: a fresh scan, project tier first. Cheap
+    /// (a directory read per tier) and always current, so the panel
+    /// never shows a stale count after a vote or a dream.
+    fn refresh_memory_rows(&mut self) {
+        self.memory_rows = self
+            .memory_store
+            .as_ref()
+            .map(|store| store.scan())
+            .unwrap_or_default();
+    }
+
+    /// One vote: writes through the store, refreshes the rows. The
+    /// vote is a real write to the entry's file line, so the sidecar,
+    /// the index, and dreaming all see it.
+    fn vote_memory(&mut self, id: String, helpful: bool, cx: &mut Context<Self>) {
+        let Some(store) = self.memory_store.as_ref() else {
+            return;
+        };
+        match store.vote(&id, helpful) {
+            // Success is visible where you're looking: the row's own
+            // ▲/▼ labels carry the new counts (the rows just
+            // refreshed). A notice per vote would pile one line onto
+            // the transcript per click, saying what the panel already
+            // shows. Errors still speak.
+            Ok(_) => {
+                self.refresh_memory_rows();
+            }
+            Err(error) => self.push_notice(format!("memory vote failed: {error}"), cx),
+        }
+    }
+
+    /// The memory panel: both tiers, entries as rows with their votes.
+    /// Read-and-vote, not editing: the files stay the editor's surface.
+    /// The header says where the files live, so "what does it remember"
+    /// and "how do I fix it" are both one glance apart.
+    fn render_memory_panel(&self, cx: &Context<Self>) -> AnyElement {
+        let rows: Vec<AnyElement> = match self.memory_rows.is_empty() {
+            true => vec![
+                div()
+                    .text_size(px(12.))
+                    .text_color(cx.theme().muted_foreground)
+                    .child("Nothing remembered yet. Memory fills on settle (a proposal card) or when you ask the model to remember something.")
+                    .into_any_element(),
+            ],
+            false => self
+                .memory_rows
+                .iter()
+                .map(|entry| {
+                    let id = entry.id.clone();
+                    let vote_up = format!("memory-vote-up-{id}");
+                    let vote_down = format!("memory-vote-down-{id}");
+                    let provenance = match (&entry.source_session, &entry.added_at) {
+                        (Some(source), Some(added)) => format!("{source}, {added}"),
+                        (Some(source), None) => source.clone(),
+                        (None, Some(added)) => format!("added {added}"),
+                        (None, None) => String::new(),
+                    };
+                    h_flex()
+                        .id(SharedString::from(format!("memory-row-{id}")))
+                        .gap_2()
+                        .px_1()
+                        .py_0p5()
+                        .rounded_sm()
+                        .hover(|style| style.bg(cx.theme().secondary))
+                        .child(
+                            div()
+                                .text_size(px(11.))
+                                .text_color(cx.theme().muted_foreground)
+                                .min_w_10()
+                                .child(entry.id.clone()),
+                        )
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .text_size(px(12.))
+                                .truncate()
+                                .child(entry.text.clone()),
+                        )
+                        .child(
+                            h_flex()
+                                .gap_2()
+                                .child(
+                                    div()
+                                        .id(SharedString::from(vote_up.clone()))
+                                        .cursor_pointer()
+                                        .text_size(px(11.))
+                                        .text_color(cx.theme().muted_foreground)
+                                        .hover(|style| style.text_color(cx.theme().foreground))
+                                        .on_click(cx.listener({
+                                            let id = id.clone();
+                                            move |this, _, _, cx| this.vote_memory(id.clone(), true, cx)
+                                        }))
+                                        .child(format!("▲ {}", entry.helpful))
+                                        .test_support(),
+                                )
+                                .child(
+                                    div()
+                                        .id(SharedString::from(vote_down.clone()))
+                                        .cursor_pointer()
+                                        .text_size(px(11.))
+                                        .text_color(cx.theme().muted_foreground)
+                                        .hover(|style| style.text_color(cx.theme().foreground))
+                                        .on_click(cx.listener({
+                                            let id = id.clone();
+                                            move |this, _, _, cx| this.vote_memory(id.clone(), false, cx)
+                                        }))
+                                        .child(format!("▼ {}", entry.harmful))
+                                        .test_support(),
+                                ),
+                        )
+                        .when(!provenance.is_empty(), |row| {
+                            row.child(
+                                div()
+                                    .text_size(px(10.5))
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child(provenance),
+                            )
+                        })
+                        .into_any_element()
+                })
+                .collect(),
+        };
+        let count = self.memory_rows.len();
+        let project = self
+            .memory_store
+            .as_ref()
+            .map(|store| store.root(gertie_core::Tier::Project).display().to_string());
+        // The settings panel's sizing exactly: the right column's
+        // sibling slot gives flex children nothing unless they size
+        // themselves; without the width the panel mounts invisible
+        // (the vote-row test proved it).
+        div()
+            .id("memory-panel")
+            .w(px(300.))
+            .h_full()
+            .flex_shrink_0()
+            .border_l_1()
+            .border_color(cx.theme().border)
+            .pt_3()
+            .px_3()
+            .pb_3()
+            .gap_1()
+            .overflow_y_scroll()
+            .child(
+                div()
+                    .text_size(px(12.))
+                    .text_color(cx.theme().muted_foreground)
+                    .pb_2()
+                    .child(format!(
+                        "memory ({count}) · {} · editing is the files' job",
+                        project.as_deref().unwrap_or("no memory store")
+                    )),
+            )
+            .children(rows)
+            .into_any_element()
+    }
+
     /// Puts a sidebar row into rename mode, prefilled with its title.
     fn start_rename(&mut self, session_id: SessionId, window: &mut Window, cx: &mut Context<Self>) {
         self.renaming = Some(session_id);
@@ -1779,7 +2347,160 @@ impl ChatView {
         cx.notify();
     }
 
-    /// The ✕ on a sidebar row: the session leaves every list right now,
+    /// Session-end memory extraction (M6 PR 5): digest the session's
+    /// record, propose delta ops to the store, and put them on a
+    /// review card. Runs on settle (the human's "done") and after
+    /// compaction (the context boundary), debounced once an hour.
+    /// Every failure is a notice, never an error: memory must not
+    /// become the reason a session feels broken.
+    fn maybe_extract(&mut self, session_id: SessionId, cx: &mut Context<Self>) {
+        if !self.memory_enabled {
+            return;
+        }
+        let Some(store) = self.memory_store.clone() else {
+            return;
+        };
+        let Some(provider) = self.memory_extract_provider.clone() else {
+            return;
+        };
+        // Debounce: one run per hour per session, the compaction path
+        // can fire repeatedly in a long session.
+        if let Some(last) = self.last_memory_extract.get(&session_id.0)
+            && last.elapsed() < std::time::Duration::from_secs(3600)
+        {
+            return;
+        }
+        // Eligibility: skip short sessions (a 2-turn hello holds no
+        // durable facts) and anything still streaming.
+        if self.streaming {
+            return;
+        }
+        let messages = match self.store.load_messages(session_id) {
+            Ok(messages) => messages,
+            Err(_) => return,
+        };
+        let user_turns = messages
+            .iter()
+            .filter(|message| message.role == gertie_core::Role::User)
+            .count();
+        if user_turns < 4 {
+            return;
+        }
+        let digest = gertie_core::memory_extract::digest_from(&messages, 12_000);
+        let digest_hash = format!("{:x}", sha2::Sha256::digest(digest.as_bytes()));
+        // The once-per-digest gate: the same record never proposes
+        // twice. A denied proposal is marked consumed too: a deny is
+        // a decision, not a nag.
+        match store.extracted(&digest_hash) {
+            Ok(true) => return,
+            Ok(false) => {}
+            Err(_) => return,
+        }
+        let index = self.memory_index.clone().unwrap_or_default();
+        let flagged = messages
+            .iter()
+            .filter(|message| message.role == gertie_core::Role::User)
+            .count()
+            > 0
+            && messages.iter().any(|message| {
+                message.role == gertie_core::Role::Tool && message.content.contains("web_fetch")
+            });
+        self.last_memory_extract
+            .insert(session_id.0, Instant::now());
+        let store = store.clone();
+        cx.spawn(async move |this, cx| {
+            let raw = gertie_core::memory_extract::run_extraction(provider, &digest, &index).await;
+            let proposal: Result<Option<gertie_core::memory_extract::Proposal>, String> = match raw
+            {
+                Ok(raw) => match gertie_core::memory_extract::parse_ops(&raw) {
+                    Ok(ops) if ops.is_empty() => Ok(None),
+                    Ok(ops) => Ok(Some(gertie_core::memory_extract::Proposal {
+                        ops,
+                        flagged,
+                        digest_hash: digest_hash.clone(),
+                    })),
+                    Err(error) => Err(error),
+                },
+                Err(error) => Err(error),
+            };
+            let _ = this.update(cx, |this, cx| match proposal {
+                Err(error) => {
+                    let _ = store.mark_extracted(&digest_hash, Some(session_id.0 as i64));
+                    this.push_notice(format!("memory: extraction skipped ({error})"), cx);
+                }
+                Ok(None) => {
+                    // Silence is a valid extraction outcome; the gate
+                    // still consumes the digest, a retry-loop is not.
+                    let _ = store.mark_extracted(&digest_hash, Some(session_id.0 as i64));
+                    this.push_notice("memory: nothing proposed this session", cx);
+                }
+                Ok(Some(proposal)) => {
+                    this.memory_card(proposal, store, session_id, cx);
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// The review card: one pending card in the transcript, approved
+    /// ops apply to the store, a deny marks the digest consumed.
+    fn memory_card(
+        &mut self,
+        proposal: gertie_core::memory_extract::Proposal,
+        store: Arc<gertie_core::MemoryStore>,
+        session_id: SessionId,
+        cx: &mut Context<Self>,
+    ) {
+        let summary = proposal
+            .ops
+            .iter()
+            .map(|op| match op {
+                gertie_core::Op::Add { file, text, .. } => {
+                    format!("add {} :: {text}", file)
+                }
+                gertie_core::Op::Update { id, text } => format!("update {id} :: {text}"),
+                gertie_core::Op::Supersede { id } => format!("supersede {id}"),
+                gertie_core::Op::Archive { id } => format!("archive {id}"),
+                gertie_core::Op::Merge { keep, drop, .. } => {
+                    format!("merge {drop} into {keep}")
+                }
+                gertie_core::Op::Link { from, to, relation } => {
+                    format!("link {from} -{relation}- {to}")
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let header = if proposal.flagged {
+            "memory proposal (session used untrusted web content; review closely)"
+        } else {
+            "memory proposal"
+        };
+        let call = gertie_core::ToolCall {
+            id: format!("memory-proposal-{}", proposal.digest_hash),
+            name: "memory_proposal".into(),
+            arguments: format!("{{\"{header}\": {summary:?}}}"),
+        };
+        // The card is an ask on the shared broker: the same approve/
+        // deny UI, the same card lifecycle, and the answer routes back
+        // through decide_tool. The proposal rides the pending map so
+        // the decision site can apply it.
+        let (id, _answer) = self
+            .broker
+            .request(call.clone(), gertie_core::PromptSource::Leader);
+        self.memory_proposals.insert(id, proposal.clone());
+        let _ = (&store, session_id);
+        self.pending_memory_apply
+            .insert(call.id.clone(), (proposal, store, session_id));
+        self.turns.push(Turn::Tool {
+            call,
+            status: ToolStatus::Pending(id),
+            auto_approved: false,
+            worker: false,
+            db_id: None,
+        });
+        self.sync_list(cx);
+    }
+
     /// but the store row survives a five-second undo window, the toast
     /// at the sidebar's foot is the speed bump the "sure?" step used to
     /// be. Undo puts it back; the window closing purges it for real.
@@ -1865,6 +2586,7 @@ impl ChatView {
             self.sessions = self.store.list_sessions().unwrap_or_default();
         }
         if settled {
+            self.maybe_extract(session_id, cx);
             self.run_reclaim(session_id, cx);
         }
         cx.notify();
@@ -1994,6 +2716,8 @@ impl ChatView {
         self.workspace_root = switched.workspace_root;
         self.tools = switched.tools;
         self.system_prompt = switched.system_prompt;
+        self.instructions = switched.instructions;
+        self.memory_index = switched.memory_index;
         self.templates = switched.templates;
         self.sandbox_bash = switched.sandbox_bash;
         for warning in switched.warnings {
@@ -2267,7 +2991,16 @@ impl ChatView {
     fn accept_slash_top(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
         let value = self.input.read(cx).value().to_string();
         let matches = slash_matches(&value, &self.templates);
-        let Some(first) = matches.first() else {
+        // No walked selection: the top row is the default (the popup
+        // is open, Enter means "accept what's highlighted", and the
+        // top row is highlighted by default).
+        let selected = self
+            .popup_selection
+            .take()
+            .filter(|(selection, _)| *selection < matches.len())
+            .map(|(selection, _)| selection)
+            .unwrap_or(0);
+        let Some(first) = matches.get(selected) else {
             return false;
         };
         let (builtin, text) = match first {
@@ -2281,6 +3014,46 @@ impl ChatView {
         };
         self.accept_slash_text(builtin, text, window, cx);
         true
+    }
+
+    /// Enter's mention acceptance: the popup's top row attaches.
+    fn accept_mention_top(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let value = self.input.read(cx).value().to_string();
+        let mut matches = mention_matches(&value, &self.workspace_root);
+        let selected = self
+            .popup_selection
+            .take()
+            .filter(|(selection, _)| *selection < matches.len())
+            .map(|(selection, _)| selection)
+            .unwrap_or(0);
+        let Some(matched) = matches.drain(..).nth(selected) else {
+            return false;
+        };
+        self.accept_mention(matched, window, cx);
+        true
+    }
+
+    /// Accepts one @-mention row: the trailing `@query` token leaves
+    /// the composer, the file attaches through the normal path (text
+    /// inlines, oversized pastes file into .gertie/pastes, the chip
+    /// shows what rides), and the agent reads it by its relative path.
+    fn accept_mention(
+        &mut self,
+        matched: MentionMatch,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let value = self.input.read(cx).value().to_string();
+        // The textarea keeps a trailing newline the buffer owns; the
+        // token sits at the end of the user's text, before it. Empty
+        // means set_value(""), not a bare newline.
+        let body = value.trim_end_matches('\n');
+        let trimmed = body.strip_suffix(&matched.token).unwrap_or(body).trim_end();
+        self.input.update(cx, |input, cx| {
+            input.set_value(trimmed.to_string(), window, cx)
+        });
+        let path = self.workspace_root.join(&matched.path);
+        self.attach_file(path, cx);
     }
 
     /// Accepts one popup row: builtins execute through the normal send
@@ -2655,6 +3428,17 @@ impl ChatView {
 
     /// A muted system row in the transcript, notices, command results.
     /// Display-only: never persisted, never sent.
+    /// Re-render the frozen index (post-apply): the new content is
+    /// visible next session by design, but the current session's view
+    /// of "what memory holds" should not be a lie either.
+    fn refresh_memory_index(&mut self, cx: &mut Context<Self>) {
+        if let Some(store) = &self.memory_store {
+            let rendered = store.render_index(600 * 4);
+            self.memory_index = (!rendered.is_empty()).then_some(rendered);
+            cx.notify();
+        }
+    }
+
     fn push_notice(&mut self, text: impl Into<String>, cx: &mut Context<Self>) {
         self.turns.push(Turn::Message {
             role: Role::System,
@@ -2710,6 +3494,8 @@ impl ChatView {
             history: self.history.clone(),
             user_message: user_text,
             user_attachments,
+            max_tool_rounds: self.max_tool_rounds,
+            grace_rounds: self.grace_rounds,
             snapshots: self.snapshots.clone(),
             checkpoint_session: self.session_id,
             workspace_root: Some(self.workspace_root.clone()),
@@ -2720,6 +3506,8 @@ impl ChatView {
             sandbox_bash: self.sandbox_bash,
             prompt_source: gertie_core::PromptSource::Leader,
             system_prompt: self.system_prompt.clone(),
+            instructions: self.instructions.clone(),
+            memory_index: self.memory_index.clone(),
         });
         // Subagent asks arrive here, not on the leader's stream, a
         // worker's loop runs inside a tool, so nobody drains its events.
@@ -2792,6 +3580,7 @@ impl ChatView {
                     LoopEvent::Usage {
                         input_tokens,
                         output_tokens,
+                        cached_input_tokens,
                     } => {
                         let _ = this.update(cx, |this, cx| {
                             // A round boundary landed: the quiet gauge
@@ -2810,7 +3599,7 @@ impl ChatView {
                             if let Some(session) = this.session_id {
                                 let _ = this
                                     .store
-                                    .add_usage(session, input_tokens, output_tokens);
+                                    .add_usage(session, input_tokens, output_tokens, cached_input_tokens);
                             }
                             cx.notify();
                         });
@@ -3092,6 +3881,10 @@ impl ChatView {
     /// compaction is the in-memory view (a reload restores full history
     /// and the loop re-compacts if the threshold trips again).
     fn on_compacted(&mut self, kept: usize, total: usize, cx: &mut Context<Self>) {
+        let session_id = self.session_id;
+        if let Some(session_id) = session_id {
+            self.maybe_extract(session_id, cx);
+        }
         self.set_activity("Compacting context…");
         self.turns.push(Turn::Message {
             role: Role::System,
@@ -3285,10 +4078,63 @@ impl ChatView {
     /// did answer.
     fn decide_tool(&mut self, index: usize, decision: PermissionDecision, cx: &mut Context<Self>) {
         if let Some(Turn::Tool { call, status, .. }) = self.turns.get_mut(index) {
+            // The mode confirm routes here first: the ask id lives in
+            // pending_mode_confirm, approve applies the mode, deny
+            // dismisses. Nothing executes either way.
+            if call.name == "mode_confirm" {
+                let confirm_id = self.pending_mode_confirm.take();
+                if let ToolStatus::Pending(id) = std::mem::replace(status, ToolStatus::Running) {
+                    debug_assert_eq!(Some(id), confirm_id, "confirm card id matches");
+                    match decision {
+                        PermissionDecision::Approve => {
+                            self.set_mode(PermissionMode::FullAccess, cx);
+                            self.push_notice("Full access from the next turn on.", cx);
+                        }
+                        PermissionDecision::Deny { .. } => {
+                            self.push_notice("Full access not applied.", cx);
+                        }
+                    }
+                }
+                return;
+            }
             match std::mem::replace(status, ToolStatus::Running) {
                 ToolStatus::Pending(id) => {
                     // The card is settled; its reply input goes with it.
                     self.approval_replies.remove(&index);
+                    // A memory proposal routes through here: approve
+                    // applies the ops, deny marks the digest consumed.
+                    if let Some((proposal, store, session_id)) =
+                        self.pending_memory_apply.remove(&call.id)
+                    {
+                        let digest_hash = proposal.digest_hash.clone();
+                        match decision {
+                            PermissionDecision::Approve => {
+                                let budget = 600;
+                                let report = store.apply(&proposal.ops, budget);
+                                let _ =
+                                    store.mark_extracted(&digest_hash, Some(session_id.0 as i64));
+                                let applied = report
+                                    .map(|report| {
+                                        format!(
+                                            "memory: {} applied, {} skipped",
+                                            report.applied.len(),
+                                            report.skipped.len()
+                                        )
+                                    })
+                                    .unwrap_or_else(|error| {
+                                        format!("memory: apply failed ({error})")
+                                    });
+                                self.push_notice(applied, cx);
+                                self.refresh_memory_index(cx);
+                            }
+                            PermissionDecision::Deny { .. } => {
+                                let _ =
+                                    store.mark_extracted(&digest_hash, Some(session_id.0 as i64));
+                                self.push_notice("memory: proposal denied", cx);
+                            }
+                        }
+                        return;
+                    }
                     // The approved call starts executing now, its
                     // clock starts here, not when the ask arrived.
                     self.tool_starts.insert(call.id.clone(), Instant::now());
@@ -3663,6 +4509,14 @@ impl ChatView {
         cx.notify();
     }
 
+    /// "Copy" on an assistant turn: the raw markdown rides the
+    /// clipboard, out of the transcript and into wherever the user
+    /// actually needs it (a PR description, a commit body, a ticket).
+    fn copy_turn_to_clipboard(&mut self, text: std::sync::Arc<str>, cx: &mut Context<Self>) {
+        cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(text.to_string()));
+        self.push_notice("copied", cx);
+    }
+
     /// "Quote" on an assistant turn: the response lands in the composer
     /// as a blockquote and your comment types after it, sending shows
     /// the model exactly which words you're talking about. A long
@@ -3728,6 +4582,39 @@ impl ChatView {
     fn recall_step(&mut self, up: bool, window: &mut Window, cx: &mut Context<Self>) {
         let focused = self.input.read(cx).focus_handle(cx).is_focused(window);
         let value = self.input.read(cx).value().to_string();
+        // A composer popup (slash commands or @-mentions) owns the
+        // arrows while it's open: the walk moves its selection, the
+        // composer's text is the query, recall waits. The count is
+        // the popup's, recomputed the same way the render computes it.
+        // Same trailing-newline trim the matcher does: the buffer's
+        // newline is the textarea's, not the user's.
+        let query = value.trim_end_matches('\n');
+        let slash_rows = slash_matches(query, &self.templates).len();
+        let popup_rows = if slash_rows == 0 {
+            mention_matches(query, &self.workspace_root).len()
+        } else {
+            slash_rows
+        };
+        if focused && popup_rows > 0 {
+            let walked = self.popup_selection.take();
+            let current = match walked {
+                Some((index, _)) => index,
+                None if up => popup_rows,
+                None => usize::MAX,
+            };
+            let step = if up { -1isize } else { 1isize };
+            let next = (current as isize + step).rem_euclid(popup_rows as isize) as usize;
+            // The token is the query the walk happened under: the
+            // reset-on-Change comparison uses it.
+            let token = if slash_rows == 0 {
+                format!("@{}", query.rsplit('@').next().unwrap_or(""))
+            } else {
+                query.to_string()
+            };
+            self.popup_selection = Some((next, token));
+            cx.notify();
+            return;
+        }
         if !focused || (!value.trim().is_empty() && self.recall.is_none()) {
             let move_cursor: Box<dyn Action> = if up {
                 Box::new(MoveUp)
@@ -3990,15 +4877,32 @@ impl ChatView {
                 ..
             } if !text.trim().is_empty() => {
                 let text: std::sync::Arc<str> = text.as_str().into();
+                let copy_text = text.clone();
                 Some(
-                    Button::new(format!("quote-{index}"))
-                        .label("quote")
-                        .small()
-                        .ghost()
-                        .tooltip("Quote this into the composer, comment under it, send it back")
-                        .on_click(cx.listener(move |this, _, window, cx| {
-                            this.quote_into_composer(text.clone(), window, cx);
-                        })),
+                    h_flex()
+                        .gap_1()
+                        .child(
+                            Button::new(format!("copy-{index}"))
+                                .label("copy")
+                                .small()
+                                .ghost()
+                                .tooltip("Copy the raw markdown of this turn")
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.copy_turn_to_clipboard(copy_text.clone(), cx);
+                                })),
+                        )
+                        .child(
+                            Button::new(format!("quote-{index}"))
+                                .label("quote")
+                                .small()
+                                .ghost()
+                                .tooltip(
+                                    "Quote this into the composer, comment under it, send it back",
+                                )
+                                .on_click(cx.listener(move |this, _, window, cx| {
+                                    this.quote_into_composer(text.clone(), window, cx);
+                                })),
+                        ),
                 )
             }
             _ => None,
@@ -4032,7 +4936,31 @@ impl ChatView {
         // Horizontal padding lives on each item, not the list: gpui's
         // `list` paints items at the container's left edge and ignores
         // `px_*` on the list element, so without this the transcript
-        // butts against the window border.
+        // butts against the window border. The find bar's current
+        // match marks its row: which row "3/7" refers to is the
+        // highlight's whole job (a span-level marker inside the
+        // markdown is the deferred bigger version).
+        let current_match = self
+            .find
+            .as_ref()
+            .and_then(|(query, position)| {
+                let matches = self.find_matches(query);
+                matches.get(*position).copied()
+            })
+            .map(|row| row == index)
+            .unwrap_or(false);
+        let inner = if current_match {
+            // The types differ (Div vs AnyElement); going through
+            // any_element makes both arms one type.
+            div()
+                .w_full()
+                .rounded_sm()
+                .bg(cx.theme().secondary)
+                .child(inner)
+                .into_any_element()
+        } else {
+            inner.into_any_element()
+        };
         div().w_full().px_4().child(inner).into_any_element()
     }
 
@@ -4058,6 +4986,60 @@ impl ChatView {
     /// stuck or just slow" is a question the words alone answer too
     /// late. The clock sits beside it, and past [`QUIET_AFTER`] of
     /// silence the line says that too.
+    /// The empty transcript's center. Three honest variants, quiet
+    /// to loud: a configured endpoint gets the two-line "Ready." state;
+    /// a fresh install (no chats ever, this is the sidebar's test)
+    /// gets the one-minute tour with its two actions; a missing
+    /// endpoint says plainly what's missing and offers the fix. No
+    /// wizard: three lines, two buttons, done.
+    fn render_empty_state(&self, cx: &Context<Self>) -> AnyElement {
+        let no_endpoint = self.endpoint_label.starts_with("no endpoint configured");
+        let fresh = self.sessions.is_empty();
+        let headline: &str = if no_endpoint {
+            "Ready to run, once an endpoint exists."
+        } else {
+            "Ready."
+        };
+        let subline: &str = if no_endpoint {
+            "gertie runs local and API models; add one endpoint and it works."
+        } else {
+            "Ask, paste, or point me at a file."
+        };
+        v_flex()
+            .items_center()
+            .gap_1()
+            .child(
+                div()
+                    .text_size(px(14.))
+                    .text_color(cx.theme().foreground)
+                    .child(headline),
+            )
+            .child(
+                div()
+                    .text_size(px(12.))
+                    .text_color(cx.theme().muted_foreground)
+                    .child(subline),
+            )
+            .when(no_endpoint, |state| {
+                state.child(
+                    Button::new("empty-state-configure")
+                        .label("Add an endpoint")
+                        .small()
+                        .on_click(cx.listener(|this, _, _, cx| this.toggle_settings(cx))),
+                )
+            })
+            .when(fresh && !no_endpoint, |state| {
+                state.child(
+                    div()
+                        .text_size(px(11.5))
+                        .text_color(cx.theme().muted_foreground)
+                        .pt_1()
+                        .child("Ctrl+K finds anything you've ever asked; memory remembers what matters."),
+                )
+            })
+            .into_any_element()
+    }
+
     fn render_activity_row(&self, cx: &Context<Self>) -> AnyElement {
         let frame = SPINNER_FRAMES
             [(self.activity_at.elapsed().as_millis() as usize / 500) % SPINNER_FRAMES.len()];
@@ -4090,45 +5072,55 @@ impl ChatView {
     /// when the chat is blocked on you, that fact in warning color.
     /// Quiet until there is something to say.
     fn render_token_footer(&self, status: Option<&str>, cx: &Context<Self>) -> AnyElement {
-        let mut parts = Vec::new();
-        if self.usage.0 + self.usage.1 > 0 {
-            parts.push(format!(
-                "in {} · out {}",
-                human_tokens(self.usage.0),
-                human_tokens(self.usage.1)
-            ));
-        }
+        let parts = self.footer_parts();
         let near_compaction = self
             .context_window
             .is_some_and(|window| self.context_used * 100 >= window.max(1) * 75);
-        if self.context_used > 0 {
-            let mut gauge = human_tokens(self.context_used);
-            if let Some(window) = self.context_window {
-                let percent = self.context_used.min(window) * 100 / window.max(1);
-                gauge = format!("{gauge} ({percent}%)");
-            }
-            parts.push(gauge);
-        }
         // The permission posture leads the quiet line: a word, not a
-        // chip, the same click-to-cycle it had in the composer row,
-        // none of the row's width. The footer always renders now that
-        // the word lives here; the token ledger rides behind it.
+        // chip, click-to-cycle with one asymmetry: the ring is
+        // de-escalation-only, full access costs a palette command
+        // plus a confirm card (M7 PR 1). The tooltip names the
+        // current mode's meaning, read before the div builds.
+        let mode_text = mode_tooltip(self.mode);
         let mode = div()
             .id("mode-chip")
             .cursor_pointer()
             .text_size(px(11.))
             .text_color(cx.theme().muted_foreground)
             .hover(|style| style.text_color(cx.theme().foreground))
-            .tooltip(|window, cx| {
-                Tooltip::new("Permission mode, click to change. Applies from the next turn on.")
-                    .build(window, cx)
-            })
+            .tooltip(move |window, cx| Tooltip::new(mode_text).build(window, cx))
             .on_click(cx.listener(|this, _, _, cx| this.cycle_mode(cx)))
             .child(mode_label(self.mode))
             // Observed so the test harness can click the word; a
             // no-op outside test-support builds.
             .test_support();
+        // The memory word: how much this workspace remembers, hidden
+        // when the store is empty (a memoryless session pays zero
+        // attention, matching the zero-cost read path). Click opens
+        // the memory panel; the tooltip names both tiers.
+        let memory = self
+            .memory_store
+            .as_ref()
+            .map(|store| store.scan().len())
+            .filter(|count| *count > 0)
+            .map(|count| {
+                let tooltip =
+                    "memory: what gertie recalls in this repo and for you; click to read and vote.";
+                div()
+                    .id("memory-chip")
+                    .cursor_pointer()
+                    .text_size(px(11.))
+                    .text_color(cx.theme().muted_foreground)
+                    .hover(|style| style.text_color(cx.theme().foreground))
+                    .tooltip(move |window, cx| Tooltip::new(tooltip).build(window, cx))
+                    .on_click(cx.listener(|this, _, _, cx| this.toggle_memory(cx)))
+                    .child(format!("memory {count}"))
+                    .test_support()
+            });
         let mut ledger = h_flex().gap_2().child(mode);
+        if let Some(memory) = memory {
+            ledger = ledger.child(memory);
+        }
         if !parts.is_empty() {
             ledger = ledger.child(
                 div()
@@ -4584,6 +5576,9 @@ enum Panel {
     #[default]
     None,
     Settings,
+    /// The memory surface: both tiers, entries as rows, voting. A
+    /// read-and-vote view; editing stays the files' job (M7 PR 2).
+    Memory,
 }
 
 /// Bubbles out of the chat: a settings save landed. The workspace
@@ -4702,6 +5697,15 @@ impl ChatView {
     /// Whether the open session's last turn ended on a rate limit,
     /// the resume bar's condition. Test-visible: the limited state is
     /// the §2.3 contract.
+    /// Whether this tab finished unseen work: a turn just ended
+    /// (streaming flipped off) and the tab hasn't been focused since.
+    /// The tab bar's done-unseen dot reads this; the workspace clears
+    /// it on activation. Tracked by the caller (it owns the previous
+    /// streaming state), this is only the completion probe.
+    pub fn turn_just_finished(&self, prev_streaming: bool) -> bool {
+        prev_streaming && !self.streaming
+    }
+
     pub fn open_session_limited(&self) -> bool {
         self.session_id
             .and_then(|id| self.sessions.iter().find(|summary| summary.id == id))
@@ -4841,10 +5845,16 @@ impl ChatView {
 impl Render for ChatView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let view = cx.entity().downgrade();
-        // The composer's slash matches, computed once per frame: the
-        // popup's guard and its rows share the one computation.
+        // The composer's slash and mention matches, computed once per
+        // frame: the popups' guards and rows share the one computation.
         let value = self.input.read(cx).value().to_string();
         let slash = slash_matches(&value, &self.templates);
+        let mentions = if slash.is_empty() {
+            mention_matches(&value, &self.workspace_root)
+        } else {
+            Vec::new()
+        };
+        let selected_popup_index = self.popup_selection.as_ref().map(|(index, _)| *index);
         // The sidebar's session snapshot, same contract: one clone
         // feeds the rows, the fold's guard, and its count.
         let visible = self.visible_sessions();
@@ -4884,6 +5894,12 @@ impl Render for ChatView {
             }))
             .on_action(cx.listener(|this, _: &RecallDown, window, cx| {
                 this.recall_step(false, window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &FindInTranscript, window, cx| {
+                this.open_find(window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &FindClose, _, cx| {
+                this.close_find(cx);
             }))
             // Escape inside the turn-diff panel closes it (focus is
             // handed to the panel on open).
@@ -5094,7 +6110,11 @@ impl Render for ChatView {
                                     ),
                             )
                             // Empty state: the transcript is quiet until
-                            // it isn't, say so, quietly.
+                            // it isn't, say so, quietly. The state says
+                            // more when a first-run needs to know it
+                            // (M7 PR 3): no endpoint is the one blocking
+                            // fact, a fresh install gets the one-minute
+                            // tour.
                             .when(self.turns.is_empty(), |col| {
                                 col.child(
                                     div()
@@ -5103,25 +6123,7 @@ impl Render for ChatView {
                                         .flex()
                                         .items_center()
                                         .justify_center()
-                                        .child(
-                                            v_flex()
-                                                .items_center()
-                                                .gap_1()
-                                                .child(
-                                                    div()
-                                                        .text_size(px(14.))
-                                                        .text_color(cx.theme().foreground)
-                                                        .child("Ready."),
-                                                )
-                                                .child(
-                                                    div()
-                                                        .text_size(px(12.))
-                                                        .text_color(cx.theme().muted_foreground)
-                                                        .child(
-                                                            "Ask, paste, or point me at a file.",
-                                                        ),
-                                                ),
-                                        ),
+                                        .child(self.render_empty_state(cx)),
                                 )
                             })
                             .child(
@@ -5133,6 +6135,72 @@ impl Render for ChatView {
                                 v_flex()
                                     .border_t_1()
                                     .border_color(cx.theme().border)
+                                    .when(self.find.is_some(), |composer| {
+                                        // The find bar: query, match
+                                        // count, walk, close. Focus sits
+                                        // here while open; Escape (the
+                                        // find-close rule, FindBar
+                                        // context) hands focus back.
+                                        let (query, position) = self
+                                            .find
+                                            .clone()
+                                            .unwrap_or_default();
+                                        let count = self.find_matches(&query).len();
+                                        composer.child(
+                                            h_flex()
+                                                .id("find-bar")
+                                                .key_context("FindBar")
+                                                .track_focus(&self.find_input.read(cx).focus_handle(cx))
+                                                .px_4()
+                                                .py_1p5()
+                                                .gap_2()
+                                                .items_center()
+                                                .border_b_1()
+                                                .border_color(cx.theme().border)
+                                                .child(
+                                                    div()
+                                                        .flex_1()
+                                                        .child(Input::new(&self.find_input).small()),
+                                                )
+                                                .child(
+                                                    div()
+                                                        .text_size(px(11.))
+                                                        .text_color(cx.theme().muted_foreground)
+                                                        .child(if count == 0 {
+                                                            "no matches".to_string()
+                                                        } else {
+                                                            format!("{}/{count}", position + 1)
+                                                        }),
+                                                )
+                                                .child(
+                                                    Button::new("find-prev")
+                                                        .label("↑")
+                                                        .small()
+                                                        .ghost()
+                                                        .on_click(cx.listener(|this, _, _, cx| {
+                                                            this.find_step(false, cx);
+                                                        })),
+                                                )
+                                                .child(
+                                                    Button::new("find-next")
+                                                        .label("↓")
+                                                        .small()
+                                                        .ghost()
+                                                        .on_click(cx.listener(|this, _, _, cx| {
+                                                            this.find_step(true, cx);
+                                                        })),
+                                                )
+                                                .child(
+                                                    Button::new("find-close")
+                                                        .label("✕")
+                                                        .small()
+                                                        .ghost()
+                                                        .on_click(cx.listener(|this, _, _, cx| {
+                                                            this.close_find(cx);
+                                                        })),
+                                                ),
+                                        )
+                                    })
                                     // The resume bar: the open session's
                                     // last turn paused (the provider's
                                     // rate limit, or the round budget's
@@ -5423,6 +6491,74 @@ impl Render for ChatView {
                                             ),
                                         )
                                     })
+                                    .when(!mentions.is_empty(), |composer| {
+                                        // Mention discovery: typing `@`
+                                        // offers the workspace's files,
+                                        // narrowed by the query; Enter (or
+                                        // a click) attaches through the
+                                        // normal path, the chip shows what
+                                        // rides. The agent reads the file
+                                        // by its relative path.
+                                        composer.child(
+                                            v_flex()
+                                                .id("mention-popup")
+                                                .mx_4()
+                                                .mt_2()
+                                                .max_h(px(220.))
+                                                .overflow_y_scroll()
+                                                .rounded_md()
+                                                .border_1()
+                                                .border_color(cx.theme().border)
+                                                .bg(cx.theme().background)
+                                                .py_1()
+                                                .children(mentions.iter().take(12).enumerate().map(
+                                                    |(row_index, matched)| {
+                                                        let path = matched.path.clone();
+                                                        let token = matched.token.clone();
+                                                        let selected = selected_popup_index
+                                                            == Some(row_index);
+                                                        h_flex()
+                                                            .id(SharedString::from(format!(
+                                                                "mention-row-{path}"
+                                                            )))
+                                                            .w_full()
+                                                            .px_3()
+                                                            .py_1()
+                                                            .rounded_sm()
+                                                            .justify_between()
+                                                            .when(selected, |row| {
+                                                                row.bg(cx.theme().secondary)
+                                                            })
+                                                            .hover(|style| {
+                                                                style.bg(cx.theme().secondary)
+                                                            })
+                                                            .on_click(cx.listener({
+                                                                move |this, _, window, cx| {
+                                                                    let matched =
+                                                                        MentionMatch {
+                                                                            path: path.clone(),
+                                                                            token: token.clone(),
+                                                                        };
+                                                                    this.accept_mention(
+                                                                        matched, window, cx,
+                                                                    );
+                                                                }
+                                                            }))
+                                                            .child(
+                                                                div()
+                                                                    .text_size(px(12.5))
+                                                                    .child(matched.path.clone()),
+                                                            )
+                                                            .child(
+                                                                div()
+                                                                    .text_size(px(10.5))
+                                                                    .text_color(cx.theme().muted_foreground)
+                                                                    .child("attach"),
+                                                            )
+                                                    },
+                                                )),
+                                        )
+                                    })
                                     .when(!slash.is_empty(), |composer| {
                                         // Slash discovery: typing `/` lists
                                         // every command; typing narrows it.
@@ -5478,6 +6614,8 @@ impl Render for ChatView {
                                                                     )
                                                                 }
                                                             };
+                                                            let selected = selected_popup_index
+                                                                == Some(row_index);
                                                             div()
                                                                 .id(("slash-row", row_index))
                                                                 .w_full()
@@ -5485,6 +6623,13 @@ impl Render for ChatView {
                                                                 .py_1()
                                                                 .rounded_sm()
                                                                 .cursor_pointer()
+                                                                .when(selected, |row| {
+                                                                    row.bg(
+                                                                        cx.theme()
+                                                                            .accent
+                                                                            .opacity(0.14),
+                                                                    )
+                                                                })
                                                                 .hover(|style| {
                                                                     style.bg(
                                                                         cx.theme()
@@ -5632,6 +6777,9 @@ impl Render for ChatView {
                                 .track_focus(&self.side_focus)
                                 .child(self.settings_panel.clone()),
                         )
+                    })
+                    .when(self.panel == Panel::Memory, |row| {
+                        row.child(self.render_memory_panel(cx))
                     }),
             )
             // The palette floats over everything, last child so it
@@ -5697,6 +6845,24 @@ fn mode_label(mode: PermissionMode) -> &'static str {
         PermissionMode::AcceptEdits => "accept edits",
         PermissionMode::Auto => "auto",
         PermissionMode::FullAccess => "full access",
+    }
+}
+
+/// The footer chip's hover text: what the current mode asks, and how
+/// the ring moves. The one control that can remove every guardrail
+/// says plainly what it does.
+fn mode_tooltip(mode: PermissionMode) -> &'static str {
+    match mode {
+        PermissionMode::Supervised => {
+            "supervised: every edit and command asks. Click: accept edits (edits run unasked, reversible; bash asks). Full access is in the palette."
+        }
+        PermissionMode::AcceptEdits => {
+            "accept edits: edits run unasked and reversible, bash asks. Click: auto (sandboxed bash unasked). Click again: back to supervised. Full access is in the palette."
+        }
+        PermissionMode::Auto => {
+            "auto: edits and sandboxed bash run unasked. Click: back to supervised. Full access (nothing asks) is in the palette."
+        }
+        PermissionMode::FullAccess => "full access: nothing asks. Click: back to supervised.",
     }
 }
 
@@ -5770,6 +6936,111 @@ fn clock(elapsed: std::time::Duration) -> String {
 enum SlashMatch {
     Builtin(&'static str, &'static str),
     Template(usize),
+}
+
+/// The popup token for a composer value: the trailing `@query` run
+/// after the buffer's newline is trimmed. The walk's reset check and
+/// the tests share it.
+pub fn popup_token_for_test(value: &str) -> Option<String> {
+    let trimmed = value.trim_end_matches('\n');
+    trimmed.rfind('@').map(|at| trimmed[at..].to_string())
+}
+
+/// The @-mention matcher, exposed for tests (doc'ed, not hidden: the
+/// integration tests reach it through the crate's public surface).
+pub fn mention_matches_for_test(input: &str, root: &std::path::Path) -> Vec<MentionMatch> {
+    mention_matches(input, root)
+}
+
+/// One row of the @-mention popup: a workspace file the picker offers.
+#[derive(Debug, Clone)]
+pub struct MentionMatch {
+    /// Path relative to the workspace root, what the agent reads by.
+    pub path: String,
+    /// The trailing `@query` token to erase on acceptance.
+    pub token: String,
+}
+
+/// The @-mention's candidate list: files under the workspace root
+/// whose relative path contains the query, directory scratch
+/// (.git, target, node_modules, .gertie) excluded, capped so a big
+/// repo renders a popup, not a novel. The bare `@` lists nothing
+/// until a character narrows it: with thousands of files the first
+/// keystroke should already mean something.
+fn mention_matches(input: &str, root: &std::path::Path) -> Vec<MentionMatch> {
+    // The token: an `@` that starts the input or follows whitespace,
+    // up to the caret (the input state's value is all we see; the
+    // token is the whole trailing `@...` run, mentions are typed at
+    // the end like slash commands).
+    let input = input.trim_end_matches('\n');
+    let Some(at) = input.rfind('@') else {
+        return Vec::new();
+    };
+    let at_line_start = at == 0
+        || input[..at]
+            .chars()
+            .last()
+            .is_some_and(|c| c.is_whitespace());
+    if !at_line_start {
+        return Vec::new();
+    }
+    let query = &input[at + 1..];
+    // A query with spaces is a sentence again, not a mention.
+    if query.is_empty() || query.chars().any(char::is_whitespace) {
+        return Vec::new();
+    }
+    let token = input[at..].to_string();
+    let mut files = Vec::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let Ok(read) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in read.flatten() {
+            let path = entry.path();
+            let Ok(file_type) = entry.file_type() else {
+                continue;
+            };
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if file_type.is_dir() {
+                if matches!(
+                    name.as_str(),
+                    ".git" | ".gertie" | "target" | "node_modules" | "dist"
+                ) {
+                    continue;
+                }
+                if files.len() < 512 {
+                    stack.push(path);
+                }
+                continue;
+            }
+            let relative = path
+                .strip_prefix(root)
+                .map(|p| p.to_string_lossy().into_owned())
+                .unwrap_or(name.clone());
+            if !relative.contains(query) {
+                continue;
+            }
+            files.push(relative);
+            if files.len() >= 64 {
+                return files
+                    .into_iter()
+                    .map(|path| MentionMatch {
+                        path,
+                        token: token.clone(),
+                    })
+                    .collect();
+            }
+        }
+    }
+    files.sort();
+    files
+        .into_iter()
+        .map(|path| MentionMatch {
+            path,
+            token: token.clone(),
+        })
+        .collect()
 }
 
 /// A tool card's parsed face, memoized per turn index: the label in

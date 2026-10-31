@@ -34,6 +34,17 @@ pub struct Reloaded {
     pub settings: Arc<crate::settings::SettingsSummary>,
 }
 
+/// Everything a re-rooted registry carries: the rebuilt tools, the
+/// prompt, the always-layer, the memory index and store. `Switched`
+/// spreads these into a tab.
+pub type RootedRegistry = (
+    gertie_core::ToolRegistry,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<Arc<gertie_core::MemoryStore>>,
+);
+
 pub struct Bootstrap {
     pub config: crate::config::Config,
     /// The `--config` override, if any, reload reads the same file
@@ -68,6 +79,17 @@ pub struct Bootstrap {
     pub overlay_error: Option<String>,
     pub snapshots: Option<Arc<gertie_core::SnapshotStore>>,
     pub system_prompt: Option<String>,
+    /// The memory index snapshotted at boot for the load-time root.
+    pub memory_index: Option<String>,
+    /// The shared memory store (both tiers) and the extraction
+    /// endpoint name from `[memory]` config. None store = no data dir.
+    pub memory: Option<Arc<gertie_core::MemoryStore>>,
+    pub memory_extract_provider: Option<Arc<dyn gertie_core::Provider>>,
+    /// Session instructions loaded from AGENTS.md files (the
+    /// always-layer), resolved for the load-time root. Threads into
+    /// every leader session prompt as framing; workers get them in
+    /// their brief envelope instead.
+    pub instructions: Option<String>,
     /// Human-readable status line: endpoint, warnings, capability counts.
     pub workspace_root: PathBuf,
     /// The label tail that doesn't change on an endpoint switch:
@@ -92,6 +114,13 @@ pub struct Bootstrap {
 pub struct Switched {
     pub tools: gertie_core::ToolRegistry,
     pub system_prompt: Option<String>,
+    /// The root's own AGENTS.md text (sanitized), project tier of the
+    /// always-layer; the global tier rides the boot's instructions.
+    pub instructions: Option<String>,
+    /// The memory index for this root, snapshotted at session start.
+    pub memory_index: Option<String>,
+    pub memory: Option<Arc<gertie_core::MemoryStore>>,
+    pub memory_extract_provider: Option<Arc<dyn gertie_core::Provider>>,
     /// The canonicalized root, containment checks and the footer's
     /// word mean the one true path.
     pub workspace_root: PathBuf,
@@ -173,6 +202,48 @@ impl Bootstrap {
     }
 
     /// A fresh settings editor over the live config.
+    /// Whether session-end memory extraction runs: `[memory] enabled`,
+    /// default off. Read per use (config can reload).
+    /// The turn's round budgets, resolved from config (None = the
+    /// loop's built-in defaults).
+    pub fn max_tool_rounds(&self) -> Option<usize> {
+        self.live_config().resolve_max_tool_rounds()
+    }
+
+    pub fn grace_rounds(&self) -> Option<usize> {
+        self.live_config().resolve_grace_rounds()
+    }
+
+    pub fn memory_enabled(&self) -> bool {
+        self.live_config().memory_enabled()
+    }
+
+    /// The extraction provider for the session-end memory call:
+    /// `[memory] extract_endpoint` names an endpoint, absent = the
+    /// leader's. None provider = no extraction is possible (the
+    /// caller reports a notice, never an error).
+    pub fn memory_extract_provider(&self) -> Option<Arc<dyn gertie_core::Provider>> {
+        let config = self.live_config();
+        if let Some(name) = config
+            .memory
+            .as_ref()
+            .and_then(|memory| memory.extract_endpoint.as_deref())
+        {
+            let endpoint = config
+                .endpoints
+                .iter()
+                .find(|e| e.name == name)
+                .map(|e| e.resolve())?;
+            let provider = gertie_providers::AnyProvider::with_endpoints(vec![endpoint]).ok()?;
+            return Some(Arc::new(provider));
+        }
+        // Absent: the session's own endpoint. AnyProvider already
+        // unsize-coerces through Arc's target; the map makes it
+        // explicit for the trait-object return type.
+        self.provider()
+            .map(|provider| provider as Arc<dyn gertie_core::Provider>)
+    }
+
     pub fn settings_panel(&self) -> crate::settings_edit::SettingsPanelView {
         let reloaded = self.reloaded.read().unwrap();
         crate::settings_edit::SettingsPanelView::new(&reloaded.config, (*reloaded.settings).clone())
@@ -209,6 +280,11 @@ impl Bootstrap {
         let sandbox = config.resolve_sandbox_bash(self.overlay.as_ref());
         settings.sandbox = sandbox.value;
         settings.sandbox_origin = sandbox.origin;
+        // Memory's on/off is user-config only (the overlay never
+        // carries it: extraction is process, not posture), so the
+        // origin is user-config vs default, no overlay resolution.
+        settings.memory_enabled = config.memory_enabled();
+        settings.memory_dream_days = config.memory_dream_days();
         settings.skills = self.skill_count;
         *self.reloaded.write().unwrap() = Reloaded {
             config: Arc::new(config),
@@ -391,7 +467,9 @@ impl Bootstrap {
         // The system prompt: identity, the one policy paragraph the model
         // must know, the skill index. Terse by the two-loads rule, every
         // line is context paid on every turn.
-        let system_prompt = system_prompt_for(&workspace_root, &skill_index);
+        let instructions = load_instructions(&workspace_root);
+        let system_prompt =
+            system_prompt_for(&workspace_root, &skill_index, instructions.as_deref());
 
         // Web tools: fetch always (private-network targets gated by
         // the user's config, the model may not choose to open them);
@@ -422,6 +500,51 @@ impl Bootstrap {
             Arc::new(gertie_tools::web::SearchHistory::new(store.clone())),
         );
         root_independent.push("search_history".into());
+
+        let (provider, agent_endpoint) = provider_chain(&config);
+        // Memory: one store over the repo's tier and the user's global
+        // tier, same sidecar as the sessions. Root-independent as
+        // registered here; worktree tabs re-root the project tier
+        // through registry_for_root, the global tier stays shared.
+        let memory = Arc::new(gertie_core::MemoryStore::open(
+            workspace_root.join(".gertie/memory"),
+            memory_global_root(),
+            store.clone(),
+        ));
+        memory
+            .sync()
+            .unwrap_or_else(|error| eprintln!("warning: memory sync: {error}"));
+        // Dreaming rides the same sweep: idle-gated, opt-in, and only
+        // when memory is on. The changelog lands in the tier's dreams/.
+        if config.memory_enabled()
+            && config.memory_dream_days() > 0
+            && let Some(changelog) = dream(&memory, &workspace_root.join(".gertie/memory"))
+        {
+            eprintln!("{changelog}");
+        }
+        let memory_index = render_memory_index(&memory);
+        let memory_extract_provider: Option<Arc<dyn gertie_core::Provider>> = config
+            .memory
+            .as_ref()
+            .and_then(|memory| memory.extract_endpoint.as_deref())
+            .and_then(|name| config.endpoints.iter().find(|e| e.name == name))
+            .and_then(|e| gertie_providers::AnyProvider::with_endpoints(vec![e.resolve()]).ok())
+            .map(|provider| Arc::new(provider) as Arc<dyn gertie_core::Provider>)
+            .or_else(|| {
+                provider
+                    .clone()
+                    .map(|provider| provider as Arc<dyn gertie_core::Provider>)
+            });
+        map.insert(
+            "memory".into(),
+            Arc::new(gertie_tools::memory::Memory::new(memory.clone())),
+        );
+        root_independent.push("memory".into());
+        map.insert(
+            "search_memory".into(),
+            Arc::new(gertie_tools::memory::SearchMemory::new(memory.clone())),
+        );
+        root_independent.push("search_memory".into());
 
         // MCP servers connect at startup; a server that won't start is a
         // status-line warning, never a failed launch, gertie's local
@@ -508,8 +631,8 @@ impl Bootstrap {
         // when an endpoint dies before producing content (model names
         // don't translate across wires, so the chain never switches).
         // The preferred endpoint is kept for agent-type model
-        // overrides on the same wire.
-        let (provider, agent_endpoint) = provider_chain(&config);
+        // overrides on the same wire. Built above (the memory
+        // extraction provider falls back to it); nothing here rebuilds.
 
         let broker = Arc::new(gertie_core::PermissionBroker::new());
         let session_scope = gertie_core::SessionScope::new();
@@ -619,6 +742,10 @@ impl Bootstrap {
             overlay_error,
             snapshots,
             system_prompt,
+            instructions,
+            memory_index,
+            memory: Some(Arc::clone(&memory)),
+            memory_extract_provider,
             workspace_root,
             root_independent,
             skill_index,
@@ -649,6 +776,28 @@ impl Bootstrap {
                     map.insert(name.clone(), tool.clone());
                 }
             }
+        }
+        // Memory's project tier follows the (possibly new) root; the
+        // global tier and the sidecar are the boot's shared state.
+        let memory = Arc::new(gertie_core::MemoryStore::open(
+            root.join(".gertie/memory"),
+            memory_global_root(),
+            self.store.clone(),
+        ));
+        memory
+            .sync()
+            .unwrap_or_else(|error| eprintln!("warning: memory sync: {error}"));
+        let memory_index = render_memory_index(&memory);
+        {
+            let map = Arc::get_mut(&mut tools).expect("registry not yet shared");
+            map.insert(
+                "memory".into(),
+                Arc::new(gertie_tools::memory::Memory::new(memory.clone())),
+            );
+            map.insert(
+                "search_memory".into(),
+                Arc::new(gertie_tools::memory::SearchMemory::new(Arc::clone(&memory))),
+            );
         }
 
         // Skills: the user dir rides along; the project dir is the new
@@ -723,10 +872,20 @@ impl Bootstrap {
             }
         }
 
-        let system_prompt = system_prompt_for(&root, &skill_index);
+        // Instructions: the global tier once, the project tier per
+        // root. Both sanitized at the entrance (agent.rs's
+        // sanitize_untrusted), 2048 characters total.
+        let global = load_global_instructions();
+        let project = load_project_instructions(&root);
+        let instructions = join_instructions(global.as_deref(), project.as_deref());
+        let system_prompt = system_prompt_for(&root, &skill_index, project.as_deref());
         Ok(Switched {
             tools,
             system_prompt,
+            instructions,
+            memory_index,
+            memory: Some(Arc::clone(&memory)),
+            memory_extract_provider: self.memory_extract_provider(),
             workspace_root: root,
             templates,
             sandbox_bash,
@@ -741,7 +900,7 @@ impl Bootstrap {
     /// tools, web, history, MCP connections, skills, are carried over
     /// as-is rather than duplicated. Shared infrastructure (broker,
     /// store, snapshots) is untouched: one approval queue, one history.
-    pub fn registry_for_root(&self, root: &Path) -> (gertie_core::ToolRegistry, Option<String>) {
+    pub fn registry_for_root(&self, root: &Path) -> RootedRegistry {
         let sandbox = self
             .live_config()
             .resolve_sandbox_bash(self.overlay.as_ref())
@@ -755,6 +914,28 @@ impl Bootstrap {
                     map.insert(name.clone(), tool.clone());
                 }
             }
+        }
+        // Memory's project tier follows the tab's root; the global tier
+        // and the sidecar are the boot's shared state.
+        let memory = Arc::new(gertie_core::MemoryStore::open(
+            root.join(".gertie/memory"),
+            memory_global_root(),
+            self.store.clone(),
+        ));
+        memory
+            .sync()
+            .unwrap_or_else(|error| eprintln!("warning: memory sync: {error}"));
+        let memory_index = render_memory_index(&memory);
+        {
+            let map = Arc::get_mut(&mut tools).expect("registry not yet shared");
+            map.insert(
+                "memory".into(),
+                Arc::new(gertie_tools::memory::Memory::new(memory.clone())),
+            );
+            map.insert(
+                "search_memory".into(),
+                Arc::new(gertie_tools::memory::SearchMemory::new(Arc::clone(&memory))),
+            );
         }
         if let (Some(endpoint), Some(leader_provider)) = (self.agent_endpoint(), self.provider()) {
             let (types, type_warnings) = agent_types(&self.config, &endpoint);
@@ -791,8 +972,87 @@ impl Bootstrap {
                 map.insert(name, tool);
             }
         }
-        (tools, system_prompt_for(root, &self.skill_index))
+        // Per-root instructions: the project tier only, the global
+        // tier is shared with the boot and rides along.
+        let project = load_project_instructions(root);
+        let instructions = join_instructions(self.instructions.as_deref(), project.as_deref());
+        let system_prompt = system_prompt_for(root, &self.skill_index, project.as_deref());
+        (
+            tools,
+            system_prompt,
+            instructions,
+            memory_index,
+            Some(Arc::clone(&memory)),
+        )
     }
+}
+
+/// The memory index, rendered once per boot/switch and frozen: the
+/// caller hands the string to every turn of a session and never
+/// re-renders mid-session (cache discipline). An empty store renders
+/// no index at all: a session without memory pays nothing.
+fn render_memory_index(memory: &gertie_core::MemoryStore) -> Option<String> {
+    let index = memory.render_index(600);
+    (index != "# Memory\n").then_some(index)
+}
+
+/// The global memory tier's root. The session store's open has already
+/// proved the data dir exists (gertie refuses to run without
+/// persistence), so the fallback is unreachable in practice and harmless
+/// when reached: a temp dir, never the repo.
+fn memory_global_root() -> PathBuf {
+    crate::config::Config::data_dir()
+        .map(|dir| dir.join("memory"))
+        .unwrap_or_else(|| std::env::temp_dir().join("gertie-memory"))
+}
+
+/// The always-layer: AGENTS.md files read at session start and
+/// injected as framing for every request of the session. The global
+/// tier is the user's posture; the project tier is the repo's policy
+/// and may arrive from a clone, so both pass through the same
+/// sanitizer as MCP and skill text. Absent files are normal; an
+/// unreadable one is skipped silently.
+fn load_instructions(root: &Path) -> Option<String> {
+    join_instructions(
+        load_global_instructions().as_deref(),
+        load_project_instructions(root).as_deref(),
+    )
+}
+
+fn load_global_instructions() -> Option<String> {
+    let path = crate::config::Config::path()
+        .and_then(|config| config.parent().map(|parent| parent.join("AGENTS.md")))?;
+    std::fs::read_to_string(&path).ok()
+}
+
+fn load_project_instructions(root: &Path) -> Option<String> {
+    let canonical = root
+        .canonicalize()
+        .ok()
+        .unwrap_or_else(|| root.to_path_buf());
+    let path = canonical.join("AGENTS.md");
+    if !path.is_file() {
+        return None;
+    }
+    std::fs::read_to_string(&path).ok()
+}
+
+fn join_instructions(global: Option<&str>, project: Option<&str>) -> Option<String> {
+    let mut joined = String::new();
+    if let Some(text) = global {
+        joined.push_str("## Instructions\n\n");
+        joined.push_str(text.trim_end());
+        joined.push('\n');
+    }
+    if let Some(text) = project {
+        joined.push_str("## Instructions\n\n");
+        joined.push_str(text.trim_end());
+        joined.push('\n');
+    }
+    if joined.is_empty() {
+        return None;
+    }
+    Some(gertie_core::agent::sanitize_untrusted(&joined, 2048))
 }
 
 /// The provider over every configured endpoint (selected first, then
@@ -921,6 +1181,102 @@ fn worker_backend(
     }
 }
 
+/// Dreaming (M6 PR 6): the consolidation pass that keeps memory from
+/// rotting. No model call: duplicates and near-duplicates are a text
+/// problem (normalized prefix comparison), not a reasoning one. Runs
+/// only from the startup sweep, never mid-session (the frozen-index
+/// discipline means mid-session rewrites of the store would desync
+/// every open session's view). Delta ops only, by construction: the
+/// merge archives the loser, nothing deletes.
+fn dream(store: &gertie_core::MemoryStore, project_root: &std::path::Path) -> Option<String> {
+    let mut ops: Vec<gertie_core::Op> = Vec::new();
+    let entries = store.scan();
+    // Near-duplicate pass: two valid entries in the same file whose
+    // normalized text (lowercased, non-alphanumeric stripped, first
+    // 48 chars) agree. The older id survives (stable ids in links);
+    // the merged text is the newer entry's (later knowledge wins).
+    let mut normalized: std::collections::HashMap<String, &gertie_core::MemoryEntry> =
+        std::collections::HashMap::new();
+    for entry in &entries {
+        if entry.valid_until.is_some() {
+            continue;
+        }
+        let key: String = entry
+            .text
+            .to_lowercase()
+            .chars()
+            .filter(|c| c.is_alphanumeric())
+            .take(48)
+            .collect();
+        if key.is_empty() {
+            continue;
+        }
+        match normalized.get(&key) {
+            Some(existing) => {
+                // Same tier only (cross-tier merges are human edits);
+                // the entry later in the scan is newer knowledge.
+                if existing.id.chars().last() == entry.id.chars().last()
+                    && existing.file == entry.file
+                {
+                    ops.push(gertie_core::Op::Merge {
+                        keep: existing.id.clone(),
+                        drop: entry.id.clone(),
+                        text: entry.text.clone(),
+                    });
+                }
+            }
+            None => {
+                normalized.insert(key, entry);
+            }
+        }
+    }
+    // Counter-dead pass: harmful outweighs helpful by 2+ and the entry
+    // has any votes at all. Retirement is counter-driven, never
+    // time-decay (no decay schedule has survived validation anywhere).
+    for entry in &entries {
+        if entry.valid_until.is_some() {
+            continue;
+        }
+        let votes = entry.helpful + entry.harmful;
+        if votes >= 2 && entry.harmful >= entry.helpful + 2 {
+            ops.push(gertie_core::Op::Archive {
+                id: entry.id.clone(),
+            });
+        }
+    }
+    if ops.is_empty() {
+        return None;
+    }
+    let report = store.apply(&ops, 4096).ok()?;
+    if report.applied.is_empty() {
+        return None;
+    }
+    // The changelog: one markdown file per dream in the project tier's
+    // dreams/ directory, the audit surface the card cites.
+    let date = store.today().ok()?;
+    let dir = project_root.join("dreams");
+    let _ = std::fs::create_dir_all(&dir);
+    let file = dir.join(format!("dream-{date}.md"));
+    let entry_text = format!(
+        "## dream {date}\n\n{}\n",
+        report
+            .applied
+            .iter()
+            .map(|line| format!("- {line}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+    if let Ok(mut handle) = std::fs::OpenOptions::new()
+        .append(true)
+        .create(true)
+        .open(&file)
+    {
+        use std::io::Write;
+        let _ = handle.write_all(entry_text.as_bytes());
+    }
+    Some(format!("memory dream: {} ops", report.applied.len()))
+}
+
 /// The voice block: always on, part of every request. This is what
 /// keeps chat replies from reading like chatbot output, the writing
 /// skill carries the full discipline for kept prose, but a two-line
@@ -940,7 +1296,7 @@ const VOICE_SECTION: &str = "## Voice\n\n\
 /// The system prompt: identity, the one policy paragraph the model
 /// must know, the voice block, the skill index. Terse by the two-loads
 /// rule, every line is context paid on every turn.
-fn system_prompt_for(root: &Path, skill_index: &str) -> Option<String> {
+fn system_prompt_for(root: &Path, skill_index: &str, instructions: Option<&str>) -> Option<String> {
     let mut prompt = format!(
         "You are gertie, a coding agent working in {}.\n\
          Read-only tools run without asking; anything that changes the \
@@ -953,6 +1309,10 @@ fn system_prompt_for(root: &Path, skill_index: &str) -> Option<String> {
     if !skill_index.is_empty() {
         prompt.push_str("\n\n");
         prompt.push_str(skill_index);
+    }
+    if instructions.is_some() {
+        prompt.push_str("\n\n");
+        prompt.push_str("Instructions loaded from AGENTS.md; they bind this session.");
     }
     Some(prompt)
 }
@@ -1114,13 +1474,58 @@ mod tests {
 
     #[test]
     fn the_system_prompt_always_carries_the_voice() {
-        let prompt = system_prompt_for(Path::new("/w"), "").unwrap();
+        let prompt = system_prompt_for(Path::new("/w"), "", None).unwrap();
         assert!(prompt.contains("## Voice"));
 
         // The skill index still appends when present.
-        let prompt = system_prompt_for(Path::new("/w"), "## Skills\n\n- **x**, y\n").unwrap();
+        let prompt = system_prompt_for(Path::new("/w"), "## Skills\n\n- **x**, y\n", None).unwrap();
         assert!(prompt.contains("## Voice"));
         assert!(prompt.contains("**x**"));
+    }
+
+    #[test]
+    fn instructions_get_a_pointer_in_the_prompt_but_never_contents() {
+        let plain = system_prompt_for(Path::new("/w"), "", None).unwrap();
+        let loaded = system_prompt_for(Path::new("/w"), "", Some("no em dashes")).unwrap();
+        assert!(!plain.contains("Instructions loaded"));
+        assert!(loaded.contains("Instructions loaded from AGENTS.md"));
+        // The contents ride the injected block, never the static prompt:
+        // the pointer stays byte-stable regardless of what the files say.
+        assert!(!loaded.contains("no em dashes"));
+    }
+
+    #[test]
+    fn the_loader_joins_tiers_and_sanitizes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+
+        // Both absent: nothing.
+        assert_eq!(load_instructions(root), None);
+
+        // Project tier only.
+        std::fs::write(root.join("AGENTS.md"), "be terse\n").unwrap();
+        assert_eq!(
+            load_instructions(root).unwrap(),
+            "## Instructions\n\nbe terse\n"
+        );
+
+        // An unreadable project file is skipped, silently. A
+        // directory where the file belongs exercises that arm in any
+        // environment (permission bits prove nothing under root, the
+        // container's test user, so the chmod route is out).
+        std::fs::remove_file(root.join("AGENTS.md")).unwrap();
+        std::fs::create_dir(root.join("AGENTS.md")).unwrap();
+        assert_eq!(load_instructions(root), None);
+
+        // The global tier is the user's config dir; the join shape is
+        // covered through join_instructions directly.
+        let joined = join_instructions(Some("global rules"), Some("project rules")).unwrap();
+        assert!(joined.starts_with("## Instructions\n\nglobal rules\n"));
+        assert!(joined.contains("## Instructions\n\nproject rules\n"));
+        // Invisible characters are stripped at the entrance, same as
+        // MCP and skill text.
+        let dirty = join_instructions(Some("a\u{200B}b"), None).unwrap();
+        assert_eq!(dirty, "## Instructions\n\nab\n");
     }
 
     /// Council seats resolve to their pinned endpoint; a pin to an
