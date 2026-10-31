@@ -5315,9 +5315,12 @@ fn mode_label(mode: PermissionMode) -> &'static str {
 
 /// Stored text as display text: attachment markers become a quiet note
 /// naming the files — the bytes live in the attachments dir, not the
-/// transcript. File names, not paths: the dir is gertie's own.
+/// transcript. Invisible-character hygiene applies at this render
+/// boundary too: stored text predating the tool-seam strip (or from a
+/// provider gone strange) renders without bidi or zero-width tricks.
+/// File names, not paths: the dir is gertie's own.
 fn display_text(text: &str) -> String {
-    let (clean, images) = gertie_core::extract_image_markers(text);
+    let (clean, images) = gertie_core::extract_image_markers(&gertie_core::strip_invisible(text));
     if images.is_empty() {
         clean
     } else {

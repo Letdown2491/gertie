@@ -418,10 +418,16 @@ pub fn run_turn(spec: TurnSpec) -> BoxStream<'static, LoopEvent> {
                     }
                 };
                 let result = match result {
-                    Ok(text) => text,
-                    Err(text) => format!("error: {text}"),
+                    Ok(text) => crate::strip_invisible(&text),
+                    Err(text) => format!("error: {}", crate::strip_invisible(&text)),
                 };
 
+                // The strip above is the prompt boundary: tool output —
+                // a web page, an MCP payload, anything the world sent
+                // back — enters the model's context and the transcript
+                // here, and enters it without bidirectional controls,
+                // zero-width marks, or tag characters that could make
+                // either reader see something other than what is there.
                 history
                     .lock()
                     .await

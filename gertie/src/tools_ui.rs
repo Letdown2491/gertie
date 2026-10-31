@@ -13,7 +13,10 @@ pub fn action_label(name: &str, arguments: &str, running: bool) -> String {
     let field = |key: &str| {
         args.get(key)
             .and_then(|v| v.as_str())
-            .map(str::to_string)
+            // The label is human-facing and the arguments are
+            // model-chosen: bidirectional or zero-width characters
+            // could make the card show a path that is not the path.
+            .map(gertie_core::strip_invisible)
             .unwrap_or_default()
     };
     let tense = |doing: String, done: String| {

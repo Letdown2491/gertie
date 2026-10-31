@@ -47,10 +47,13 @@ pub struct AgentType {
 }
 
 /// Untrusted-text hygiene, shared: descriptions from config, MCP
-/// servers, or skills never carry control characters or unbounded
-/// length into the model-visible surface.
+/// servers, or skills never carry control characters, invisible
+/// direction or zero-width tricks, or unbounded length into the
+/// model-visible surface. The invisible-char set is the same one the
+/// composer and the tool seam use — one predicate, everywhere.
 pub fn sanitize_untrusted(raw: &str, cap: usize) -> String {
-    let filtered: String = raw
+    let stripped = crate::strip_invisible(raw);
+    let filtered: String = stripped
         .chars()
         .filter(|c| !(c.is_control() && !c.is_whitespace()))
         .collect();
@@ -484,6 +487,21 @@ mod tests {
     use futures_core::stream::BoxStream;
     use std::task::{Context as TaskContext, Poll, Waker};
     use std::time::Duration;
+
+    #[test]
+    fn untrusted_text_loses_control_and_invisible_characters() {
+        // Terminal-escape and prompt-injection hygiene in one pass:
+        // control characters (ESC), bidirectional overrides, zero-width
+        // marks, and tag characters all vanish; honest text survives.
+        assert_eq!(
+            sanitize_untrusted("pa\u{200B}y\u{202E}tox\u{1B} abc\u{E0041}", 100),
+            "paytox abc"
+        );
+        // Whitespace controls stay — newlines are not an attack.
+        assert_eq!(sanitize_untrusted("a\nb\tc", 100), "a\nb\tc");
+        // The cap still applies, by character not byte.
+        assert_eq!(sanitize_untrusted("abcdef", 3), "abc");
+    }
 
     #[test]
     fn a_worker_turn_reports_its_final_message() {
