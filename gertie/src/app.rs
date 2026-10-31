@@ -7,7 +7,7 @@ use gpui_kit::{
 use std::sync::Arc;
 
 /// The Wayland app_id / X11 WM_CLASS, matching the desktop entry.
-const APP_IDENTITY: &str = "dev.gertie.gertie";
+const APP_IDENTITY: &str = "io.github.Letdown2491.gertie";
 
 pub fn run() {
     run_with(None);
