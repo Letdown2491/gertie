@@ -4412,9 +4412,15 @@ impl ChatView {
     }
 
     /// The sidebar's active rows: every session not yet settled, in the
-    /// store's attention order (most recent activity first).
-    fn active_session_rows(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
-        self.visible_sessions()
+    /// store's attention order (most recent activity first). The
+    /// caller's `visible_sessions` snapshot is shared: one clone per
+    /// render feeds the rows, the fold's guard, and its count.
+    fn active_session_rows(
+        &self,
+        sessions: &[gertie_core::SessionSummary],
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
+        sessions
             .iter()
             .filter(|summary| !summary.settled)
             .map(|summary| self.session_row(summary, cx))
@@ -4422,8 +4428,12 @@ impl ChatView {
     }
 
     /// The fold's rows: settled work, muted, restore affordance up front.
-    fn settled_session_rows(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
-        self.visible_sessions()
+    fn settled_session_rows(
+        &self,
+        sessions: &[gertie_core::SessionSummary],
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
+        sessions
             .iter()
             .filter(|summary| summary.settled)
             .map(|summary| self.session_row(summary, cx))
@@ -4538,6 +4548,9 @@ impl Render for ChatView {
         // popup's guard and its rows share the one computation.
         let value = self.input.read(cx).value().to_string();
         let slash = slash_matches(&value, &self.templates);
+        // The sidebar's session snapshot, same contract: one clone
+        // feeds the rows, the fold's guard, and its count.
+        let visible = self.visible_sessions();
         let pending = self.turns.iter().any(|turn| {
             matches!(
                 turn,
@@ -4636,20 +4649,18 @@ impl Render for ChatView {
                                     .text_color(cx.theme().muted_foreground)
                                     .child("SESSIONS"),
                             )
-                            .children(self.active_session_rows(cx))
+                            .children(self.active_session_rows(&visible, cx))
                             // The settled fold: put-down work, collapsed
                             // by default — findable, never in the way.
                             .when(
-                                self.visible_sessions()
-                                    .iter()
-                                    .any(|summary| summary.settled),
+                                visible.iter().any(|summary| summary.settled),
                                 |col| {
                                     col.child(
                                         Button::new("settled-fold")
                                             .label(format!(
                                                 "{} SETTLED ({})",
                                                 if self.settled_open { "▾" } else { "▸" },
-                                                self.visible_sessions()
+                                                visible
                                                     .iter()
                                                     .filter(|summary| summary.settled)
                                                     .count()
@@ -4663,7 +4674,7 @@ impl Render for ChatView {
                                             })),
                                     )
                                     .when(self.settled_open, |col| {
-                                        col.children(self.settled_session_rows(cx))
+                                        col.children(self.settled_session_rows(&visible, cx))
                                     })
                                 },
                             ),
