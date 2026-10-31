@@ -609,16 +609,18 @@ impl Config {
                 // keys without complaint: forward compatibility is a
                 // feature there, not here.)
                 let unknown = Self::unknown_overlay_keys(
-                    &toml::from_str::<toml::Value>(&raw).unwrap_or(toml::Value::Table(
-                        Default::default(),
-                    )),
+                    &toml::from_str::<toml::Value>(&raw)
+                        .unwrap_or(toml::Value::Table(Default::default())),
                 );
                 let warning = match unknown.as_slice() {
                     [] => None,
                     [one] => Some(format!("unrecognized key {one:?} — ignored")),
                     many => Some(format!(
                         "unrecognized keys {}: ignored",
-                        many.iter().map(|key| format!("{key:?}")).collect::<Vec<_>>().join(", ")
+                        many.iter()
+                            .map(|key| format!("{key:?}"))
+                            .collect::<Vec<_>>()
+                            .join(", ")
                     )),
                 };
                 (Some(overlay), warning)
@@ -643,14 +645,10 @@ impl Config {
                     item,
                     &["sandbox_bash", "allow_private_fetch"],
                 )),
-                "permissions" => unknown.extend(Self::unknown_section_keys(
-                    item,
-                    &["default_mode"],
-                )),
-                "worktree" => unknown.extend(Self::unknown_section_keys(
-                    item,
-                    &["branch_prefix"],
-                )),
+                "permissions" => {
+                    unknown.extend(Self::unknown_section_keys(item, &["default_mode"]))
+                }
+                "worktree" => unknown.extend(Self::unknown_section_keys(item, &["branch_prefix"])),
                 // auto_settle_days is the leaf that needs no section
                 // check; everything else at top level is unrecognized.
                 "auto_settle_days" => {}

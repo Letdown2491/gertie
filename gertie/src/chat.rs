@@ -3598,9 +3598,7 @@ impl ChatView {
             self.approval_reply_for(index, window, cx);
         }
         let inner = match &self.turns[index] {
-            Turn::Message { role, text, .. } => {
-                self.render_message(role, text, index as u64, cx)
-            }
+            Turn::Message { role, text, .. } => self.render_message(role, text, index as u64, cx),
             Turn::Tool {
                 call,
                 status,
@@ -3940,11 +3938,7 @@ impl ChatView {
                     .when(!is_error, |row| {
                         // The memoized parse: settled rows parse once,
                         // the streaming row once per throttled frame.
-                        row.child(
-                            self.markdown_cache
-                                .borrow_mut()
-                                .render(key, text, cx),
-                        )
+                        row.child(self.markdown_cache.borrow_mut().render(key, text, cx))
                     })
                     .into_any_element()
             }
