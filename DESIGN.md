@@ -150,6 +150,10 @@ The original "Deferred" row — every item shipped or decided:
 - **Keys, hybrid**: env vars win (`GERTIE_<PROVIDER>_API_KEY`, falling back to common
   `<PROVIDER>_API_KEY` conventions); plaintext keys allowed in config with a warning and
   enforced 0600 file mode; `gertie keys` command manages a 0600 keys file. No system keyring in v1.
+  The writer's side holds too: config.toml is created 0600 (a umask can only strip bits,
+  never add them) and a loose pre-existing file is tightened on save — the doctor's
+  mode warning must never be one gertie caused. An `Endpoint`'s `Debug` shows a key's
+  presence, never its content, and the settings editor masks the key field.
 
 ## Data layout (XDG)
 
@@ -190,9 +194,12 @@ directories beyond the optional `gertie.toml`.
 - **Invisible characters never reach a prompt**: bidi controls, zero-width spacing and
   joiners, and Unicode tag letters are stripped from user text at the system's entrance —
   composer send (queued, steered, and template-expanded text included) and `gertie run`
-  alike — so the database, the transcript, and the prompt hold the same words. Emoji ZWJ
-  sequences, soft hyphens, and variation selectors survive; a transcript notice says when
-  cleaning happened.
+  alike — so the database, the transcript, and the prompt hold the same words. The same
+  strip guards the other entrances: tool output is stripped where it joins the loop (one
+  seam feeds both the prompt and the transcript), MCP and skill descriptions pass through
+  the sanitizer, and the transcript renders stored text and model-chosen arguments
+  stripped too. Emoji ZWJ sequences, soft hyphens, and variation selectors survive; a
+  transcript notice says when cleaning happened.
 
 ## Tools
 
@@ -205,11 +212,21 @@ configured**) · `search_history` (native, FTS5 over our own session DB).
 
 Explicitly out of v1: LSP, notebooks, native web browsing beyond fetch/search.
 
+**web_fetch dials the open web only**: a URL is judged as an address, not a string —
+literal private IPs (RFC 1918, loopback, the 169.254 metadata range, CGNAT), localhost-ish
+names, and public names that resolve into private space are all refused, and every dial —
+first fetch and every redirect hop — resolves through that same filter, so DNS rebinding
+has no gap to live in. A localhost dev server is a legitimate target for a coding agent,
+so `[security] allow_private_fetch = true` opens the gate (user config or repo overlay
+posture; never a model ask).
+
 **MCP**: stdio **and Streamable HTTP** transports, **tools capability only**, config-defined
 servers (`[[mcp_servers]]` with `command` or `url`). Resource/prompt capabilities come later.
 Server tool descriptions are **untrusted input** (prompt-injection surface): sanitized,
-length-capped, prefixed `[mcp]` in the registry; every MCP call goes through the permission
-prompt — the user is the capability system.
+length-capped, prefixed `[mcp]` in the registry; server tools register under
+`mcp_{server}_{tool}` — a server's `bash` can never shadow gertie's own — and every MCP
+call goes through the permission prompt (every mode short of full access: third-party code
+is pre-approved by nothing) — the user is the capability system.
 
 ## Context management
 
@@ -342,7 +359,8 @@ the composer carries the text as a draft, and the confirm row asks which flavor 
 rewind — **Revert and keep changes** (the conversation forgets; the files keep what
 the turns did) or **Revert files too** (the checkpoints restore each path to its
 pre-turn content). Rewind is fail-closed: a restore is refused while another tab's
-session is live in the same checkout (the workspace's guard), and history truncation
+session is live in the same checkout (the workspace's guard), a restore target that
+resolves outside the workspace (symlinks included) is refused outright, and history truncation
 and file restore commit as one step — never files-without-history. The rewound work
 is not destroyed either way: the store is append-only, the cut rows remain
 recoverable by a reload.
