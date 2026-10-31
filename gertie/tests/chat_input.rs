@@ -45,7 +45,7 @@ fn fixture() -> Fixture {
 }
 
 fn fixture_with_store(store: Arc<SessionStore>) -> Fixture {
-    fixture_built(store, None, None, None, None, None, Vec::new())
+    fixture_built(store, None, None, None, None, None, Vec::new(), None)
 }
 
 /// A fixture whose view carries a real checkpoint ledger over a real
@@ -64,6 +64,7 @@ fn fixture_with_snapshots() -> Fixture {
         None,
         None,
         Vec::new(),
+        None,
     );
     fixture.hold = vec![snapshots_dir, workspace];
     fixture
@@ -83,6 +84,9 @@ fn fixture_built(
     broker: Option<Arc<gertie_core::PermissionBroker>>,
     // Extra tools beside the builtins (None = builtins alone).
     extra_tools: Vec<Arc<dyn gertie_core::Tool>>,
+    // The rewind safety guard (None = single-tab tests, nothing ever
+    // streams elsewhere).
+    guard: Option<gertie::chat::LiveElsewhere>,
 ) -> Fixture {
     let mut cx = HeadlessAppContext::with_asset_source(
         Arc::new(NoopTextSystem),
@@ -95,6 +99,7 @@ fn fixture_built(
         gpui_kit::component::Theme::change(gpui_kit::component::ThemeMode::Dark, None, cx);
     });
     let mut view_entity = None;
+    let guard = guard.unwrap_or_else(|| Arc::new(|_, _, _| Ok(())));
     let window = cx
         .open_window(size(px(900.), px(640.)), |window, cx| {
             let view = cx.new(|cx| {
@@ -123,6 +128,7 @@ fn fixture_built(
                     gertie_core::PermissionMode::Supervised,
                     panel,
                     true,
+                    guard.clone(),
                     window,
                     cx,
                 )
@@ -332,6 +338,7 @@ fn accept_edits_runs_the_checkpointed_edit_without_asking() {
         Some(provider),
         None,
         Vec::new(),
+        None,
     );
     fixture.hold = vec![scenarios, workspace, snapshots_dir];
 
@@ -440,6 +447,7 @@ fn markdown_and_tool_rows_draw_clean() {
         gpui_kit::component::Theme::change(gpui_kit::component::ThemeMode::Dark, None, cx);
     });
     let mut view_entity = None;
+    let guard: gertie::chat::LiveElsewhere = Arc::new(|_, _, _| Ok(()));
     let window = cx
         .open_window(size(px(900.), px(640.)), |window, cx| {
             let view = cx.new(|cx| {
@@ -468,6 +476,7 @@ fn markdown_and_tool_rows_draw_clean() {
                     gertie_core::PermissionMode::Supervised,
                     panel,
                     true,
+                    guard.clone(),
                     window,
                     cx,
                 )
@@ -877,6 +886,7 @@ fn settling_runs_the_reclaim_command_in_the_recorded_workspace() {
         None,
         None,
         Vec::new(),
+        None,
     );
 
     // A send records the workspace on the session — the settle hook's
@@ -1006,6 +1016,7 @@ fn a_worker_ask_bubbles_into_the_transcript_and_the_answer_reaches_the_worker() 
         vec![Arc::new(WorkerAskTool {
             broker: broker.clone(),
         })],
+        None,
     );
 
     // Send: the scripted leader calls worker_ask (a Running card, its
@@ -1194,6 +1205,7 @@ fn a_rate_limited_turn_offers_resume_and_resuming_clears_it() {
         Some(provider),
         None,
         Vec::new(),
+        None,
     );
 
     fixture.act(|window, cx| {
@@ -1296,6 +1308,7 @@ fn snoozing_a_limited_session_resumes_it_when_the_timer_fires() {
         Some(provider),
         None,
         Vec::new(),
+        None,
     );
 
     fixture.act(|window, cx| {
@@ -1389,6 +1402,7 @@ fn canceling_the_snooze_leaves_the_session_limited_and_quiet() {
         Some(provider),
         None,
         Vec::new(),
+        None,
     );
 
     fixture.act(|window, cx| {
@@ -1449,6 +1463,7 @@ fn a_big_paste_files_itself_into_the_workspace_and_the_message_cites_it() {
         None,
         None,
         Vec::new(),
+        None,
     );
     fixture.hold = vec![snapshots_dir, workspace];
 
@@ -1642,6 +1657,7 @@ fn a_queued_followup_is_a_row_that_drafts_drains_and_survives() {
         Some(provider),
         None,
         Vec::new(),
+        None,
     );
     fixture.hold = vec![scenarios, workspace];
 
@@ -1922,4 +1938,236 @@ fn arrow_up_with_no_history_leaves_the_composer_alone() {
 
     fixture.act(|window, cx| window.press("up", cx));
     assert_eq!(composer_text(&mut fixture), "");
+}
+
+/// "Edit from here": the transcript rewinds to the kept prefix, the
+/// question returns as a draft, and the NEXT send parents to the keep
+/// point — the abandoned branch stays in the ledger as audit while
+/// dropping off every read.
+#[test]
+fn edit_from_here_keeps_changes_and_parents_the_next_send_to_the_keep_point() {
+    let store = Arc::new(SessionStore::open(Path::new(":memory:")).expect("memory store"));
+    let session = store.create_session("rewound").expect("session");
+    let q1 = store
+        .append_message(session, None, gertie_core::Role::User, "first ask")
+        .expect("row");
+    let a1 = store
+        .append_message(
+            session,
+            Some(q1),
+            gertie_core::Role::Assistant,
+            "first answer",
+        )
+        .expect("row");
+    store
+        .append_message(session, Some(a1), gertie_core::Role::User, "second ask")
+        .expect("row");
+    let mut fixture = fixture_with_store(store);
+
+    // Asking opens the confirm row — a choice, not a fait accompli.
+    // No checkpoint ledger in this fixture, so there is no files
+    // offer to make.
+    fixture.act(|window, cx| window.click("rewind-2", cx));
+    fixture.act(|window, cx| {
+        assert!(
+            window.try_find("rewind-keep").is_some(),
+            "the confirm row appears"
+        );
+        assert!(
+            window.try_find("rewind-files").is_none(),
+            "no ledger, no files offer"
+        );
+        window.click("rewind-cancel", cx);
+    });
+    assert_eq!(turn_count_of(&mut fixture), 3, "cancel changes nothing");
+
+    // Keep-changes: files untouched (there are none), transcript is
+    // the kept prefix, the question is the composer's draft.
+    fixture.act(|window, cx| window.click("rewind-2", cx));
+    fixture.act(|window, cx| window.click("rewind-keep", cx));
+    assert_eq!(
+        turn_count_of(&mut fixture),
+        2,
+        "the transcript is the prefix"
+    );
+    assert_eq!(composer_text(&mut fixture), "second ask");
+
+    // The rewind is real on the next send: it parents to the keep
+    // point, so the canonical path reads the new branch and the
+    // abandoned question stays in the table as audit.
+    fixture.act(|window, cx| {
+        window.input(" — edited", cx);
+        window.press("enter", cx);
+    });
+    let rows = fixture.store.load_messages(session).expect("rows");
+    let contents: Vec<&str> = rows.iter().map(|row| row.content.as_str()).collect();
+    assert_eq!(
+        contents,
+        vec!["first ask", "first answer", "second ask — edited"]
+    );
+    // (The abandoned row's survival as audit is pinned in the core
+    // store tests — the rowids here are the store's to hand out.)
+}
+
+/// "Revert files too": the restore walks the ledger turn by turn —
+/// the file goes back to its before content, then the transcript
+/// truncates. Never files-without-history, never the reverse.
+#[test]
+fn revert_files_too_restores_the_checkpointed_content() {
+    let scenarios = tempfile::tempdir().expect("scenario dir");
+    std::fs::write(
+        scenarios.path().join("edits.toml"),
+        "[[steps]]\ntext = ''\n\n\
+         [[steps.tool_calls]]\nname = \"write_file\"\n\
+         arguments = '{\"path\": \"scratch.txt\", \"content\": \"auto\"}'\n\n\
+         [[steps]]\ntext = ''\n",
+    )
+    .expect("scenario file");
+    let workspace = tempfile::tempdir().expect("workspace dir");
+    let snapshots_dir = tempfile::tempdir().expect("snapshots dir");
+    let snapshots =
+        Arc::new(gertie_core::SnapshotStore::open(snapshots_dir.path()).expect("snapshot store"));
+    let endpoint = gertie_providers::Endpoint {
+        name: "replay".into(),
+        base_url: scenarios.path().to_string_lossy().into_owned(),
+        model: "edits".into(),
+        api_key: None,
+        context_window: None,
+        wire: gertie_providers::Wire::Replay,
+    };
+    let provider = Arc::new(
+        gertie_providers::AnyProvider::with_endpoints(vec![endpoint]).expect("replay provider"),
+    );
+    let store = Arc::new(SessionStore::open(Path::new(":memory:")).expect("memory store"));
+    let workspace_path = workspace.path().to_path_buf();
+    let mut fixture = fixture_built(
+        store,
+        Some(snapshots),
+        Some(workspace_path.clone()),
+        None,
+        Some(provider),
+        None,
+        Vec::new(),
+        None,
+    );
+    fixture.hold = vec![scenarios, workspace, snapshots_dir];
+
+    // The scripted turn writes the file (the write needs one
+    // approval in supervised mode).
+    fixture.act(|window, cx| {
+        window.input("go", cx);
+        window.press("enter", cx);
+    });
+    pump(&mut fixture, 30);
+    fixture.act(|window, cx| window.click("approve-1", cx));
+    pump(&mut fixture, 40);
+    assert_eq!(
+        std::fs::read(workspace_path.join("scratch.txt")).expect("written"),
+        b"auto"
+    );
+
+    // Rewind the first (only) turn, files included: the file's
+    // before-content comes back (it didn't exist — an empty file),
+    // the transcript empties, the question returns as a draft.
+    fixture.act(|window, cx| window.click("rewind-0", cx));
+    fixture.act(|window, cx| {
+        assert!(
+            window.try_find("rewind-files").is_some(),
+            "the ledger offers the file restore"
+        );
+        window.click("rewind-files", cx);
+    });
+    assert_eq!(
+        std::fs::read(workspace_path.join("scratch.txt")).expect("restored"),
+        b"",
+        "the file is back to its before content"
+    );
+    assert_eq!(turn_count_of(&mut fixture), 0, "the transcript is empty");
+    assert_eq!(composer_text(&mut fixture), "go");
+}
+
+/// The safety guard is fail-closed: when something else streams in
+/// the same checkout, the file restore refuses — and only the files
+/// restore; keep-changes never needs the guard.
+#[test]
+fn the_guard_refuses_a_file_restore_while_another_tab_streams() {
+    let scenarios = tempfile::tempdir().expect("scenario dir");
+    std::fs::write(
+        scenarios.path().join("edits.toml"),
+        "[[steps]]\ntext = ''\n\n\
+         [[steps.tool_calls]]\nname = \"write_file\"\n\
+         arguments = '{\"path\": \"scratch.txt\", \"content\": \"auto\"}'\n\n\
+         [[steps]]\ntext = ''\n",
+    )
+    .expect("scenario file");
+    let workspace = tempfile::tempdir().expect("workspace dir");
+    let snapshots_dir = tempfile::tempdir().expect("snapshots dir");
+    let snapshots =
+        Arc::new(gertie_core::SnapshotStore::open(snapshots_dir.path()).expect("snapshot store"));
+    let endpoint = gertie_providers::Endpoint {
+        name: "replay".into(),
+        base_url: scenarios.path().to_string_lossy().into_owned(),
+        model: "edits".into(),
+        api_key: None,
+        context_window: None,
+        wire: gertie_providers::Wire::Replay,
+    };
+    let provider = Arc::new(
+        gertie_providers::AnyProvider::with_endpoints(vec![endpoint]).expect("replay provider"),
+    );
+    let store = Arc::new(SessionStore::open(Path::new(":memory:")).expect("memory store"));
+    let workspace_path = workspace.path().to_path_buf();
+    let busy: gertie::chat::LiveElsewhere =
+        Arc::new(|_, _, _| Err("another chat is streaming in this checkout".to_string()));
+    let mut fixture = fixture_built(
+        store,
+        Some(snapshots),
+        Some(workspace_path.clone()),
+        None,
+        Some(provider),
+        None,
+        Vec::new(),
+        Some(busy),
+    );
+    fixture.hold = vec![scenarios, workspace, snapshots_dir];
+
+    fixture.act(|window, cx| {
+        window.input("go", cx);
+        window.press("enter", cx);
+    });
+    pump(&mut fixture, 30);
+    fixture.act(|window, cx| window.click("approve-1", cx));
+    pump(&mut fixture, 40);
+
+    // Files restore: refused, nothing touched.
+    fixture.act(|window, cx| window.click("rewind-0", cx));
+    fixture.act(|window, cx| window.click("rewind-files", cx));
+    assert_eq!(
+        std::fs::read(workspace_path.join("scratch.txt")).expect("untouched"),
+        b"auto",
+        "the restore refused before touching anything"
+    );
+    // The refusal is visible — a notice turn joined the transcript —
+    // but nothing else moved.
+    assert_eq!(turn_count_of(&mut fixture), 3);
+
+    // Keep-changes never consults the guard — it changes no files.
+    fixture.act(|window, cx| window.click("rewind-keep", cx));
+    assert_eq!(turn_count_of(&mut fixture), 0);
+    assert_eq!(
+        std::fs::read(workspace_path.join("scratch.txt")).expect("kept"),
+        b"auto",
+        "keep means keep"
+    );
+}
+
+fn turn_count_of(fixture: &mut Fixture) -> usize {
+    fixture.cx.update(|cx| {
+        fixture
+            .view
+            .upgrade()
+            .expect("view alive")
+            .read(cx)
+            .turn_count_for_test()
+    })
 }

@@ -844,6 +844,24 @@ impl SessionStore {
         Ok(gone > 0)
     }
 
+    /// A message row's parent — the keep-point an "edit from here"
+    /// rewind restores the conversation to. `None` for a session's
+    /// first row.
+    pub fn message_parent(
+        &self,
+        message_id: MessageId,
+    ) -> Result<Option<MessageId>, rusqlite::Error> {
+        let connection = self.connection.lock().unwrap();
+        connection.query_row(
+            "SELECT parent_id FROM messages WHERE id = ?1",
+            [message_id.0 as i64],
+            |row| {
+                row.get::<_, Option<i64>>(0)
+                    .map(|parent| parent.map(|parent| MessageId(parent as u64)))
+            },
+        )
+    }
+
     /// Loads a session's messages oldest-first along the canonical
     /// path. Unbounded by design: the wire history, export, and fork
     /// need every row — the UI transcript uses the bounded
@@ -939,12 +957,15 @@ impl SessionStore {
                 }
             }
         }
-        // One root means one tree: the walk that ended there is the
-        // canonical path, abandoned branches and all. Any other shape
-        // — legacy linear rows (all roots), a corrupted chain — reads
-        // flat id order, which is what those rows mean.
-        let roots = rows.iter().filter(|row| row.parent_id.is_none()).count();
-        if broken || roots != 1 {
+        // One tree, one truth: if the walk from the tip reaches a root
+        // through resolvable parents, that walk is the canonical path —
+        // abandoned branches and all (a rewind-to-start even grows a
+        // second root; the tip says which branch is live). A store too
+        // old to have parents — no row links to anything — or a
+        // corrupted chain reads flat id order, which is what those
+        // rows mean.
+        let linked = rows.iter().any(|row| row.parent_id.is_some());
+        if broken || !linked {
             let mut flat: Vec<i64> = rows.iter().map(|row| row.id.0 as i64).collect();
             flat.sort_unstable();
             return Ok(flat);
@@ -1441,6 +1462,33 @@ mod tests {
         let rows = store.load_messages(session).unwrap();
         let contents: Vec<&str> = rows.iter().map(|row| row.content.as_str()).collect();
         assert_eq!(contents, vec!["one", "two"]);
+    }
+
+    /// A rewind to the very start parents the next send to nothing —
+    /// a second root. The tip still says which branch is live: the
+    /// walk reads the new conversation; the old rows stay as audit.
+    #[test]
+    fn a_rewind_to_the_start_grows_a_second_root_the_tip_still_rules() {
+        let store = memory_store();
+        let session = store.create_session("from scratch").unwrap();
+        let q1 = store
+            .append_message(session, None, Role::User, "wrong start")
+            .unwrap();
+        store
+            .append_message(session, Some(q1), Role::Assistant, "answer")
+            .unwrap();
+        // Edit from here on q1: keep-point is None; the re-sent
+        // message is a second root.
+        let q1_fixed = store
+            .append_message(session, None, Role::User, "right start")
+            .unwrap();
+        store
+            .append_message(session, Some(q1_fixed), Role::Assistant, "answer 2")
+            .unwrap();
+
+        let rows = store.load_messages(session).unwrap();
+        let contents: Vec<&str> = rows.iter().map(|row| row.content.as_str()).collect();
+        assert_eq!(contents, vec!["right start", "answer 2"]);
     }
 
     /// A fork's copy ends with the fork point as its tip, so the new

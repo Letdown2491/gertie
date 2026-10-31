@@ -195,10 +195,16 @@ pub(crate) fn pump(
 ) -> (Outcome, String) {
     // Assistant text accumulates until a shape change, then lands as one
     // row — the headless equivalent of the UI's throttled persistence.
+    // The recorder parents onto the session's tip, the way the real
+    // front does: whatever the session already held is the
+    // conversation this turn continues.
     let mut recorder = Recorder {
         store: store.clone(),
         session,
-        last_db_id: None,
+        last_db_id: store
+            .load_recent_messages(session, 1)
+            .ok()
+            .and_then(|rows| rows.last().map(|row| row.id)),
         pending: String::new(),
         text: String::new(),
     };

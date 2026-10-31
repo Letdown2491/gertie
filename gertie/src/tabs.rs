@@ -61,12 +61,46 @@ struct TabState {
     worktree: Option<PathBuf>,
 }
 
+/// The rewind safety guard every chat shares: a file restore refuses
+/// while another tab's turn is streaming in the same checkout — the
+/// workspace is what knows every tab, so it builds the closure.
+/// Fail-closed: if the workspace itself is unreachable, nothing
+/// restores.
+fn live_elsewhere(cx: &Context<WorkspaceView>) -> crate::chat::LiveElsewhere {
+    let workspace = cx.weak_entity();
+    Arc::new(move |cx, caller, root| {
+        let Some(workspace) = workspace.upgrade() else {
+            return Err("the workspace is gone".to_string());
+        };
+        // Read-only walk over the tab strip. The strong handle means
+        // the read can't fail; the Result inside is the guard's own
+        // verdict.
+        workspace.read_with(cx, |workspace, cx| {
+            for tab in &workspace.tabs {
+                // The asking tab never guards against itself.
+                if tab.view.entity_id() == caller.entity_id() {
+                    continue;
+                }
+                let view = tab.view.read(cx);
+                if view.is_streaming() && view.workspace_root() == root {
+                    return Err(format!(
+                        "'{}' is streaming in this checkout",
+                        view.tab_title()
+                    ));
+                }
+            }
+            Ok(())
+        })
+    })
+}
+
 impl WorkspaceView {
     /// The first tab resumes the newest stored session; every later tab
     /// starts blank — two views on one session would diverge their
     /// in-memory histories against one database.
     pub fn new(boot: Arc<Bootstrap>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let panel = cx.new(|_| boot.settings_panel());
+        let guard = live_elsewhere(cx);
         let first = cx.new(|cx| {
             ChatView::new(
                 boot.store.clone(),
@@ -85,6 +119,7 @@ impl WorkspaceView {
                 boot.default_mode,
                 panel,
                 true,
+                guard,
                 window,
                 cx,
             )
@@ -179,6 +214,7 @@ impl WorkspaceView {
         cx: &mut Context<Self>,
     ) -> Entity<ChatView> {
         let panel = cx.new(|_| self.boot.settings_panel());
+        let guard = live_elsewhere(cx);
         let view = cx.new(|cx| {
             ChatView::new(
                 self.boot.store.clone(),
@@ -197,6 +233,7 @@ impl WorkspaceView {
                 self.boot.default_mode,
                 panel,
                 false,
+                guard,
                 window,
                 cx,
             )

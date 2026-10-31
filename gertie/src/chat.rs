@@ -107,10 +107,43 @@ struct Recall {
     set: String,
 }
 
+/// An "edit from here" waiting on its user's choice — which flavor of
+/// rewind to run, if either. The confirm row renders from this; the
+/// rewind itself is real on the next send (the composer carries the
+/// edited text as a draft, the transcript already shows the kept
+/// prefix).
+#[derive(Clone)]
+struct PendingRewind {
+    /// Where the edited turn sits in the transcript — the cut point.
+    turn_index: usize,
+    /// The edited row's id, re-verified at completion: the only
+    /// guarantee that the index still means the same turn.
+    edit_id: MessageId,
+    /// The row the next send parents to — the edited message's own
+    /// parent. `None` rewinds to the session's very start.
+    keep_point: Option<MessageId>,
+    /// What each later turn changed, oldest first: the file-restore
+    /// offer. Per path, the earliest turn's checkpoint wins — its
+    /// object is the before content for everything after.
+    restore_points: Vec<(gertie_core::CheckpointId, std::path::PathBuf)>,
+    /// The edited message's text, restored into the composer.
+    text: String,
+}
+
 actions!(
     gertie,
     [CloseTurnDiff, UndoDeleteSession, RecallUp, RecallDown]
 );
+
+/// The rewind safety guard: is this workspace root busy with someone
+/// else's turn? A file restore rewrites working-tree content while a
+/// model may be mid-edit in another tab pointed at the same checkout
+/// — the restore refuses (fail-closed) rather than race it. The
+/// closure is built once by the workspace, which knows every tab;
+/// the second argument is the caller, so a tab never guards against
+/// itself.
+pub type LiveElsewhere =
+    Arc<dyn Fn(&mut App, &Entity<ChatView>, &std::path::Path) -> Result<(), String> + 'static>;
 
 /// The chat surface's key map, bound once at app start: escape closes
 /// the turn-diff panel while focus sits inside it, Ctrl+Z outside
@@ -308,6 +341,12 @@ pub struct ChatView {
     /// The prompt-recall walk (ArrowUp in an empty composer), when the
     /// composer is riding one.
     recall: Option<Recall>,
+    /// An "edit from here" waiting on its user's choice — the confirm
+    /// row above the queue shows it.
+    pending_rewind: Option<PendingRewind>,
+    /// The rewind safety guard, built by the workspace (see
+    /// `LiveElsewhere`): consulted before any file restore.
+    live_elsewhere: LiveElsewhere,
     /// Images waiting to ride with the next sent message.
     attachments: Vec<Attachment>,
     /// Bytes of the streaming assistant row already written to the
@@ -351,6 +390,9 @@ impl ChatView {
         // Resume the newest stored session (window open), or start
         // blank (a new tab — two views on one session would diverge).
         resume: bool,
+        // The rewind safety guard, built by the workspace: refuses a
+        // file restore while another tab streams in the same checkout.
+        live_elsewhere: LiveElsewhere,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -504,6 +546,8 @@ impl ChatView {
             steer_tx: None,
             queued: Vec::new(),
             recall: None,
+            pending_rewind: None,
+            live_elsewhere,
             attachments: Vec::new(),
             stream_persisted: 0,
             expanded_tools: Default::default(),
@@ -658,6 +702,10 @@ impl ChatView {
         self.turns = turns;
         self.history = Arc::new(tokio::sync::Mutex::new(history));
         self.last_db_id = last_db_id;
+        // A rewind confirm names turns of THIS transcript — switching
+        // sessions invalidates the question.
+        self.pending_rewind = None;
+        self.recall = None;
         self.streaming = false;
         self.thinking = false;
         self.streaming_assistant = None;
@@ -2778,6 +2826,189 @@ impl ChatView {
         }
     }
 
+    /// The folder this chat's tools run in — the guard's identity of
+    /// "the same checkout".
+    pub fn workspace_root(&self) -> &std::path::Path {
+        &self.workspace_root
+    }
+
+    /// "Edit from here" on a sent user turn: the transcript rewinds to
+    /// the turn's question, which returns to the composer as a draft.
+    /// The rewind is real on the next send — until then nothing is
+    /// lost, and the confirm row (kept changes vs. files too) waits
+    /// above the queue.
+    fn begin_rewind(&mut self, index: usize, cx: &mut Context<Self>) {
+        if self.streaming {
+            self.push_notice("A run is in flight — stop it before rewinding.", cx);
+            return;
+        }
+        let Some(Turn::Message {
+            role: Role::User,
+            text,
+            db_id: Some(edit_id),
+        }) = self.turns.get(index)
+        else {
+            return;
+        };
+        let edit_id = *edit_id;
+        let text = text.clone();
+        let keep_point = self.store.message_parent(edit_id).ok().flatten();
+        let restore_points = self.rewind_restore_points(keep_point);
+        self.pending_rewind = Some(PendingRewind {
+            turn_index: index,
+            edit_id,
+            keep_point,
+            restore_points,
+            text,
+        });
+        cx.notify();
+    }
+
+    /// What restoring "files too" would rewrite, oldest first: every
+    /// turn after the keep-point, its first checkpoint per path. No
+    /// ledger or no later turns means the files choice has nothing to
+    /// offer — the keep-changes rewind still stands.
+    fn rewind_restore_points(
+        &self,
+        keep_point: Option<MessageId>,
+    ) -> Vec<(gertie_core::CheckpointId, std::path::PathBuf)> {
+        let Some(snapshots) = &self.snapshots else {
+            return Vec::new();
+        };
+        let Some(session_id) = self.session_id else {
+            return Vec::new();
+        };
+        let turns = match snapshots.turns_for_session(session_id) {
+            Ok(turns) => turns,
+            Err(_) => return Vec::new(),
+        };
+        let mut seen = std::collections::HashSet::new();
+        let mut points = Vec::new();
+        for turn in turns
+            .iter()
+            .filter(|turn| keep_point.is_none_or(|keep| turn.user_message_id > keep))
+        {
+            let Ok(changes) = snapshots.turn_changes(turn) else {
+                continue;
+            };
+            for change in changes {
+                if seen.insert(change.path.clone()) {
+                    points.push((change.checkpoint, change.path));
+                }
+            }
+        }
+        points
+    }
+
+    /// Runs the confirmed rewind. Files restore first — any failure
+    /// aborts the whole thing with the view untouched (never
+    /// files-without-history, never the reverse either) — then the
+    /// transcript and the loop's history truncate to the kept prefix.
+    fn complete_rewind(
+        &mut self,
+        restore_files: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // Peeking, not taking: a refused rewind keeps the confirm row
+        // open — the user's question doesn't vanish because the files
+        // were busy. Only the commit point consumes it.
+        let Some(pending) = self.pending_rewind.clone() else {
+            return;
+        };
+        if self.streaming {
+            self.push_notice("A run is in flight — stop it before rewinding.", cx);
+            return;
+        }
+        // The turn we're rewinding must still be the one the user
+        // pointed at (pagination can have reshuffled the list in
+        // between) — a stale confirm closes itself.
+        let still_there = matches!(
+            self.turns.get(pending.turn_index),
+            Some(Turn::Message {
+                db_id: Some(id),
+                ..
+            }) if *id == pending.edit_id
+        );
+        if !still_there {
+            self.pending_rewind = None;
+            self.push_notice("The conversation moved — rewind cancelled.", cx);
+            return;
+        }
+        if restore_files {
+            // Safety first, and cheap: another tab streaming in this
+            // checkout refuses the restore before anything is touched.
+            let caller = cx.entity();
+            let guard = self.live_elsewhere.clone();
+            if let Err(reason) = guard.as_ref()(cx, &caller, &self.workspace_root) {
+                self.push_notice(format!("Files kept — {reason}."), cx);
+                return;
+            }
+            let Some(snapshots) = &self.snapshots else {
+                self.push_notice("No checkpoint ledger — files can't be restored.", cx);
+                return;
+            };
+            for (checkpoint, path) in &pending.restore_points {
+                if let Err(error) = snapshots.restore_under(*checkpoint, &self.workspace_root) {
+                    self.push_notice(
+                        format!(
+                            "Rewind stopped — {} could not be restored: {error}. \
+                             The choice stays open; fix the file and try again.",
+                            path.display()
+                        ),
+                        cx,
+                    );
+                    return;
+                }
+            }
+        }
+        let PendingRewind {
+            turn_index,
+            keep_point,
+            text,
+            ..
+        } = pending;
+        // Commit point. View surgery now that every fallible step is
+        // behind us. The next send parents to the keep point — the
+        // abandoned branch stays in the ledger as audit, off every
+        // read.
+        self.pending_rewind = None;
+        self.last_db_id = keep_point;
+        self.turns.truncate(turn_index);
+        // The kept prefix, rebuilt as the loop's wire history. Rows at
+        // or before the keep point are identical on every branch, so
+        // filtering the canonical path by id is branch-independent.
+        let prefix = match (self.session_id, pending.keep_point) {
+            (Some(session_id), Some(keep)) => self
+                .store
+                .load_messages(session_id)
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|row| row.id <= keep)
+                .collect::<Vec<_>>(),
+            _ => Vec::new(),
+        };
+        *self.history.blocking_lock() = SessionStore::wire_history_from_rows(&prefix);
+        // The expanded tool cards and unanswered reply boxes belonged
+        // to turns the transcript no longer shows.
+        self.expanded_tools.clear();
+        self.approval_replies.clear();
+        // The edited question returns as the composer's draft.
+        self.input
+            .update(cx, |input, cx| input.set_value(text, window, cx));
+        window.dispatch_action(Box::new(MoveToEnd), cx);
+        window.focus(&self.input.read(cx).focus_handle(cx), cx);
+        self.sync_list(cx);
+        cx.notify();
+    }
+
+    /// "Never mind" on the rewind confirm: nothing was changed by
+    /// asking.
+    fn cancel_rewind(&mut self, cx: &mut Context<Self>) {
+        self.pending_rewind = None;
+        cx.notify();
+    }
+
     /// "Quote" on an assistant turn: the response lands in the composer
     /// as a blockquote and your comment types after it — sending shows
     /// the model exactly which words you're talking about. A long
@@ -2986,6 +3217,26 @@ impl ChatView {
             }
             _ => None,
         };
+        // The rewind affordance: the same persisted user turns —
+        // "edit from here" truncates this conversation back to the
+        // question, which returns to the composer as a draft.
+        let rewind_button = match &self.turns[index] {
+            Turn::Message {
+                role: Role::User,
+                db_id: Some(_),
+                ..
+            } => Some(
+                Button::new(format!("rewind-{index}"))
+                    .label("rewind")
+                    .small()
+                    .ghost()
+                    .tooltip("Edit from here — the conversation after this message leaves the transcript")
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.begin_rewind(index, cx);
+                    })),
+            ),
+            _ => None,
+        };
         // The quote affordance: an assistant turn worth commenting on,
         // dropped into the composer as a blockquote (the citation is
         // exact — the agent reads back the same words you sent).
@@ -3009,26 +3260,31 @@ impl ChatView {
             }
             _ => None,
         };
-        let inner = match (fork_button, quote_button) {
-            (Some(button), _) => div()
+        // One affordance row under the bubble: user turns right-align
+        // (fork, rewind), assistant turns left-align (quote).
+        let user_turn = fork_button.is_some();
+        let mut buttons: Vec<AnyElement> = Vec::new();
+        if let Some(button) = fork_button {
+            buttons.push(button.into_any_element());
+        }
+        if let Some(button) = rewind_button {
+            buttons.push(button.into_any_element());
+        }
+        if let Some(button) = quote_button {
+            buttons.push(button.into_any_element());
+        }
+        let inner = if buttons.is_empty() {
+            inner
+        } else {
+            div()
                 .w_full()
                 .flex()
                 .flex_col()
-                .items_end()
+                .when(user_turn, |col| col.items_end())
+                .when(!user_turn, |col| col.items_start())
                 .child(inner)
-                .child(button)
-                .into_any_element(),
-            // The assistant bubble is left-aligned; its button keeps
-            // the same side.
-            (None, Some(button)) => div()
-                .w_full()
-                .flex()
-                .flex_col()
-                .items_start()
-                .child(inner)
-                .child(button)
-                .into_any_element(),
-            (None, None) => inner,
+                .child(h_flex().gap_1().children(buttons))
+                .into_any_element()
         };
         // Horizontal padding lives on each item, not the list: gpui's
         // `list` paints items at the container's left edge and ignores
@@ -4140,6 +4396,98 @@ impl Render for ChatView {
                                             )
                                         },
                                     )
+                                    .when(self.pending_rewind.is_some(), |composer| {
+                                        // The rewind confirm: which
+                                        // flavor — keep the files as
+                                        // they are, or restore their
+                                        // pre-turn content from the
+                                        // checkpoint ledger. The
+                                        // files choice only shows
+                                        // when the ledger holds
+                                        // something to restore.
+                                        let pending = self
+                                            .pending_rewind
+                                            .as_ref()
+                                            .expect("just checked");
+                                        let files = pending.restore_points.len();
+                                        composer.child(
+                                            v_flex()
+                                                .mx_4()
+                                                .mt_2()
+                                                .gap_1()
+                                                .border_1()
+                                                .border_dashed()
+                                                .border_color(cx.theme().border)
+                                                .rounded_md()
+                                                .px_3()
+                                                .py_2()
+                                                .child(
+                                                    div()
+                                                        .text_size(px(12.))
+                                                        .text_color(cx.theme().muted_foreground)
+                                                        .child(
+                                                            "Rewind to here — the conversation \
+                                                             after this question leaves the \
+                                                             transcript; the question returns \
+                                                             as a draft.",
+                                                        ),
+                                                )
+                                                .child(
+                                                    h_flex()
+                                                        .gap_2()
+                                                        .child(
+                                                            Button::new("rewind-keep")
+                                                                .label("Revert and keep changes")
+                                                                .xsmall()
+                                                                .outline()
+                                                                .tooltip(
+                                                                    "Keep every file as it is — \
+                                                                     only the conversation rewinds",
+                                                                )
+                                                                .on_click(cx.listener(
+                                                                    |this, _, window, cx| {
+                                                                        this.complete_rewind(
+                                                                            false, window, cx,
+                                                                        );
+                                                                    },
+                                                                )),
+                                                        )
+                                                        .when(files > 0, |row| {
+                                                            row.child(
+                                                                Button::new("rewind-files")
+                                                                    .label(format!(
+                                                                        "Revert files too ({files})"
+                                                                    ))
+                                                                    .xsmall()
+                                                                    .outline()
+                                                                    .tooltip(
+                                                                        "Restore each touched \
+                                                                         file to its content \
+                                                                         before these turns",
+                                                                    )
+                                                                    .on_click(cx.listener(
+                                                                        |this, _, window, cx| {
+                                                                            this.complete_rewind(
+                                                                                true, window, cx,
+                                                                            );
+                                                                        },
+                                                                    )),
+                                                            )
+                                                        })
+                                                        .child(
+                                                            Button::new("rewind-cancel")
+                                                                .label("Cancel")
+                                                                .xsmall()
+                                                                .ghost()
+                                                                .on_click(cx.listener(
+                                                                    |this, _, _, cx| {
+                                                                        this.cancel_rewind(cx);
+                                                                    },
+                                                                )),
+                                                        ),
+                                                ),
+                                        )
+                                    })
                                     .when(!self.queued.is_empty(), |composer| {
                                         // Queued follow-ups as dashed
                                         // drafts: visible words, not a
