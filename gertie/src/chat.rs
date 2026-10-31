@@ -40,7 +40,7 @@ enum ToolStatus {
 /// endpoints actually read: images and PDFs ride the multimodal blocks
 /// as data URLs; text-likes ride inline in the message text, the one
 /// shape every endpoint accepts. `id` keys the chip and its remove
-/// button — a content or path hash, so re-attaching the same thing
+/// button, a content or path hash, so re-attaching the same thing
 /// replaces the chip instead of stacking it.
 struct Attachment {
     id: u64,
@@ -53,10 +53,10 @@ enum AttachmentKind {
     /// also writes them to the attachments dir so a reload re-sends.
     DataUrl(String),
     /// UTF-8 content inlined into the message text at send. No storage
-    /// marker — the stored transcript carries the text itself.
+    /// marker, the stored transcript carries the text itself.
     Text(String),
     /// A paste too big for the message: held whole here, written into
-    /// the workspace (.gertie/pastes/) at send, and cited by path —
+    /// the workspace (.gertie/pastes/) at send, and cited by path,
     /// the agent reads the file with its own tools instead of the
     /// context carrying the body.
     Paste { name: String, content: String },
@@ -74,7 +74,7 @@ const RECENT_WINDOW: usize = 400;
 
 /// The cadence streaming repaints at. Deltas arrive in bursts; each
 /// repaint re-parses the growing row, so a token's cost must be a
-/// frame's cost, not a token-shaped pile of them. 16 ms is one frame —
+/// frame's cost, not a token-shaped pile of them. 16 ms is one frame,
 /// and the turn's transitions (flush_stream) notify regardless.
 const STREAM_NOTIFY_CADENCE: std::time::Duration = std::time::Duration::from_millis(16);
 
@@ -90,14 +90,14 @@ const WORKING_TICK: std::time::Duration = std::time::Duration::from_millis(500);
 /// "stopped", and only worth speaking when it exists.
 const QUIET_AFTER: std::time::Duration = std::time::Duration::from_secs(20);
 
-/// The status spinner's frames — half-moons, one step per working
+/// The status spinner's frames, half-moons, one step per working
 /// tick (2 fps). Geometric shapes on purpose: the emoji lesson
-/// (the paperclip below) — glyphs a bare Linux font stack actually
+/// (the paperclip below), glyphs a bare Linux font stack actually
 /// carries.
 const SPINNER_FRAMES: [&str; 4] = ["◐", "◓", "◑", "◒"];
 
 /// The composer's ghost text at rest.
-const IDLE_PLACEHOLDER: &str = "Message gertie… — / for commands";
+const IDLE_PLACEHOLDER: &str = "Message gertie…, / for commands";
 
 /// The composer's ghost text while a turn runs: the send key's two
 /// meanings, stated where the keys are. Placeholders only render on
@@ -119,9 +119,9 @@ enum Turn {
         /// Read-only tools never prompted; the card says so instead of
         /// showing buttons the human never needed to click.
         auto_approved: bool,
-        /// Subagent asks get labeled — same card, provenance visible.
+        /// Subagent asks get labeled, same card, provenance visible.
         worker: bool,
-        /// The persisted row for this tool's result, once it exists —
+        /// The persisted row for this tool's result, once it exists,
         /// how a palette hit lands on the right card.
         db_id: Option<MessageId>,
     },
@@ -133,7 +133,7 @@ enum Turn {
 
 /// Composer recall: which sent prompt the composer is sitting on
 /// (counting back from the newest) and what was typed before recall
-/// began — ArrowDown past the newest restores it. `set` is the exact
+/// began, ArrowDown past the newest restores it. `set` is the exact
 /// text recall last wrote: a Change carrying anything else is the
 /// user typing, which ends recall.
 struct Recall {
@@ -142,23 +142,23 @@ struct Recall {
     set: String,
 }
 
-/// An "edit from here" waiting on its user's choice — which flavor of
+/// An "edit from here" waiting on its user's choice, which flavor of
 /// rewind to run, if either. The confirm row renders from this; the
 /// rewind itself is real on the next send (the composer carries the
 /// edited text as a draft, the transcript already shows the kept
 /// prefix).
 #[derive(Clone)]
 struct PendingRewind {
-    /// Where the edited turn sits in the transcript — the cut point.
+    /// Where the edited turn sits in the transcript, the cut point.
     turn_index: usize,
     /// The edited row's id, re-verified at completion: the only
     /// guarantee that the index still means the same turn.
     edit_id: MessageId,
-    /// The row the next send parents to — the edited message's own
+    /// The row the next send parents to, the edited message's own
     /// parent. `None` rewinds to the session's very start.
     keep_point: Option<MessageId>,
     /// What each later turn changed, oldest first: the file-restore
-    /// offer. Per path, the earliest turn's checkpoint wins — its
+    /// offer. Per path, the earliest turn's checkpoint wins, its
     /// object is the before content for everything after.
     restore_points: Vec<(gertie_core::CheckpointId, std::path::PathBuf)>,
     /// The edited message's text, restored into the composer.
@@ -192,7 +192,7 @@ enum FocusArea {
 /// The rewind safety guard: is this workspace root busy with someone
 /// else's turn? A file restore rewrites working-tree content while a
 /// model may be mid-edit in another tab pointed at the same checkout
-/// — the restore refuses (fail-closed) rather than race it. The
+///, the restore refuses (fail-closed) rather than race it. The
 /// closure is built once by the workspace, which knows every tab;
 /// the second argument is the caller, so a tab never guards against
 /// itself.
@@ -200,7 +200,7 @@ pub type LiveElsewhere =
     Arc<dyn Fn(&mut App, &Entity<ChatView>, &std::path::Path) -> Result<(), String> + 'static>;
 
 /// The workspace switch, as a chat asks for it: hand the closure a
-/// folder, get back everything the chat must re-root — registry,
+/// folder, get back everything the chat must re-root, registry,
 /// prompt, templates, sandbox posture. Built once by the workspace,
 /// which owns the bootstrap; the chat never sees it. The switch is a
 /// human gesture only: nothing on the model's side of the glass can
@@ -208,14 +208,14 @@ pub type LiveElsewhere =
 pub type SwitchWorkspace =
     Arc<dyn Fn(&std::path::Path) -> Result<crate::bootstrap::Switched, String> + 'static>;
 
-/// Binds the keymap's default rules directly — the test-fixture
+/// Binds the keymap's default rules directly, the test-fixture
 /// path. The app binds through `keymap::load_and_bind` (the same
 /// defaults, plus the user's keymap.toml on top).
 pub fn bind_chat_keys(cx: &mut App) {
     crate::keymap::bind_rules(&crate::keymap::default_rules(), cx);
 }
 
-/// One file's change in the turn-diff panel, resolved at open time —
+/// One file's change in the turn-diff panel, resolved at open time,
 /// the panel never re-reads the ledger while it shows.
 struct TurnFileView {
     path: std::path::PathBuf,
@@ -224,7 +224,7 @@ struct TurnFileView {
     diff: FileDiff,
 }
 
-/// Text files diff; binary files refuse — a lossy text rendering would
+/// Text files diff; binary files refuse, a lossy text rendering would
 /// lie about what changed.
 enum FileDiff {
     Text(crate::diff::Patch),
@@ -238,7 +238,7 @@ struct TurnDiffPanel {
     focus: gpui_kit::FocusHandle,
 }
 
-/// One row of the panel's list, as data — `AnyElement` isn't `Clone`,
+/// One row of the panel's list, as data, `AnyElement` isn't `Clone`,
 /// so (like the transcript) rows re-render from data on every paint.
 enum TurnDiffRow {
     /// A file's header: path, ± summary, expand toggle.
@@ -251,17 +251,17 @@ enum TurnDiffRow {
 
 /// A session inside its undo window: ✕ clicked, store row still there,
 /// purge task scheduled. The vec membership is the "not yet purged"
-/// marker — undo removes the entry, the purge finds nothing to do.
+/// marker, undo removes the entry, the purge finds nothing to do.
 /// The snooze delay: how far a limited turn's resume is put off. Not
 /// parsed from the provider's reported reset time (Retry-After and
-/// friends differ per wire) — a fixed half hour is the boring middle,
+/// friends differ per wire), a fixed half hour is the boring middle,
 /// and a fired-but-still-limited turn just ends limited again for a
 /// human decision.
 const SNOOZE_MINUTES: u64 = 30;
 
 struct PendingDelete {
     session_id: SessionId,
-    /// The title at delete time — the toast speaks in past tense about
+    /// The title at delete time, the toast speaks in past tense about
     /// a row that no longer exists to ask.
     title: String,
 }
@@ -276,7 +276,7 @@ pub struct ChatView {
     /// part of history: the DB stays canonical.
     system_prompt: Option<String>,
     sessions: Vec<gertie_core::SessionSummary>,
-    /// None until the first message — empty chats don't exist as rows, so
+    /// None until the first message, empty chats don't exist as rows, so
     /// the sidebar shows only real conversations.
     session_id: Option<SessionId>,
     turns: Vec<Turn>,
@@ -285,13 +285,13 @@ pub struct ChatView {
     /// Index of the assistant turn currently receiving deltas; None until
     /// the first delta of a round (tool rounds each get their own row).
     streaming_assistant: Option<usize>,
-    /// Last persisted row — the parent for whatever is appended next.
+    /// Last persisted row, the parent for whatever is appended next.
     last_db_id: Option<MessageId>,
-    /// What the agent is up to right now, for the status line — the loop
+    /// What the agent is up to right now, for the status line, the loop
     /// goes quiet between streaming rounds, and silence reads as a hang.
     activity: String,
     /// When the current activity began. The status line's clock resets
-    /// with every change — thinking, a tool, thinking again — so the
+    /// with every change, thinking, a tool, thinking again, so the
     /// number always answers "how long has THIS been going on".
     activity_at: Instant,
     /// The last event the loop delivered. The status line's quiet
@@ -302,33 +302,33 @@ pub struct ChatView {
     /// outlive several silent minutes; its card's "running · 2m 05s"
     /// is its own time, not the turn's.
     tool_starts: std::collections::HashMap<String, Instant>,
-    /// This chat's window, captured at construction — the composer's
+    /// This chat's window, captured at construction, the composer's
     /// placeholder swaps from windowless async contexts (turn start
     /// and end both live inside the turn driver's spawn).
     window_handle: AnyWindowHandle,
-    /// True while the turn is alive but nothing visible is happening —
+    /// True while the turn is alive but nothing visible is happening,
     /// the request is in flight or the model is chewing on tool results.
     /// Drives the in-transcript "Thinking…" row: the header status alone
     /// was too easy to miss, and a quiet transcript reads as a hang.
     thinking: bool,
-    /// Session token totals from the provider's usage events — persisted
+    /// Session token totals from the provider's usage events, persisted
     /// per session, so a resumed chat shows what it spent before too.
     usage: (u64, u64),
     /// Token totals across all sessions, for the settings panel.
     /// Refreshed when the panel opens, never per render.
     total_usage: (u64, u64),
-    /// The last request's context size (prompt + completion) — what the
+    /// The last request's context size (prompt + completion), what the
     /// next request carries, the number the compaction check watches.
     /// Shown as a live gauge under the composer.
     context_used: u64,
-    /// The provider's context window, when it declares one — the gauge's
+    /// The provider's context window, when it declares one, the gauge's
     /// denominator.
     context_window: Option<u64>,
     /// Prompt templates for `/name` expansion in the composer. The
-    /// builtins /compact, /export, /new, /settings and /agents are
-    /// methods, not files.
+    /// builtins /compact, /export, /new and /settings are methods,
+    /// not files.
     templates: Vec<gertie_tools::templates::Template>,
-    /// The folder the agent's tools run in — shown in the footer so
+    /// The folder the agent's tools run in, shown in the footer so
     /// "which project am I talking about" is always answered on screen.
     workspace_root: std::path::PathBuf,
     /// The reclaim command a manual settle runs in the settling
@@ -339,15 +339,15 @@ pub struct ChatView {
     palette: Entity<CommandState>,
     /// Whether the palette is on screen.
     palette_open: bool,
-    /// The hits behind the palette's rows, in search-rank order — the
+    /// The hits behind the palette's rows, in search-rank order, the
     /// row index a confirm hands back indexes this vector.
     palette_hits: Vec<gertie_core::HistoryHit>,
     /// The `>` mode's matched commands, same row-index contract.
     palette_commands: Vec<(&'static str, &'static str, crate::palette::PaletteCommand)>,
-    /// The query the palette is sitting on — the pick ledger's key and
+    /// The query the palette is sitting on, the pick ledger's key and
     /// the mode switch (`>` = commands).
     palette_query: String,
-    /// The turn-diff modal, when open — raised from a tool card's
+    /// The turn-diff modal, when open, raised from a tool card's
     /// "turn diff" button, dismissed by escape, backdrop, or restore.
     turn_diff: Option<TurnDiffPanel>,
     /// Which file's diff is expanded in the panel, one at a time.
@@ -362,10 +362,10 @@ pub struct ChatView {
     /// Worker dispatch reads the turn's posture here; the chat sets it
     /// at every turn start, never mid-turn.
     mode_scope: gertie_core::ModeScope,
-    /// Whether bash runs inside the Landlock sandbox (config) — the
+    /// Whether bash runs inside the Landlock sandbox (config), the
     /// auto mode's bash approval keys off it.
     sandbox_bash: bool,
-    /// This session's permission mode — the chip's state and the next
+    /// This session's permission mode, the chip's state and the next
     /// turn's posture. Follows the open session; a fresh chat starts
     /// at the configured default.
     mode: PermissionMode,
@@ -376,7 +376,7 @@ pub struct ChatView {
     /// field editing its title (Enter commits; clicking away cancels).
     renaming: Option<SessionId>,
     rename_input: Entity<InputState>,
-    /// Reply inputs for pending permission cards, keyed by turn index —
+    /// Reply inputs for pending permission cards, keyed by turn index,
     /// the deny-with-feedback path: the human's text rides back to the
     /// model in the tool result. Created on first render (that's where
     /// a window handle exists), dropped when the card is answered.
@@ -387,19 +387,17 @@ pub struct ChatView {
     /// closes; undo pulls the entry back out first.
     pending_deletes: Vec<PendingDelete>,
     /// The snooze promise: this open session's limited turn will be
-    /// resumed by itself, thirty minutes out. One shot — cleared by the
+    /// resumed by itself, thirty minutes out. One shot, cleared by the
     /// fire, a manual resume, a fresh send, or a fresh limit; the
     /// pending timer no-ops whenever the field no longer agrees.
     snoozed: Option<SessionId>,
     /// Whether the sidebar's settled fold is expanded. Collapsed by
-    /// default — settled work is put down, not gone; one click brings
+    /// default, settled work is put down, not gone; one click brings
     /// it back.
     settled_open: bool,
-    /// The right column: this chat's worker runs, or the settings view.
-    /// One slot — opening one closes the other.
+    /// The right column: the settings view.
     panel: Panel,
-    worker_runs: Vec<(gertie_core::SessionSummary, RunState)>,
-    /// The settings editor (summary + form) — its Saved event bubbles
+    /// The settings editor (summary + form), its Saved event bubbles
     /// to the workspace, which reloads the bootstrap and applies here.
     settings_panel: Entity<SettingsPanelView>,
     list_state: ListState,
@@ -407,7 +405,7 @@ pub struct ChatView {
     /// Mid-run steering: user messages land in the running turn at the
     /// next round boundary. Set while a turn drives; cleared at its end.
     steer_tx: Option<tokio::sync::mpsc::UnboundedSender<String>>,
-    /// Follow-ups typed while streaming with the secondary Enter —
+    /// Follow-ups typed while streaming with the secondary Enter,
     /// queued rows, mirrored from the store: they run as their own
     /// turns when the current one ends, and they survive a stop, a
     /// crash, or a restart because they were rows all along.
@@ -415,7 +413,7 @@ pub struct ChatView {
     /// The prompt-recall walk (ArrowUp in an empty composer), when the
     /// composer is riding one.
     recall: Option<Recall>,
-    /// An "edit from here" waiting on its user's choice — the confirm
+    /// An "edit from here" waiting on its user's choice, the confirm
     /// row above the queue shows it.
     pending_rewind: Option<PendingRewind>,
     /// The rewind safety guard, built by the workspace (see
@@ -436,7 +434,7 @@ pub struct ChatView {
     sidebar_focus: gpui_kit::FocusHandle,
     transcript_focus: gpui_kit::FocusHandle,
     side_focus: gpui_kit::FocusHandle,
-    /// Each area's last-focused control — the cycle restores it when
+    /// Each area's last-focused control, the cycle restores it when
     /// it comes back around.
     focus_memory: std::collections::HashMap<FocusArea, gpui_kit::FocusHandle>,
     /// Images waiting to ride with the next sent message.
@@ -458,7 +456,7 @@ pub struct ChatView {
     markdown_cache: std::cell::RefCell<crate::markdown::ParseCache>,
     /// Memoized tool-card faces per turn index (see [`ToolFace`]).
     tool_face: std::cell::RefCell<std::collections::HashMap<usize, ToolFace>>,
-    /// The last repaint a streaming delta asked for — deltas coalesce
+    /// The last repaint a streaming delta asked for, deltas coalesce
     /// to [`STREAM_NOTIFY_CADENCE`].
     stream_notify: Option<std::time::Instant>,
 }
@@ -485,7 +483,7 @@ impl ChatView {
         // Worker dispatch reads this turn's posture; the chat sets it
         // at every turn start.
         mode_scope: gertie_core::ModeScope,
-        // Whether bash runs inside the Landlock sandbox (config) —
+        // Whether bash runs inside the Landlock sandbox (config),
         // the auto mode's bash approval keys off it.
         sandbox_bash: bool,
         // The mode new sessions open in ([permissions] default_mode).
@@ -493,7 +491,7 @@ impl ChatView {
         // The settings editor over the live config.
         settings_panel: Entity<SettingsPanelView>,
         // Resume the newest stored session (window open), or start
-        // blank (a new tab — two views on one session would diverge).
+        // blank (a new tab, two views on one session would diverge).
         resume: bool,
         // The worktree branch naming, when this chat works in its own
         // worktree: the branch is renamed from the session's first
@@ -510,7 +508,7 @@ impl ChatView {
     ) -> Self {
         // The composer is a multi-line text area: Enter sends,
         // Shift+Enter is a newline (long prompts, pasted snippets).
-        // One row at rest, growing with content up to a cap — a tall
+        // One row at rest, growing with content up to a cap, a tall
         // empty box made the attach button look lost beside it.
         // The palette is a component entity like the input: created
         // once, parked until Ctrl+K puts it on screen.
@@ -518,7 +516,7 @@ impl ChatView {
         let turn_diff_list = ListState::new(0, ListAlignment::Top, px(256.));
         let input = cx.new(|cx| {
             TextareaState::new(window, cx)
-                .placeholder("Message gertie… — / for commands")
+                .placeholder("Message gertie…, / for commands")
                 .auto_grow(1, 6)
         });
         cx.subscribe_in(&input, window, |this, _, event: &InputEvent, window, cx| {
@@ -533,7 +531,7 @@ impl ChatView {
                     this.send(*secondary, window, cx)
                 }
             }
-            // Typing ends the recall walk — but recall's own writes
+            // Typing ends the recall walk, but recall's own writes
             // don't: the set text is the walk's, until the user edits.
             if let InputEvent::Change = event
                 && let Some(recall) = &this.recall
@@ -575,7 +573,7 @@ impl ChatView {
         // un-settle door, and a cold open shouldn't shove put-down work
         // back in your face). The store is one global memory across
         // every folder, but a chat opened in a folder is that folder's
-        // chat — resuming the global newest is how one conversation's
+        // chat, resuming the global newest is how one conversation's
         // files end up in another folder's fresh window. Otherwise the
         // first message creates the session (lazy, so no empty rows
         // accumulate).
@@ -661,7 +659,6 @@ impl ChatView {
             snoozed: None,
             settled_open: false,
             panel: Panel::None,
-            worker_runs: Vec::new(),
             settings_panel,
             // Tail: follow new content while pinned to the bottom, stop
             // when the user scrolls up, resume when they return.
@@ -725,15 +722,6 @@ impl ChatView {
         self.streaming
     }
 
-    /// The agents panel's rows in display order — title and state
-    /// label — for the attention-order test.
-    pub fn worker_runs_for_test(&self) -> Vec<(String, &'static str)> {
-        self.worker_runs
-            .iter()
-            .map(|(summary, state)| (summary.title.clone(), state.label()))
-            .collect()
-    }
-
     /// How many turns the transcript holds, for tests and tooling.
     pub fn turn_count_for_test(&self) -> usize {
         self.turns.len()
@@ -744,7 +732,7 @@ impl ChatView {
         self.activity_line()
     }
 
-    /// Ages the status clocks, for tests — quiet's threshold is real
+    /// Ages the status clocks, for tests, quiet's threshold is real
     /// seconds and no test waits them out. Instant arithmetic, not a
     /// mocked clock: both clocks go back together, as a real quiet
     /// stretch would leave them.
@@ -775,7 +763,7 @@ impl ChatView {
         self.palette_open
     }
 
-    /// The sidebar's settled sessions, for tests — the ids that folded
+    /// The sidebar's settled sessions, for tests, the ids that folded
     /// out of the active list.
     pub fn settled_ids_for_test(&self) -> Vec<SessionId> {
         self.sessions
@@ -790,7 +778,7 @@ impl ChatView {
         self.palette_hits.len()
     }
 
-    /// The palette's hit sessions in display order — the MRU boost's
+    /// The palette's hit sessions in display order, the MRU boost's
     /// test.
     pub fn palette_hit_sessions_for_test(&self) -> Vec<gertie_core::SessionId> {
         self.palette_hits.iter().map(|hit| hit.session_id).collect()
@@ -808,12 +796,11 @@ impl ChatView {
     pub fn panel_for_test(&self) -> &'static str {
         match self.panel {
             Panel::None => "none",
-            Panel::Agents => "agents",
             Panel::Settings => "settings",
         }
     }
 
-    /// The palette state's entity, for tests — the selection mover.
+    /// The palette state's entity, for tests, the selection mover.
     pub fn palette_entity_for_test(&self) -> Entity<CommandState> {
         self.palette.clone()
     }
@@ -832,13 +819,13 @@ impl ChatView {
         }
     }
 
-    /// Where the transcript's virtual list is scrolled, for tests —
+    /// Where the transcript's virtual list is scrolled, for tests,
     /// the first visible turn index.
     pub fn scroll_top_for_test(&self) -> usize {
         self.list_state.logical_scroll_top().item_ix
     }
 
-    /// Scrolls the transcript to an absolute row, for tests — the
+    /// Scrolls the transcript to an absolute row, for tests, the
     /// programmatic stand-in for the user scrolling up (tail-follow
     /// pauses the same way).
     pub fn scroll_to_item_for_test(&self, ix: usize) {
@@ -849,7 +836,7 @@ impl ChatView {
         });
     }
 
-    /// The turn-diff panel's file count — `None` when closed, `Some(n)`
+    /// The turn-diff panel's file count, `None` when closed, `Some(n)`
     /// when open with n files listed, for tests.
     pub fn turn_diff_for_test(&self) -> Option<usize> {
         self.turn_diff.as_ref().map(|panel| panel.files.len())
@@ -866,7 +853,7 @@ impl ChatView {
         }
     }
 
-    /// Whether a turn is alive in this chat, for the tab strip — a tab
+    /// Whether a turn is alive in this chat, for the tab strip, a tab
     /// working in the background reads as busy even when its window is
     /// elsewhere.
     pub fn is_streaming(&self) -> bool {
@@ -876,9 +863,9 @@ impl ChatView {
     /// Swaps the transcript for a session's stored messages and rebuilds
     /// the canonical history the loop will extend. The transcript takes
     /// a bounded window (the newest `RECENT_WINDOW` rows); the wire
-    /// history takes everything — the loop resumes with exactly what
+    /// history takes everything, the loop resumes with exactly what
     /// the model saw before.
-    /// Reloads the draft stack from the store — the rows are the
+    /// Reloads the draft stack from the store, the rows are the
     /// truth; the vec is their shadow.
     fn sync_queue(&mut self) {
         self.queued = match self.session_id {
@@ -898,7 +885,7 @@ impl ChatView {
                     .load_recent_messages(session_id, RECENT_WINDOW + 1)
                     .unwrap_or_default();
                 let older_rows = rows.len() > RECENT_WINDOW;
-                // The wire history starts as the page's rows — opening
+                // The wire history starts as the page's rows, opening
                 // a chat is one page of work, and the archive behind
                 // the page loads in the background (below).
                 let seed = SessionStore::wire_history_from_rows(&rows);
@@ -915,7 +902,7 @@ impl ChatView {
             None => (Vec::new(), Vec::new(), None, None),
         };
         self.turns = turns;
-        // The turn indexes name different turns now — no cached parse
+        // The turn indexes name different turns now, no cached parse
         // or card face may survive the reload. The running clocks go
         // with them: a reloaded transcript has no live cards.
         self.markdown_cache.borrow_mut().clear();
@@ -923,8 +910,8 @@ impl ChatView {
         self.tool_starts.clear();
         self.history = Arc::new(tokio::sync::Mutex::new(history));
         self.last_db_id = last_db_id;
-        // The archive behind the page — every row, every image
-        // re-read — loads off the UI thread and lands here: the seed
+        // The archive behind the page, every row, every image
+        // re-read, loads off the UI thread and lands here: the seed
         // is replaced wholesale, unless the in-memory history diverged
         // meanwhile (a compaction shrank it: never re-inflate it; a
         // send grew it: its new wires ride along).
@@ -949,7 +936,7 @@ impl ChatView {
             })
             .detach();
         }
-        // A rewind confirm names turns of THIS transcript — switching
+        // A rewind confirm names turns of THIS transcript, switching
         // sessions invalidates the question.
         self.pending_rewind = None;
         self.recall = None;
@@ -975,7 +962,7 @@ impl ChatView {
     /// "Load earlier": page the next older batch of rows into the
     /// transcript. The prepend shifts every turn index, so index-keyed
     /// state (expanded cards, reply inputs) dies here, and the click is
-    /// refused mid-stream — a live turn is still appending and would
+    /// refused mid-stream, a live turn is still appending and would
     /// race the renumbering.
     fn load_earlier(&mut self, cx: &mut Context<Self>) {
         if self.streaming {
@@ -1006,7 +993,7 @@ impl ChatView {
             rows.remove(0);
         }
         if rows.is_empty() {
-            // The row that got us here was stale — retire it.
+            // The row that got us here was stale, retire it.
             let had_row = matches!(self.turns.first(), Some(Turn::LoadEarlier));
             if had_row {
                 self.turns.remove(0);
@@ -1015,7 +1002,7 @@ impl ChatView {
             cx.notify();
             return;
         }
-        // Reading history pauses tail-following — the next append must
+        // Reading history pauses tail-following, the next append must
         // not yank the view to the bottom. (A user who scrolled up here
         // already paused it; this is for the fresh-session edge.)
         self.list_state.pause_following_tail();
@@ -1029,10 +1016,10 @@ impl ChatView {
         let added = page.len();
         self.turns = page;
         // The clicked row's slot grew into the new page: one splice
-        // keeps the list's height cache and scroll position in step —
+        // keeps the list's height cache and scroll position in step,
         // the reader holds their place, no snap.
         self.list_state.splice(0..1, added);
-        // Every turn's index just shifted by the page's size — all
+        // Every turn's index just shifted by the page's size, all
         // index-keyed state is stale at once.
         self.expanded_tools.clear();
         self.expanded_runs.clear();
@@ -1059,7 +1046,7 @@ impl ChatView {
 
     /// Whether an approval card waits on the human. Quiet's gauge
     /// holds its tongue then: the silence is ours to answer, not the
-    /// agent's to explain — and the ask's own clock already tells it.
+    /// agent's to explain, and the ask's own clock already tells it.
     fn waiting_on_human(&self) -> bool {
         self.turns.iter().any(|turn| {
             matches!(
@@ -1074,13 +1061,13 @@ impl ChatView {
 
     /// Whether the "Thinking…" row belongs at the bottom right now: the
     /// turn is alive, but no card, prompt, or streaming text is telling
-    /// the story — the exact gaps that used to read as a hang.
+    /// the story, the exact gaps that used to read as a hang.
     fn show_activity_row(&self) -> bool {
         self.streaming && self.thinking && !self.waiting_on_human()
     }
 
-    /// The composer chip's click: the mode advances around the ring —
-    /// supervised → accept edits → auto → full access — and persists
+    /// The composer chip's click: the mode advances around the ring,
+    /// supervised → accept edits → auto → full access, and persists
     /// with the session. It applies from the next turn on; a running
     /// turn keeps the posture it was built with, and the notice says
     /// so when it matters.
@@ -1118,7 +1105,6 @@ impl ChatView {
         self.mode = self.default_mode;
         self.usage = (0, 0);
         self.context_used = 0;
-        self.refresh_agent_runs(cx);
         self.turns.clear();
         self.approval_replies.clear();
         self.last_db_id = None;
@@ -1133,7 +1119,7 @@ impl ChatView {
 
     /// The composer's ghost text follows the turn: at rest it invites a
     /// message; while a turn runs it names what Enter and Ctrl+Enter
-    /// do — steer the running turn, or queue for the next one. The old
+    /// do, steer the running turn, or queue for the next one. The old
     /// static hint beside the attach button left the composer row
     /// before the eyes ever got there; a placeholder renders exactly
     /// where the user is typing, and only while the input is empty, so
@@ -1167,13 +1153,13 @@ impl ChatView {
         window.focus(&self.input.read(cx).focus_handle(cx), cx);
     }
 
-    /// The window-free body of a session switch — the palette's confirm
+    /// The window-free body of a session switch, the palette's confirm
     /// callback runs with an App handle, not a window, and jumps here.
     fn switch_session_state(&mut self, session_id: SessionId, cx: &mut Context<Self>) {
         if self.streaming {
             return;
         }
-        // Pending attachments are composer state, not session state —
+        // Pending attachments are composer state, not session state,
         // they don't hop conversations. Neither does the turn-diff
         // panel: it answers for the session it was opened in.
         self.attachments.clear();
@@ -1209,17 +1195,16 @@ impl ChatView {
             .map(|summary| summary.mode)
             .unwrap_or(self.default_mode);
         self.context_used = summary.map(|summary| summary.context_tokens).unwrap_or(0);
-        self.refresh_agent_runs(cx);
         self.reload_session(cx);
         // A conversation that started in another folder: the
-        // transcript's paths are about to say so — better the tab says
+        // transcript's paths are about to say so, better the tab says
         // it first. The tools stay rooted here; /new is the fresh
         // chat. After the reload on purpose: the notice is a transcript
         // row, and the reload just rebuilt the transcript.
         if let Some(stored) = foreign_root {
             self.push_notice(
                 format!(
-                    "This conversation started in {} — this tab's tools run in {}. \
+                    "This conversation started in {}, this tab's tools run in {}. \
                      /new starts a fresh chat.",
                     tildify(std::path::Path::new(&stored)),
                     tildify(&self.workspace_root)
@@ -1230,7 +1215,7 @@ impl ChatView {
     }
 
     /// Ctrl+K (or the sidebar's search button): open the palette over
-    /// the store's memory. A fresh query — last time's hits are last
+    /// the store's memory. A fresh query, last time's hits are last
     /// time's; and focus the field so typing starts immediately.
     fn open_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.palette_open = true;
@@ -1250,7 +1235,7 @@ impl ChatView {
             return;
         }
         self.palette_open = false;
-        // Focus comes home: the hidden palette field must not keep it —
+        // Focus comes home: the hidden palette field must not keep it,
         // a dead focus strands the next Ctrl+K (no dispatch path) and
         // every keystroke in between.
         window.focus(&self.input.read(cx).focus_handle(cx), cx);
@@ -1260,7 +1245,7 @@ impl ChatView {
     /// The palette's query callback. Two modes: `>` filters the
     /// command list (case-insensitive substring over name and
     /// description); anything else answers from the store's FTS index,
-    /// bounded — twenty hits is a page a human can actually scan —
+    /// bounded, twenty hits is a page a human can actually scan,
     /// with the query's past picks boosted to the top. Sessions inside
     /// their undo window never show up here.
     fn palette_search(&mut self, query: &str, cx: &mut Context<Self>) {
@@ -1284,7 +1269,7 @@ impl ChatView {
                 .collect();
             // The MRU boost: threads this query led to before rank
             // first, in pick-recency order; the rest keep the FTS
-            // rank. Stable sort — both orders survive inside their
+            // rank. Stable sort, both orders survive inside their
             // class.
             let boosts = self.store.palette_boosts(query.trim());
             hits.sort_by_key(|hit| {
@@ -1299,8 +1284,8 @@ impl ChatView {
     }
 
     /// Confirming a palette row. Command mode runs the action; a hit
-    /// lands on that turn — a hit from another session switches first,
-    /// either way the matching row scrolls into view — and the
+    /// lands on that turn, a hit from another session switches first,
+    /// either way the matching row scrolls into view, and the
     /// (query, session) pair lands in the pick ledger for next time.
     fn palette_confirm(&mut self, row: usize, window: &mut Window, cx: &mut Context<Self>) {
         if !self.palette_commands.is_empty() {
@@ -1347,7 +1332,7 @@ impl ChatView {
     }
 
     /// A `>`-picked command, run. Same actions the slash commands
-    /// drive — one vocabulary, two doors.
+    /// drive, one vocabulary, two doors.
     fn run_palette_command(
         &mut self,
         command: crate::palette::PaletteCommand,
@@ -1357,23 +1342,19 @@ impl ChatView {
         match command {
             crate::palette::PaletteCommand::NewChat => {
                 if self.streaming {
-                    self.push_notice(
-                        "A run is in flight — a new chat waits for it to finish.",
-                        cx,
-                    );
+                    self.push_notice("A run is in flight, a new chat waits for it to finish.", cx);
                     return;
                 }
                 self.new_session(window, cx);
             }
             crate::palette::PaletteCommand::Compact => self.compact_now(cx),
             crate::palette::PaletteCommand::Export => self.export_now(cx),
-            crate::palette::PaletteCommand::Agents => self.toggle_agents(cx),
             crate::palette::PaletteCommand::Settings => self.toggle_settings(cx),
         }
     }
 
-    /// "turn diff" on a done tool card: anchor to the card's turn —
-    /// the latest user message at or before it — and open the ledger's
+    /// "turn diff" on a done tool card: anchor to the card's turn,
+    /// the latest user message at or before it, and open the ledger's
     /// answer. Works from any card in the turn; the diff is the turn's,
     /// not the call's.
     fn open_turn_diff(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
@@ -1396,7 +1377,7 @@ impl ChatView {
         }
     }
 
-    /// The panel body, window-free — tests call this directly. The
+    /// The panel body, window-free, tests call this directly. The
     /// ledger resolves the turn from the user message row, and every
     /// file's before/after is read once, here.
     pub fn open_turn_diff_for_message(&mut self, message_id: MessageId, cx: &mut Context<Self>) {
@@ -1412,7 +1393,7 @@ impl ChatView {
             .flatten()
         else {
             self.push_notice(
-                "No checkpoint ledger for this turn — it predates turn diffs.",
+                "No checkpoint ledger for this turn, it predates turn diffs.",
                 cx,
             );
             return;
@@ -1427,7 +1408,7 @@ impl ChatView {
                 let after = match &change.after {
                     AfterState::Object(hash) => snapshots.read_object(hash).unwrap_or_default(),
                     // Never touched again: disk is the answer, resolved
-                    // against the workspace the turn ran in — the
+                    // against the workspace the turn ran in, the
                     // ledger's record, not necessarily this chat's
                     // current root.
                     AfterState::Disk => {
@@ -1467,12 +1448,12 @@ impl ChatView {
         }
     }
 
-    /// Restore: every touched path back to its pre-turn content — the
+    /// Restore: every touched path back to its pre-turn content, the
     /// turn's own undo. Bounded local writes; gated on a quiet turn
     /// because files changing under a running loop is chaos.
     fn restore_turn(&mut self, cx: &mut Context<Self>) {
         if self.streaming {
-            self.push_notice("A run is in flight — restoring waits for it.", cx);
+            self.push_notice("A run is in flight, restoring waits for it.", cx);
             return;
         }
         let Some(panel) = self.turn_diff.take() else {
@@ -1481,8 +1462,8 @@ impl ChatView {
         self.turn_diff_open = None;
         let mut restored = 0;
         if let Some(snapshots) = &self.snapshots {
-            // The writes land where the turn ran — the ledger's
-            // recorded root, not this chat's current one — so that is
+            // The writes land where the turn ran, the ledger's
+            // recorded root, not this chat's current one, so that is
             // the checkout the guard must see.
             let restore_root = panel
                 .files
@@ -1492,7 +1473,7 @@ impl ChatView {
             let caller = cx.entity();
             let guard = self.live_elsewhere.clone();
             if let Err(reason) = guard.as_ref()(cx, &caller, &restore_root) {
-                self.push_notice(format!("Files kept — {reason}."), cx);
+                self.push_notice(format!("Files kept, {reason}."), cx);
                 self.turn_diff = Some(panel);
                 return;
             }
@@ -1524,7 +1505,7 @@ impl ChatView {
         cx: &Context<Self>,
     ) -> AnyElement {
         // The rows as data; the list's closure paints them through the
-        // view (elements are rebuilt per paint — the transcript works
+        // view (elements are rebuilt per paint, the transcript works
         // the same way).
         let mut rows: Vec<TurnDiffRow> = Vec::new();
         for (index, file) in panel.files.iter().enumerate() {
@@ -1543,7 +1524,7 @@ impl ChatView {
                         }
                     }
                     FileDiff::Binary { .. } => {
-                        rows.push(TurnDiffRow::Note("binary file — contents not shown".into()))
+                        rows.push(TurnDiffRow::Note("binary file, contents not shown".into()))
                     }
                 }
             }
@@ -1646,7 +1627,7 @@ impl ChatView {
                                                             cx.theme().muted_foreground,
                                                         )
                                                         .child(
-                                                            "Git's own churn (pulls, merges) never appears here — the diff is what the tools did.",
+                                                            "Git's own churn (pulls, merges) never appears here, the diff is what the tools did.",
                                                         ),
                                                 )
                                                 .child(
@@ -1668,7 +1649,7 @@ impl ChatView {
             .into_any_element()
     }
 
-    /// Paints one panel row from its data. Runs per paint, per row —
+    /// Paints one panel row from its data. Runs per paint, per row,
     /// nothing here touches the ledger.
     fn paint_diff_row(&self, row: &TurnDiffRow, cx: &mut Context<Self>) -> AnyElement {
         match row {
@@ -1755,18 +1736,8 @@ impl ChatView {
         }
     }
 
-    /// The agents panel toggle: opens/closes and refreshes the run list.
-    fn toggle_agents(&mut self, cx: &mut Context<Self>) {
-        self.panel = if self.panel == Panel::Agents {
-            Panel::None
-        } else {
-            Panel::Agents
-        };
-        self.refresh_agent_runs(cx);
-    }
-
-    /// The settings panel toggle. One column, one panel: opening one
-    /// closes the other.
+    /// The settings panel toggle: the right column's only panel now,
+    /// the toggle opens and closes it.
     fn toggle_settings(&mut self, cx: &mut Context<Self>) {
         self.panel = if self.panel == Panel::Settings {
             Panel::None
@@ -1774,40 +1745,6 @@ impl ChatView {
             Panel::Settings
         };
         self.total_usage = self.store.total_usage();
-        cx.notify();
-    }
-
-    /// Reloads this chat's worker runs (summary + report status). Cheap
-    /// queries on agent-tool events only — never per render.
-    fn refresh_agent_runs(&mut self, cx: &mut Context<Self>) {
-        let mut runs = self
-            .session_id
-            .map(|session| {
-                self.store
-                    .list_child_sessions(session)
-                    .unwrap_or_default()
-                    .into_iter()
-                    .map(|summary| {
-                        let reported = self.store.worker_run_reported(summary.id);
-                        let state = if summary.limited {
-                            // Stopped on the provider's limit: the run
-                            // waits on the human's Resume.
-                            RunState::NeedsYou
-                        } else if reported {
-                            RunState::Done
-                        } else {
-                            RunState::Running
-                        };
-                        (summary, state)
-                    })
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default();
-        // Attention-ordered, not recency-ordered: what waits on you
-        // first, then what's alive, then what's finished. Stable, so
-        // id order (start order) holds within a class.
-        runs.sort_by_key(|(_, state)| *state as u8);
-        self.worker_runs = runs;
         cx.notify();
     }
 
@@ -1828,7 +1765,7 @@ impl ChatView {
     }
 
     /// Enter in the rename field: persist the title, refresh the sidebar.
-    /// Empty input cancels — an unnamed session is worse than a stale title.
+    /// Empty input cancels, an unnamed session is worse than a stale title.
     fn commit_rename(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(session_id) = self.renaming.take() else {
             return;
@@ -1843,7 +1780,7 @@ impl ChatView {
     }
 
     /// The ✕ on a sidebar row: the session leaves every list right now,
-    /// but the store row survives a five-second undo window — the toast
+    /// but the store row survives a five-second undo window, the toast
     /// at the sidebar's foot is the speed bump the "sure?" step used to
     /// be. Undo puts it back; the window closing purges it for real.
     /// Deleting the open session returns to the blank transcript.
@@ -1868,7 +1805,7 @@ impl ChatView {
         self.renaming = None;
         if self.session_id == Some(session_id) {
             // The human asked for this transcript gone: blank it now,
-            // not after the purge — the view never contradicts ✕.
+            // not after the purge, the view never contradicts ✕.
             self.session_id = None;
             self.turns.clear();
             self.approval_replies.clear();
@@ -1876,7 +1813,6 @@ impl ChatView {
             self.streaming_assistant = None;
             self.history.blocking_lock().clear();
         }
-        self.refresh_agent_runs(cx);
         self.sync_list(cx);
         cx.notify();
 
@@ -1903,22 +1839,20 @@ impl ChatView {
             .retain(|pending| pending.session_id != session_id);
         let _ = self.store.delete_session(session_id);
         self.sessions = self.store.list_sessions().unwrap_or_default();
-        self.refresh_agent_runs(cx);
         cx.notify();
     }
 
     /// Undo on the toast (button or Ctrl+Z outside the composer): pop
-    /// the most recent pending delete — the row returns to its lists
+    /// the most recent pending delete, the row returns to its lists
     /// untouched, the store row was never gone.
     fn undo_delete_clicked(&mut self, cx: &mut Context<Self>) {
         if self.pending_deletes.pop().is_some() {
             self.sessions = self.store.list_sessions().unwrap_or_default();
-            self.refresh_agent_runs(cx);
             cx.notify();
         }
     }
 
-    /// The ✓ on a sidebar row: settle — the human put the work down.
+    /// The ✓ on a sidebar row: settle, the human put the work down.
     /// Out of the active list, never out of the record; opening it
     /// again un-settles. Reversible on the row itself (↩).
     fn settle_clicked(&mut self, session_id: SessionId, settled: bool, cx: &mut Context<Self>) {
@@ -1937,7 +1871,7 @@ impl ChatView {
     }
 
     /// The settle_command (config), run in the settling session's
-    /// recorded workspace — the reclaim hook (`cargo clean` in a
+    /// recorded workspace, the reclaim hook (`cargo clean` in a
     /// worktree checkout, say). The command never blocks the UI and
     /// never runs from the auto-settle sweep: a human pressed ✓ here.
     /// A session with no recorded root (older than the column) says so
@@ -1948,7 +1882,7 @@ impl ChatView {
         };
         let Some(root) = self.store.session_workspace(session_id) else {
             self.push_notice(
-                "no workspace recorded for this session — settle command skipped",
+                "no workspace recorded for this session, settle command skipped",
                 cx,
             );
             return;
@@ -1967,15 +1901,15 @@ impl ChatView {
                 .await;
             let _ = this.update(cx, |this, cx| match output {
                 Ok(output) if output.status.success() => {
-                    this.push_notice(format!("settle: `{notice_command}` — done"), cx);
+                    this.push_notice(format!("settle: `{notice_command}`, done"), cx);
                 }
                 Ok(output) => {
                     let stderr = String::from_utf8_lossy(&output.stderr);
                     let tail = stderr.lines().next_back().unwrap_or("no output");
-                    this.push_notice(format!("settle: `{notice_command}` failed — {tail}"), cx);
+                    this.push_notice(format!("settle: `{notice_command}` failed, {tail}"), cx);
                 }
                 Err(error) => {
-                    this.push_notice(format!("settle: `{notice_command}` failed — {error}"), cx)
+                    this.push_notice(format!("settle: `{notice_command}` failed, {error}"), cx)
                 }
             });
         })
@@ -2010,7 +1944,7 @@ impl ChatView {
 
     /// The footer's workspace word, clicked: a folder picker, then the
     /// re-root. The rebuild (registry, prompt, overlay answers) is the
-    /// bootstrap closure's; the apply is atomic here, between turns —
+    /// bootstrap closure's; the apply is atomic here, between turns,
     /// a running turn keeps the root it started with, the same
     /// doctrine as the permission mode, and the notice says so when
     /// one is in flight.
@@ -2018,7 +1952,7 @@ impl ChatView {
         if self.branch_naming.is_some() {
             // A worktree tab's root IS its checkout; moving it would
             // break the branch-rename promise the tab was opened for.
-            self.push_notice("This tab works in its own worktree — it doesn't move.", cx);
+            self.push_notice("This tab works in its own worktree, it doesn't move.", cx);
             return;
         }
         let picker = cx.prompt_for_paths(gpui_kit::PathPromptOptions {
@@ -2039,7 +1973,7 @@ impl ChatView {
                 Ok(Ok(switched)) => switched,
                 Ok(Err(error)) => {
                     let _ = this.update(cx, |this, cx| {
-                        this.push_notice(format!("Workspace stays — {error}."), cx)
+                        this.push_notice(format!("Workspace stays, {error}."), cx)
                     });
                     return;
                 }
@@ -2051,8 +1985,8 @@ impl ChatView {
     }
 
     /// Lands a rebuilt workspace in this chat. The running turn is
-    /// safe by construction — its spec cloned the old root and
-    /// registry at send — so the swap is plain field assignment, and
+    /// safe by construction, its spec cloned the old root and
+    /// registry at send, so the swap is plain field assignment, and
     /// the next send runs re-rooted. Steers included in the *old*
     /// root: they join the running turn, which is what the notice's
     /// "when this turn ends" owns.
@@ -2067,11 +2001,11 @@ impl ChatView {
         }
         // The one notice that states the move in the transcript's own
         // sequence: the turns after this row ran there. It dies with
-        // the session's UI life (never stored) — the ledger's
+        // the session's UI life (never stored), the ledger's
         // per-checkpoint workspace is the durable record.
         self.push_notice(
             format!(
-                "Workspace switched to {} — the next turn runs there{}.",
+                "Workspace switched to {}, the next turn runs there{}.",
                 tildify(&self.workspace_root),
                 if self.streaming {
                     " when this turn ends"
@@ -2117,7 +2051,7 @@ impl ChatView {
                         attached = true;
                     }
                 }
-                // Text entries paste as text, as always — unless the
+                // Text entries paste as text, as always, unless the
                 // paste is bigger than a message should be, in which
                 // case it becomes a file chip and the paste is consumed.
                 gpui_kit::ClipboardEntry::String(text) => {
@@ -2156,14 +2090,14 @@ impl ChatView {
             cx,
         );
         self.push_notice(
-            format!("Big paste ({kb} KB) filed as {name} — it rides as a path the agent reads with read_file, not as message text."),
+            format!("Big paste ({kb} KB) filed as {name}, it rides as a path the agent reads with read_file, not as message text."),
             cx,
         );
         true
     }
 
     /// One file from the picker or a copied path: read it, classify it
-    /// by extension, park it as a chip. Refusals speak — an unsupported
+    /// by extension, park it as a chip. Refusals speak, an unsupported
     /// type or an oversized file explains itself instead of silently
     /// vanishing on the wire later.
     fn attach_file(&mut self, path: std::path::PathBuf, cx: &mut Context<Self>) {
@@ -2181,7 +2115,7 @@ impl ChatView {
         let Some(media_type) = gertie_core::media_type_for_extension(extension) else {
             self.push_notice(
                 format!(
-                    "Can't attach {name} — models read images, PDFs, and text files; \
+                    "Can't attach {name}, models read images, PDFs, and text files; \
                      .{extension} has no wire shape."
                 ),
                 cx,
@@ -2241,10 +2175,10 @@ impl ChatView {
 
     /// Turns pending attachments into (inline text, storage markers,
     /// wire data URLs). Binary bytes land in the attachments dir under
-    /// their content hash; the DB keeps only the path — a reload reads
+    /// their content hash; the DB keeps only the path, a reload reads
     /// the file back. A write failure degrades to wire-only: the live
     /// turn still sees the image, it just won't survive a restart.
-    /// Text attachments never touch the dir — their content joins the
+    /// Text attachments never touch the dir, their content joins the
     /// message text itself, so the record and the wire stay identical.
     /// A big paste is filed inside the workspace (.gertie/pastes/) and
     /// the message cites the path for the agent's read_file.
@@ -2269,8 +2203,8 @@ impl ChatView {
                     ));
                 }
                 AttachmentKind::Paste { name, content } => {
-                    // Filed into the workspace — the only place the
-                    // agent's read_file can reach — and cited by path.
+                    // Filed into the workspace, the only place the
+                    // agent's read_file can reach, and cited by path.
                     // The write is gertie's own, not a tool call, so no
                     // checkpoint: .gertie/ is scratch by convention, and
                     // the local exclude keeps it out of git status the
@@ -2282,12 +2216,12 @@ impl ChatView {
                     if filed {
                         let _ = crate::worktree::ensure_local_exclude(&self.workspace_root);
                         inline.push_str(&format!(
-                            "\n\n--- pasted text: {name} ({} KB) — too large for the message, \
+                            "\n\n--- pasted text: {name} ({} KB), too large for the message, \
                              saved to .gertie/pastes/{name}; read it with read_file ---",
                             content.len() / 1024
                         ));
                     } else {
-                        // Couldn't file it — the paste still rides, inline.
+                        // Couldn't file it, the paste still rides, inline.
                         // Losing the user's text to a disk error is worse
                         // than a fat message.
                         inline.push_str(&format!(
@@ -2328,7 +2262,7 @@ impl ChatView {
 
     /// Accepts the popup's top match (what Enter does while the slash
     /// popup is open): builtins execute, templates expand into the
-    /// composer for editing — args ride along. Returns false when no
+    /// composer for editing, args ride along. Returns false when no
     /// popup is open, so Enter falls through to sending.
     fn accept_slash_top(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
         let value = self.input.read(cx).value().to_string();
@@ -2350,7 +2284,7 @@ impl ChatView {
     }
 
     /// Accepts one popup row: builtins execute through the normal send
-    /// path; templates expand into the composer — you see the real
+    /// path; templates expand into the composer, you see the real
     /// prompt, edit it, send it yourself.
     fn accept_slash_text(
         &mut self,
@@ -2369,7 +2303,7 @@ impl ChatView {
 
     fn send(&mut self, queue_only: bool, window: &mut Window, cx: &mut Context<Self>) {
         let raw = self.input.read(cx).value().trim().to_string();
-        // Invisible characters never reach a prompt — or a title. Bidi
+        // Invisible characters never reach a prompt, or a title. Bidi
         // controls and zero-width letters can't be typed but paste in
         // fine; stripped here at the system's entrance, so the record,
         // the transcript, and the model all read the same words.
@@ -2377,12 +2311,12 @@ impl ChatView {
         if typed.is_empty() {
             return;
         }
-        // Whatever leaves the composer ends a recall walk — the walk's
+        // Whatever leaves the composer ends a recall walk, the walk's
         // place in history is superseded by the send itself.
         self.recall = None;
         // Slash commands act on the session, not through the model:
         // builtins first, then file templates. An unknown name reports
-        // and keeps the input — the user fixes the spelling instead of
+        // and keeps the input, the user fixes the spelling instead of
         // retyping the message.
         let text = match gertie_tools::templates::parse_invocation(&typed) {
             Some((name, args)) => match name.as_str() {
@@ -2400,10 +2334,10 @@ impl ChatView {
                 }
                 "new" => {
                     // The composer blanks only when the new chat
-                    // actually happens — a run in flight keeps its
+                    // actually happens, a run in flight keeps its
                     // turn's state, and the user hears why.
                     if self.streaming {
-                        self.push_notice("A run is in flight — /new waits for it to finish.", cx);
+                        self.push_notice("A run is in flight, /new waits for it to finish.", cx);
                         return;
                     }
                     self.input
@@ -2417,16 +2351,10 @@ impl ChatView {
                     self.toggle_settings(cx);
                     return;
                 }
-                "agents" => {
-                    self.input
-                        .update(cx, |input, cx| input.set_value("", window, cx));
-                    self.toggle_agents(cx);
-                    return;
-                }
                 _ => {
                     let Some(template) = gertie_tools::templates::lookup(&self.templates, &name)
                     else {
-                        // The same list the bare `/` popup shows —
+                        // The same list the bare `/` popup shows,
                         // derived, so the notice can't drift from it.
                         let names: Vec<String> = slash_matches("/", &self.templates)
                             .iter()
@@ -2438,7 +2366,7 @@ impl ChatView {
                             })
                             .collect();
                         self.push_notice(
-                            format!("No template `/{name}` — available: {}.", names.join(", ")),
+                            format!("No template `/{name}`, available: {}.", names.join(", ")),
                             cx,
                         );
                         return;
@@ -2450,7 +2378,7 @@ impl ChatView {
         };
         // A template's body is front-authored too, so it rides through
         // the same strip. One notice when anything was actually
-        // removed — the message itself proceeds cleaned.
+        // removed, the message itself proceeds cleaned.
         let cleaned = gertie_core::strip_invisible(&text);
         if cleaned != text || typed != raw {
             self.push_notice("Invisible characters were removed from the message.", cx);
@@ -2461,7 +2389,7 @@ impl ChatView {
         // boundary); the secondary Enter queues a follow-up that
         // runs as its own turn when this one ends. The queue is rows
         // in the store, so a crash keeps the words; a write that
-        // can't land hands the message back — it never pretends.
+        // can't land hands the message back, it never pretends.
         if self.streaming {
             if queue_only || self.steer_tx.is_none() {
                 match self
@@ -2473,7 +2401,7 @@ impl ChatView {
                         self.input
                             .update(cx, |input, cx| input.set_value(raw, window, cx));
                         self.push_notice(
-                            "The queue didn't take the message — it's back in the composer.",
+                            "The queue didn't take the message, it's back in the composer.",
                             cx,
                         );
                         return;
@@ -2495,19 +2423,19 @@ impl ChatView {
         // Attachments split three ways at send: text files join the
         // message text (record and wire stay identical), binary bytes
         // become storage markers for the DB and data URLs for the wire
-        // — the wire text itself stays clean, the model gets files as
+        //, the wire text itself stays clean, the model gets files as
         // typed blocks.
         let (inline, markers, images) = self.take_attachments();
         let text = format!("{text}{inline}");
         let stored = format!("{text}{markers}");
         // First message of a chat: the session is born here, titled by
-        // what was typed — the invocation, not the expansion.
+        // what was typed, the invocation, not the expansion.
         let session_id = match self.session_id {
             Some(session_id) => session_id,
             None => {
                 let title: String = typed.chars().take(48).collect();
                 let session_id = self.store.create_session(&title).expect("create session");
-                // The chip's posture at birth is the session's record —
+                // The chip's posture at birth is the session's record,
                 // config default unless the chip moved first. The
                 // workspace rides in with `deliver_message`'s re-root
                 // check (a fresh session's root reads None → written).
@@ -2522,7 +2450,7 @@ impl ChatView {
 
     /// The common tail of a real send: the row persists, the ledger
     /// mints, the loop runs. Queue drains and force-sends land here
-    /// too — with no attachments of their own (stored == text, no
+    /// too, with no attachments of their own (stored == text, no
     /// images). The session already exists by the time this runs.
     fn deliver_message(
         &mut self,
@@ -2536,7 +2464,7 @@ impl ChatView {
         // from the footer re-roots the session at the next send, so
         // launch resume and the settle hook follow the conversation
         // rather than the folder it was born in. Checked per send, not
-        // assumed — the common case (no switch) costs one small read.
+        // assumed, the common case (no switch) costs one small read.
         let stored_root = self.store.session_workspace(session_id);
         let moved = match stored_root.as_deref() {
             Some(stored) => !same_workspace(stored, &self.workspace_root),
@@ -2546,12 +2474,12 @@ impl ChatView {
             self.store
                 .set_session_workspace(session_id, &self.workspace_root);
         }
-        // The session's first message names the worktree's branch —
+        // The session's first message names the worktree's branch,
         // computed from the same text that's about to be persisted,
         // before any state moves. Only the first: the branch name is
         // the opening request's slug, fixed once. Failures are
         // swallowed (the temporary tab-N name remains, the work goes
-        // on) — the branch name is a courtesy, never a gate. The git
+        // on), the branch name is a courtesy, never a gate. The git
         // subprocesses run on the background pool: the send must not
         // wait on `git branch -m`.
         let is_first = self.last_db_id.is_none();
@@ -2596,7 +2524,7 @@ impl ChatView {
     }
 
     /// "Send now" on a queued draft: out of the queue, into the live
-    /// turn as a steer — or its own turn when none runs.
+    /// turn as a steer, or its own turn when none runs.
     fn force_send_followup(&mut self, id: gertie_core::QueuedId, cx: &mut Context<Self>) {
         let Some(text) = self.store.take_followup(id).ok().flatten() else {
             // The row vanished under us: refresh the stack and move on.
@@ -2619,7 +2547,7 @@ impl ChatView {
     }
 
     /// "Edit" on a queued draft: pulled back into the composer (under
-    /// any draft already typed there) and out of the queue — editing a
+    /// any draft already typed there) and out of the queue, editing a
     /// queued message is just drafting it again.
     fn edit_followup(
         &mut self,
@@ -2645,7 +2573,7 @@ impl ChatView {
         cx.notify();
     }
 
-    /// "✕" on a queued draft: the row goes from the store — the queue
+    /// "✕" on a queued draft: the row goes from the store, the queue
     /// is rows, so removal is real in every direction.
     fn remove_followup(&mut self, id: gertie_core::QueuedId, cx: &mut Context<Self>) {
         let _ = self.store.remove_followup(id);
@@ -2655,23 +2583,23 @@ impl ChatView {
 
     /// `/compact`: replace the in-memory history with its selection now
     /// instead of waiting for the context ceiling. Shapes the next
-    /// request, not the record — the DB keeps every row, so a reload
+    /// request, not the record, the DB keeps every row, so a reload
     /// restores full history. No model is called; this works with no
     /// endpoint configured at all.
     fn compact_now(&mut self, cx: &mut Context<Self>) {
         if self.streaming {
-            self.push_notice("A run is in flight — wait for it to finish.", cx);
+            self.push_notice("A run is in flight, wait for it to finish.", cx);
             return;
         }
         let history = self.history.clone();
-        // Below twice the kept tail there's nothing to give back —
+        // Below twice the kept tail there's nothing to give back,
         // selecting would shrink nothing.
         let big_enough = {
             let current = history.blocking_lock();
             current.len() >= 2 * gertie_core::agent_loop::KEEP_TAIL
         };
         if !big_enough {
-            self.push_notice("Nothing to compact — the history is already short.", cx);
+            self.push_notice("Nothing to compact, the history is already short.", cx);
             return;
         }
         let budget = gertie_core::agent_loop::selection_budget(self.context_window);
@@ -2682,18 +2610,18 @@ impl ChatView {
                     this.on_compacted(kept, total, cx);
                     this.set_activity("Context compacted");
                 }
-                None => this.push_notice("Nothing to compact — history is small.", cx),
+                None => this.push_notice("Nothing to compact, history is small.", cx),
             });
         })
         .detach();
     }
 
-    /// `/export`: write the session's persisted rows as JSONL — one
+    /// `/export`: write the session's persisted rows as JSONL, one
     /// object per message, the shape the model saw. Lands in the data
     /// dir's `exports/`; the notice reports the path.
     fn export_now(&mut self, cx: &mut Context<Self>) {
         let Some(session_id) = self.session_id else {
-            self.push_notice("Nothing to export — this chat has no messages yet.", cx);
+            self.push_notice("Nothing to export, this chat has no messages yet.", cx);
             return;
         };
         let title = self
@@ -2725,7 +2653,7 @@ impl ChatView {
         }
     }
 
-    /// A muted system row in the transcript — notices, command results.
+    /// A muted system row in the transcript, notices, command results.
     /// Display-only: never persisted, never sent.
     fn push_notice(&mut self, text: impl Into<String>, cx: &mut Context<Self>) {
         self.turns.push(Turn::Message {
@@ -2736,8 +2664,8 @@ impl ChatView {
         self.sync_list(cx);
     }
 
-    /// A notice from the harness side — the window-close gate is the
-    /// one caller — saying why something the user just did did
+    /// A notice from the harness side, the window-close gate is the
+    /// one caller, saying why something the user just did did
     /// nothing. Display-only, like every notice row.
     pub fn warn(&mut self, text: &str, cx: &mut Context<Self>) {
         self.push_notice(text, cx);
@@ -2746,7 +2674,7 @@ impl ChatView {
     /// Hands the turn to the agent loop and renders its event stream:
     /// deltas stream into an assistant row, tool calls become cards, and
     /// results persist as tool rows the model also sees on reload.
-    /// `user_text` None means *resume* — continue from history as it
+    /// `user_text` None means *resume*, continue from history as it
     /// stands, no new user row.
     fn drive_turn(
         &mut self,
@@ -2770,9 +2698,9 @@ impl ChatView {
         // Subagent dispatch reads this to link its runs to this chat.
         self.session_scope.set(self.session_id);
         // Worker dispatch reads the posture the same way: set once per
-        // turn, read at their spawn — never mutated mid-turn.
+        // turn, read at their spawn, never mutated mid-turn.
         self.mode_scope.set(self.mode);
-        // Steering: the channel lives exactly as long as the turn —
+        // Steering: the channel lives exactly as long as the turn,
         // Enter while streaming lands here; at the turn's end the
         // sender drops and Enter queues instead.
         let (steer_tx, steer_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -2793,7 +2721,7 @@ impl ChatView {
             prompt_source: gertie_core::PromptSource::Leader,
             system_prompt: self.system_prompt.clone(),
         });
-        // Subagent asks arrive here, not on the leader's stream — a
+        // Subagent asks arrive here, not on the leader's stream, a
         // worker's loop runs inside a tool, so nobody drains its events.
         let mut worker_asks = self.broker.subscribe();
 
@@ -2808,8 +2736,8 @@ impl ChatView {
         self.sync_list(cx);
 
         // The working tick: half a second, only while this turn runs.
-        // Deltas repaint by themselves; the quiet stretches — a model
-        // thinking, a two-minute test run — are what the tick serves,
+        // Deltas repaint by themselves; the quiet stretches, a model
+        // thinking, a two-minute test run, are what the tick serves,
         // stepping the spinner and rolling the status line's clock.
         // It dies with the turn, so nothing animates at rest.
         cx.spawn(async move |this, cx| {
@@ -2834,7 +2762,7 @@ impl ChatView {
         cx.spawn(async move |this, cx| {
             let mut stream = stream;
             // The leader stream parks inside agent tools while a worker
-            // runs — its asks would be invisible. Selecting over both
+            // runs, its asks would be invisible. Selecting over both
             // keeps every ask answerable, whoever asked.
             loop {
                 tokio::select! {
@@ -2873,7 +2801,7 @@ impl ChatView {
                             this.usage.0 += input_tokens;
                             this.usage.1 += output_tokens;
                             // The last request's prompt + completion is
-                            // the context the next request carries — the
+                            // the context the next request carries, the
                             // live number the compaction check watches.
                             this.context_used = input_tokens + output_tokens;
                             // The ledger outlives the view: persist per
@@ -2899,6 +2827,19 @@ impl ChatView {
                     LoopEvent::Limited { message } => {
                         let _ = this.update(cx, |this, cx| this.on_limited(&message, cx));
                     }
+                    LoopEvent::Nudged => {
+                        // The wrap-up nudge entered history; the human
+                        // hears it too, quietly, local notice only.
+                        let _ = this.update(cx, |this, cx| {
+                            this.push_notice(
+                                "Tool-round budget reached, the model is wrapping up.",
+                                cx,
+                            )
+                        });
+                    }
+                    LoopEvent::Budgeted { message } => {
+                        let _ = this.update(cx, |this, cx| this.on_budgeted(&message, cx));
+                    }
                     LoopEvent::Done => break,
                         }
                     }
@@ -2921,10 +2862,10 @@ impl ChatView {
                 this.streaming_assistant = None;
                 // The turn is over: steering closes, the queue takes
                 // over. A queued follow-up runs as its own turn, right
-                // now — the composer keeps whatever was typed meanwhile.
+                // now, the composer keeps whatever was typed meanwhile.
                 this.steer_tx = None;
                 // No running cards survive the turn, and the composer's
-                // ghost text goes back to inviting a message — unless a
+                // ghost text goes back to inviting a message, unless a
                 // queued follow-up re-opens the turn below, which swaps
                 // it again.
                 this.tool_starts.clear();
@@ -2977,7 +2918,7 @@ impl ChatView {
                 self.streaming_assistant = Some(index);
                 self.stream_persisted = 0;
                 // The list's item count is stale the moment a turn is
-                // added — without a reset, scroll_to_end targets the old
+                // added, without a reset, scroll_to_end targets the old
                 // end and the new turn renders below the viewport (the
                 // "reply appeared only after I typed again" bug).
                 self.list_state.reset(self.item_count());
@@ -2985,7 +2926,7 @@ impl ChatView {
             }
         };
 
-        // Tail mode handles following (no per-delta scroll_to_end — it
+        // Tail mode handles following (no per-delta scroll_to_end, it
         // used to yank the viewport on every token). Persistence is
         // throttled: a SQLite write per delta would dominate streaming.
         if let Some(Turn::Message { text, db_id, .. }) = self.turns.get_mut(index) {
@@ -3013,8 +2954,8 @@ impl ChatView {
     }
 
     /// Writes the streaming row's unsaved tail to the store. Called when
-    /// the stream changes shape — a tool starts, a prompt appears, the
-    /// turn ends — so a reload always sees the full text.
+    /// the stream changes shape, a tool starts, a prompt appears, the
+    /// turn ends, so a reload always sees the full text.
     fn flush_stream(&mut self, cx: &mut Context<Self>) {
         if let Some(index) = self.streaming_assistant
             && let Some(Turn::Message { text, db_id, .. }) = self.turns.get_mut(index)
@@ -3043,7 +2984,6 @@ impl ChatView {
         self.thinking = false;
         self.flush_stream(cx);
         self.streaming_assistant = None;
-        let dispatches_workers = call.name.starts_with("agent_");
         self.turns.push(Turn::Tool {
             call,
             status: ToolStatus::Running,
@@ -3051,11 +2991,6 @@ impl ChatView {
             worker: false,
             db_id: None,
         });
-        if dispatches_workers {
-            // The worker run's child session exists once the tool starts
-            // executing; a second refresh lands with its result.
-            self.refresh_agent_runs(cx);
-        }
         self.sync_list(cx);
     }
 
@@ -3076,7 +3011,7 @@ impl ChatView {
         self.sync_list(cx);
     }
 
-    /// A subagent's ask, arriving via the broker subscription — same
+    /// A subagent's ask, arriving via the broker subscription, same
     /// card, labeled.
     fn on_worker_ask(&mut self, id: u64, call: ToolCall, cx: &mut Context<Self>) {
         self.set_activity("A worker needs your approval…");
@@ -3090,8 +3025,6 @@ impl ChatView {
             worker: true,
             db_id: None,
         });
-        // A worker is mid-run: its child session exists by now.
-        self.refresh_agent_runs(cx);
         self.sync_list(cx);
     }
 
@@ -3099,16 +3032,12 @@ impl ChatView {
     /// and the next request see the same thing the model did.
     fn on_tool_result(&mut self, call_id: &str, name: &str, result: &str, cx: &mut Context<Self>) {
         // The tool is done, so the model is chewing on the result before
-        // it writes the next thing — say so in the transcript.
+        // it writes the next thing, say so in the transcript.
         self.set_activity("Thinking…");
         self.thinking = true;
         // The card's clock retires with the card.
         self.tool_starts.remove(call_id);
         self.streaming_assistant = None;
-        if name.starts_with("agent_") {
-            // The worker's report row is on disk; the panel flips to done.
-            self.refresh_agent_runs(cx);
-        }
 
         let arguments = self
             .turns
@@ -3119,7 +3048,7 @@ impl ChatView {
             })
             .unwrap_or_default();
 
-        // Mark the card done, remembering which one it is — the
+        // Mark the card done, remembering which one it is, the
         // persisted row's id lands on it below, so a palette hit on
         // this result can find the card after a reload too.
         let mut done_index: Option<usize> = None;
@@ -3152,13 +3081,13 @@ impl ChatView {
             }
         }
         // The thinking row appears here (item count grew by one), so a
-        // reset — not just a scroll — keeps the tail pinned.
+        // reset, not just a scroll, keeps the tail pinned.
         self.sync_list(cx);
     }
 
     /// Loop-level failures (provider exhausted retries, round budget hit)
     /// surface in the transcript like any other turn.
-    /// History shrank mid-turn: tell the user honestly — a muted notice
+    /// History shrank mid-turn: tell the user honestly, a muted notice
     /// card, not hidden magic. Not persisted: DB rows stay whole, the
     /// compaction is the in-memory view (a reload restores full history
     /// and the loop re-compacts if the threshold trips again).
@@ -3167,7 +3096,7 @@ impl ChatView {
         self.turns.push(Turn::Message {
             role: Role::System,
             text: format!(
-                "⟳ context compacted — {kept} of {total} messages kept: the original \
+                "⟳ context compacted, {kept} of {total} messages kept: the original \
                  request, prefix lines of the omitted turns, and the live tail. \
                  read_session retrieves any omitted message in full."
             ),
@@ -3177,10 +3106,10 @@ impl ChatView {
     }
 
     /// A steered message joined the running turn at a round boundary:
-    /// persist and bubble it exactly like a send-time row — the loop
+    /// persist and bubble it exactly like a send-time row, the loop
     /// owns the in-memory history, the DB row is ours.
     fn on_steered(&mut self, text: &str, cx: &mut Context<Self>) {
-        // No activity change — a steer doesn't alter what's happening —
+        // No activity change, a steer doesn't alter what's happening,
         // but the quiet gauge restarts all the same: something happened.
         self.last_event_at = Instant::now();
         let db_id = match self.session_id {
@@ -3215,17 +3144,37 @@ impl ChatView {
     }
 
     /// The turn ended on the provider's rate limit: like an error, but
-    /// the state persists — the ask is "wait, then continue", so the
+    /// the state persists, the ask is "wait, then continue", so the
     /// session goes Limited (badge on the row, Resume affordance) and
     /// comes back clear on resume or the next send.
     fn on_limited(&mut self, message: &str, cx: &mut Context<Self>) {
         self.flush_stream(cx);
-        self.set_activity("Rate limited — pick it up when you're ready");
+        self.set_activity("Rate limited, pick it up when you're ready");
         self.thinking = false;
         // A fresh limit is a fresh decision: no stale snooze from the
         // round before survives it.
         self.snoozed = None;
         self.persist_stream_note(format!("[limited] {message}"));
+        if let Some(session_id) = self.session_id {
+            let _ = self.store.set_session_limited(session_id, true);
+            self.sessions = self.store.list_sessions().unwrap_or_default();
+        }
+        self.list_state.reset(self.item_count());
+        self.list_state.scroll_to_end();
+        cx.notify();
+    }
+
+    /// The turn ended on the round budget's grace window closing:
+    /// identical shape to a rate limit (pause, persist, resume bar),
+    /// different words. Like the limit, a fresh budget pause clears any
+    /// stale snooze; if the model wraps up in the grace window instead,
+    /// the turn ends Done and nothing here ever runs.
+    fn on_budgeted(&mut self, message: &str, cx: &mut Context<Self>) {
+        self.flush_stream(cx);
+        self.set_activity("Round budget reached, pick it up when you're ready");
+        self.thinking = false;
+        self.snoozed = None;
+        self.persist_stream_note(format!("[paused] {message}"));
         if let Some(session_id) = self.session_id {
             let _ = self.store.set_session_limited(session_id, true);
             self.sessions = self.store.list_sessions().unwrap_or_default();
@@ -3263,11 +3212,12 @@ impl ChatView {
         }
     }
 
-    /// Resume on a limited session: a new turn with no new user message
-    /// — history already ends with what the model should continue from
-    /// (the user's ask, or the tool result of the round that got
-    /// rate-limited). The flag clears up front; if the resume hits the
-    /// limit again, the turn ends limited once more.
+    /// Resume on a limited or budget-paused session: a new turn with no
+    /// new user message, history already ends with what the model
+    /// should continue from (the user's ask, the tool result of the
+    /// round that got rate-limited, or the budget's wrap-up nudge). The
+    /// flag clears up front; if the resume hits the limit again, the
+    /// turn ends limited once more.
     fn resume_clicked(&mut self, cx: &mut Context<Self>) {
         let Some(session_id) = self.session_id else {
             return;
@@ -3283,7 +3233,7 @@ impl ChatView {
         self.drive_turn(None, Vec::new(), cx);
     }
 
-    /// Snooze on the limited bar: the human asks for the resume later —
+    /// Snooze on the limited bar: the human asks for the resume later,
     /// [`SNOOZE_MINUTES`] out, one shot, this app run. A deferred
     /// click, not an auto-resume: nothing here re-arms itself, so every
     /// cycle still starts with a human.
@@ -3306,7 +3256,7 @@ impl ChatView {
     }
 
     /// The snooze is up. It only keeps its promise if this very session
-    /// is still the open one, still limited, and not mid-turn — a
+    /// is still the open one, still limited, and not mid-turn, a
     /// manual resume, a new send, a switch away, or a fresh limit all
     /// dissolved it already, and then the fire is a quiet no-op.
     fn snooze_fired(&mut self, session_id: SessionId, cx: &mut Context<Self>) {
@@ -3316,14 +3266,14 @@ impl ChatView {
         self.snoozed = None;
         if self.session_id == Some(session_id) && !self.streaming && self.open_session_limited() {
             self.push_notice(
-                format!("Snooze is up — resuming the limited turn ({SNOOZE_MINUTES} min)."),
+                format!("Snooze is up, resuming the limited turn ({SNOOZE_MINUTES} min)."),
                 cx,
             );
             self.resume_clicked(cx);
         }
     }
 
-    /// Cancel the snooze: the session stays limited and quiet — the
+    /// Cancel the snooze: the session stays limited and quiet, the
     /// pending timer no-ops when it fires. The Resume button stays.
     fn cancel_snooze_clicked(&mut self, cx: &mut Context<Self>) {
         self.snoozed = None;
@@ -3339,13 +3289,13 @@ impl ChatView {
                 ToolStatus::Pending(id) => {
                     // The card is settled; its reply input goes with it.
                     self.approval_replies.remove(&index);
-                    // The approved call starts executing now — its
+                    // The approved call starts executing now, its
                     // clock starts here, not when the ask arrived.
                     self.tool_starts.insert(call.id.clone(), Instant::now());
                     if self.broker.respond(id, decision) {
                         // The human's answer is an event: the status
                         // line stops saying "waiting" and its clock
-                        // hands over to the call — otherwise a long
+                        // hands over to the call, otherwise a long
                         // wait would surface, un-reset, as instant
                         // quiet against a stale label.
                         let label =
@@ -3381,8 +3331,8 @@ impl ChatView {
         );
     }
 
-    /// The reply input for a pending card, created at first render —
-    /// that's where a window handle exists — and remembered until the
+    /// The reply input for a pending card, created at first render,
+    /// that's where a window handle exists, and remembered until the
     /// card is answered. Per-card, never shared: two pending asks must
     /// not merge their drafts.
     fn approval_reply_for(
@@ -3395,7 +3345,7 @@ impl ChatView {
             .entry(index)
             .or_insert_with(|| {
                 cx.new(|cx| {
-                    InputState::new(window, cx).placeholder("…or reply to the model — why deny?")
+                    InputState::new(window, cx).placeholder("…or reply to the model, why deny?")
                 })
             })
             .clone()
@@ -3406,7 +3356,7 @@ impl ChatView {
     /// switch to it. The original keeps running its own life.
     fn fork_from(&mut self, upto: MessageId, window: &mut Window, cx: &mut Context<Self>) {
         if self.streaming {
-            self.push_notice("A run is in flight — wait for it to finish.", cx);
+            self.push_notice("A run is in flight, wait for it to finish.", cx);
             return;
         }
         let Some(session_id) = self.session_id else {
@@ -3427,14 +3377,14 @@ impl ChatView {
         }
     }
 
-    /// The folder this chat's tools run in — the guard's identity of
+    /// The folder this chat's tools run in, the guard's identity of
     /// "the same checkout".
     pub fn workspace_root(&self) -> &std::path::Path {
         &self.workspace_root
     }
 
     /// Whether a turn joins a collapsible run: a finished tool card.
-    /// Anything alive — pending, running — stands alone: an approval
+    /// Anything alive, pending, running, stands alone: an approval
     /// hiding inside a summary is a trap.
     fn joins_run(turn: &Turn) -> bool {
         matches!(
@@ -3455,7 +3405,7 @@ impl ChatView {
             return 1;
         }
         if index > 0 && Self::joins_run(&self.turns[index - 1]) {
-            // A run began earlier — this card hides inside it, unless
+            // A run began earlier, this card hides inside it, unless
             // the reader expanded the run to see its cards.
             let mut first = index;
             while first > 0 && Self::joins_run(&self.turns[first - 1]) {
@@ -3473,7 +3423,7 @@ impl ChatView {
     }
 
     /// The collapsed face of a run of finished tool calls: one button
-    /// stating what happened in the cards' own counts — failures on
+    /// stating what happened in the cards' own counts, failures on
     /// the line, never rounded away. Clicking expands to the full
     /// cards.
     fn render_tool_run(&self, index: usize, count: usize, cx: &mut Context<Self>) -> AnyElement {
@@ -3530,12 +3480,12 @@ impl ChatView {
 
     /// "Edit from here" on a sent user turn: the transcript rewinds to
     /// the turn's question, which returns to the composer as a draft.
-    /// The rewind is real on the next send — until then nothing is
+    /// The rewind is real on the next send, until then nothing is
     /// lost, and the confirm row (kept changes vs. files too) waits
     /// above the queue.
     fn begin_rewind(&mut self, index: usize, cx: &mut Context<Self>) {
         if self.streaming {
-            self.push_notice("A run is in flight — stop it before rewinding.", cx);
+            self.push_notice("A run is in flight, stop it before rewinding.", cx);
             return;
         }
         let Some(Turn::Message {
@@ -3563,7 +3513,7 @@ impl ChatView {
     /// What restoring "files too" would rewrite, oldest first: every
     /// turn after the keep-point, its first checkpoint per path. No
     /// ledger or no later turns means the files choice has nothing to
-    /// offer — the keep-changes rewind still stands.
+    /// offer, the keep-changes rewind still stands.
     fn rewind_restore_points(
         &self,
         keep_point: Option<MessageId>,
@@ -3596,9 +3546,9 @@ impl ChatView {
         points
     }
 
-    /// Runs the confirmed rewind. Files restore first — any failure
+    /// Runs the confirmed rewind. Files restore first, any failure
     /// aborts the whole thing with the view untouched (never
-    /// files-without-history, never the reverse either) — then the
+    /// files-without-history, never the reverse either), then the
     /// transcript and the loop's history truncate to the kept prefix.
     fn complete_rewind(
         &mut self,
@@ -3607,18 +3557,18 @@ impl ChatView {
         cx: &mut Context<Self>,
     ) {
         // Peeking, not taking: a refused rewind keeps the confirm row
-        // open — the user's question doesn't vanish because the files
+        // open, the user's question doesn't vanish because the files
         // were busy. Only the commit point consumes it.
         let Some(pending) = self.pending_rewind.clone() else {
             return;
         };
         if self.streaming {
-            self.push_notice("A run is in flight — stop it before rewinding.", cx);
+            self.push_notice("A run is in flight, stop it before rewinding.", cx);
             return;
         }
         // The turn we're rewinding must still be the one the user
         // pointed at (pagination can have reshuffled the list in
-        // between) — a stale confirm closes itself.
+        // between), a stale confirm closes itself.
         let still_there = matches!(
             self.turns.get(pending.turn_index),
             Some(Turn::Message {
@@ -3628,17 +3578,17 @@ impl ChatView {
         );
         if !still_there {
             self.pending_rewind = None;
-            self.push_notice("The conversation moved — rewind cancelled.", cx);
+            self.push_notice("The conversation moved, rewind cancelled.", cx);
             return;
         }
         if restore_files {
             let Some(snapshots) = &self.snapshots else {
-                self.push_notice("No checkpoint ledger — files can't be restored.", cx);
+                self.push_notice("No checkpoint ledger, files can't be restored.", cx);
                 return;
             };
             // The restores write where the turn ran (the ledger's
             // recorded root), so that's the checkout the guard must
-            // see — not the live root, which a moved-on chat no
+            // see, not the live root, which a moved-on chat no
             // longer points at.
             let restore_root = pending
                 .restore_points
@@ -3648,14 +3598,14 @@ impl ChatView {
             let caller = cx.entity();
             let guard = self.live_elsewhere.clone();
             if let Err(reason) = guard.as_ref()(cx, &caller, &restore_root) {
-                self.push_notice(format!("Files kept — {reason}."), cx);
+                self.push_notice(format!("Files kept, {reason}."), cx);
                 return;
             }
             for (checkpoint, path) in &pending.restore_points {
                 if let Err(error) = snapshots.restore_under(*checkpoint, &self.workspace_root) {
                     self.push_notice(
                         format!(
-                            "Rewind stopped — {} could not be restored: {error}. \
+                            "Rewind stopped, {} could not be restored: {error}. \
                              The choice stays open; fix the file and try again.",
                             path.display()
                         ),
@@ -3672,7 +3622,7 @@ impl ChatView {
             ..
         } = pending;
         // Commit point. View surgery now that every fallible step is
-        // behind us. The next send parents to the keep point — the
+        // behind us. The next send parents to the keep point, the
         // abandoned branch stays in the ledger as audit, off every
         // read.
         self.pending_rewind = None;
@@ -3714,7 +3664,7 @@ impl ChatView {
     }
 
     /// "Quote" on an assistant turn: the response lands in the composer
-    /// as a blockquote and your comment types after it — sending shows
+    /// as a blockquote and your comment types after it, sending shows
     /// the model exactly which words you're talking about. A long
     /// response quotes bounded: enough to pin the referent, never the
     /// whole answer back into the prompt.
@@ -3742,7 +3692,7 @@ impl ChatView {
         let value = if draft.trim().is_empty() {
             format!("{quoted}\n\n")
         } else {
-            // The comment you already typed rides under the quote —
+            // The comment you already typed rides under the quote,
             // the quote is context, the draft is the point.
             format!("{quoted}\n\n{draft}")
         };
@@ -3773,7 +3723,7 @@ impl ChatView {
     /// One ArrowUp/Down step in the composer. Recall claims the
     /// keystroke only when the composer is focused and empty (or
     /// already riding the walk); every other case hands the cursor
-    /// move back — a half-typed draft never gets clobbered, and other
+    /// move back, a half-typed draft never gets clobbered, and other
     /// inputs on the surface keep their own arrow behavior.
     fn recall_step(&mut self, up: bool, window: &mut Window, cx: &mut Context<Self>) {
         let focused = self.input.read(cx).focus_handle(cx).is_focused(window);
@@ -3789,7 +3739,7 @@ impl ChatView {
         }
         let entries = self.sent_user_texts();
         if entries.is_empty() {
-            // Nothing sent yet — nothing to recall. (The composer is
+            // Nothing sent yet, nothing to recall. (The composer is
             // empty; the cursor move this keystroke would have done
             // has nothing to move past either.)
             self.recall = None;
@@ -3822,7 +3772,7 @@ impl ChatView {
             active.index.saturating_sub(1)
         };
         // Down past the newest hands the composer back its saved draft
-        // — the walk ends where it started.
+        //, the walk ends where it started.
         if !up && active.index == 0 {
             self.input
                 .update(cx, |input, cx| input.set_value(active.saved, window, cx));
@@ -3841,7 +3791,7 @@ impl ChatView {
 
     /// The area cycle's ordered list: sidebar, transcript, composer,
     /// and the right column when one is open. The composer's handle is
-    /// the input's own — its dominant control and its identity.
+    /// the input's own, its dominant control and its identity.
     fn focus_areas(&self, cx: &App) -> Vec<(FocusArea, gpui_kit::FocusHandle)> {
         let mut areas = vec![
             (FocusArea::Sidebar, self.sidebar_focus.clone()),
@@ -3854,7 +3804,7 @@ impl ChatView {
         areas
     }
 
-    /// The area (if any) that currently holds focus — a container or
+    /// The area (if any) that currently holds focus, a container or
     /// any control inside it counts.
     fn focused_area(
         &self,
@@ -3870,7 +3820,7 @@ impl ChatView {
     /// F6 / Shift+F6: move focus between the surface's areas, wrapping
     /// at the ends. The control that held focus inside an area is
     /// remembered when the cycle leaves it and restored when it comes
-    /// back (a stale restore — a control since unmounted — falls back
+    /// back (a stale restore, a control since unmounted, falls back
     /// to the area's container; the next press self-heals from
     /// wherever focus really sits). A modal on screen (palette, turn
     /// diff) owns focus exclusively; the cycle stands down.
@@ -3904,7 +3854,7 @@ impl ChatView {
         match remembered {
             Some(handle) if !handle.is_focused(window) => {
                 window.focus(&handle, cx);
-                // A stale restore leaves focus where it was — fall
+                // A stale restore leaves focus where it was, fall
                 // back to the container so the cycle always lands.
                 if !handle.is_focused(window) {
                     window.focus(container, cx);
@@ -3935,7 +3885,7 @@ impl ChatView {
         }
         // Runs of finished tool calls collapse into one honest summary
         // (the counts are the cards', failures stay counted); a hidden
-        // member renders nothing — the list's index space is the
+        // member renders nothing, the list's index space is the
         // turns'.
         let run = self.tool_run_at(index);
         if run == 0 {
@@ -3967,7 +3917,7 @@ impl ChatView {
                 ..
             } => self.render_tool(index, call, status, *auto_approved, *worker, cx),
             Turn::LoadEarlier => {
-                // The pagination row: one quiet button, centered —
+                // The pagination row: one quiet button, centered,
                 // clearly furniture, not a turn. The handler gates on
                 // streaming; mid-turn the index space is shifting.
                 div()
@@ -3986,7 +3936,7 @@ impl ChatView {
                     .into_any_element()
             }
         };
-        // Fork affordance: persisted user turns only — "branch from this
+        // Fork affordance: persisted user turns only, "branch from this
         // question" is the mental model that survives contact with use.
         let fork_button = match &self.turns[index] {
             Turn::Message {
@@ -4008,7 +3958,7 @@ impl ChatView {
             }
             _ => None,
         };
-        // The rewind affordance: the same persisted user turns —
+        // The rewind affordance: the same persisted user turns,
         // "edit from here" truncates this conversation back to the
         // question, which returns to the composer as a draft.
         let rewind_button = match &self.turns[index] {
@@ -4021,7 +3971,9 @@ impl ChatView {
                     .label("rewind")
                     .small()
                     .ghost()
-                    .tooltip("Edit from here — the conversation after this message leaves the transcript")
+                    .tooltip(
+                        "Edit from here, the conversation after this message leaves the transcript",
+                    )
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.begin_rewind(index, cx);
                     })),
@@ -4030,7 +3982,7 @@ impl ChatView {
         };
         // The quote affordance: an assistant turn worth commenting on,
         // dropped into the composer as a blockquote (the citation is
-        // exact — the agent reads back the same words you sent).
+        // exact, the agent reads back the same words you sent).
         let quote_button = match &self.turns[index] {
             Turn::Message {
                 role: Role::Assistant,
@@ -4043,7 +3995,7 @@ impl ChatView {
                         .label("quote")
                         .small()
                         .ghost()
-                        .tooltip("Quote this into the composer — comment under it, send it back")
+                        .tooltip("Quote this into the composer, comment under it, send it back")
                         .on_click(cx.listener(move |this, _, window, cx| {
                             this.quote_into_composer(text.clone(), window, cx);
                         })),
@@ -4085,7 +4037,7 @@ impl ChatView {
     }
 
     /// The status line's words, spinner aside: the activity, its
-    /// elapsed clock, and — past [`QUIET_AFTER`] of no loop events —
+    /// elapsed clock, and, past [`QUIET_AFTER`] of no loop events,
     /// the quiet gauge. Quiet stays silent while an approval card
     /// waits on the human: that silence is the human's, and the ask's
     /// own clock tells it.
@@ -4102,7 +4054,7 @@ impl ChatView {
     /// anything has landed lately. The spinner is the no-animation
     /// doctrine's one carve-out, time-derived so it needs no state of
     /// its own: it steps at 2 fps on the working tick (which only runs
-    /// while a turn does — nothing animates at rest), because "is it
+    /// while a turn does, nothing animates at rest), because "is it
     /// stuck or just slow" is a question the words alone answer too
     /// late. The clock sits beside it, and past [`QUIET_AFTER`] of
     /// silence the line says that too.
@@ -4124,7 +4076,7 @@ impl ChatView {
                     .text_size(px(13.))
                     .text_color(cx.theme().muted_foreground)
                     // Activity strings carry `code` spans (tool labels
-                    // quote paths and commands) — same treatment as
+                    // quote paths and commands), same treatment as
                     // the cards.
                     .child(crate::markdown::inline_element(&line, cx)),
             )
@@ -4132,9 +4084,9 @@ impl ChatView {
     }
 
     /// The footer line under the composer. Left: this session's spend
-    /// and the live context gauge — `12.3k (23%)` — so the distance to
+    /// and the live context gauge, `12.3k (23%)`, so the distance to
     /// the compaction threshold is visible before it happens. Right:
-    /// what you're talking to — `gertie · ppq · glm-5.3-flash` — or,
+    /// what you're talking to, `gertie · ppq · glm-5.3-flash`, or,
     /// when the chat is blocked on you, that fact in warning color.
     /// Quiet until there is something to say.
     fn render_token_footer(&self, status: Option<&str>, cx: &Context<Self>) -> AnyElement {
@@ -4158,7 +4110,7 @@ impl ChatView {
             parts.push(gauge);
         }
         // The permission posture leads the quiet line: a word, not a
-        // chip — the same click-to-cycle it had in the composer row,
+        // chip, the same click-to-cycle it had in the composer row,
         // none of the row's width. The footer always renders now that
         // the word lives here; the token ledger rides behind it.
         let mode = div()
@@ -4168,7 +4120,7 @@ impl ChatView {
             .text_color(cx.theme().muted_foreground)
             .hover(|style| style.text_color(cx.theme().foreground))
             .tooltip(|window, cx| {
-                Tooltip::new("Permission mode — click to change. Applies from the next turn on.")
+                Tooltip::new("Permission mode, click to change. Applies from the next turn on.")
                     .build(window, cx)
             })
             .on_click(cx.listener(|this, _, _, cx| this.cycle_mode(cx)))
@@ -4199,16 +4151,16 @@ impl ChatView {
             .child(match status {
                 // The one status that earns a place outside the
                 // transcript: the chat is blocked on you. Everything
-                // else — thinking, writing, tool work — lives in the
+                // else, thinking, writing, tool work, lives in the
                 // transcript, where the user is looking anyway. At
                 // rest, the identity line leads with the folder the
-                // agent's tools run in — "which project am I talking
+                // agent's tools run in, "which project am I talking
                 // about" is answered without opening anything.
                 Some(status) => div().child(status.to_string()),
                 None => {
                     // The word is the switch: click it, pick a folder,
                     // the agent moves. A worktree tab's word stays
-                    // text — its root is the checkout it was opened
+                    // text, its root is the checkout it was opened
                     // for, and the move would break the tab's
                     // branch-rename promise.
                     let word: AnyElement = if self.branch_naming.is_none() {
@@ -4217,10 +4169,8 @@ impl ChatView {
                             .cursor_pointer()
                             .hover(|style| style.text_color(cx.theme().foreground))
                             .tooltip(|window, cx| {
-                                Tooltip::new(
-                                    "Workspace — click to move the agent to another folder",
-                                )
-                                .build(window, cx)
+                                Tooltip::new("Workspace, click to move the agent to another folder")
+                                    .build(window, cx)
                             })
                             .on_click(cx.listener(|this, _, _, cx| this.switch_workspace(cx)))
                             .child(tildify(&self.workspace_root))
@@ -4290,7 +4240,7 @@ impl ChatView {
                                         crate::palette::command_items(&self.palette_commands)
                                     })
                                     .filterable(false)
-                                    .placeholder("Search your history — > for commands…")
+                                    .placeholder("Search your history, > for commands…")
                                     .empty(|_, _, cx| {
                                         div()
                                             .px_4()
@@ -4337,7 +4287,7 @@ impl ChatView {
                 )
                 .into_any_element(),
             Role::System => {
-                // Loop notices (compaction) — centered, quiet, not a chat
+                // Loop notices (compaction), centered, quiet, not a chat
                 // message from anyone.
                 h_flex()
                     .w_full()
@@ -4363,7 +4313,7 @@ impl ChatView {
                         cx.theme().foreground
                     })
                     .when(is_error, |row| {
-                        // Error text is for the human, verbatim — don't
+                        // Error text is for the human, verbatim, don't
                         // run it through the markdown parser.
                         row.child(text.to_string())
                     })
@@ -4419,14 +4369,14 @@ impl ChatView {
                     div()
                         .text_size(px(13.))
                         .text_color(cx.theme().accent)
-                        // Labels carry `code` spans (paths, commands) —
+                        // Labels carry `code` spans (paths, commands),
                         // through the inline renderer they become chips
                         // instead of literal backticks.
                         .child(crate::markdown::inline_element(&label, cx)),
                 )
                 // The running tag carries the doctrine's one carve-out
                 // too: a spinner stepping on the working tick and the
-                // call's own clock — a two-minute test run says how
+                // call's own clock, a two-minute test run says how
                 // long it has been saying nothing.
                 .when(running, |row| {
                     let started = self.tool_starts.get(&call.id);
@@ -4463,9 +4413,9 @@ impl ChatView {
                             .text_size(px(12.))
                             .text_color(cx.theme().warning)
                             .child(if call.name == "bash" {
-                                "This runs a shell command — your OK first."
+                                "This runs a shell command, your OK first."
                             } else {
-                                "This changes files in the workspace — your OK first."
+                                "This changes files in the workspace, your OK first."
                             }),
                     )
                     .children(diff.as_ref().map(|diff| diff_element(diff, cx)))
@@ -4498,7 +4448,7 @@ impl ChatView {
                             ),
                     )
                     // The text path: what you type here denies the call
-                    // AND goes back to the model — "no, use the other
+                    // AND goes back to the model, "no, use the other
                     // file" becomes a correction, not a dead end.
                     .children(reply.map(|reply| {
                         h_flex()
@@ -4533,7 +4483,7 @@ impl ChatView {
                     || result.starts_with("exit ")
                     || result.starts_with("blocked by policy")
                     || result.ends_with("denied by user");
-                // The diff tells the story for file changes — but never
+                // The diff tells the story for file changes, but never
                 // for a call that didn't happen (denied or failed).
                 if !failed && let Some(diff) = &diff {
                     inner = inner.child(diff_element(diff, cx));
@@ -4542,8 +4492,8 @@ impl ChatView {
                 let line_count = result.lines().count();
                 let expanded = self.expanded_tools.contains(&index);
 
-                // Default face: the one-line outcome. The raw result —
-                // file contents, match dumps, exit noise — is what the
+                // Default face: the one-line outcome. The raw result,
+                // file contents, match dumps, exit noise, is what the
                 // model eats, not what the human asked to read.
                 inner = inner.child(
                     div()
@@ -4595,7 +4545,7 @@ impl ChatView {
                     );
                 }
                 // The turn's own diff, from any done card in the turn:
-                // the ledger answers "what did the tools do" — the
+                // the ledger answers "what did the tools do", the
                 // agent's work, not git's.
                 if self.snapshots.is_some() {
                     inner = inner.child(
@@ -4626,99 +4576,13 @@ impl ChatView {
             )
             .into_any_element()
     }
-
-    /// The agents panel: this chat's worker runs, oldest first, with a
-    /// report status per run. A live org-chart in miniature — dispatch,
-    /// watch, inspect later via search_history.
-    fn render_agents_panel(&self, cx: &Context<Self>) -> AnyElement {
-        let theme = cx.theme();
-        v_flex()
-            .id("agents-panel")
-            .key_context("AgentsPanel")
-            .track_focus(&self.side_focus)
-            .w(px(240.))
-            .h_full()
-            .flex_shrink_0()
-            .border_l_1()
-            .border_color(theme.border)
-            .pt_3()
-            .px_3()
-            .pb_3()
-            .gap_1()
-            .overflow_y_scroll()
-            .child(
-                div()
-                    .text_size(px(11.))
-                    .text_color(theme.muted_foreground)
-                    .child("WORKER RUNS"),
-            )
-            .when(self.worker_runs.is_empty(), |col| {
-                col.child(
-                    div()
-                        .text_size(px(12.))
-                        .text_color(theme.muted_foreground)
-                        .child("none yet — dispatch an agent and its run shows up here"),
-                )
-            })
-            .children(self.worker_runs.iter().map(|(summary, state)| {
-                h_flex()
-                    .gap_1()
-                    .items_center()
-                    .min_w_0()
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .truncate()
-                            .text_size(px(12.))
-                            .child(summary.title.clone()),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(11.))
-                            .flex_shrink_0()
-                            .text_color(match state {
-                                RunState::NeedsYou => theme.danger,
-                                RunState::Running => theme.accent,
-                                RunState::Done => theme.muted_foreground,
-                            })
-                            .child(state.label()),
-                    )
-            }))
-            .into_any_element()
-    }
 }
 
-/// A worker run's state in the agents panel — the attention sort's
-/// classes, ordered: what waits on you beats what's alive beats
-/// what's finished.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum RunState {
-    /// Stopped on the provider's limit — the Resume is yours to give.
-    NeedsYou,
-    /// Dispatched, no report yet.
-    Running,
-    /// Reported back (finished or failed loudly — the report says).
-    Done,
-}
-
-impl RunState {
-    fn label(self) -> &'static str {
-        match self {
-            RunState::NeedsYou => "needs you",
-            RunState::Running => "running…",
-            RunState::Done => "done",
-        }
-    }
-}
-
-/// Which right-column panel is open, if any. One slot: the agents
-/// org-chart and the settings view alternate.
+/// Which right-column panel is open, if any: settings alone now.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 enum Panel {
     #[default]
     None,
-    Agents,
     Settings,
 }
 
@@ -4731,7 +4595,7 @@ pub enum ChatViewEvent {
 impl EventEmitter<ChatViewEvent> for ChatView {}
 
 impl ChatView {
-    /// Applies a fresh bootstrap snapshot — what a settings save
+    /// Applies a fresh bootstrap snapshot, what a settings save
     /// triggers. The provider swap takes effect on the next turn's
     /// send (a running turn keeps the provider it started with).
     pub fn apply_provider(&mut self, update: Reloaded, cx: &mut Context<Self>) {
@@ -4751,7 +4615,7 @@ impl ChatView {
 /// old in red and new in green; write shows the content as additions.
 /// Returns None for tools without a natural diff.
 /// Where a stored tool path lives on disk: absolute as-is, relative
-/// against the workspace root — the same rule the loop's checkpoint
+/// against the workspace root, the same rule the loop's checkpoint
 /// hook applies before snapshotting.
 fn resolve_tool_path(root: &std::path::Path, path: &std::path::Path) -> std::path::PathBuf {
     if path.is_absolute() {
@@ -4761,7 +4625,7 @@ fn resolve_tool_path(root: &std::path::Path, path: &std::path::Path) -> std::pat
     }
 }
 
-/// The diff's data — (added, removed) lines, capped — parsed from the
+/// The diff's data, (added, removed) lines, capped, parsed from the
 /// call's arguments. Pure: the card cache holds this; element
 /// construction (`diff_lines`) rebuilds per frame from it.
 fn diff_data(call: &ToolCall) -> Option<(Vec<String>, Vec<String>)> {
@@ -4820,7 +4684,7 @@ fn diff_element(diff: &(Vec<String>, Vec<String>), cx: &App) -> AnyElement {
 
 impl ChatView {
     /// The sessions the UI may show: everything in the store except
-    /// rows inside their undo window — ✕ already answered, the purge
+    /// rows inside their undo window, ✕ already answered, the purge
     /// pending. The sidebar, its fold, and the palette all look here.
     fn visible_sessions(&self) -> Vec<gertie_core::SessionSummary> {
         self.sessions
@@ -4835,7 +4699,7 @@ impl ChatView {
             .collect()
     }
 
-    /// Whether the open session's last turn ended on a rate limit —
+    /// Whether the open session's last turn ended on a rate limit,
     /// the resume bar's condition. Test-visible: the limited state is
     /// the §2.3 contract.
     pub fn open_session_limited(&self) -> bool {
@@ -4873,7 +4737,7 @@ impl ChatView {
             .collect()
     }
 
-    /// One sidebar row — active or settled; the settled variant renders
+    /// One sidebar row, active or settled; the settled variant renders
     /// muted with the restore glyph. The one shape both lists share.
     fn session_row(
         &self,
@@ -4894,7 +4758,7 @@ impl ChatView {
             .label("✕")
             .xsmall()
             .ghost()
-            .tooltip("Delete this conversation — five seconds to undo");
+            .tooltip("Delete this conversation, five seconds to undo");
         h_flex()
             .w_full()
             .min_w_0()
@@ -4906,7 +4770,7 @@ impl ChatView {
                     .flex_1()
                     .min_w_0()
                     .when(is_active, |button| {
-                        // The open conversation is tinted, not loud — the
+                        // The open conversation is tinted, not loud, the
                         // accent at conversation weight.
                         button.custom(
                             ButtonCustomVariant::new(cx)
@@ -4931,7 +4795,7 @@ impl ChatView {
                     })),
             )
             // The limited chip: the session's last turn died on the
-            // provider's rate limit. Static text, warning tint — the
+            // provider's rate limit. Static text, warning tint, the
             // open transcript carries the Resume button.
             .when(summary.limited, |row| {
                 row.child(
@@ -4957,9 +4821,9 @@ impl ChatView {
                     .xsmall()
                     .ghost()
                     .tooltip(if settled {
-                        "Un-settle — back to the active list"
+                        "Un-settle, back to the active list"
                     } else {
-                        "Settle — done; folds out of the list"
+                        "Settle, done; folds out of the list"
                     })
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.settle_clicked(session_id, !settled, cx);
@@ -5003,10 +4867,10 @@ impl Render for ChatView {
             .size_full()
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
-            // The turnRunning `when` context — present only while a
+            // The turnRunning `when` context, present only while a
             // turn drives, so keymap rules can gate on it.
             .when(self.streaming, |root| root.key_context("TurnRunning"))
-            // The palette's trigger fires from wherever focus sits —
+            // The palette's trigger fires from wherever focus sits,
             // the root catches it on the way up the dispatch path.
             .on_action(cx.listener(
                 |this, _: &crate::palette::OpenPalette, window, cx| {
@@ -5038,7 +4902,7 @@ impl Render for ChatView {
             .on_action(cx.listener(|this, _: &CycleFocusBack, window, cx| {
                 this.cycle_focus(true, window, cx);
             }))
-            // h_flex centers children on the cross axis by default —
+            // h_flex centers children on the cross axis by default,
             // stretch instead, so the main row fills the window height
             // and the transcript list keeps its flex sizing.
             .items_stretch()
@@ -5084,7 +4948,7 @@ impl Render for ChatView {
                             )
                             .children(self.active_session_rows(&visible, cx))
                             // The settled fold: put-down work, collapsed
-                            // by default — findable, never in the way.
+                            // by default, findable, never in the way.
                             .when(
                                 visible.iter().any(|summary| summary.settled),
                                 |col| {
@@ -5100,7 +4964,7 @@ impl Render for ChatView {
                                             ))
                                             .xsmall()
                                             .ghost()
-                                            .tooltip("Conversations put down — expand to bring one back")
+                                            .tooltip("Conversations put down, expand to bring one back")
                                             .on_click(cx.listener(|this, _, _, cx| {
                                                 this.settled_open = !this.settled_open;
                                                 cx.notify();
@@ -5114,7 +4978,7 @@ impl Render for ChatView {
                     )
                     .child(
                         // The utilities: stacked at the
-                        // sidebar's foot — findable, never
+                        // sidebar's foot, findable, never
                         // in the way.
                         v_flex()
                             .gap_1()
@@ -5123,7 +4987,7 @@ impl Render for ChatView {
                             .pb_3()
                             // The undo toast: sessions inside their
                             // five-second window, newest first. One
-                            // line, one button — the whole mechanism.
+                            // line, one button, the whole mechanism.
                             .when(!self.pending_deletes.is_empty(), |util| {
                                 let newest = self
                                     .pending_deletes
@@ -5170,20 +5034,9 @@ impl Render for ChatView {
                                     .small()
                                     .ghost()
                                     .w_full()
-                                    .tooltip("Search every session — Ctrl+K")
+                                    .tooltip("Search every session, Ctrl+K")
                                     .on_click(cx.listener(|this, _, window, cx| {
                                         this.open_palette(window, cx)
-                                    })),
-                            )
-                            .child(
-                                Button::new("toggle-agents")
-                                    .label("agents")
-                                    .small()
-                                    .ghost()
-                                    .w_full()
-                                    .tooltip("Worker runs dispatched from this chat")
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.toggle_agents(cx)
                                     })),
                             )
                             .child(
@@ -5206,7 +5059,7 @@ impl Render for ChatView {
                     .items_stretch()
                     .child(
                         // The transcript: horizontal padding is
-                        // per-item (see render_turn) — gpui's list
+                        // per-item (see render_turn), gpui's list
                         // paints items at the container edge and would
                         // ignore px_* here. The pt/pb DO apply.
                         v_flex()
@@ -5215,7 +5068,7 @@ impl Render for ChatView {
                             .relative()
                             .child(
                                 // The transcript area's container wraps
-                                // exactly the list — not the composer
+                                // exactly the list, not the composer
                                 // chrome below it: F6's detection walks
                                 // ancestors, and a container over both
                                 // would read a focused composer as
@@ -5241,7 +5094,7 @@ impl Render for ChatView {
                                     ),
                             )
                             // Empty state: the transcript is quiet until
-                            // it isn't — say so, quietly.
+                            // it isn't, say so, quietly.
                             .when(self.turns.is_empty(), |col| {
                                 col.child(
                                     div()
@@ -5274,20 +5127,23 @@ impl Render for ChatView {
                             .child(
                                 // Composer + footer: the input and the
                                 // token ledger live under the
-                                // conversation — the sidebar owns the
+                                // conversation, the sidebar owns the
                                 // full window height, so nothing here
                                 // spans the window.
                                 v_flex()
                                     .border_t_1()
                                     .border_color(cx.theme().border)
                                     // The resume bar: the open session's
-                                    // last turn ended on the provider's
-                                    // rate limit. One static line, one
-                                    // button — the way back in without
-                                    // retyping the ask. Snoozed, the
-                                    // line says the resume will happen
-                                    // by itself, and "now" plus
-                                    // "cancel" replace the snooze.
+                                    // last turn paused (the provider's
+                                    // rate limit, or the round budget's
+                                    // grace window closing). One static
+                                    // line, one button, the way back in
+                                    // without retyping the ask; the
+                                    // transcript's note says which
+                                    // pause it was. Snoozed, the line
+                                    // says the resume will happen by
+                                    // itself, and "now" plus "cancel"
+                                    // replace the snooze.
                                     .when(
                                         self.open_session_limited() && !self.streaming,
                                         |composer| {
@@ -5304,12 +5160,12 @@ impl Render for ChatView {
                                                     .text_color(cx.theme().warning)
                                                     .child(if snoozed {
                                                         format!(
-                                                            "rate limited — snoozed, the turn \
+                                                            "the turn paused, snoozed, it \
                                                              resumes by itself ({SNOOZE_MINUTES} min)"
                                                         )
                                                     } else {
-                                                        "rate limited — the turn stopped \
-                                                         on the provider's limit"
+                                                        "the turn paused, it can pick up \
+                                                         where it stopped"
                                                             .into()
                                                     })
                                                     .child(
@@ -5371,7 +5227,7 @@ impl Render for ChatView {
                                     )
                                     .when(self.pending_rewind.is_some(), |composer| {
                                         // The rewind confirm: which
-                                        // flavor — keep the files as
+                                        // flavor, keep the files as
                                         // they are, or restore their
                                         // pre-turn content from the
                                         // checkpoint ledger. The
@@ -5399,7 +5255,7 @@ impl Render for ChatView {
                                                         .text_size(px(12.))
                                                         .text_color(cx.theme().muted_foreground)
                                                         .child(
-                                                            "Rewind to here — the conversation \
+                                                            "Rewind to here, the conversation \
                                                              after this question leaves the \
                                                              transcript; the question returns \
                                                              as a draft.",
@@ -5414,7 +5270,7 @@ impl Render for ChatView {
                                                                 .xsmall()
                                                                 .outline()
                                                                 .tooltip(
-                                                                    "Keep every file as it is — \
+                                                                    "Keep every file as it is, \
                                                                      only the conversation rewinds",
                                                                 )
                                                                 .on_click(cx.listener(
@@ -5466,7 +5322,7 @@ impl Render for ChatView {
                                         // drafts: visible words, not a
                                         // count. Each can be sent now,
                                         // pulled back into the composer,
-                                        // or dropped — the queue is
+                                        // or dropped, the queue is
                                         // rows, so every action is real
                                         // in both directions.
                                         composer.child(
@@ -5511,7 +5367,7 @@ impl Render for ChatView {
                                                                 .xsmall()
                                                                 .ghost()
                                                                 .tooltip(
-                                                                    "Send this one now — \
+                                                                    "Send this one now, \
                                                                      steers the running turn",
                                                                 )
                                                                 .on_click(cx.listener(
@@ -5570,7 +5426,7 @@ impl Render for ChatView {
                                     .when(!slash.is_empty(), |composer| {
                                         // Slash discovery: typing `/` lists
                                         // every command; typing narrows it.
-                                        // Enter (or a click) accepts — a
+                                        // Enter (or a click) accepts, a
                                         // template expands into the composer
                                         // so the real prompt is visible
                                         // before it goes anywhere.
@@ -5714,7 +5570,7 @@ impl Render for ChatView {
                                             .py_3()
                                             .gap_2()
                                             // The steer/queue hint lives in the
-                                            // composer's placeholder now — the
+                                            // composer's placeholder now, the
                                             // sync keeps it true while a turn
                                             // runs, and an empty input is the
                                             // only state that ever shows it.
@@ -5730,7 +5586,7 @@ impl Render for ChatView {
                                                     // ships the kit's default
                                                     // bundle, not the full
                                                     // Lucide catalog this path
-                                                    // lives in — `Icon::data`
+                                                    // lives in, `Icon::data`
                                                     // renders it without
                                                     // registering an asset.
                                                     .icon(Icon::default().data(PAPERCLIP_SVG))
@@ -5769,11 +5625,6 @@ impl Render for ChatView {
                                     .child(self.render_token_footer(status, cx)),
                             ),
                     )
-                    // The right column: agent runs or settings — one
-                    // focus area (F6) across both.
-                    .when(self.panel == Panel::Agents, |row| {
-                        row.child(self.render_agents_panel(cx))
-                    })
                     .when(self.panel == Panel::Settings, |row| {
                         row.child(
                             div()
@@ -5796,7 +5647,7 @@ impl Render for ChatView {
     }
 }
 
-const NO_ENDPOINT_NOTICE: &str = "No endpoint configured — none is built in. Add one in the \
+const NO_ENDPOINT_NOTICE: &str = "No endpoint configured, none is built in. Add one in the \
     settings panel (type `/settings` in the composer): any OpenAI-compatible URL, the model id it \
     serves, and the env var holding your key. `gertie doctor` checks the setup.";
 
@@ -5815,7 +5666,7 @@ const PAPERCLIP_SVG: &[u8] =
 
 /// A stored row as a transcript turn: tool rows render as finished
 /// cards, everything else as its role's bubble. The one mapping both
-/// the reload and the "load earlier" pagination share — a row must
+/// the reload and the "load earlier" pagination share, a row must
 /// look the same however it reached the screen.
 fn turn_from_row(row: &gertie_core::Message) -> Turn {
     match row.role {
@@ -5838,7 +5689,7 @@ fn turn_from_row(row: &gertie_core::Message) -> Turn {
     }
 }
 
-/// The footer's word for a mode — the enum's snake_case config
+/// The footer's word for a mode, the enum's snake_case config
 /// spelling, spoken the way the UI speaks.
 fn mode_label(mode: PermissionMode) -> &'static str {
     match mode {
@@ -5850,7 +5701,7 @@ fn mode_label(mode: PermissionMode) -> &'static str {
 }
 
 /// Stored text as display text: attachment markers become a quiet note
-/// naming the files — the bytes live in the attachments dir, not the
+/// naming the files, the bytes live in the attachments dir, not the
 /// transcript. Invisible-character hygiene applies at this render
 /// boundary too: stored text predating the tool-seam strip (or from a
 /// provider gone strange) renders without bidi or zero-width tricks.
@@ -5873,7 +5724,7 @@ fn display_text(text: &str) -> String {
     }
 }
 
-/// `/home/martin/x/y` → `~/x/y` — the footer's folder stays short. No
+/// `/home/martin/x/y` → `~/x/y`, the footer's folder stays short. No
 /// `HOME`, or a path outside it: printed whole.
 fn tildify(path: &std::path::Path) -> String {
     let home = std::env::var("HOME").ok().filter(|home| !home.is_empty());
@@ -5893,7 +5744,7 @@ fn tildify(path: &std::path::Path) -> String {
 /// Whether a session's stored root and a tab's root are the same
 /// folder. Canonical compare when both resolve (symlinks, `..`
 /// segments, bind mounts); a folder that no longer exists falls back
-/// to the literal strings — the store recorded what the OS handed it.
+/// to the literal strings, the store recorded what the OS handed it.
 fn same_workspace(stored: &str, current: &std::path::Path) -> bool {
     let stored = std::path::Path::new(stored);
     match (stored.canonicalize(), current.canonicalize()) {
@@ -5923,7 +5774,7 @@ enum SlashMatch {
 
 /// A tool card's parsed face, memoized per turn index: the label in
 /// both tenses and the diff's line data. Element construction stays
-/// per-frame — gpui elements are consumed on render — but the JSON
+/// per-frame, gpui elements are consumed on render, but the JSON
 /// parses and label shaping behind a card only need happen once: a
 /// card's arguments never change, only its tense. Cleared wherever
 /// the turns are replaced or shifted, with the other index-keyed
@@ -5935,8 +5786,8 @@ struct ToolFace {
 }
 
 /// What the current composer text would complete to, for the popup and
-/// for Enter routing. Builtins first — they always win over same-named
-/// files — then templates, filtered by prefix on the typed name. Empty
+/// for Enter routing. Builtins first, they always win over same-named
+/// files, then templates, filtered by prefix on the typed name. Empty
 /// = no popup: not an invocation, or nothing matches.
 fn slash_matches(input: &str, templates: &[gertie_tools::templates::Template]) -> Vec<SlashMatch> {
     // The bare slash is the discovery moment: list everything.
@@ -5952,7 +5803,7 @@ fn slash_matches(input: &str, templates: &[gertie_tools::templates::Template]) -
     if "compact".starts_with(name.as_str()) {
         matches.push(SlashMatch::Builtin(
             "compact",
-            "Summarize older history now — frees context, leaves the record whole",
+            "Summarize older history now, frees context, leaves the record whole",
         ));
     }
     if "export".starts_with(name.as_str()) {
@@ -5967,18 +5818,12 @@ fn slash_matches(input: &str, templates: &[gertie_tools::templates::Template]) -
     if "settings".starts_with(name.as_str()) {
         matches.push(SlashMatch::Builtin("settings", "Open the settings panel"));
     }
-    if "agents".starts_with(name.as_str()) {
-        matches.push(SlashMatch::Builtin(
-            "agents",
-            "Show the worker runs dispatched from this chat",
-        ));
-    }
     for (index, template) in templates.iter().enumerate() {
         if template.name.starts_with(name.as_str()) {
             matches.push(SlashMatch::Template(index));
         }
     }
-    // With args present the name is already chosen — the popup narrows
+    // With args present the name is already chosen, the popup narrows
     // to the exact row, as a confirm-and-expand.
     if !args.is_empty() {
         matches.retain(|matched| match matched {
@@ -5989,7 +5834,7 @@ fn slash_matches(input: &str, templates: &[gertie_tools::templates::Template]) -
     matches
 }
 
-/// `1234` → "1.2k" — token counts stay scannable: one decimal below
+/// `1234` → "1.2k", token counts stay scannable: one decimal below
 /// 100k (`12.3k`), whole k above (`123k`).
 fn human_tokens(count: u64) -> String {
     if count >= 100_000 {

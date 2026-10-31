@@ -1,5 +1,5 @@
 //! Headless UI regression tests for the chat surface: typing and Enter
-//! must reach the session store, with no provider configured at all —
+//! must reach the session store, with no provider configured at all,
 //! the exact path a fresh install walks first.
 
 use gertie::chat::ChatView;
@@ -49,7 +49,7 @@ fn fixture_with_store(store: Arc<SessionStore>) -> Fixture {
 }
 
 /// A fixture whose view carries a real checkpoint ledger over a real
-/// (empty) workspace — the turn-diff path end to end.
+/// (empty) workspace, the turn-diff path end to end.
 fn fixture_with_snapshots() -> Fixture {
     let store = Arc::new(SessionStore::open(Path::new(":memory:")).expect("memory store"));
     let snapshots_dir = tempfile::tempdir().expect("snapshots dir");
@@ -96,7 +96,7 @@ fn fixture_full(
     );
     cx.update(|cx| {
         gpui_kit::init(cx);
-        // The defaults the app would read from keymap.toml — the
+        // The defaults the app would read from keymap.toml, the
         // fixture binds them directly, no filesystem.
         gertie::chat::bind_chat_keys(cx);
         gpui_kit::component::Theme::change(gpui_kit::component::ThemeMode::Dark, None, cx);
@@ -107,7 +107,7 @@ fn fixture_full(
         .clone()
         .unwrap_or_else(|| Path::new(".").to_path_buf());
     // A real session records its workspace at first send; the seeds
-    // below (and above — the store arrives pre-seeded) bypass send, so
+    // below (and above, the store arrives pre-seeded) bypass send, so
     // the fixture records for them: every seeded conversation ran in
     // the view's workspace, which is what launch-resume matches on. A
     // root a test already set on purpose is left alone.
@@ -218,7 +218,7 @@ impl Fixture {
 
 /// Builtins plus whatever test doubles the fixture asked for. The
 /// registry is a plain map, so merging is one insert per extra tool.
-/// Rooted at the fixture's workspace, the way a real session's is —
+/// Rooted at the fixture's workspace, the way a real session's is,
 /// a tool that writes relative paths writes there, not at the CWD.
 fn merge_tools(extra: Vec<Arc<dyn gertie_core::Tool>>, root: &Path) -> gertie_core::ToolRegistry {
     let mut map = (*gertie_tools::builtin_tools(root)).clone();
@@ -232,7 +232,7 @@ fn merge_tools(extra: Vec<Arc<dyn gertie_core::Tool>>, root: &Path) -> gertie_co
 fn typing_and_enter_persists_the_user_message() {
     let mut fixture = fixture();
 
-    // A fresh install: no session rows yet — they are created lazily.
+    // A fresh install: no session rows yet, they are created lazily.
     assert!(fixture.store.list_sessions().unwrap().is_empty());
 
     fixture.act(|window, cx| {
@@ -308,7 +308,7 @@ fn invisible_characters_are_stripped_when_a_message_is_sent() {
 fn the_composer_chip_cycles_the_permission_mode_and_persists_it() {
     let mut fixture = fixture();
 
-    // A session is born with the chip's posture — supervised until the
+    // A session is born with the chip's posture, supervised until the
     // chip moves.
     fixture.act(|window, cx| {
         window.input("go", cx);
@@ -358,7 +358,7 @@ fn the_composer_chip_cycles_the_permission_mode_and_persists_it() {
 #[test]
 fn accept_edits_runs_the_checkpointed_edit_without_asking() {
     // A scripted turn that writes a file: the write_file call carries
-    // a path, so the checkpoint hook covers it — exactly the class
+    // a path, so the checkpoint hook covers it, exactly the class
     // accept_edits runs unasked. Empty step texts keep replay pacing
     // deterministic.
     let scenarios = tempfile::tempdir().expect("scenario dir");
@@ -400,7 +400,7 @@ fn accept_edits_runs_the_checkpointed_edit_without_asking() {
     );
     fixture.hold = vec![scenarios, workspace, snapshots_dir];
 
-    // Flip to accept edits before the first send — the session is
+    // Flip to accept edits before the first send, the session is
     // born with the chip's posture.
     fixture.act(|window, cx| {
         window.click("mode-chip", cx);
@@ -456,7 +456,7 @@ fn enter_on_an_empty_input_does_nothing() {
 }
 
 /// A resumed transcript full of markdown and a finished tool row must
-/// draw without panicking — the markdown renderer is hand-rolled and
+/// draw without panicking, the markdown renderer is hand-rolled and
 /// byte-index-driven, so the headless draw is the guard against
 /// char-boundary panics reaching a user.
 #[test]
@@ -475,7 +475,7 @@ fn markdown_and_tool_rows_draw_clean() {
         "- item one\n- [x] done\n- [ ] open\n  1. nested\n",
         "| a | b |\n|---|---|\n| 1 | 2 |\n",
         "> quoted **prose**\n\n---\n\n```rust\nfn main() {}\n```",
-        "closed **span and *nested* inside** end — écrit en français — 🦀 emoji",
+        "closed **span and *nested* inside** end, écrit en français, 🦀 emoji",
     ] {
         parent = Some(
             store
@@ -493,7 +493,7 @@ fn markdown_and_tool_rows_draw_clean() {
             "   1  fn main() {}\n   2  // three lines",
         )
         .expect("tool row");
-    // A real session records its workspace at first send — the seed
+    // A real session records its workspace at first send, the seed
     // bypasses send, so record it here: launch-resume matches on it.
     store.set_session_workspace(session_id, Path::new("."));
 
@@ -581,7 +581,7 @@ fn seeded_store() -> Arc<SessionStore> {
         .create_session("the flaky widget hunt")
         .expect("needle");
     for i in 0..40 {
-        // The one match sits at turn 6 — early enough that revealing
+        // The one match sits at turn 6, early enough that revealing
         // it must move the scroll off the bottom anchor.
         let content = if i == 3 {
             "the flaky widget broke here"
@@ -670,7 +670,7 @@ fn the_palette_jumps_to_a_hit_in_another_session() {
     );
     assert!(!open, "confirm closes the palette");
     // The transcript left the bottom anchor (40 items) to reveal turn
-    // 6 — the whole point of the jump.
+    // 6, the whole point of the jump.
     assert!(
         scroll < 40,
         "the hit's turn should be scrolled into view, got {scroll}"
@@ -679,7 +679,7 @@ fn the_palette_jumps_to_a_hit_in_another_session() {
 
 /// Launch resume is workspace-scoped: the store is one global memory,
 /// but a conversation rooted in another folder must not open in this
-/// folder's first tab — that is how one chat's file paths ended up in
+/// folder's first tab, that is how one chat's file paths ended up in
 /// a different directory's fresh window.
 #[test]
 fn launch_resume_matches_the_workspace() {
@@ -756,7 +756,7 @@ fn launch_resume_still_takes_this_workspaces_chat() {
 
 /// A footer workspace switch re-roots the session at the next send:
 /// the conversation follows the tab, so launch resume and the settle
-/// hook land in the folder it now runs in — not the one it was born
+/// hook land in the folder it now runs in, not the one it was born
 /// in.
 #[test]
 fn a_send_after_a_workspace_switch_re_roots_the_session() {
@@ -768,7 +768,7 @@ fn a_send_after_a_workspace_switch_re_roots_the_session() {
     store.set_session_workspace(session, Path::new("."));
 
     let mut fixture = fixture_with_store(store.clone());
-    // The footer's switch — the apply path, portal-free.
+    // The footer's switch, the apply path, portal-free.
     let view = fixture.view.clone();
     fixture.act(|_window, cx| {
         view.upgrade().expect("view alive").update(cx, |view, cx| {
@@ -811,7 +811,7 @@ fn escape_leaves_the_palette_without_jumping() {
 fn a_sent_message_mints_a_turn_window_and_the_panel_opens() {
     let mut fixture = fixture_with_snapshots();
 
-    // No provider configured: the turn still mints — the ledger
+    // No provider configured: the turn still mints, the ledger
     // anchors to the user row before the loop ever runs.
     fixture.act(|window, cx| {
         window.input("do a thing", cx);
@@ -834,7 +834,7 @@ fn a_sent_message_mints_a_turn_window_and_the_panel_opens() {
         .expect("rows")
         .remove(0);
 
-    // The ledger answers for that message — the seam a tool card's
+    // The ledger answers for that message, the seam a tool card's
     // "turn diff" resolves through, live or after a reload.
     let snapshots = fixture.snapshots.as_ref().expect("wired ledger");
     let turn = snapshots
@@ -843,7 +843,7 @@ fn a_sent_message_mints_a_turn_window_and_the_panel_opens() {
         .expect("turn minted by send");
     assert_eq!(turn.user_message_id, user.id);
 
-    // The panel opens on it — empty, since nothing mutated yet —
+    // The panel opens on it, empty, since nothing mutated yet,
     // showing the no-changes answer rather than an error.
     let view = fixture.view.clone();
     fixture.act(|_, cx| {
@@ -887,7 +887,7 @@ fn archive_store() -> Arc<SessionStore> {
 /// An archive deeper than the load window pages in: the newest 400 rows
 /// render, "load earlier" brings one batch at a time, and the last
 /// click retires the pagination row. The store keeps every row
-/// throughout — paging is a view concern, the record is not.
+/// throughout, paging is a view concern, the record is not.
 #[test]
 fn a_long_transcript_loads_in_pages_and_load_earlier_exhausts_cleanly() {
     let store = archive_store();
@@ -937,7 +937,7 @@ fn a_long_transcript_loads_in_pages_and_load_earlier_exhausts_cleanly() {
         assert_eq!(scroll, 0, "the reader stays on the oldest content");
     }
 
-    // Exhausted: the pagination row retired — no stale control, and
+    // Exhausted: the pagination row retired, no stale control, and
     // nothing was deleted from the record.
     fixture.act(|window, _| {
         assert!(
@@ -1007,14 +1007,14 @@ fn settling_folds_a_session_and_opening_brings_it_back() {
         "settled state persists in the store, not just the view"
     );
 
-    // The fold is collapsed: the settled row paints nothing — its
+    // The fold is collapsed: the settled row paints nothing, its
     // restore click must miss until the fold expands.
     fixture.act(|window, cx| {
         assert!(window.try_find("session-1").is_none());
         window.click("settled-fold", cx);
     });
 
-    // Open the settled session from the expanded fold — opening it
+    // Open the settled session from the expanded fold, opening it
     // is activity: it comes back to the active list on its own.
     fixture.act(|window, cx| {
         window.click("session-1", cx);
@@ -1050,7 +1050,7 @@ fn the_folds_restore_button_unsettles_without_opening() {
 }
 
 /// The settle command (config: settle_command) runs in the settling
-/// session's recorded workspace — the reclaim hook end to end: send
+/// session's recorded workspace, the reclaim hook end to end: send
 /// records the root, ✓ runs the command off the UI thread, the
 /// transcript reports the outcome.
 #[test]
@@ -1070,7 +1070,7 @@ fn settling_runs_the_reclaim_command_in_the_recorded_workspace() {
         None,
     );
 
-    // A send records the workspace on the session — the settle hook's
+    // A send records the workspace on the session, the settle hook's
     // anchor. (No provider: the turn fails loudly and ends; the
     // session and its root are real either way.)
     fixture.act(|window, cx| {
@@ -1100,8 +1100,8 @@ fn settling_runs_the_reclaim_command_in_the_recorded_workspace() {
 }
 
 /// The §2.5 pin: a worker's permission ask bubbles into the parent
-/// transcript as a pending card — not dead-ending in the agents panel —
-/// and the human's answer rides back to the worker's loop parked on it.
+/// transcript as a pending card, the answer rides back to the worker's
+/// loop parked on it.
 /// Scripted end to end: the replay provider drives the leader; its one
 /// tool registers a worker ask on the shared broker exactly as a real
 /// worker's loop does, then parks on the answer.
@@ -1146,7 +1146,7 @@ impl gertie_core::Tool for WorkerAskTool {
 }
 
 /// Settles a live turn: the pump's select loop ticks on a background
-/// timer, and test-executor timers only fire when the clock moves —
+/// timer, and test-executor timers only fire when the clock moves,
 /// so nudge time, drain, and draw, until the turn parks for good.
 fn pump(fixture: &mut Fixture, passes: usize) {
     for _ in 0..passes {
@@ -1161,7 +1161,7 @@ fn pump(fixture: &mut Fixture, passes: usize) {
 #[test]
 fn a_worker_ask_bubbles_into_the_transcript_and_the_answer_reaches_the_worker() {
     // The scripted leader turn: one call to the test's worker-ask tool,
-    // then a closing step with no calls — the turn ends there. Empty
+    // then a closing step with no calls, the turn ends there. Empty
     // texts keep the replay provider from pacing any deltas.
     let scenarios = tempfile::tempdir().expect("scenario dir");
     std::fs::write(
@@ -1202,8 +1202,7 @@ fn a_worker_ask_bubbles_into_the_transcript_and_the_answer_reaches_the_worker() 
 
     // Send: the scripted leader calls worker_ask (a Running card, its
     // auto-run), which registers the ask and parks. The pump surfaces
-    // it as a pending card in THIS transcript — the parent's, not the
-    // agents panel's.
+    // it as a pending card in THIS transcript, the parent's.
     fixture.act(|window, cx| {
         window.input("go", cx);
         window.press("enter", cx);
@@ -1250,7 +1249,7 @@ fn a_worker_ask_bubbles_into_the_transcript_and_the_answer_reaches_the_worker() 
 }
 
 /// Quiet is the agent's silence, not the human's: while an approval
-/// card waits on an answer, the status line keeps "quiet" to itself —
+/// card waits on an answer, the status line keeps "quiet" to itself,
 /// the ask's own clock tells that story. The gauge still speaks when
 /// nothing waits on anyone.
 #[test]
@@ -1299,7 +1298,7 @@ fn the_quiet_gauge_holds_its_tongue_while_an_approval_waits() {
     pump(&mut fixture, 30);
 
     // The card pends; the clocks age past the quiet threshold. The
-    // line must not call that quiet — the human is the quiet party.
+    // line must not call that quiet, the human is the quiet party.
     let view = fixture.view.clone();
     fixture.act(|_window, cx| {
         view.upgrade().expect("view alive").update(cx, |view, _| {
@@ -1320,7 +1319,7 @@ fn the_quiet_gauge_holds_its_tongue_while_an_approval_waits() {
     );
 
     // The answer is an event: the waiting label and its clock retire
-    // with the card — no instant, un-reset quiet on the other side.
+    // with the card, no instant, un-reset quiet on the other side.
     fixture.act(|window, cx| {
         window.click("approve-2", cx);
     });
@@ -1362,7 +1361,7 @@ fn the_quiet_gauge_holds_its_tongue_while_an_approval_waits() {
     );
 }
 
-/// The §2.4 pin: ✕ deletes without a "sure?" step — the row leaves
+/// The §2.4 pin: ✕ deletes without a "sure?" step, the row leaves
 /// every list at once and the undo toast is the speed bump. The store
 /// row survives the five-second window; when it closes, the purge task
 /// removes the row for real.
@@ -1431,7 +1430,7 @@ fn undo_brings_a_deleted_session_back_before_the_window_closes() {
         );
     });
 
-    // The window's task still fires — and finds nothing pending.
+    // The window's task still fires, and finds nothing pending.
     fixture
         .cx
         .background_executor
@@ -1444,7 +1443,7 @@ fn undo_brings_a_deleted_session_back_before_the_window_closes() {
     );
 }
 
-/// Ctrl+Z outside the composer fires the undo-delete action — the
+/// Ctrl+Z outside the composer fires the undo-delete action, the
 /// binding is global (no context), so it works from wherever focus
 /// sits that doesn't consume the keystroke.
 #[test]
@@ -1466,7 +1465,7 @@ fn ctrl_z_outside_the_composer_undoes_the_delete() {
 }
 
 /// The §2.3 pin, end to end through the replay provider: a turn that
-/// ends on the provider's rate limit leaves the session Limited —
+/// ends on the provider's rate limit leaves the session Limited,
 /// persisted, resumed from the bar above the composer, cleared the
 /// moment the resumed turn runs.
 #[test]
@@ -1535,7 +1534,7 @@ fn a_rate_limited_turn_offers_resume_and_resuming_clears_it() {
             .find(|summary| summary.id == session_id)
             .expect("summary")
             .limited,
-        "limited persists in the store — it survives a restart"
+        "limited persists in the store, it survives a restart"
     );
     fixture.act(|window, cx| {
         assert!(
@@ -1568,7 +1567,7 @@ fn a_rate_limited_turn_offers_resume_and_resuming_clears_it() {
     });
 }
 
-/// The snooze pin: "Snooze 30 min" schedules the resume itself — half
+/// The snooze pin: "Snooze 30 min" schedules the resume itself, half
 /// an hour later the limited turn resumes with no further click, and
 /// the limited state clears. Nothing else in this test touches the
 /// resume path, so a cleared flag IS the fired snooze.
@@ -1665,7 +1664,7 @@ fn snoozing_a_limited_session_resumes_it_when_the_timer_fires() {
 }
 
 /// Canceling the snooze dissolves the promise: the timer fires into a
-/// cleared field and the session stays limited and quiet — no turn
+/// cleared field and the session stays limited and quiet, no turn
 /// runs by itself.
 #[test]
 fn canceling_the_snooze_leaves_the_session_limited_and_quiet() {
@@ -1717,7 +1716,7 @@ fn canceling_the_snooze_leaves_the_session_limited_and_quiet() {
         );
         assert!(
             window.try_find("resume-turn").is_some(),
-            "the session is still limited — the manual way back stays"
+            "the session is still limited, the manual way back stays"
         );
     });
 
@@ -1739,7 +1738,7 @@ fn canceling_the_snooze_leaves_the_session_limited_and_quiet() {
 
 /// A paste bigger than a message should be lands as a file chip: at
 /// send the body is filed into the workspace and the message cites
-/// the path — the context never carries it. A smaller paste stays
+/// the path, the context never carries it. A smaller paste stays
 /// text (returns false, the textarea does its thing).
 #[test]
 fn a_big_paste_files_itself_into_the_workspace_and_the_message_cites_it() {
@@ -1778,7 +1777,7 @@ fn a_big_paste_files_itself_into_the_workspace_and_the_message_cites_it() {
         });
     });
 
-    // Sending with no provider still persists the user row — enough
+    // Sending with no provider still persists the user row, enough
     // to assert the citation and the filed file.
     fixture.act(|window, cx| {
         window.input("read what I pasted", cx);
@@ -1832,7 +1831,7 @@ fn a_big_paste_files_itself_into_the_workspace_and_the_message_cites_it() {
     );
 }
 
-/// "Quote" on an assistant turn drops a blockquote into the composer —
+/// "Quote" on an assistant turn drops a blockquote into the composer,
 /// the exact words the user is talking about, with typing room under.
 #[test]
 fn quoting_an_assistant_turn_lands_a_blockquote_in_the_composer() {
@@ -1878,7 +1877,7 @@ fn quoting_an_assistant_turn_lands_a_blockquote_in_the_composer() {
     );
 }
 
-/// A long response quotes bounded — enough to pin the referent, never
+/// A long response quotes bounded, enough to pin the referent, never
 /// the whole answer forced back into the prompt.
 #[test]
 fn a_long_assistant_turn_quotes_truncated() {
@@ -1919,7 +1918,7 @@ fn a_long_assistant_turn_quotes_truncated() {
 /// running one ends.
 #[test]
 fn a_queued_followup_is_a_row_that_drafts_drains_and_survives() {
-    // A turn that pends on a permission card: stable "running" state —
+    // A turn that pends on a permission card: stable "running" state,
     // the queue can be exercised against a live turn.
     let scenarios = tempfile::tempdir().expect("scenario dir");
     std::fs::write(
@@ -1988,7 +1987,7 @@ fn a_queued_followup_is_a_row_that_drafts_drains_and_survives() {
     });
 
     // Approve the held write: the turn finishes and the drain fires
-    // the queued row as its own turn — a real user row, no composer
+    // the queued row as its own turn, a real user row, no composer
     // involvement.
     fixture.act(|window, cx| {
         window.click("approve-1", cx);
@@ -2029,7 +2028,7 @@ fn queued_drafts_render_from_rows_and_every_action_is_real() {
     let mut fixture = fixture_with_store(store);
 
     // The resumed session renders the queued row as a draft with
-    // actions — the words survived the restart.
+    // actions, the words survived the restart.
     fixture.act(|window, cx| {
         assert!(
             window.try_find("queue-edit-1").is_some(),
@@ -2038,7 +2037,7 @@ fn queued_drafts_render_from_rows_and_every_action_is_real() {
     });
 
     // "Send now" with no live turn: its own turn, straight from the
-    // row — the composer's draft (if any) untouched.
+    // row, the composer's draft (if any) untouched.
     fixture.act(|window, cx| {
         window.click("queue-send-1", cx);
     });
@@ -2073,7 +2072,7 @@ fn queued_drafts_render_from_rows_and_every_action_is_real() {
     );
 
     // Edit pulls a fresh row back into the composer; ✕ removes one.
-    // The rows land through the store (as a restart's would) — the
+    // The rows land through the store (as a restart's would), the
     // view sees them on re-open. Row ids come from the store: a
     // drained table reuses ids.
     store2
@@ -2143,7 +2142,7 @@ fn queued_drafts_render_from_rows_and_every_action_is_real() {
     );
 }
 
-/// Reads the composer through the view — the same bytes a user sees.
+/// Reads the composer through the view, the same bytes a user sees.
 fn composer_text(fixture: &mut Fixture) -> String {
     fixture.cx.update(|cx| {
         fixture
@@ -2200,7 +2199,7 @@ fn arrow_up_recalls_sent_prompts_and_arrow_down_returns() {
 }
 
 /// Typing ends the walk: the next ArrowUp is a cursor move again, not
-/// a jump through history — the edit survives.
+/// a jump through history, the edit survives.
 #[test]
 fn typing_ends_the_recall_walk() {
     let store = seeded_two_turn_session();
@@ -2236,7 +2235,7 @@ fn arrow_up_with_no_history_leaves_the_composer_alone() {
 
 /// "Edit from here": the transcript rewinds to the kept prefix, the
 /// question returns as a draft, and the NEXT send parents to the keep
-/// point — the abandoned branch stays in the ledger as audit while
+/// point, the abandoned branch stays in the ledger as audit while
 /// dropping off every read.
 #[test]
 fn edit_from_here_keeps_changes_and_parents_the_next_send_to_the_keep_point() {
@@ -2258,7 +2257,7 @@ fn edit_from_here_keeps_changes_and_parents_the_next_send_to_the_keep_point() {
         .expect("row");
     let mut fixture = fixture_with_store(store);
 
-    // Asking opens the confirm row — a choice, not a fait accompli.
+    // Asking opens the confirm row, a choice, not a fait accompli.
     // No checkpoint ledger in this fixture, so there is no files
     // offer to make.
     fixture.act(|window, cx| window.click("rewind-2", cx));
@@ -2290,20 +2289,20 @@ fn edit_from_here_keeps_changes_and_parents_the_next_send_to_the_keep_point() {
     // point, so the canonical path reads the new branch and the
     // abandoned question stays in the table as audit.
     fixture.act(|window, cx| {
-        window.input(" — edited", cx);
+        window.input(", edited", cx);
         window.press("enter", cx);
     });
     let rows = fixture.store.load_messages(session).expect("rows");
     let contents: Vec<&str> = rows.iter().map(|row| row.content.as_str()).collect();
     assert_eq!(
         contents,
-        vec!["first ask", "first answer", "second ask — edited"]
+        vec!["first ask", "first answer", "second ask, edited"]
     );
     // (The abandoned row's survival as audit is pinned in the core
-    // store tests — the rowids here are the store's to hand out.)
+    // store tests, the rowids here are the store's to hand out.)
 }
 
-/// "Revert files too": the restore walks the ledger turn by turn —
+/// "Revert files too": the restore walks the ledger turn by turn,
 /// the file goes back to its before content, then the transcript
 /// truncates. Never files-without-history, never the reverse.
 #[test]
@@ -2361,7 +2360,7 @@ fn revert_files_too_restores_the_checkpointed_content() {
     );
 
     // Rewind the first (only) turn, files included: the file's
-    // before-content comes back (it didn't exist — an empty file),
+    // before-content comes back (it didn't exist, an empty file),
     // the transcript empties, the question returns as a draft.
     fixture.act(|window, cx| window.click("rewind-0", cx));
     fixture.act(|window, cx| {
@@ -2381,7 +2380,7 @@ fn revert_files_too_restores_the_checkpointed_content() {
 }
 
 /// The safety guard is fail-closed: when something else streams in
-/// the same checkout, the file restore refuses — and only the files
+/// the same checkout, the file restore refuses, and only the files
 /// restore; keep-changes never needs the guard.
 #[test]
 fn the_guard_refuses_a_file_restore_while_another_tab_streams() {
@@ -2441,11 +2440,11 @@ fn the_guard_refuses_a_file_restore_while_another_tab_streams() {
         b"auto",
         "the restore refused before touching anything"
     );
-    // The refusal is visible — a notice turn joined the transcript —
+    // The refusal is visible, a notice turn joined the transcript,
     // but nothing else moved.
     assert_eq!(turn_count_of(&mut fixture), 3);
 
-    // Keep-changes never consults the guard — it changes no files.
+    // Keep-changes never consults the guard, it changes no files.
     fixture.act(|window, cx| window.click("rewind-keep", cx));
     assert_eq!(turn_count_of(&mut fixture), 0);
     assert_eq!(
@@ -2456,7 +2455,7 @@ fn the_guard_refuses_a_file_restore_while_another_tab_streams() {
 }
 
 /// The workspace switch, end to end: turn 1 writes in the first
-/// folder, the chat moves to the second, turn 2 writes there — and
+/// folder, the chat moves to the second, turn 2 writes there, and
 /// rewinding turn 1 restores into the first, because the ledger
 /// recorded where its turn ran. The tools follow the switch (the
 /// second write landed in the new root), the history does not lie
@@ -2522,7 +2521,7 @@ fn a_workspace_switch_moves_the_tools_and_the_ledger_restores_where_it_ran() {
         b"one"
     );
 
-    // The switch — the footer word's apply path, portal-free.
+    // The switch, the footer word's apply path, portal-free.
     let view = fixture.view.clone();
     fixture.act(|_window, cx| {
         view.upgrade().expect("view alive").update(cx, |view, cx| {
@@ -2548,7 +2547,7 @@ fn a_workspace_switch_moves_the_tools_and_the_ledger_restores_where_it_ran() {
     );
 
     // Rewind turn 1, files included: rewind truncates both turns, and
-    // each file restores where its own turn ran — turn 1's into the
+    // each file restores where its own turn ran, turn 1's into the
     // first folder (the ledger's recorded workspace, though the caller
     // now stands in the second), turn 2's into the second.
     fixture.act(|window, cx| window.click("rewind-0", cx));
@@ -2691,7 +2690,7 @@ fn a_pending_card_breaks_the_run_until_it_settles() {
     fixture.act(|window, cx| {
         assert!(
             window.try_find("tool-run-1").is_none(),
-            "the pending write breaks the run — no summary over a live ask"
+            "the pending write breaks the run, no summary over a live ask"
         );
         assert!(
             window.try_find("approve-2").is_some(),
@@ -2706,53 +2705,9 @@ fn a_pending_card_breaks_the_run_until_it_settles() {
     fixture.act(|window, cx| {
         assert!(
             window.try_find("tool-run-1").is_some(),
-            "both finished — the run collapses"
+            "both finished, the run collapses"
         );
     });
-}
-
-/// The agents panel is an attention-ordered list, not a recency list:
-/// what waits on you first, then what's alive, then what's finished —
-/// dispatch order holds within a class.
-#[test]
-fn the_agents_panel_sorts_runs_by_attention() {
-    let store = Arc::new(SessionStore::open(Path::new(":memory:")).expect("memory store"));
-    let session = store.create_session("parent").expect("session");
-    // Dispatch order: done, running, stuck — recency would read the
-    // stuck run last; attention reads it first.
-    let done = store
-        .create_worker_run(Some(session), "done run")
-        .expect("run");
-    store
-        .append_message(done, None, gertie_core::Role::Assistant, "report")
-        .expect("report row");
-    store
-        .create_worker_run(Some(session), "running run")
-        .expect("run");
-    let stuck = store
-        .create_worker_run(Some(session), "stuck run")
-        .expect("run");
-    store.set_session_limited(stuck, true).expect("limited");
-
-    let mut fixture = fixture_with_store(store);
-    fixture.act(|window, cx| window.click("toggle-agents", cx));
-
-    let runs = fixture.cx.update(|cx| {
-        fixture
-            .view
-            .upgrade()
-            .expect("view alive")
-            .read(cx)
-            .worker_runs_for_test()
-    });
-    assert_eq!(
-        runs,
-        vec![
-            ("stuck run".to_string(), "needs you"),
-            ("running run".to_string(), "running…"),
-            ("done run".to_string(), "done"),
-        ]
-    );
 }
 
 /// `>` switches the palette to commands: the term matches names and
@@ -2773,7 +2728,7 @@ fn the_palette_gt_filter_runs_a_command() {
                 .read(cx)
                 .palette_command_names_for_test())
             .len(),
-        5,
+        4,
         "a bare > lists every command"
     );
 
@@ -2781,7 +2736,7 @@ fn the_palette_gt_filter_runs_a_command() {
     // cleared field (escape closes, ctrl-k reopens it empty).
     fixture.act(|window, cx| window.press("escape", cx));
     fixture.act(|window, cx| window.press("ctrl-k", cx));
-    fixture.act(|window, cx| window.input(">agents", cx));
+    fixture.act(|window, cx| window.input(">settings", cx));
     assert_eq!(
         fixture.cx.update(|cx| fixture
             .view
@@ -2789,7 +2744,7 @@ fn the_palette_gt_filter_runs_a_command() {
             .expect("view alive")
             .read(cx)
             .palette_command_names_for_test()),
-        vec!["agents"]
+        vec!["settings"]
     );
     fixture.act(|window, cx| window.press("enter", cx));
     let state = fixture.cx.update(|cx| {
@@ -2805,8 +2760,8 @@ fn the_palette_gt_filter_runs_a_command() {
         "palette should close on confirm (commands={:?}, panel={})",
         state.1, state.2
     );
-    // The action ran: the right column flipped to the agents panel.
-    assert_eq!(state.2, "agents", "the agents panel opened");
+    // The action ran: the right column flipped to the settings panel.
+    assert_eq!(state.2, "settings", "the settings panel opened");
 }
 
 /// F6 cycles the surface's areas forward (wrapping), Shift+F6 back;
@@ -2836,11 +2791,11 @@ fn f6_cycles_focus_areas_and_shift_f6_walks_back() {
     assert_eq!(focused_area(&mut fixture), "transcript");
 
     // The right panel joins the cycle while it's open. Open it via
-    // the palette — its close hands focus back to the composer —
+    // the palette, its close hands focus back to the composer,
     // then the cycle reads composer → panel, and the wrap crosses
     // the panel too.
     fixture.act(|window, cx| window.press("ctrl-k", cx));
-    fixture.act(|window, cx| window.input(">agents", cx));
+    fixture.act(|window, cx| window.input(">settings", cx));
     fixture.act(|window, cx| window.press("enter", cx));
     assert_eq!(focused_area(&mut fixture), "composer");
     fixture.act(|window, cx| window.press("f6", cx));
@@ -2870,14 +2825,14 @@ fn focused_area(fixture: &mut Fixture) -> String {
 
 /// The MRU boost: the thread you last picked for a query ranks first
 /// when you type that query again. The selection moves through the
-/// palette state's own API — what the hover and arrow paths converge
+/// palette state's own API, what the hover and arrow paths converge
 /// on; the input context claims the arrow keys while the query has
 /// text, so the keystroke path isn't testable.
 #[test]
 fn a_picked_session_ranks_first_when_the_query_returns() {
     let store = Arc::new(SessionStore::open(Path::new(":memory:")).expect("memory store"));
-    // Two flaky rows with different match densities, so the FTS rank —
-    // and therefore the unpicked order — is deterministic: alpha's
+    // Two flaky rows with different match densities, so the FTS rank,
+    // and therefore the unpicked order, is deterministic: alpha's
     // denser row outranks beta's.
     let alpha = store.create_session("alpha flaky").expect("alpha");
     store
@@ -2902,7 +2857,7 @@ fn a_picked_session_ranks_first_when_the_query_returns() {
     assert_eq!(before.len(), 2, "both sessions hold a flaky row");
     assert_eq!(before[0], alpha, "the denser row ranks first, unpicked");
 
-    // Select beta's row and confirm it — the pick ledger records it.
+    // Select beta's row and confirm it, the pick ledger records it.
     let palette = fixture.cx.update(|cx| {
         fixture
             .view

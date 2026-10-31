@@ -1,6 +1,6 @@
 //! `gertie run`: one turn, no window. Model text goes to stdout (clean
 //! for pipes), every activity line to stderr, and the session persists
-//! exactly like a GUI session — the librarian and search_history see it
+//! exactly like a GUI session, the librarian and search_history see it
 //! later. Approval flow mirrors the UI's safety model: reads auto-run;
 //! mutating calls print the tool and arguments and wait for Enter/y,
 //! or deny outright when there is no terminal and no `--yes`.
@@ -22,7 +22,7 @@ pub fn run(prompt: Option<String>, yes: bool, config_path: Option<PathBuf>) -> i
     }
     let Some(provider) = boot.provider() else {
         eprintln!(
-            "error: no endpoint configured — add one to config.toml (see config.example.toml)"
+            "error: no endpoint configured, add one to config.toml (see config.example.toml)"
         );
         return 1;
     };
@@ -59,7 +59,7 @@ pub fn run(prompt: Option<String>, yes: bool, config_path: Option<PathBuf>) -> i
     for warning in boot.config.key_warnings() {
         eprintln!("⚠ {warning}");
     }
-    // A key that didn't resolve means a guaranteed 401 — refuse to send
+    // A key that didn't resolve means a guaranteed 401, refuse to send
     // the doomed request; the warning above carries the fix.
     if boot
         .config
@@ -134,7 +134,7 @@ pub fn run(prompt: Option<String>, yes: bool, config_path: Option<PathBuf>) -> i
                 // Anything else the human typed is worth more than a
                 // bare no: it goes back to the model in the tool result.
                 reply => {
-                    eprintln!("  denied — your reply goes back to the model");
+                    eprintln!("  denied, your reply goes back to the model");
                     PermissionDecision::Deny {
                         feedback: Some(reply.to_string()),
                     }
@@ -165,6 +165,10 @@ pub fn run(prompt: Option<String>, yes: bool, config_path: Option<PathBuf>) -> i
             eprintln!("[limited] {message}");
             1
         }
+        Outcome::Budgeted { message } => {
+            eprintln!("[paused] {message}");
+            1
+        }
     }
 }
 
@@ -175,15 +179,18 @@ pub(crate) enum Outcome {
     /// The loop surfaced an exhausted error.
     Error { message: String },
     /// The loop ended on the provider's rate limit. The transcript and
-    /// the exit say so distinctly — an error asks "what broke", a limit
+    /// the exit say so distinctly, an error asks "what broke", a limit
     /// asks "when do we go again".
     Limited { message: String },
+    /// The round budget's grace window closed, the turn paused like a
+    /// limited one: resumable in a session, exit 1 headless.
+    Budgeted { message: String },
 }
 
 /// Drives one turn to completion on the current thread. Returns the
 /// outcome plus everything the model said in total. The provider
 /// drains on its own runtime; polling here only receives, so `Pending`
-/// means "still producing", never deadlock — the same contract the
+/// means "still producing", never deadlock, the same contract the
 /// provider tests rely on.
 pub(crate) fn pump(
     mut stream: futures_util::stream::BoxStream<'static, LoopEvent>,
@@ -194,7 +201,7 @@ pub(crate) fn pump(
     decide: &mut dyn FnMut(&gertie_core::ToolCall) -> PermissionDecision,
 ) -> (Outcome, String) {
     // Assistant text accumulates until a shape change, then lands as one
-    // row — the headless equivalent of the UI's throttled persistence.
+    // row, the headless equivalent of the UI's throttled persistence.
     // The recorder parents onto the session's tip, the way the real
     // front does: whatever the session already held is the
     // conversation this turn continues.
@@ -209,7 +216,7 @@ pub(crate) fn pump(
         text: String::new(),
     };
     // call id → (name, arguments), so tool-result rows carry what the
-    // model actually sent — the reload path depends on it.
+    // model actually sent, the reload path depends on it.
     let mut calls: HashMap<String, (String, String)> = HashMap::new();
     let waker = Waker::noop();
     let mut cx = TaskContext::from_waker(waker);
@@ -217,7 +224,7 @@ pub(crate) fn pump(
     loop {
         // Worker asks first: a worker's loop parks inside its tool, so
         // its asks only surface here, never on the leader stream. An
-        // empty or disconnected channel just ends the drain — no more
+        // empty or disconnected channel just ends the drain, no more
         // asks for now.
         while let Ok(ask) = worker_asks.try_recv() {
             recorder.flush();
@@ -275,16 +282,17 @@ pub(crate) fn pump(
                     output_tokens,
                 } => {
                     // Persist against the session so its totals survive
-                    // the run — same ledger the GUI reads on resume.
+                    // the run, same ledger the GUI reads on resume.
                     let _ = store.add_usage(session, input_tokens, output_tokens);
-                    eprintln!("· tokens — {input_tokens} in / {output_tokens} out (this request)");
+                    eprintln!("· tokens, {input_tokens} in / {output_tokens} out (this request)");
                 }
                 LoopEvent::Compacted { kept, total } => {
-                    eprintln!("· context compacted — {kept} of {total} messages kept");
+                    eprintln!("· context compacted, {kept} of {total} messages kept");
                 }
-                // One-shot prompt mode cannot steer — no stdin to speak
-                // of — so the event cannot fire; the arm is completeness.
+                // One-shot prompt mode cannot steer, no stdin to speak
+                // of, so the event cannot fire; the arm is completeness.
                 LoopEvent::Steered { .. } => {}
+                LoopEvent::Nudged => {}
                 LoopEvent::Error { message } => {
                     recorder.flush();
                     return (Outcome::Error { message }, recorder.text);
@@ -292,6 +300,10 @@ pub(crate) fn pump(
                 LoopEvent::Limited { message } => {
                     recorder.flush();
                     return (Outcome::Limited { message }, recorder.text);
+                }
+                LoopEvent::Budgeted { message } => {
+                    recorder.flush();
+                    return (Outcome::Budgeted { message }, recorder.text);
                 }
                 LoopEvent::Done => {
                     recorder.flush();
@@ -309,7 +321,7 @@ pub(crate) fn pump(
     }
 }
 
-/// Prints the ask and applies the decider. Worker asks are labeled —
+/// Prints the ask and applies the decider. Worker asks are labeled,
 /// same information the UI's `· worker` card carries.
 fn ask_permission(
     call: &gertie_core::ToolCall,
@@ -321,7 +333,7 @@ fn ask_permission(
     } else {
         "approval needed"
     };
-    eprintln!("· {who} — {}", call.name);
+    eprintln!("· {who}, {}", call.name);
     eprintln!("  {}", describe(call));
     decide(call)
 }
@@ -413,7 +425,7 @@ mod tests {
         }
     }
 
-    /// A mutating tool that does nothing — enough to trigger the
+    /// A mutating tool that does nothing, enough to trigger the
     /// permission path.
     struct YesTool;
 
@@ -522,7 +534,7 @@ mod tests {
         assert_eq!(approvals, 1);
 
         // The persisted record: user, assistant segment, tool result,
-        // final assistant — a reload would reconstruct exactly this.
+        // final assistant, a reload would reconstruct exactly this.
         let messages = store.load_messages(session).unwrap();
         let rendered: Vec<String> = messages
             .iter()
