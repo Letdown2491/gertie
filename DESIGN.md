@@ -328,9 +328,12 @@ The composer grew the t3code set: a command palette (Ctrl+K, or the sidebar's se
 button) that answers with FTS5 hits from the store — every session's memory, ranked, with
 confirm jumping to the hit's turn (a cross-session hit switches first; the jump breaks
 tail-follow, scrolling back to the bottom re-engages it). Attachments broadened past
-images: "attach file" opens the picker, paste intercepts images and copied files, PDFs
+images: a paperclip button (the Lucide path, inlined as bytes — the app ships only the
+kit's default icon bundle) opens the picker, paste intercepts images and copied files, PDFs
 ride the wire as typed document/file blocks, and text files inline into the message — the
-extension table refuses (with a reason) what no endpoint can read. A paste at or above
+extension table refuses (with a reason) what no endpoint can read. The permission mode
+lives on the footer line under the composer, a quiet clickable word that cycles the ring —
+same click, none of the composer row's width. A paste at or above
 32 KiB never becomes message text: it files into the workspace (`.gertie/pastes/`, kept
 out of git by the local exclude) and the message cites the path for the agent's
 `read_file` — the context carries the pointer, not the document. An assistant turn worth

@@ -15,11 +15,13 @@ use gpui_kit::component::command::{Command, CommandState};
 use gpui_kit::component::input::{
     Input, InputEvent, InputState, MoveDown, MoveToEnd, MoveUp, Textarea, TextareaState,
 };
-use gpui_kit::component::{ActiveTheme, Sizable as _, h_flex, v_flex};
+use gpui_kit::component::tooltip::Tooltip;
+use gpui_kit::component::{ActiveTheme, Icon, Sizable as _, h_flex, v_flex};
 use gpui_kit::{
     Action, AnyElement, App, AppContext as _, Context, Entity, EventEmitter, Focusable,
     IntoElement, ListAlignment, ListState, ParentElement, Render, SharedString,
-    StatefulInteractiveElement as _, Styled, Window, actions, div, list, prelude::*, px,
+    StatefulInteractiveElement as _, Styled, TestSupportExt as _, Window, actions, div, list,
+    prelude::*, px,
 };
 use std::sync::Arc;
 use std::time::Duration;
@@ -1798,9 +1800,10 @@ impl ChatView {
     }
 
     /// The attach affordance, three ways in, one destination:
-    /// the "attach file" button opens a native file picker; pasting
-    /// intercepts images and copied files before the textarea sees
-    /// them; both land in the same pending set as removable chips.
+    /// the "attach file" paperclip opens a native file picker;
+    /// pasting intercepts images and copied files before the
+    /// textarea sees them; both land in the same pending set as
+    /// removable chips.
     fn attach_from_picker(&mut self, cx: &mut Context<Self>) {
         let picker = cx.prompt_for_paths(gpui_kit::PathPromptOptions {
             files: true,
@@ -3790,21 +3793,38 @@ impl ChatView {
             }
             parts.push(gauge);
         }
-        if parts.is_empty() {
-            return div().into_any_element();
-        }
-        let ledger = div()
+        // The permission posture leads the quiet line: a word, not a
+        // chip — the same click-to-cycle it had in the composer row,
+        // none of the row's width. The footer always renders now that
+        // the word lives here; the token ledger rides behind it.
+        let mode = div()
+            .id("mode-chip")
+            .cursor_pointer()
             .text_size(px(11.))
-            .text_color(if near_compaction {
-                cx.theme().warning
-            } else {
-                cx.theme().muted_foreground
+            .text_color(cx.theme().muted_foreground)
+            .hover(|style| style.text_color(cx.theme().foreground))
+            .tooltip(|window, cx| {
+                Tooltip::new("Permission mode — click to change. Applies from the next turn on.")
+                    .build(window, cx)
             })
-            .child(if parts.is_empty() {
-                " ".into()
-            } else {
-                parts.join("  ·  ")
-            });
+            .on_click(cx.listener(|this, _, _, cx| this.cycle_mode(cx)))
+            .child(mode_label(self.mode))
+            // Observed so the test harness can click the word; a
+            // no-op outside test-support builds.
+            .test_support();
+        let mut ledger = h_flex().gap_2().child(mode);
+        if !parts.is_empty() {
+            ledger = ledger.child(
+                div()
+                    .text_size(px(11.))
+                    .text_color(if near_compaction {
+                        cx.theme().warning
+                    } else {
+                        cx.theme().muted_foreground
+                    })
+                    .child(parts.join("  ·  ")),
+            );
+        }
         let ident = div()
             .text_size(px(11.))
             .truncate()
@@ -5291,19 +5311,6 @@ impl Render for ChatView {
                                             .px_4()
                                             .py_3()
                                             .gap_2()
-                                            .child(
-                                                Button::new("mode-chip")
-                                                    .label(format!("mode: {}", mode_label(self.mode)))
-                                                    .small()
-                                                    .ghost()
-                                                    .tooltip(concat!(
-                                                        "Permission mode — click to change. ",
-                                                        "Applies from the next turn on."
-                                                    ))
-                                                    .on_click(cx.listener(|this, _, _, cx| {
-                                                        this.cycle_mode(cx);
-                                                    })),
-                                            )
                                             // The verb the send key fires,
                                             // stated where the key is used:
                                             // Enter steers a running turn,
@@ -5324,14 +5331,28 @@ impl Render for ChatView {
                                             })
                                             .child(
                                                 Button::new("attach-file")
-                                                    // A word, not a glyph: the
-                                                    // emoji-only label rasterized
-                                                    // as nothing on Linux — the
-                                                    // button was there and no one
-                                                    // could see it.
-                                                    .label("attach file")
+                                                    // A paperclip, the one word
+                                                    // every file-affordance
+                                                    // speaks. Bytes, not a
+                                                    // font glyph: the emoji
+                                                    // label rasterized as
+                                                    // nothing on Linux, and
+                                                    // the app's asset source
+                                                    // ships the kit's default
+                                                    // bundle, not the full
+                                                    // Lucide catalog this path
+                                                    // lives in — `Icon::data`
+                                                    // renders it without
+                                                    // registering an asset.
+                                                    .icon(Icon::default().data(PAPERCLIP_SVG))
                                                     .small()
                                                     .ghost()
+                                                    // The label left the
+                                                    // screen with the word;
+                                                    // the name stays for the
+                                                    // reader that never sees
+                                                    // pixels.
+                                                    .accessibility_label("attach file")
                                                     .tooltip(
                                                         "Attach images, PDFs, or text files",
                                                     )
@@ -5390,6 +5411,19 @@ const NO_ENDPOINT_NOTICE: &str = "No endpoint configured — none is built in. A
     settings panel (type `/settings` in the composer): any OpenAI-compatible URL, the model id it \
     serves, and the env var holding your key. `gertie doctor` checks the setup.";
 
+/// The composer's paperclip, the Lucide path as raw bytes. The app's
+/// asset source is the kit's default icon bundle; the full Lucide
+/// catalog it draws from would add megabytes for one glyph, so the
+/// path rides here and `Icon::data` paints it without an asset
+/// lookup. `currentColor` keeps it in whatever the button's text
+/// color is at rest and hovered.
+const PAPERCLIP_SVG: &[u8] =
+    b"<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"24\" height=\"24\" \
+    viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" \
+    stroke-linecap=\"round\" stroke-linejoin=\"round\"><path d=\"m16 6-8.414 8.586a2 2 0 0 0 \
+    2.829 2.829l8.414-8.586a4 4 0 1 0-5.657-5.657l-8.379 8.551a6 6 0 1 0 8.485 8.485l8.379-8.551\" \
+    /></svg>";
+
 /// A stored row as a transcript turn: tool rows render as finished
 /// cards, everything else as its role's bubble. The one mapping both
 /// the reload and the "load earlier" pagination share — a row must
@@ -5415,7 +5449,7 @@ fn turn_from_row(row: &gertie_core::Message) -> Turn {
     }
 }
 
-/// The composer chip's word for a mode — the enum's snake_case config
+/// The footer's word for a mode — the enum's snake_case config
 /// spelling, spoken the way the UI speaks.
 fn mode_label(mode: PermissionMode) -> &'static str {
     match mode {
