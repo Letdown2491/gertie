@@ -194,11 +194,6 @@ pub fn run_turn(spec: TurnSpec) -> BoxStream<'static, LoopEvent> {
     let mut steer = steer;
     let specs = tool_specs(&tools);
     Box::pin(async_stream::stream! {
-        let mut request = Request {
-            tools: specs,
-            ..Request::default()
-        };
-
         // A resume turn pushes nothing: history already ends with what
         // the model should continue from.
         if let Some(text) = user_message {
@@ -248,6 +243,16 @@ pub fn run_turn(spec: TurnSpec) -> BoxStream<'static, LoopEvent> {
                     yield LoopEvent::Steered { text };
                 }
             }
+            // The request is rebuilt per round — history grows, and
+            // the wire must see all of it. Owned into the provider:
+            // the old draft moved the request in and cloned it back
+            // out every round, a full deep copy of every message twice
+            // over. A fresh shell costs only the tool specs' clone —
+            // descriptions are framing, not payload.
+            let mut request = Request {
+                tools: specs.clone(),
+                ..Request::default()
+            };
             request.messages = history
                 .lock()
                 .await
@@ -262,7 +267,7 @@ pub fn run_turn(spec: TurnSpec) -> BoxStream<'static, LoopEvent> {
                     .insert(0, WireMessage { role: Role::System, content: Some(prompt.clone()), ..WireMessage::default() });
             }
 
-            let mut stream = provider.stream(request.clone());
+            let mut stream = provider.stream(request);
             let mut assistant_text = String::new();
             let mut calls: Vec<ToolCall> = Vec::new();
 
