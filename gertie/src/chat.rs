@@ -132,8 +132,27 @@ struct PendingRewind {
 
 actions!(
     gertie,
-    [CloseTurnDiff, UndoDeleteSession, RecallUp, RecallDown]
+    [
+        CloseTurnDiff,
+        UndoDeleteSession,
+        RecallUp,
+        RecallDown,
+        CycleFocus,
+        CycleFocusBack
+    ]
 );
+
+/// F6's focus areas, in cycle order: the sidebar, the transcript, the
+/// composer, and the right panel when one is open. F6 walks forward
+/// (wrapping), Shift+F6 backward; each area remembers the control that
+/// last held focus inside it and restores it on return.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum FocusArea {
+    Sidebar,
+    Transcript,
+    Composer,
+    SidePanel,
+}
 
 /// The rewind safety guard: is this workspace root busy with someone
 /// else's turn? A file restore rewrites working-tree content while a
@@ -149,16 +168,19 @@ pub type LiveElsewhere =
 /// the turn-diff panel while focus sits inside it, Ctrl+Z outside
 /// the composer undoes a sidebar delete inside its window (inside the
 /// composer it stays text undo — the input consumes the keystroke),
-/// and ArrowUp/Down recall sent prompts from an empty composer —
+/// ArrowUp/Down recall sent prompts from an empty composer —
 /// bound after gpui_kit::init so they outbid the input's own cursor
 /// move, and the handler re-dispatches the move whenever the
-/// keystroke shouldn't recall.
+/// keystroke shouldn't recall — and F6/Shift+F6 cycle the focus
+/// areas.
 pub fn bind_chat_keys(cx: &mut App) {
     cx.bind_keys([
         KeyBinding::new("escape", CloseTurnDiff, Some("TurnDiffPanel")),
         KeyBinding::new("ctrl-z", UndoDeleteSession, None::<&str>),
         KeyBinding::new("up", RecallUp, Some("Input")),
         KeyBinding::new("down", RecallDown, Some("Input")),
+        KeyBinding::new("f6", CycleFocus, None::<&str>),
+        KeyBinding::new("shift-f6", CycleFocusBack, None::<&str>),
     ]);
 }
 
@@ -352,6 +374,15 @@ pub struct ChatView {
     /// The rewind safety guard, built by the workspace (see
     /// `LiveElsewhere`): consulted before any file restore.
     live_elsewhere: LiveElsewhere,
+    /// F6's area containers: the sidebar, the transcript, and the
+    /// right column each track one of these; focusing one means the
+    /// area (or some control inside it) holds focus.
+    sidebar_focus: gpui_kit::FocusHandle,
+    transcript_focus: gpui_kit::FocusHandle,
+    side_focus: gpui_kit::FocusHandle,
+    /// Each area's last-focused control — the cycle restores it when
+    /// it comes back around.
+    focus_memory: std::collections::HashMap<FocusArea, gpui_kit::FocusHandle>,
     /// Images waiting to ride with the next sent message.
     attachments: Vec<Attachment>,
     /// Bytes of the streaming assistant row already written to the
@@ -559,6 +590,10 @@ impl ChatView {
             recall: None,
             pending_rewind: None,
             live_elsewhere,
+            sidebar_focus: cx.focus_handle(),
+            transcript_focus: cx.focus_handle(),
+            side_focus: cx.focus_handle(),
+            focus_memory: Default::default(),
             attachments: Vec::new(),
             stream_persisted: 0,
             expanded_tools: Default::default(),
@@ -667,6 +702,20 @@ impl ChatView {
     /// The palette state's entity, for tests — the selection mover.
     pub fn palette_entity_for_test(&self) -> Entity<CommandState> {
         self.palette.clone()
+    }
+
+    /// Which F6 area holds focus, for the cycle test.
+    pub fn focused_area_for_test(&self, window: &Window, cx: &App) -> &'static str {
+        let areas = self.focus_areas(cx);
+        match self.focused_area(&areas, window, cx) {
+            Some(index) => match areas[index].0 {
+                FocusArea::Sidebar => "sidebar",
+                FocusArea::Transcript => "transcript",
+                FocusArea::Composer => "composer",
+                FocusArea::SidePanel => "panel",
+            },
+            None => "none",
+        }
     }
 
     /// Where the transcript's virtual list is scrolled, for tests —
@@ -3364,6 +3413,82 @@ impl ChatView {
         window.dispatch_action(Box::new(MoveToEnd), cx);
     }
 
+    /// The area cycle's ordered list: sidebar, transcript, composer,
+    /// and the right column when one is open. The composer's handle is
+    /// the input's own — its dominant control and its identity.
+    fn focus_areas(&self, cx: &App) -> Vec<(FocusArea, gpui_kit::FocusHandle)> {
+        let mut areas = vec![
+            (FocusArea::Sidebar, self.sidebar_focus.clone()),
+            (FocusArea::Transcript, self.transcript_focus.clone()),
+            (FocusArea::Composer, self.input.read(cx).focus_handle(cx)),
+        ];
+        if self.panel != Panel::None {
+            areas.push((FocusArea::SidePanel, self.side_focus.clone()));
+        }
+        areas
+    }
+
+    /// The area (if any) that currently holds focus — a container or
+    /// any control inside it counts.
+    fn focused_area(
+        &self,
+        areas: &[(FocusArea, gpui_kit::FocusHandle)],
+        window: &Window,
+        cx: &App,
+    ) -> Option<usize> {
+        areas
+            .iter()
+            .position(|(_, handle)| handle.contains_focused(window, cx))
+    }
+
+    /// F6 / Shift+F6: move focus between the surface's areas, wrapping
+    /// at the ends. The control that held focus inside an area is
+    /// remembered when the cycle leaves it and restored when it comes
+    /// back (a stale restore — a control since unmounted — falls back
+    /// to the area's container; the next press self-heals from
+    /// wherever focus really sits). A modal on screen (palette, turn
+    /// diff) owns focus exclusively; the cycle stands down.
+    fn cycle_focus(&mut self, backwards: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if self.turn_diff.is_some() || self.palette_open {
+            return;
+        }
+        let areas = self.focus_areas(cx);
+        let current = self.focused_area(&areas, window, cx);
+        // Leaving: remember the exact control.
+        if let Some(index) = current
+            && let Some(focused) = window.focused(cx)
+        {
+            self.focus_memory.insert(areas[index].0, focused);
+        }
+        let next = match current {
+            Some(index) => {
+                if backwards {
+                    (index + areas.len() - 1) % areas.len()
+                } else {
+                    (index + 1) % areas.len()
+                }
+            }
+            // Focus sits nowhere the cycle knows: forward enters at
+            // the sidebar, backward at the last area.
+            None if backwards => areas.len() - 1,
+            None => 0,
+        };
+        let (area, container) = &areas[next];
+        let remembered = self.focus_memory.get(area).cloned();
+        match remembered {
+            Some(handle) if !handle.is_focused(window) => {
+                window.focus(&handle, cx);
+                // A stale restore leaves focus where it was — fall
+                // back to the container so the cycle always lands.
+                if !handle.is_focused(window) {
+                    window.focus(container, cx);
+                }
+            }
+            _ => window.focus(container, cx),
+        }
+        cx.notify();
+    }
+
     fn render_turn(
         &mut self,
         index: usize,
@@ -3983,6 +4108,8 @@ impl ChatView {
         let theme = cx.theme();
         v_flex()
             .id("agents-panel")
+            .key_context("AgentsPanel")
+            .track_focus(&self.side_focus)
             .w(px(240.))
             .h_full()
             .flex_shrink_0()
@@ -4348,6 +4475,13 @@ impl Render for ChatView {
             .on_action(cx.listener(|this, _: &UndoDeleteSession, _, cx| {
                 this.undo_delete_clicked(cx)
             }))
+            // F6 / Shift+F6: the focus cycle between areas.
+            .on_action(cx.listener(|this, _: &CycleFocus, window, cx| {
+                this.cycle_focus(false, window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &CycleFocusBack, window, cx| {
+                this.cycle_focus(true, window, cx);
+            }))
             // h_flex centers children on the cross axis by default —
             // stretch instead, so the main row fills the window height
             // and the transcript list keeps its flex sizing.
@@ -4355,11 +4489,14 @@ impl Render for ChatView {
             .relative()
             .child(
                 // Session sidebar: sessions scroll, the utility
-                // buttons stay put at the foot.
+                // buttons stay put at the foot. A focus area (F6):
+                // the container tracks focus so the cycle can find it.
                 v_flex()
                     .w(px(240.))
                     .h_full()
                     .flex_shrink_0()
+                    .key_context("Sidebar")
+                    .track_focus(&self.sidebar_focus)
                     .border_r_1()
                     .border_color(cx.theme().border)
                     .child(
@@ -4514,27 +4651,40 @@ impl Render for ChatView {
                     .min_h_0()
                     .items_stretch()
                     .child(
-                        // The transcript: flex sizing goes directly on the
-                        // list element — a wrapper div collapses it.
-                        // Horizontal padding is per-item (see render_turn):
-                        // gpui's list paints items at the container edge
-                        // and would ignore px_* here. The pt/pb DO apply.
+                        // The transcript: horizontal padding is
+                        // per-item (see render_turn) — gpui's list
+                        // paints items at the container edge and would
+                        // ignore px_* here. The pt/pb DO apply.
                         v_flex()
                             .flex_1()
                             .min_h_0()
                             .relative()
                             .child(
-                                list(self.list_state.clone(), move |index, window, cx| {
-                                    view.update(cx, |view, cx| {
-                                        view.render_turn(index, window, cx)
-                                    })
-                                    .unwrap_or_else(|_| div().into_any_element())
-                                })
-                                .flex_1()
-                                .min_h_0()
-                                .overflow_hidden()
-                                .pt_3()
-                                .pb_4(),
+                                // The transcript area's container wraps
+                                // exactly the list — not the composer
+                                // chrome below it: F6's detection walks
+                                // ancestors, and a container over both
+                                // would read a focused composer as
+                                // transcript. The wrapper carries the
+                                // flex sizing; the list fills it.
+                                div()
+                                    .id("transcript-area")
+                                    .flex_1()
+                                    .min_h_0()
+                                    .key_context("Transcript")
+                                    .track_focus(&self.transcript_focus)
+                                    .child(
+                                        list(self.list_state.clone(), move |index, window, cx| {
+                                            view.update(cx, |view, cx| {
+                                                view.render_turn(index, window, cx)
+                                            })
+                                            .unwrap_or_else(|_| div().into_any_element())
+                                        })
+                                        .h_full()
+                                        .overflow_hidden()
+                                        .pt_3()
+                                        .pb_4(),
+                                    ),
                             )
                             // Empty state: the transcript is quiet until
                             // it isn't — say so, quietly.
@@ -5085,12 +5235,18 @@ impl Render for ChatView {
                                     .child(self.render_token_footer(status, cx)),
                             ),
                     )
-                    // The right column: agent runs or settings.
+                    // The right column: agent runs or settings — one
+                    // focus area (F6) across both.
                     .when(self.panel == Panel::Agents, |row| {
                         row.child(self.render_agents_panel(cx))
                     })
                     .when(self.panel == Panel::Settings, |row| {
-                        row.child(self.settings_panel.clone())
+                        row.child(
+                            div()
+                                .key_context("SettingsPanel")
+                                .track_focus(&self.side_focus)
+                                .child(self.settings_panel.clone()),
+                        )
                     }),
             )
             // The palette floats over everything, last child so it

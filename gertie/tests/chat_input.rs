@@ -2405,6 +2405,65 @@ fn the_palette_gt_filter_runs_a_command() {
     assert_eq!(state.2, "agents", "the agents panel opened");
 }
 
+/// F6 cycles the surface's areas forward (wrapping), Shift+F6 back;
+/// the right panel joins the cycle only while it's open.
+#[test]
+fn f6_cycles_focus_areas_and_shift_f6_walks_back() {
+    let mut fixture = fixture();
+
+    // The composer holds focus on open.
+    assert_eq!(focused_area(&mut fixture), "composer");
+
+    // Forward: sidebar → transcript → composer → wrap.
+    fixture.act(|window, cx| window.press("f6", cx));
+    assert_eq!(focused_area(&mut fixture), "sidebar");
+    fixture.act(|window, cx| window.press("f6", cx));
+    assert_eq!(focused_area(&mut fixture), "transcript");
+    fixture.act(|window, cx| window.press("f6", cx));
+    assert_eq!(focused_area(&mut fixture), "composer");
+    fixture.act(|window, cx| window.press("f6", cx));
+    assert_eq!(focused_area(&mut fixture), "sidebar", "the cycle wraps");
+
+    // Backward: from the sidebar, Shift+F6 lands on the last area
+    // (composer), then walks back to the transcript.
+    fixture.act(|window, cx| window.press("shift-f6", cx));
+    assert_eq!(focused_area(&mut fixture), "composer");
+    fixture.act(|window, cx| window.press("shift-f6", cx));
+    assert_eq!(focused_area(&mut fixture), "transcript");
+
+    // The right panel joins the cycle while it's open. Open it via
+    // the palette — its close hands focus back to the composer —
+    // then the cycle reads composer → panel, and the wrap crosses
+    // the panel too.
+    fixture.act(|window, cx| window.press("ctrl-k", cx));
+    fixture.act(|window, cx| window.input(">agents", cx));
+    fixture.act(|window, cx| window.press("enter", cx));
+    assert_eq!(focused_area(&mut fixture), "composer");
+    fixture.act(|window, cx| window.press("f6", cx));
+    assert_eq!(focused_area(&mut fixture), "panel");
+    fixture.act(|window, cx| window.press("f6", cx));
+    assert_eq!(
+        focused_area(&mut fixture),
+        "sidebar",
+        "the wrap crosses the panel"
+    );
+}
+
+fn focused_area(fixture: &mut Fixture) -> String {
+    fixture
+        .cx
+        .update_window(fixture.window.into(), |_, window, cx| {
+            fixture
+                .view
+                .upgrade()
+                .expect("view alive")
+                .read(cx)
+                .focused_area_for_test(window, cx)
+                .to_string()
+        })
+        .expect("fixture window")
+}
+
 /// The MRU boost: the thread you last picked for a query ranks first
 /// when you type that query again. The selection moves through the
 /// palette state's own API — what the hover and arrow paths converge
