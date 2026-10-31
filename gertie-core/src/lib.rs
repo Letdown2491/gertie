@@ -328,6 +328,19 @@ impl SessionStore {
              WHERE last_activity_at IS NULL",
             [],
         )?;
+        // Indexes over the migrated session columns (they must exist
+        // before these can be built). The agents panel lists a
+        // dispatch's runs by parent; the settle sweep looks for old,
+        // unsettled chats — both scanned the whole table per open
+        // (and the sweep, on every settle check) before this. The
+        // partial index matches the sweep's own WHERE: it holds only
+        // the rows the sweep can ever pick.
+        connection.execute_batch(
+            "CREATE INDEX IF NOT EXISTS sessions_by_parent
+                 ON sessions(parent_id, last_activity_at);
+             CREATE INDEX IF NOT EXISTS sessions_unsettled_by_activity
+                 ON sessions(last_activity_at) WHERE settled_at IS NULL;",
+        )?;
         Ok(Self {
             connection: std::sync::Mutex::new(connection),
         })
