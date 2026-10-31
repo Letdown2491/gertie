@@ -2350,3 +2350,142 @@ fn the_agents_panel_sorts_runs_by_attention() {
         ]
     );
 }
+
+/// `>` switches the palette to commands: the term matches names and
+/// descriptions, Enter runs the action, and the panel opens.
+#[test]
+fn the_palette_gt_filter_runs_a_command() {
+    let mut fixture = fixture();
+
+    fixture.act(|window, cx| window.press("ctrl-k", cx));
+    fixture.act(|window, cx| window.input(">", cx));
+    assert_eq!(
+        fixture
+            .cx
+            .update(|cx| fixture
+                .view
+                .upgrade()
+                .expect("view alive")
+                .read(cx)
+                .palette_command_names_for_test())
+            .len(),
+        5,
+        "a bare > lists every command"
+    );
+
+    // Fresh palette: typing appends, so the next query starts from a
+    // cleared field (escape closes, ctrl-k reopens it empty).
+    fixture.act(|window, cx| window.press("escape", cx));
+    fixture.act(|window, cx| window.press("ctrl-k", cx));
+    fixture.act(|window, cx| window.input(">agents", cx));
+    assert_eq!(
+        fixture.cx.update(|cx| fixture
+            .view
+            .upgrade()
+            .expect("view alive")
+            .read(cx)
+            .palette_command_names_for_test()),
+        vec!["agents"]
+    );
+    fixture.act(|window, cx| window.press("enter", cx));
+    let state = fixture.cx.update(|cx| {
+        let view = fixture.view.upgrade().expect("view alive").read(cx);
+        (
+            view.palette_open_for_test(),
+            view.palette_command_names_for_test(),
+            view.panel_for_test(),
+        )
+    });
+    assert!(
+        !state.0,
+        "palette should close on confirm (commands={:?}, panel={})",
+        state.1, state.2
+    );
+    // The action ran: the right column flipped to the agents panel.
+    assert_eq!(state.2, "agents", "the agents panel opened");
+}
+
+/// The MRU boost: the thread you last picked for a query ranks first
+/// when you type that query again. The selection moves through the
+/// palette state's own API — what the hover and arrow paths converge
+/// on; the input context claims the arrow keys while the query has
+/// text, so the keystroke path isn't testable.
+#[test]
+fn a_picked_session_ranks_first_when_the_query_returns() {
+    let store = Arc::new(SessionStore::open(Path::new(":memory:")).expect("memory store"));
+    // Two flaky rows with different match densities, so the FTS rank —
+    // and therefore the unpicked order — is deterministic: alpha's
+    // denser row outranks beta's.
+    let alpha = store.create_session("alpha flaky").expect("alpha");
+    store
+        .append_message(alpha, None, gertie_core::Role::User, "flaky flaky clue one")
+        .expect("row");
+    let beta = store.create_session("beta flaky").expect("beta");
+    store
+        .append_message(beta, None, gertie_core::Role::User, "flaky clue two")
+        .expect("row");
+    let mut fixture = fixture_with_store(store);
+
+    fixture.act(|window, cx| window.press("ctrl-k", cx));
+    fixture.act(|window, cx| window.input("flaky", cx));
+    let before = fixture.cx.update(|cx| {
+        fixture
+            .view
+            .upgrade()
+            .expect("view alive")
+            .read(cx)
+            .palette_hit_sessions_for_test()
+    });
+    assert_eq!(before.len(), 2, "both sessions hold a flaky row");
+    assert_eq!(before[0], alpha, "the denser row ranks first, unpicked");
+
+    // Select beta's row and confirm it — the pick ledger records it.
+    let palette = fixture.cx.update(|cx| {
+        fixture
+            .view
+            .upgrade()
+            .expect("view alive")
+            .read(cx)
+            .palette_entity_for_test()
+    });
+    fixture.act(move |window, cx| {
+        palette.update(cx, |palette, cx| {
+            palette.set_selected_index(
+                Some(gpui_kit::component::IndexPath::new(1).section(0)),
+                window,
+                cx,
+            );
+        });
+        window.press("enter", cx);
+    });
+    let landed = fixture
+        .cx
+        .update(|cx| {
+            fixture
+                .view
+                .upgrade()
+                .expect("view alive")
+                .read(cx)
+                .session_id()
+        })
+        .expect("landed");
+    assert_eq!(landed, beta, "the confirm switched to the picked hit");
+
+    fixture.act(|window, cx| window.press("ctrl-k", cx));
+    fixture.act(|window, cx| window.input("flaky", cx));
+    let after = fixture.cx.update(|cx| {
+        fixture
+            .view
+            .upgrade()
+            .expect("view alive")
+            .read(cx)
+            .palette_hit_sessions_for_test()
+    });
+    let ledger = fixture.store.palette_boosts("flaky");
+    assert_eq!(ledger, vec![beta], "the pick landed in the ledger");
+    assert_eq!(after.len(), before.len(), "nothing was lost");
+    assert_eq!(
+        after[0], beta,
+        "the picked session ranks first on the repeated query"
+    );
+}

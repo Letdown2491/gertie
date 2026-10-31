@@ -273,6 +273,11 @@ pub struct ChatView {
     /// The hits behind the palette's rows, in search-rank order — the
     /// row index a confirm hands back indexes this vector.
     palette_hits: Vec<gertie_core::HistoryHit>,
+    /// The `>` mode's matched commands, same row-index contract.
+    palette_commands: Vec<(&'static str, &'static str, crate::palette::PaletteCommand)>,
+    /// The query the palette is sitting on — the pick ledger's key and
+    /// the mode switch (`>` = commands).
+    palette_query: String,
     /// The turn-diff modal, when open — raised from a tool card's
     /// "turn diff" button, dismissed by escape, backdrop, or restore.
     turn_diff: Option<TurnDiffPanel>,
@@ -509,6 +514,8 @@ impl ChatView {
             palette,
             palette_open: false,
             palette_hits: Vec::new(),
+            palette_commands: Vec::new(),
+            palette_query: String::new(),
             turn_diff: None,
             turn_diff_open: None,
             turn_diff_list,
@@ -632,6 +639,34 @@ impl ChatView {
     /// How many hits the palette is showing, for tests.
     pub fn palette_hits_for_test(&self) -> usize {
         self.palette_hits.len()
+    }
+
+    /// The palette's hit sessions in display order — the MRU boost's
+    /// test.
+    pub fn palette_hit_sessions_for_test(&self) -> Vec<gertie_core::SessionId> {
+        self.palette_hits.iter().map(|hit| hit.session_id).collect()
+    }
+
+    /// The `>` mode's matched command names, in row order.
+    pub fn palette_command_names_for_test(&self) -> Vec<&'static str> {
+        self.palette_commands
+            .iter()
+            .map(|(name, _, _)| *name)
+            .collect()
+    }
+
+    /// Which right-column panel is open, for tests.
+    pub fn panel_for_test(&self) -> &'static str {
+        match self.panel {
+            Panel::None => "none",
+            Panel::Agents => "agents",
+            Panel::Settings => "settings",
+        }
+    }
+
+    /// The palette state's entity, for tests — the selection mover.
+    pub fn palette_entity_for_test(&self) -> Entity<CommandState> {
+        self.palette.clone()
     }
 
     /// Where the transcript's virtual list is scrolled, for tests —
@@ -933,6 +968,8 @@ impl ChatView {
     fn open_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.palette_open = true;
         self.palette_hits.clear();
+        self.palette_commands.clear();
+        self.palette_query.clear();
         self.palette.update(cx, |palette, cx| {
             palette.set_query("", window, cx);
         });
@@ -941,21 +978,32 @@ impl ChatView {
         cx.notify();
     }
 
-    fn close_palette(&mut self, cx: &mut Context<Self>) {
+    fn close_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if !self.palette_open {
             return;
         }
         self.palette_open = false;
+        // Focus comes home: the hidden palette field must not keep it —
+        // a dead focus strands the next Ctrl+K (no dispatch path) and
+        // every keystroke in between.
+        window.focus(&self.input.read(cx).focus_handle(cx), cx);
         cx.notify();
     }
 
-    /// The palette's query callback: the store's FTS index answers,
-    /// bounded — twenty hits is a page a human can actually scan.
-    /// Sessions inside their undo window never show up here.
+    /// The palette's query callback. Two modes: `>` filters the
+    /// command list (case-insensitive substring over name and
+    /// description); anything else answers from the store's FTS index,
+    /// bounded — twenty hits is a page a human can actually scan —
+    /// with the query's past picks boosted to the top. Sessions inside
+    /// their undo window never show up here.
     fn palette_search(&mut self, query: &str, cx: &mut Context<Self>) {
         self.palette_hits.clear();
-        if !query.trim().is_empty() {
-            self.palette_hits = self
+        self.palette_commands.clear();
+        self.palette_query = query.trim().to_string();
+        if let Some(term) = query.trim().strip_prefix('>') {
+            self.palette_commands = crate::palette::command_matches(term);
+        } else if !query.trim().is_empty() {
+            let mut hits: Vec<_> = self
                 .store
                 .search(query, 20)
                 .unwrap_or_default()
@@ -967,19 +1015,48 @@ impl ChatView {
                         .any(|pending| pending.session_id == hit.session_id)
                 })
                 .collect();
+            // The MRU boost: threads this query led to before rank
+            // first, in pick-recency order; the rest keep the FTS
+            // rank. Stable sort — both orders survive inside their
+            // class.
+            let boosts = self.store.palette_boosts(query.trim());
+            hits.sort_by_key(|hit| {
+                boosts
+                    .iter()
+                    .position(|picked| *picked == hit.session_id)
+                    .unwrap_or(usize::MAX)
+            });
+            self.palette_hits = hits;
         }
         cx.notify();
     }
 
-    /// Confirming a hit: land on that turn. A hit from another session
-    /// switches first; either way the matching row scrolls into view.
-    fn palette_jump(&mut self, row: usize, cx: &mut Context<Self>) {
+    /// Confirming a palette row. Command mode runs the action; a hit
+    /// lands on that turn — a hit from another session switches first,
+    /// either way the matching row scrolls into view — and the
+    /// (query, session) pair lands in the pick ledger for next time.
+    fn palette_confirm(&mut self, row: usize, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.palette_commands.is_empty() {
+            let command = self
+                .palette_commands
+                .get(row)
+                .map(|(_, _, command)| *command);
+            self.close_palette(window, cx);
+            if let Some(command) = command {
+                self.run_palette_command(command, window, cx);
+            }
+            return;
+        }
         let Some(hit) = self.palette_hits.get(row) else {
-            self.close_palette(cx);
+            self.close_palette(window, cx);
             return;
         };
         let session_id = hit.session_id;
         let message_id = hit.message_id;
+        let query = self.palette_query.clone();
+        if !query.is_empty() {
+            self.store.record_palette_pick(&query, session_id);
+        }
         if self.session_id != Some(session_id) {
             self.switch_session_state(session_id, cx);
         }
@@ -999,7 +1076,33 @@ impl ChatView {
             self.list_state.pause_following_tail();
             self.list_state.scroll_to_reveal_item(index);
         }
-        self.close_palette(cx);
+        self.close_palette(window, cx);
+    }
+
+    /// A `>`-picked command, run. Same actions the slash commands
+    /// drive — one vocabulary, two doors.
+    fn run_palette_command(
+        &mut self,
+        command: crate::palette::PaletteCommand,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match command {
+            crate::palette::PaletteCommand::NewChat => {
+                if self.streaming {
+                    self.push_notice(
+                        "A run is in flight — a new chat waits for it to finish.",
+                        cx,
+                    );
+                    return;
+                }
+                self.new_session(window, cx);
+            }
+            crate::palette::PaletteCommand::Compact => self.compact_now(cx),
+            crate::palette::PaletteCommand::Export => self.export_now(cx),
+            crate::palette::PaletteCommand::Agents => self.toggle_agents(cx),
+            crate::palette::PaletteCommand::Settings => self.toggle_settings(cx),
+        }
     }
 
     /// "turn diff" on a done tool card: anchor to the card's turn —
@@ -3540,7 +3643,7 @@ impl ChatView {
             // choosing text or moving focus never closes it.
             .on_mouse_down(
                 gpui_kit::MouseButton::Left,
-                cx.listener(|this, _, _, cx| this.close_palette(cx)),
+                cx.listener(|this, _, window, cx| this.close_palette(window, cx)),
             )
             .child(
                 div()
@@ -3558,9 +3661,13 @@ impl ChatView {
                             })
                             .child(
                                 Command::new(&self.palette)
-                                    .items(crate::palette::search_items(&self.palette_hits))
+                                    .items(if self.palette_commands.is_empty() {
+                                        crate::palette::search_items(&self.palette_hits)
+                                    } else {
+                                        crate::palette::command_items(&self.palette_commands)
+                                    })
                                     .filterable(false)
-                                    .placeholder("Search your history…")
+                                    .placeholder("Search your history — > for commands…")
                                     .empty(|_, _, cx| {
                                         div()
                                             .px_4()
@@ -3574,12 +3681,14 @@ impl ChatView {
                                         search_view
                                             .update(cx, |chat, cx| chat.palette_search(query, cx));
                                     })
-                                    .on_confirm(move |path, _, cx| {
-                                        jump_view
-                                            .update(cx, |chat, cx| chat.palette_jump(path.row, cx));
+                                    .on_confirm(move |path, window, cx| {
+                                        jump_view.update(cx, |chat, cx| {
+                                            chat.palette_confirm(path.row, window, cx)
+                                        });
                                     })
-                                    .on_cancel(move |_, cx| {
-                                        cancel_view.update(cx, |chat, cx| chat.close_palette(cx));
+                                    .on_cancel(move |window, cx| {
+                                        cancel_view
+                                            .update(cx, |chat, cx| chat.close_palette(window, cx));
                                     }),
                             ),
                     ),

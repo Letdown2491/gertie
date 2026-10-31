@@ -236,7 +236,14 @@ impl SessionStore {
                  content TEXT NOT NULL
              );
              CREATE INDEX IF NOT EXISTS queued_followups_by_session
-                 ON queued_followups(session_id, id);",
+                 ON queued_followups(session_id, id);
+             CREATE TABLE IF NOT EXISTS palette_picks (
+                 query TEXT NOT NULL,
+                 session_id INTEGER NOT NULL REFERENCES sessions(id),
+                 picked_count INTEGER NOT NULL DEFAULT 1,
+                 picked_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+                 PRIMARY KEY (query, session_id)
+             );",
         )?;
         // Full-text index over message content (FTS5, bundled SQLite).
         // External-content-free on purpose: messages are append-only
@@ -601,6 +608,39 @@ impl SessionStore {
             })
         })?;
         rows.collect()
+    }
+
+    /// Remembers a palette confirm: this query led to this session.
+    /// The MRU table behind the palette's ranking — the thread you
+    /// last picked for a query ranks higher when you type that query
+    /// again. An upsert: repeat picks bump recency and the count.
+    pub fn record_palette_pick(&self, query: &str, session_id: SessionId) {
+        let _ = self.connection.lock().unwrap().execute(
+            "INSERT INTO palette_picks (query, session_id) VALUES (?1, ?2)
+             ON CONFLICT (query, session_id)
+             DO UPDATE SET picked_count = picked_count + 1,
+                           picked_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')",
+            rusqlite::params![query, session_id.0 as i64],
+        );
+    }
+
+    /// Sessions previously picked for this exact query, most-recently
+    /// picked first — the palette's boost order. Empty for a query
+    /// that never led anywhere.
+    pub fn palette_boosts(&self, query: &str) -> Vec<SessionId> {
+        self.connection
+            .lock()
+            .unwrap()
+            .prepare(
+                "SELECT session_id FROM palette_picks WHERE query = ?1
+                 ORDER BY picked_at DESC, picked_count DESC",
+            )
+            .and_then(|mut statement| {
+                statement
+                    .query_map([query], |row| Ok(SessionId(row.get::<_, i64>(0)? as u64)))?
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     /// The session's own record as full-text hits, oldest first — what
@@ -1362,6 +1402,23 @@ mod tests {
 
     fn memory_store() -> SessionStore {
         SessionStore::open(Path::new(":memory:")).expect("open in-memory store")
+    }
+
+    /// The palette's pick ledger: re-picking a session bumps it to the
+    /// front of that query's boosts; other queries answer empty.
+    #[test]
+    fn palette_picks_rank_the_last_picked_session_first() {
+        let store = memory_store();
+        let one = store.create_session("one").unwrap();
+        let two = store.create_session("two").unwrap();
+        store.record_palette_pick("fix", one);
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        store.record_palette_pick("fix", two);
+        assert_eq!(store.palette_boosts("fix"), vec![two, one]);
+        assert!(store.palette_boosts("other").is_empty());
+        // Picking the older one again flips the order back.
+        store.record_palette_pick("fix", one);
+        assert_eq!(store.palette_boosts("fix"), vec![one, two]);
     }
 
     /// After a rewind, the abandoned branch (rows are never deleted —

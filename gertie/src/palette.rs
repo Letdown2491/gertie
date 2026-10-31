@@ -21,6 +21,104 @@ pub fn bind_palette_keys(cx: &mut App) {
     cx.bind_keys([KeyBinding::new("ctrl-k", OpenPalette, None::<&str>)]);
 }
 
+/// The palette's commands — the `>` filter's rows. One per action the
+/// chat surface actually offers (the same set the slash commands
+/// drive), spelled the way a person would search for them. No registry
+/// hunting: the chat maps each variant straight onto its handler.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PaletteCommand {
+    NewChat,
+    Compact,
+    Export,
+    Agents,
+    Settings,
+}
+
+/// Every command: (search name, what it does, the action). The match
+/// is a case-insensitive substring over the name AND the description —
+/// ">export" and ">markdown" both find the export.
+pub const COMMANDS: &[(&str, &str, PaletteCommand)] = &[
+    (
+        "new chat",
+        "start a blank conversation",
+        PaletteCommand::NewChat,
+    ),
+    (
+        "compact",
+        "summarize and shrink this session's history",
+        PaletteCommand::Compact,
+    ),
+    (
+        "export",
+        "write this session out as markdown",
+        PaletteCommand::Export,
+    ),
+    (
+        "agents",
+        "show this chat's worker runs",
+        PaletteCommand::Agents,
+    ),
+    (
+        "settings",
+        "open the settings editor",
+        PaletteCommand::Settings,
+    ),
+];
+
+/// The `>`-filtered command rows: name or description contains the
+/// term (empty term = everything), search order — the constant's
+/// order, which reads most-used-first.
+pub fn command_matches(term: &str) -> Vec<(&'static str, &'static str, PaletteCommand)> {
+    let term = term.trim().to_lowercase();
+    COMMANDS
+        .iter()
+        .filter(|(name, description, _)| {
+            term.is_empty()
+                || name.to_lowercase().contains(&term)
+                || description.to_lowercase().contains(&term)
+        })
+        .copied()
+        .collect()
+}
+
+/// The `>` mode's rows: one per matched command, the action's name
+/// with its description riding beside it.
+pub fn command_items(
+    commands: &[(&'static str, &'static str, PaletteCommand)],
+) -> Vec<CommandItem> {
+    commands
+        .iter()
+        .map(|(name, description, _)| {
+            let label = (*name).to_string();
+            let description = (*description).to_string();
+            CommandItem::new()
+                .label(label.clone())
+                .keywords([description.as_str()])
+                .child(move |_, cx| {
+                    h_flex()
+                        .gap_2()
+                        .items_center()
+                        .min_w_0()
+                        .flex_1()
+                        .child(
+                            div()
+                                .text_size(px(13.))
+                                .text_color(cx.theme().foreground)
+                                .truncate()
+                                .child(label.clone()),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(11.))
+                                .text_color(cx.theme().muted_foreground)
+                                .truncate()
+                                .child(description.clone()),
+                        )
+                })
+        })
+        .collect()
+}
+
 /// One palette row per search hit: where it lives (session title, who
 /// said it) and what it says (the FTS snippet, markers left in — they
 /// bracket the match). Ordered as `search` ranked them, best first;
@@ -102,5 +200,27 @@ mod tests {
         // Role words feed keywords too, so "gertie" narrows to its rows.
         assert_eq!(role_word("assistant"), "gertie");
         assert_eq!(role_word("system"), "system");
+    }
+
+    #[test]
+    fn command_matches_run_over_names_and_descriptions() {
+        // Empty term: everything, in the constant's order.
+        assert_eq!(command_matches("").len(), COMMANDS.len());
+        // Name substring, case-blind.
+        assert_eq!(
+            command_matches("EXPORT")
+                .iter()
+                .map(|(name, _, _)| *name)
+                .collect::<Vec<_>>(),
+            vec!["export"]
+        );
+        // Description substring too — "markdown" finds the export.
+        let markdown: Vec<&str> = command_matches("markdown")
+            .iter()
+            .map(|(name, _, _)| *name)
+            .collect();
+        assert_eq!(markdown, vec!["export"]);
+        // No hit: empty, not an error.
+        assert!(command_matches("no such action").is_empty());
     }
 }
