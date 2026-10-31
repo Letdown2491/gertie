@@ -310,10 +310,14 @@ distinct from `Error` at every seam, so no string-matching), persisted as `limit
 the session. The sidebar row carries a `limited` chip and the transcript a slim bar with
 **Resume**: a new turn that continues from history as it stands — no new user message, no
 retyped ask — and clears the flag. So does any new send (the human is driving; a fresh
-limit re-marks it). Divergence from t3code, deliberate: no scheduled resume-at-reset and
-no auto-resume after restarts — gertie has no daemon to keep a clock, so the affordance
-is manual and the three-consecutive-auto-resumes cap has nothing to cap. Snooze (deferred)
-now has its clock: the persisted `limited_at`. The tab strip carries the
+limit re-marks it). Divergence from t3code, deliberate: no resume-after-restart — gertie
+has no daemon, so a closed app cannot keep a promise. **Snooze** rides the same bar as a
+*deferred click*: "Snooze 30 min" schedules the very same resume, one shot, on an in-app
+timer — nothing re-arms itself, so every cycle still starts with a human click and
+t3code's three-consecutive-auto-resumes cap has nothing to cap. The reported reset time
+(Retry-After and friends) isn't parsed; a fired-but-still-limited turn just ends limited
+again for a human decision. The timer lives in the running app like every clock gertie
+has: close it and the snooze dies with it, the persisted limited state doesn't. The tab strip carries the
 working marker — a live turn shows ● on its tab, the attention signal for work
 running while another tab is up.
 

@@ -1085,3 +1085,170 @@ fn a_rate_limited_turn_offers_resume_and_resuming_clears_it() {
         );
     });
 }
+
+/// The snooze pin: "Snooze 30 min" schedules the resume itself — half
+/// an hour later the limited turn resumes with no further click, and
+/// the limited state clears. Nothing else in this test touches the
+/// resume path, so a cleared flag IS the fired snooze.
+#[test]
+fn snoozing_a_limited_session_resumes_it_when_the_timer_fires() {
+    // Step one refuses (the limit); step two is what the snoozed
+    // resume gets. Empty text keeps replay pacing deterministic.
+    let scenarios = tempfile::tempdir().expect("scenario dir");
+    std::fs::write(
+        scenarios.path().join("worker.toml"),
+        "[[steps]]\nlimited = true\n\n[[steps]]\ntext = ''\n",
+    )
+    .expect("scenario file");
+    let endpoint = gertie_providers::Endpoint {
+        name: "replay".into(),
+        base_url: scenarios.path().to_string_lossy().into_owned(),
+        model: "worker".into(),
+        api_key: None,
+        context_window: None,
+        wire: gertie_providers::Wire::Replay,
+    };
+    let provider = Arc::new(
+        gertie_providers::AnyProvider::with_endpoints(vec![endpoint]).expect("replay provider"),
+    );
+    let store = Arc::new(SessionStore::open(Path::new(":memory:")).expect("memory store"));
+    let mut fixture = fixture_built(
+        store.clone(),
+        None,
+        None,
+        None,
+        Some(provider),
+        None,
+        Vec::new(),
+    );
+
+    fixture.act(|window, cx| {
+        window.input("go", cx);
+        window.press("enter", cx);
+    });
+    pump(&mut fixture, 30);
+    assert!(
+        fixture.cx.update(|cx| fixture
+            .view
+            .upgrade()
+            .expect("view alive")
+            .read(cx)
+            .open_session_limited()),
+        "the turn ended limited before the snooze"
+    );
+
+    fixture.act(|window, cx| {
+        window.click("snooze-turn", cx);
+    });
+    fixture.act(|window, cx| {
+        assert!(
+            window.try_find("cancel-snooze").is_some(),
+            "snoozing is visible and cancellable"
+        );
+    });
+
+    // Half an hour later, on its own: the snooze fires the resume, the
+    // limit clears, the bar goes with it.
+    fixture
+        .cx
+        .background_executor
+        .advance_clock(std::time::Duration::from_secs(31 * 60));
+    pump(&mut fixture, 30);
+    let session_id = fixture
+        .cx
+        .update(|cx| {
+            fixture
+                .view
+                .upgrade()
+                .expect("view alive")
+                .read(cx)
+                .session_id()
+        })
+        .expect("session");
+    assert!(
+        !store
+            .list_sessions()
+            .unwrap()
+            .iter()
+            .find(|summary| summary.id == session_id)
+            .expect("summary")
+            .limited,
+        "the snoozed resume ran by itself and cleared the limit"
+    );
+    fixture.act(|window, cx| {
+        assert!(window.try_find("resume-turn").is_none());
+        assert!(window.try_find("cancel-snooze").is_none());
+    });
+}
+
+/// Canceling the snooze dissolves the promise: the timer fires into a
+/// cleared field and the session stays limited and quiet — no turn
+/// runs by itself.
+#[test]
+fn canceling_the_snooze_leaves_the_session_limited_and_quiet() {
+    let scenarios = tempfile::tempdir().expect("scenario dir");
+    // Step two exists but must never be reached: no auto-resume.
+    std::fs::write(
+        scenarios.path().join("worker.toml"),
+        "[[steps]]\nlimited = true\n\n[[steps]]\ntext = ''\n",
+    )
+    .expect("scenario file");
+    let endpoint = gertie_providers::Endpoint {
+        name: "replay".into(),
+        base_url: scenarios.path().to_string_lossy().into_owned(),
+        model: "worker".into(),
+        api_key: None,
+        context_window: None,
+        wire: gertie_providers::Wire::Replay,
+    };
+    let provider = Arc::new(
+        gertie_providers::AnyProvider::with_endpoints(vec![endpoint]).expect("replay provider"),
+    );
+    let store = Arc::new(SessionStore::open(Path::new(":memory:")).expect("memory store"));
+    let mut fixture = fixture_built(
+        store.clone(),
+        None,
+        None,
+        None,
+        Some(provider),
+        None,
+        Vec::new(),
+    );
+
+    fixture.act(|window, cx| {
+        window.input("go", cx);
+        window.press("enter", cx);
+    });
+    pump(&mut fixture, 30);
+    fixture.act(|window, cx| {
+        window.click("snooze-turn", cx);
+    });
+    fixture.act(|window, cx| {
+        window.click("cancel-snooze", cx);
+    });
+    fixture.act(|window, cx| {
+        assert!(
+            window.try_find("cancel-snooze").is_none(),
+            "the snoozed marker went with the cancel"
+        );
+        assert!(
+            window.try_find("resume-turn").is_some(),
+            "the session is still limited — the manual way back stays"
+        );
+    });
+
+    fixture
+        .cx
+        .background_executor
+        .advance_clock(std::time::Duration::from_secs(31 * 60));
+    pump(&mut fixture, 30);
+    assert!(
+        fixture.cx.update(|cx| fixture
+            .view
+            .upgrade()
+            .expect("view alive")
+            .read(cx)
+            .open_session_limited()),
+        "a canceled snooze never resumes by itself"
+    );
+}

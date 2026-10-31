@@ -134,6 +134,13 @@ enum TurnDiffRow {
 /// A session inside its undo window: ✕ clicked, store row still there,
 /// purge task scheduled. The vec membership is the "not yet purged"
 /// marker — undo removes the entry, the purge finds nothing to do.
+/// The snooze delay: how far a limited turn's resume is put off. Not
+/// parsed from the provider's reported reset time (Retry-After and
+/// friends differ per wire) — a fixed half hour is the boring middle,
+/// and a fired-but-still-limited turn just ends limited again for a
+/// human decision.
+const SNOOZE_MINUTES: u64 = 30;
+
 struct PendingDelete {
     session_id: SessionId,
     /// The title at delete time — the toast speaks in past tense about
@@ -228,6 +235,11 @@ pub struct ChatView {
     /// sidebar's foot. The purge task drops the row when the window
     /// closes; undo pulls the entry back out first.
     pending_deletes: Vec<PendingDelete>,
+    /// The snooze promise: this open session's limited turn will be
+    /// resumed by itself, thirty minutes out. One shot — cleared by the
+    /// fire, a manual resume, a fresh send, or a fresh limit; the
+    /// pending timer no-ops whenever the field no longer agrees.
+    snoozed: Option<SessionId>,
     /// Whether the sidebar's settled fold is expanded. Collapsed by
     /// default — settled work is put down, not gone; one click brings
     /// it back.
@@ -398,6 +410,7 @@ impl ChatView {
             renaming: None,
             rename_input,
             pending_deletes: Vec::new(),
+            snoozed: None,
             settled_open: false,
             panel: Panel::None,
             worker_runs: Vec::new(),
@@ -1729,6 +1742,7 @@ impl ChatView {
         // A fresh send is the human driving again: whatever limit
         // stopped the last turn, this one supersedes it.
         let _ = self.store.set_session_limited(session_id, false);
+        self.snoozed = None;
         self.sessions = self.store.list_sessions().unwrap_or_default();
         self.drive_turn(Some(text), images, cx);
     }
@@ -1971,6 +1985,7 @@ impl ChatView {
                     // A queued follow-up is the human driving again;
                     // whatever limited the last turn, this supersedes.
                     let _ = this.store.set_session_limited(session_id, false);
+                    this.snoozed = None;
                     this.sessions = this.store.list_sessions().unwrap_or_default();
                     let db_id = this
                         .store
@@ -2237,6 +2252,9 @@ impl ChatView {
         self.flush_stream(cx);
         self.activity = "Rate limited — pick it up when you're ready".into();
         self.thinking = false;
+        // A fresh limit is a fresh decision: no stale snooze from the
+        // round before survives it.
+        self.snoozed = None;
         self.persist_stream_note(format!("[limited] {message}"));
         if let Some(session_id) = self.session_id {
             let _ = self.store.set_session_limited(session_id, true);
@@ -2287,9 +2305,59 @@ impl ChatView {
         if self.streaming {
             return;
         }
+        // Resuming by hand supersedes any snooze; the pending timer
+        // finds the field cleared and no-ops.
+        self.snoozed = None;
         let _ = self.store.set_session_limited(session_id, false);
         self.sessions = self.store.list_sessions().unwrap_or_default();
         self.drive_turn(None, Vec::new(), cx);
+    }
+
+    /// Snooze on the limited bar: the human asks for the resume later —
+    /// [`SNOOZE_MINUTES`] out, one shot, this app run. A deferred
+    /// click, not an auto-resume: nothing here re-arms itself, so every
+    /// cycle still starts with a human.
+    fn snooze_clicked(&mut self, cx: &mut Context<Self>) {
+        let Some(session_id) = self.session_id else {
+            return;
+        };
+        if self.streaming {
+            return;
+        }
+        self.snoozed = Some(session_id);
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(Duration::from_secs(SNOOZE_MINUTES * 60))
+                .await;
+            let _ = this.update(cx, |this, cx| this.snooze_fired(session_id, cx));
+        })
+        .detach();
+    }
+
+    /// The snooze is up. It only keeps its promise if this very session
+    /// is still the open one, still limited, and not mid-turn — a
+    /// manual resume, a new send, a switch away, or a fresh limit all
+    /// dissolved it already, and then the fire is a quiet no-op.
+    fn snooze_fired(&mut self, session_id: SessionId, cx: &mut Context<Self>) {
+        if self.snoozed != Some(session_id) {
+            return;
+        }
+        self.snoozed = None;
+        if self.session_id == Some(session_id) && !self.streaming && self.open_session_limited() {
+            self.push_notice(
+                format!("Snooze is up — resuming the limited turn ({SNOOZE_MINUTES} min)."),
+                cx,
+            );
+            self.resume_clicked(cx);
+        }
+    }
+
+    /// Cancel the snooze: the session stays limited and quiet — the
+    /// pending timer no-ops when it fires. The Resume button stays.
+    fn cancel_snooze_clicked(&mut self, cx: &mut Context<Self>) {
+        self.snoozed = None;
+        cx.notify();
     }
 
     /// Answers a pending permission card through the broker. A dropped
@@ -3489,10 +3557,16 @@ impl Render for ChatView {
                                     // last turn ended on the provider's
                                     // rate limit. One static line, one
                                     // button — the way back in without
-                                    // retyping the ask.
+                                    // retyping the ask. Snoozed, the
+                                    // line says the resume will happen
+                                    // by itself, and "now" plus
+                                    // "cancel" replace the snooze.
                                     .when(
                                         self.open_session_limited() && !self.streaming,
                                         |composer| {
+                                            let snoozed = self
+                                                .session_id
+                                                .is_some_and(|id| self.snoozed == Some(id));
                                             composer.child(
                                                 h_flex()
                                                     .px_4()
@@ -3501,13 +3575,23 @@ impl Render for ChatView {
                                                     .items_center()
                                                     .text_size(px(11.))
                                                     .text_color(cx.theme().warning)
-                                                    .child(
+                                                    .child(if snoozed {
+                                                        format!(
+                                                            "rate limited — snoozed, the turn \
+                                                             resumes by itself ({SNOOZE_MINUTES} min)"
+                                                        )
+                                                    } else {
                                                         "rate limited — the turn stopped \
-                                                         on the provider's limit",
-                                                    )
+                                                         on the provider's limit"
+                                                            .into()
+                                                    })
                                                     .child(
                                                         Button::new("resume-turn")
-                                                            .label("Resume")
+                                                            .label(if snoozed {
+                                                                "Resume now"
+                                                            } else {
+                                                                "Resume"
+                                                            })
                                                             .xsmall()
                                                             .outline()
                                                             .tooltip(
@@ -3518,7 +3602,43 @@ impl Render for ChatView {
                                                                     this.resume_clicked(cx)
                                                                 },
                                                             )),
-                                                    ),
+                                                    )
+                                                    .when(!snoozed, |bar| {
+                                                        bar.child(
+                                                            Button::new("snooze-turn")
+                                                                .label(format!(
+                                                                    "Snooze {SNOOZE_MINUTES} min"
+                                                                ))
+                                                                .xsmall()
+                                                                .outline()
+                                                                .tooltip(
+                                                                    "Retry the turn by itself, \
+                                                                     half an hour out",
+                                                                )
+                                                                .on_click(cx.listener(
+                                                                    |this, _, _, cx| {
+                                                                        this.snooze_clicked(cx)
+                                                                    },
+                                                                )),
+                                                        )
+                                                    })
+                                                    .when(snoozed, |bar| {
+                                                        bar.child(
+                                                            Button::new("cancel-snooze")
+                                                                .label("cancel")
+                                                                .xsmall()
+                                                                .ghost()
+                                                                .tooltip(
+                                                                    "Keep the session limited; \
+                                                                     resume by hand",
+                                                                )
+                                                                .on_click(cx.listener(
+                                                                    |this, _, _, cx| {
+                                                                        this.cancel_snooze_clicked(cx)
+                                                                    },
+                                                                )),
+                                                        )
+                                                    }),
                                             )
                                         },
                                     )
