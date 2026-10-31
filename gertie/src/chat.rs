@@ -324,7 +324,7 @@ pub struct ChatView {
     /// The right column: this chat's worker runs, or the settings view.
     /// One slot — opening one closes the other.
     panel: Panel,
-    worker_runs: Vec<(gertie_core::SessionSummary, bool)>,
+    worker_runs: Vec<(gertie_core::SessionSummary, RunState)>,
     /// The settings editor (summary + form) — its Saved event bubbles
     /// to the workspace, which reloads the bootstrap and applies here.
     settings_panel: Entity<SettingsPanelView>,
@@ -583,6 +583,15 @@ impl ChatView {
     /// Whether a turn is driving, for tests.
     pub fn streaming_state_for_test(&self) -> bool {
         self.streaming
+    }
+
+    /// The agents panel's rows in display order — title and state
+    /// label — for the attention-order test.
+    pub fn worker_runs_for_test(&self) -> Vec<(String, &'static str)> {
+        self.worker_runs
+            .iter()
+            .map(|(summary, state)| (summary.title.clone(), state.label()))
+            .collect()
     }
 
     /// How many turns the transcript holds, for tests and tooling.
@@ -1382,7 +1391,7 @@ impl ChatView {
     /// Reloads this chat's worker runs (summary + report status). Cheap
     /// queries on agent-tool events only — never per render.
     fn refresh_agent_runs(&mut self, cx: &mut Context<Self>) {
-        self.worker_runs = self
+        let mut runs = self
             .session_id
             .map(|session| {
                 self.store
@@ -1391,11 +1400,25 @@ impl ChatView {
                     .into_iter()
                     .map(|summary| {
                         let reported = self.store.worker_run_reported(summary.id);
-                        (summary, reported)
+                        let state = if summary.limited {
+                            // Stopped on the provider's limit: the run
+                            // waits on the human's Resume.
+                            RunState::NeedsYou
+                        } else if reported {
+                            RunState::Done
+                        } else {
+                            RunState::Running
+                        };
+                        (summary, state)
                     })
-                    .collect()
+                    .collect::<Vec<_>>()
             })
             .unwrap_or_default();
+        // Attention-ordered, not recency-ordered: what waits on you
+        // first, then what's alive, then what's finished. Stable, so
+        // id order (start order) holds within a class.
+        runs.sort_by_key(|(_, state)| *state as u8);
+        self.worker_runs = runs;
         cx.notify();
     }
 
@@ -3875,7 +3898,7 @@ impl ChatView {
                         .child("none yet — dispatch an agent and its run shows up here"),
                 )
             })
-            .children(self.worker_runs.iter().map(|(summary, reported)| {
+            .children(self.worker_runs.iter().map(|(summary, state)| {
                 h_flex()
                     .gap_1()
                     .items_center()
@@ -3892,15 +3915,38 @@ impl ChatView {
                         div()
                             .text_size(px(11.))
                             .flex_shrink_0()
-                            .text_color(if *reported {
-                                theme.muted_foreground
-                            } else {
-                                theme.accent
+                            .text_color(match state {
+                                RunState::NeedsYou => theme.danger,
+                                RunState::Running => theme.accent,
+                                RunState::Done => theme.muted_foreground,
                             })
-                            .child(if *reported { "done" } else { "running…" }),
+                            .child(state.label()),
                     )
             }))
             .into_any_element()
+    }
+}
+
+/// A worker run's state in the agents panel — the attention sort's
+/// classes, ordered: what waits on you beats what's alive beats
+/// what's finished.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RunState {
+    /// Stopped on the provider's limit — the Resume is yours to give.
+    NeedsYou,
+    /// Dispatched, no report yet.
+    Running,
+    /// Reported back (finished or failed loudly — the report says).
+    Done,
+}
+
+impl RunState {
+    fn label(self) -> &'static str {
+        match self {
+            RunState::NeedsYou => "needs you",
+            RunState::Running => "running…",
+            RunState::Done => "done",
+        }
     }
 }
 

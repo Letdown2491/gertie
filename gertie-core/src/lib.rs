@@ -362,7 +362,7 @@ impl SessionStore {
     ) -> Result<Vec<SessionSummary>, rusqlite::Error> {
         let connection = self.connection.lock().unwrap();
         let mut statement = connection
-            .prepare("SELECT id, title, input_tokens, output_tokens, last_context_tokens, mode FROM sessions WHERE parent_id = ?1 ORDER BY id")?;
+            .prepare("SELECT s.id, s.title, s.input_tokens, s.output_tokens, s.last_context_tokens, s.mode, s.limited_at IS NOT NULL FROM sessions s WHERE s.parent_id = ?1 ORDER BY s.id")?;
         let rows = statement
             .query_map([parent.0 as i64], |row| {
                 Ok(SessionSummary {
@@ -372,9 +372,11 @@ impl SessionStore {
                     output_tokens: row.get::<_, i64>(3)?.max(0) as u64,
                     context_tokens: row.get::<_, i64>(4)?.max(0) as u64,
                     // Child sessions live in the agents panel, never
-                    // the sidebar's lifecycle machine.
+                    // the sidebar's lifecycle machine — but the
+                    // limited state is panel signal: a stopped run
+                    // waits for the human.
                     settled: false,
-                    limited: false,
+                    limited: row.get::<_, i64>(6)? != 0,
                     mode: row
                         .get::<_, String>(5)
                         .ok()

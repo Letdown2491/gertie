@@ -2306,3 +2306,47 @@ fn a_pending_card_breaks_the_run_until_it_settles() {
         );
     });
 }
+
+/// The agents panel is an attention-ordered list, not a recency list:
+/// what waits on you first, then what's alive, then what's finished —
+/// dispatch order holds within a class.
+#[test]
+fn the_agents_panel_sorts_runs_by_attention() {
+    let store = Arc::new(SessionStore::open(Path::new(":memory:")).expect("memory store"));
+    let session = store.create_session("parent").expect("session");
+    // Dispatch order: done, running, stuck — recency would read the
+    // stuck run last; attention reads it first.
+    let done = store
+        .create_worker_run(Some(session), "done run")
+        .expect("run");
+    store
+        .append_message(done, None, gertie_core::Role::Assistant, "report")
+        .expect("report row");
+    store
+        .create_worker_run(Some(session), "running run")
+        .expect("run");
+    let stuck = store
+        .create_worker_run(Some(session), "stuck run")
+        .expect("run");
+    store.set_session_limited(stuck, true).expect("limited");
+
+    let mut fixture = fixture_with_store(store);
+    fixture.act(|window, cx| window.click("toggle-agents", cx));
+
+    let runs = fixture.cx.update(|cx| {
+        fixture
+            .view
+            .upgrade()
+            .expect("view alive")
+            .read(cx)
+            .worker_runs_for_test()
+    });
+    assert_eq!(
+        runs,
+        vec![
+            ("stuck run".to_string(), "needs you"),
+            ("running run".to_string(), "running…"),
+            ("done run".to_string(), "done"),
+        ]
+    );
+}
