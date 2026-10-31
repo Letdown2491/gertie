@@ -198,6 +198,14 @@ state, nothing that can fail on the provider. Hard-truncate oversized tool outpu
   (e.g. `explore` on a cheap fast model, synthesis on the strong model).
 - **Persistence**: every subagent run is a child session row (parent ID, type, prompt, report)
   — inspectable and forkable.
+- **Permission asks bubble to the parent transcript.** A worker's loop runs inside a tool nobody
+  drains, so its approval requests register on the shared broker (`PromptSource::Worker`) and fan
+  out to every subscribed surface; the streaming parent renders them as pending cards in its own
+  transcript — labeled `worker`, same approve/deny/reply path as its own asks — and the human's
+  answer resolves the parked worker loop. Nothing dead-ends in the agents panel. A dropped
+  responder (the UI went away) resolves as deny: doing nothing is the safe move. Stopping the
+  turn drops the tool future, which drops the worker — cancellation by construction.
+  (Pinned end to end: `a_worker_ask_bubbles_into_the_transcript_and_the_answer_reaches_the_worker`.)
 
 ### Agent types
 

@@ -45,7 +45,7 @@ fn fixture() -> Fixture {
 }
 
 fn fixture_with_store(store: Arc<SessionStore>) -> Fixture {
-    fixture_built(store, None, None, None)
+    fixture_built(store, None, None, None, None, None, Vec::new())
 }
 
 /// A fixture whose view carries a real checkpoint ledger over a real
@@ -61,16 +61,28 @@ fn fixture_with_snapshots() -> Fixture {
         Some(snapshots),
         Some(workspace.path().to_path_buf()),
         None,
+        None,
+        None,
+        Vec::new(),
     );
     fixture.hold = vec![snapshots_dir, workspace];
     fixture
 }
 
+#[allow(clippy::too_many_arguments)]
 fn fixture_built(
     store: Arc<SessionStore>,
     snapshots: Option<Arc<gertie_core::SnapshotStore>>,
     workspace: Option<std::path::PathBuf>,
     settle_command: Option<String>,
+    // A scripted provider turns the fixture into a live turn: the pump,
+    // permission cards, and the store writes all run for real.
+    provider: Option<Arc<gertie_providers::AnyProvider>>,
+    // Share the view's broker: the test registers asks the way a
+    // worker's loop does and holds the oneshot the answer resolves.
+    broker: Option<Arc<gertie_core::PermissionBroker>>,
+    // Extra tools beside the builtins (None = builtins alone).
+    extra_tools: Vec<Arc<dyn gertie_core::Tool>>,
 ) -> Fixture {
     let mut cx = HeadlessAppContext::with_asset_source(
         Arc::new(NoopTextSystem),
@@ -96,15 +108,15 @@ fn fixture_built(
                 });
                 ChatView::new(
                     store.clone(),
-                    None,
+                    provider,
                     snapshots.clone(),
-                    gertie_tools::builtin_tools(Path::new(".")),
+                    merge_tools(extra_tools),
                     "no endpoint configured".into(),
                     None,
                     Vec::new(),
                     workspace.unwrap_or_else(|| Path::new(".").to_path_buf()),
                     settle_command,
-                    Arc::new(gertie_core::PermissionBroker::new()),
+                    broker.unwrap_or_else(|| Arc::new(gertie_core::PermissionBroker::new())),
                     gertie_core::SessionScope::new(),
                     panel,
                     true,
@@ -135,6 +147,16 @@ impl Fixture {
             .expect("fixture window");
         settle(&mut self.cx, window.into());
     }
+}
+
+/// Builtins plus whatever test doubles the fixture asked for. The
+/// registry is a plain map, so merging is one insert per extra tool.
+fn merge_tools(extra: Vec<Arc<dyn gertie_core::Tool>>) -> gertie_core::ToolRegistry {
+    let mut map = (*gertie_tools::builtin_tools(Path::new("."))).clone();
+    for tool in extra {
+        map.insert(tool.name().to_string(), tool);
+    }
+    Arc::new(map)
 }
 
 #[test]
@@ -676,6 +698,9 @@ fn settling_runs_the_reclaim_command_in_the_recorded_workspace() {
         None,
         Some(workspace.path().to_path_buf()),
         Some(command),
+        None,
+        None,
+        Vec::new(),
     );
 
     // A send records the workspace on the session — the settle hook's
@@ -704,5 +729,154 @@ fn settling_runs_the_reclaim_command_in_the_recorded_workspace() {
     assert!(
         marker.exists(),
         "the settle command ran in the recorded workspace"
+    );
+}
+
+/// The §2.5 pin: a worker's permission ask bubbles into the parent
+/// transcript as a pending card — not dead-ending in the agents panel —
+/// and the human's answer rides back to the worker's loop parked on it.
+/// Scripted end to end: the replay provider drives the leader; its one
+/// tool registers a worker ask on the shared broker exactly as a real
+/// worker's loop does, then parks on the answer.
+struct WorkerAskTool {
+    broker: Arc<gertie_core::PermissionBroker>,
+}
+
+impl gertie_core::Tool for WorkerAskTool {
+    fn name(&self) -> &'static str {
+        "worker_ask"
+    }
+
+    fn description(&self) -> String {
+        "test double: registers a worker permission ask and parks on the answer".into()
+    }
+
+    fn parameters(&self) -> serde_json::Value {
+        serde_json::json!({"type": "object", "properties": {}})
+    }
+
+    fn run<'a>(
+        &'a self,
+        _arguments: &'a str,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = gertie_core::ToolResult> + Send + 'a>>
+    {
+        Box::pin(async move {
+            let (_id, answer) = self.broker.request(
+                gertie_core::ToolCall {
+                    id: "worker_1".into(),
+                    name: "bash".into(),
+                    arguments: r#"{"command":"rm -rf /tmp/worker-scratch"}"#.into(),
+                },
+                gertie_core::PromptSource::Worker,
+            );
+            match answer.await {
+                Ok(gertie_core::PermissionDecision::Approve) => Ok("worker approved".into()),
+                Ok(gertie_core::PermissionDecision::Deny { .. }) => Ok("worker denied".into()),
+                Err(_) => Ok("worker ask dropped".into()),
+            }
+        })
+    }
+}
+
+/// Settles a live turn: the pump's select loop ticks on a background
+/// timer, and test-executor timers only fire when the clock moves —
+/// so nudge time, drain, and draw, until the turn parks for good.
+fn pump(fixture: &mut Fixture, passes: usize) {
+    for _ in 0..passes {
+        fixture
+            .cx
+            .background_executor
+            .advance_clock(std::time::Duration::from_millis(5));
+        settle(&mut fixture.cx, fixture.window.into());
+    }
+}
+
+#[test]
+fn a_worker_ask_bubbles_into_the_transcript_and_the_answer_reaches_the_worker() {
+    // The scripted leader turn: one call to the test's worker-ask tool,
+    // then a closing step with no calls — the turn ends there. Empty
+    // texts keep the replay provider from pacing any deltas.
+    let scenarios = tempfile::tempdir().expect("scenario dir");
+    std::fs::write(
+        scenarios.path().join("worker.toml"),
+        "[[steps]]\ntext = ''\n\
+         [[steps.tool_calls]]\nname = 'worker_ask'\narguments = '{}'\n\
+         [[steps]]\ntext = ''\n",
+    )
+    .expect("scenario file");
+    let endpoint = gertie_providers::Endpoint {
+        name: "replay".into(),
+        base_url: scenarios.path().to_string_lossy().into_owned(),
+        model: "worker".into(),
+        api_key: None,
+        context_window: None,
+        wire: gertie_providers::Wire::Replay,
+    };
+    let provider = Arc::new(
+        gertie_providers::AnyProvider::with_endpoints(vec![endpoint]).expect("replay provider"),
+    );
+
+    let broker = Arc::new(gertie_core::PermissionBroker::new());
+    // Read-only on purpose: the leader's own gate auto-runs the tool,
+    // so the worker's ask is the only pending card in the transcript.
+    let store = Arc::new(SessionStore::open(Path::new(":memory:")).expect("memory store"));
+    let mut fixture = fixture_built(
+        store.clone(),
+        None,
+        None,
+        None,
+        Some(provider),
+        Some(broker.clone()),
+        vec![Arc::new(WorkerAskTool {
+            broker: broker.clone(),
+        })],
+    );
+
+    // Send: the scripted leader calls worker_ask (a Running card, its
+    // auto-run), which registers the ask and parks. The pump surfaces
+    // it as a pending card in THIS transcript — the parent's, not the
+    // agents panel's.
+    fixture.act(|window, cx| {
+        window.input("go", cx);
+        window.press("enter", cx);
+    });
+    pump(&mut fixture, 30);
+    fixture.act(|window, cx| {
+        assert!(
+            window.try_find("approve-2").is_some(),
+            "the worker ask bubbled into the parent transcript as a pending card"
+        );
+    });
+
+    // The answer rides back: approve resolves the parked tool, the turn
+    // completes, and what the worker's loop made of the answer is
+    // persisted with the turn.
+    fixture.act(|window, cx| {
+        window.click("approve-2", cx);
+    });
+    pump(&mut fixture, 30);
+    let session_id = fixture
+        .cx
+        .update(|cx| {
+            fixture
+                .view
+                .upgrade()
+                .expect("view alive")
+                .read(cx)
+                .session_id()
+        })
+        .expect("session created by send");
+    let messages = store
+        .load_recent_messages(session_id, 50)
+        .expect("persisted rows");
+    assert!(
+        messages
+            .iter()
+            .any(|message| message.content == "worker approved"),
+        "the human's answer reached the parked worker loop: {:?}",
+        messages
+            .iter()
+            .map(|message| message.content.as_str())
+            .collect::<Vec<_>>()
     );
 }
