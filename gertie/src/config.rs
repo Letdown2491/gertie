@@ -117,8 +117,9 @@ impl<'de, T: Deserialize<'de>> Deserialize<'de> for Inheritable<T> {
 /// The repo's own overlay: `<repo>/.gertie/config.toml`. Deliberately
 /// a subset — posture, not process: no endpoints, keys, MCP servers,
 /// or agent types, because a cloned repo never gets to configure what
-/// runs on your machine. It sits below the user's config: it
-/// suggests, you decide.
+/// runs on your machine. The settle command is *not* here either: a
+/// shell command is process, not posture — it stays the user's.
+/// The overlay sits below the user's config: it suggests, you decide.
 #[derive(Deserialize, Debug, Clone, Default)]
 pub struct ProjectOverlay {
     #[serde(default)]
@@ -127,8 +128,6 @@ pub struct ProjectOverlay {
     pub security: Option<ProjectSecurity>,
     #[serde(default)]
     pub auto_settle_days: Option<Inheritable<u64>>,
-    #[serde(default)]
-    pub settle_command: Option<Inheritable<String>>,
     #[serde(default)]
     pub worktree: Option<ProjectWorktree>,
 }
@@ -690,9 +689,13 @@ impl Config {
     }
 
     /// The settle reclaim command in force.
+    /// The settle reclaim command in force. The user's config only —
+    /// the repo's overlay may not set a shell command (posture, not
+    /// process), so the overlay parameter is accepted for chain
+    /// symmetry and deliberately unread.
     pub fn resolve_settle_command(
         &self,
-        overlay: Option<&ProjectOverlay>,
+        _overlay: Option<&ProjectOverlay>,
     ) -> Resolved<Option<String>> {
         if let Some(value) = &self.settle_command {
             return Resolved {
@@ -700,15 +703,9 @@ impl Config {
                 origin: Origin::User,
             };
         }
-        match overlay.and_then(|overlay| overlay.settle_command.as_ref()) {
-            Some(Inheritable::Set(value)) => Resolved {
-                value: Some(value.clone()),
-                origin: Origin::Project,
-            },
-            _ => Resolved {
-                value: None,
-                origin: Origin::Default,
-            },
+        Resolved {
+            value: None,
+            origin: Origin::Default,
         }
     }
 
@@ -932,7 +929,6 @@ mod tests {
         let overlay: ProjectOverlay = toml::from_str(
             r#"
 auto_settle_days = 3
-settle_command = "cargo clean"
 
 [security]
 sandbox_bash = true
@@ -972,10 +968,14 @@ default_mode = "accept_edits"
             (resolved.value, resolved.origin),
             (Some(3), Origin::Project)
         );
+
+        // The settle command is the user's alone — an overlay that
+        // writes one is ignored (a shell command is process, not
+        // posture; a cloned repo never configures what runs).
         let resolved = empty_user.resolve_settle_command(Some(&overlay));
         assert_eq!(
             (resolved.value.as_deref(), resolved.origin),
-            (Some("cargo clean"), Origin::Project)
+            (None, Origin::Default)
         );
 
         // The user's config outranks the overlay — even when it sets

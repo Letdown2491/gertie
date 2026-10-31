@@ -136,9 +136,11 @@ The original "Deferred" row — every item shipped or decided:
   overlay → CLI flags. A directory containing `gertie.toml` is a recognized workspace
   (and the project-trust marker).
 - **The project overlay** (`<repo>/.gertie/config.toml`) carries a deliberate subset —
-  starting permission mode, bash sandbox, auto-settle days, the settle command, the
+  starting permission mode, bash sandbox, auto-settle days, the
   worktree branch prefix — and nothing that runs on your machine: no endpoints, keys,
-  MCP servers, or agent types. A cloned repo never configures what executes locally.
+  MCP servers, or agent types — and no settle command either: a shell command is
+  process, not posture, and stays the user's. A cloned repo never configures what
+  executes locally.
   The chain is user config → project overlay → built-in default (the repo suggests,
   you decide), and every resolved value says which tier decided: the settings panel
   and `gertie doctor` print the origin. Inheritance is an explicit value — a field may
@@ -375,7 +377,8 @@ section (muted rows, ↩ to restore) while the record keeps everything; opening 
 settled session is activity and un-settles it. Settling refuses a session with a turn
 in flight. Auto-settle ships opt-in (`auto_settle_days = 3`): the startup sweep lays
 chats idle that long down as settled — state only, run before any view loads, so a
-live turn can't race it. `settle_command = "cargo clean"` is the reclaim hook: a
+live turn can't race it. The settle command (`settle_command`, the user's config
+alone — the repo overlay may not set a shell command) is the reclaim hook: a
 manual settle runs it in the settling session's recorded workspace (recorded at first
 send, so whichever tab presses ✓ later, the command lands in the right checkout) —
 off the UI thread, outcome surfaced in the transcript; the sweep never runs commands,
