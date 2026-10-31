@@ -357,7 +357,9 @@ no endpoint is built in, so none is invented for the user — and says so in the
 line; the settings panel (`/settings`) owns endpoints and keys, and an explicit
 `--config` override never gets one written. `gertie doctor` prints the
 setup as gertie sees it: config parse state, endpoint + wire, the API key's resolution
-source (or the exact `export` to run), MCP servers by transport, sandbox, and all-time
+source (or the exact `export` to run), MCP servers by transport, sandbox, the default
+permission mode's honest reach (what it enforces and what it deliberately leaves
+asking — with the sandbox off, auto says it degrades), and all-time
 token totals. The missing-key warning names the variable. Exit 0 from doctor = ready.
 
 ## Distribution
@@ -374,8 +376,9 @@ boundary:
 
 - **Reverse states.** If you added a way in, add the way out and the way to see it. Snooze
   needs unsnooze; expand needs collapse; a one-way door is a bug.
-- **Labels promise the action.** A visible label or tooltip describes exactly what the
-  click does — the permission card shows the diff it will run, never a verb alone.
+- **Labels promise the action.** A visible label, tooltip, menu wording, or accessible
+  name describes the same action on the same object — the permission card shows the diff
+  it will run, never a verb alone, and a copy-message button never promises to copy a link.
 - **Authority comes from configuration and the human at the card**, never from
   conversation: no message, tool result, or skill description can grant a permission.
 - **Stored events stay decodable.** Persisted rows load after every upgrade; the reload
@@ -383,7 +386,9 @@ boundary:
 - **Answers are typed, not sentinel strings.** What can be empty, unknown, or errored
   comes back as distinct variants — a turn file's "after" is the next checkpoint's object
   or disk (`AfterState`), a refused file is a refusal with a reason, never `""` meaning
-  three things.
+  three things. Record what was *asked* as well as what was *heard*: absence from an
+  answered map is "never looked", not "looked and found nothing" — conflating them
+  reports every cleared entry as changed.
 
 Four more, from t3code's performance doctrines:
 
@@ -400,6 +405,17 @@ Four more, from t3code's performance doctrines:
 - **Raw output streams on an ephemeral channel.** If long-running tool output ever
   streams to the UI, it rides a throttled side channel — never a persisted row per
   delta. (No streaming exists yet; the doctrine pre-empts the tempting table.)
+
+Two reservations, parked until the feature they govern exists:
+
+- **Monitors buy their wakes.** Any future background monitor (a timer that starts a
+  turn) carries a self-termination budget — a cap on consecutive wakes that bring no
+  news — and deduplicates what it has already reported. A monitor that cannot decide
+  to stop is a bug, not a feature.
+- **Default bindings never steal focused text input.** If gertie ever embeds a surface
+  that owns keystrokes (a terminal pane, a full editor), every default binding that
+  could shadow it carries a `!terminalFocus`-style guard condition, and remapping a
+  default keeps that guard.
 
 ## Working agreements
 
