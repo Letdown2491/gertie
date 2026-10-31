@@ -278,9 +278,11 @@ pub struct ChatView {
     /// Mid-run steering: user messages land in the running turn at the
     /// next round boundary. Set while a turn drives; cleared at its end.
     steer_tx: Option<tokio::sync::mpsc::UnboundedSender<String>>,
-    /// Follow-ups typed while streaming with the secondary Enter — they
-    /// wait out the run, then each fires as its own turn.
-    queued: Vec<String>,
+    /// Follow-ups typed while streaming with the secondary Enter —
+    /// queued rows, mirrored from the store: they run as their own
+    /// turns when the current one ends, and they survive a stop, a
+    /// crash, or a restart because they were rows all along.
+    queued: Vec<gertie_core::QueuedFollowup>,
     /// Images waiting to ride with the next sent message.
     attachments: Vec<Attachment>,
     /// Bytes of the streaming assistant row already written to the
@@ -493,6 +495,11 @@ impl ChatView {
         self.input.read(cx).value().to_string()
     }
 
+    /// Whether a turn is driving, for tests.
+    pub fn streaming_state_for_test(&self) -> bool {
+        self.streaming
+    }
+
     /// How many turns the transcript holds, for tests and tooling.
     pub fn turn_count_for_test(&self) -> usize {
         self.turns.len()
@@ -579,6 +586,15 @@ impl ChatView {
     /// a bounded window (the newest `RECENT_WINDOW` rows); the wire
     /// history takes everything — the loop resumes with exactly what
     /// the model saw before.
+    /// Reloads the draft stack from the store — the rows are the
+    /// truth; the vec is their shadow.
+    fn sync_queue(&mut self) {
+        self.queued = match self.session_id {
+            Some(session_id) => self.store.queued_followups(session_id).unwrap_or_default(),
+            None => Vec::new(),
+        };
+    }
+
     fn reload_session(&mut self, cx: &mut Context<Self>) {
         let (turns, history, last_db_id) = match self.session_id {
             Some(session_id) => {
@@ -611,6 +627,8 @@ impl ChatView {
         self.streaming_assistant = None;
         self.expanded_tools.clear();
         self.approval_replies.clear();
+        // Queued follow-ups are rows: they come back with the session.
+        self.sync_queue();
         self.sync_list(cx);
     }
 
@@ -753,6 +771,7 @@ impl ChatView {
         self.approval_replies.clear();
         self.last_db_id = None;
         self.streaming_assistant = None;
+        self.queued.clear();
         self.history.blocking_lock().clear();
         self.close_turn_diff(cx);
         self.sync_list(cx);
@@ -1857,18 +1876,32 @@ impl ChatView {
         // The run is busy: the words still land. Enter steers the
         // running turn (the model reads it at the next round
         // boundary); the secondary Enter queues a follow-up that
-        // runs as its own turn when this one ends.
+        // runs as its own turn when this one ends. The queue is rows
+        // in the store, so a crash keeps the words; a write that
+        // can't land hands the message back — it never pretends.
         if self.streaming {
+            if queue_only || self.steer_tx.is_none() {
+                match self
+                    .session_id
+                    .map(|session_id| self.store.enqueue_followup(session_id, &text))
+                {
+                    Some(Ok(())) => self.sync_queue(),
+                    _ => {
+                        self.input
+                            .update(cx, |input, cx| input.set_value(raw, window, cx));
+                        self.push_notice(
+                            "The queue didn't take the message — it's back in the composer.",
+                            cx,
+                        );
+                        return;
+                    }
+                }
+            } else if let Some(steer_tx) = &self.steer_tx {
+                let _ = steer_tx.send(text);
+            }
             self.input
                 .update(cx, |input, cx| input.set_value("", window, cx));
             window.focus(&self.input.read(cx).focus_handle(cx), cx);
-            if queue_only {
-                self.queued.push(text);
-            } else if let Some(steer_tx) = &self.steer_tx {
-                let _ = steer_tx.send(text);
-            } else {
-                self.queued.push(text);
-            }
             cx.notify();
             return;
         }
@@ -1876,6 +1909,14 @@ impl ChatView {
             .update(cx, |input, cx| input.set_value("", window, cx));
         window.focus(&self.input.read(cx).focus_handle(cx), cx);
 
+        // Attachments split three ways at send: text files join the
+        // message text (record and wire stay identical), binary bytes
+        // become storage markers for the DB and data URLs for the wire
+        // — the wire text itself stays clean, the model gets files as
+        // typed blocks.
+        let (inline, markers, images) = self.take_attachments();
+        let text = format!("{text}{inline}");
+        let stored = format!("{text}{markers}");
         // First message of a chat: the session is born here, titled by
         // what was typed — the invocation, not the expansion.
         let session_id = match self.session_id {
@@ -1896,16 +1937,21 @@ impl ChatView {
                 session_id
             }
         };
+        self.deliver_message(session_id, text, stored, images, cx);
+    }
 
-        // Attachments split three ways at send: text files join the
-        // message text (record and wire stay identical), binary bytes
-        // become storage markers for the DB and data URLs for the wire
-        // — the wire text itself stays clean, the model gets files as
-        // typed blocks.
-        let (inline, markers, images) = self.take_attachments();
-        let text = format!("{text}{inline}");
-        let stored = format!("{text}{markers}");
-
+    /// The common tail of a real send: the row persists, the ledger
+    /// mints, the loop runs. Queue drains and force-sends land here
+    /// too — with no attachments of their own (stored == text, no
+    /// images). The session already exists by the time this runs.
+    fn deliver_message(
+        &mut self,
+        session_id: SessionId,
+        text: String,
+        stored: String,
+        images: Vec<String>,
+        cx: &mut Context<Self>,
+    ) {
         let db_id = self
             .store
             .append_message(session_id, self.last_db_id, Role::User, &stored)
@@ -1931,6 +1977,64 @@ impl ChatView {
         self.snoozed = None;
         self.sessions = self.store.list_sessions().unwrap_or_default();
         self.drive_turn(Some(text), images, cx);
+    }
+
+    /// "Send now" on a queued draft: out of the queue, into the live
+    /// turn as a steer — or its own turn when none runs.
+    fn force_send_followup(&mut self, id: gertie_core::QueuedId, cx: &mut Context<Self>) {
+        let Some(text) = self.store.take_followup(id).ok().flatten() else {
+            // The row vanished under us: refresh the stack and move on.
+            self.sync_queue();
+            cx.notify();
+            return;
+        };
+        self.sync_queue();
+        if self.streaming {
+            if let Some(steer_tx) = &self.steer_tx {
+                let _ = steer_tx.send(text);
+                cx.notify();
+                return;
+            }
+        }
+        let Some(session_id) = self.session_id else {
+            return;
+        };
+        self.deliver_message(session_id, text.clone(), text, Vec::new(), cx);
+    }
+
+    /// "Edit" on a queued draft: pulled back into the composer (under
+    /// any draft already typed there) and out of the queue — editing a
+    /// queued message is just drafting it again.
+    fn edit_followup(
+        &mut self,
+        id: gertie_core::QueuedId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(draft) = self.queued.iter().find(|draft| draft.id == id) else {
+            return;
+        };
+        let text = draft.content.clone();
+        let _ = self.store.remove_followup(id);
+        self.sync_queue();
+        let existing = self.input.read(cx).value().to_string();
+        let value = if existing.trim().is_empty() {
+            text
+        } else {
+            format!("{text}\n\n{existing}")
+        };
+        self.input
+            .update(cx, |input, cx| input.set_value(value, window, cx));
+        window.focus(&self.input.read(cx).focus_handle(cx), cx);
+        cx.notify();
+    }
+
+    /// "✕" on a queued draft: the row goes from the store — the queue
+    /// is rows, so removal is real in every direction.
+    fn remove_followup(&mut self, id: gertie_core::QueuedId, cx: &mut Context<Self>) {
+        let _ = self.store.remove_followup(id);
+        self.sync_queue();
+        cx.notify();
     }
 
     /// `/compact`: replace the in-memory history with its selection now
@@ -2175,29 +2279,20 @@ impl ChatView {
                 this.sessions = this.store.list_sessions().unwrap_or_default();
                 this.sync_list(cx);
                 if !this.queued.is_empty() {
-                    let next = this.queued.remove(0);
-                    let session_id = match this.session_id {
-                        Some(session_id) => session_id,
-                        None => return,
-                    };
-                    // A queued follow-up is the human driving again;
-                    // whatever limited the last turn, this supersedes.
-                    let _ = this.store.set_session_limited(session_id, false);
-                    this.snoozed = None;
-                    this.sessions = this.store.list_sessions().unwrap_or_default();
-                    let db_id = this
-                        .store
-                        .append_message(session_id, this.last_db_id, Role::User, &next)
-                        .ok();
-                    if db_id.is_some() {
-                        this.last_db_id = db_id;
+                    let first = this.queued[0].id;
+                    match this.store.take_followup(first) {
+                        Ok(Some(text)) => {
+                            this.sync_queue();
+                            let session_id = match this.session_id {
+                                Some(session_id) => session_id,
+                                None => return,
+                            };
+                            this.deliver_message(session_id, text.clone(), text, Vec::new(), cx);
+                        }
+                        // The row vanished under us (another surface
+                        // took it): drop the stale draft, run nothing.
+                        _ => this.sync_queue(),
                     }
-                    this.turns.push(Turn::Message {
-                        role: Role::User,
-                        text: next.clone(),
-                        db_id,
-                    });
-                    this.drive_turn(Some(next), Vec::new(), cx);
                 }
             });
         })
@@ -2788,8 +2883,6 @@ impl ChatView {
             _ => None,
         };
         let inner = match (fork_button, quote_button) {
-            // The user bubble is right-aligned; the fork button tucks
-            // under it, same side, quiet.
             (Some(button), _) => div()
                 .w_full()
                 .flex()
@@ -2809,8 +2902,6 @@ impl ChatView {
                 .child(button)
                 .into_any_element(),
             (None, None) => inner,
-            // One role per turn — never both.
-            (Some(_), Some(_)) => inner,
         };
         // Horizontal padding lives on each item, not the list: gpui's
         // `list` paints items at the container's left edge and ignores
@@ -3915,18 +4006,109 @@ impl Render for ChatView {
                                         },
                                     )
                                     .when(!self.queued.is_empty(), |composer| {
+                                        // Queued follow-ups as dashed
+                                        // drafts: visible words, not a
+                                        // count. Each can be sent now,
+                                        // pulled back into the composer,
+                                        // or dropped — the queue is
+                                        // rows, so every action is real
+                                        // in both directions.
                                         composer.child(
-                                            h_flex()
-                                                .px_4()
-                                                .pt_2()
-                                                .gap_2()
-                                                .items_center()
-                                                .text_size(px(11.))
-                                                .text_color(cx.theme().muted_foreground)
-                                                .child(format!(
-                                                    "{} queued — runs when this turn finishes",
-                                                    self.queued.len()
-                                                )),
+                                            v_flex().gap_1().children(
+                                                self.queued.clone()
+                                                    .into_iter()
+                                                    .map(|draft| {
+                                                        let id = draft.id.0;
+                                                        let first_line = draft
+                                                            .content
+                                                            .lines()
+                                                            .next()
+                                                            .unwrap_or_default()
+                                                            .to_string();
+                                                        h_flex()
+                                                            .mx_4()
+                                                            .mt_2()
+                                                            .gap_2()
+                                                            .items_center()
+                                                            .border_1()
+                                                            .border_dashed()
+                                                            .border_color(cx.theme().border)
+                                                            .rounded_md()
+                                                            .px_2()
+                                                            .py_1()
+                                                            .child(
+                                                                div()
+                                                                    .flex_1()
+                                                                    .text_size(px(12.))
+                                                                    .text_color(
+                                                                        cx.theme()
+                                                                            .muted_foreground,
+                                                                    )
+                                                                    .truncate()
+                                                                    .child(first_line),
+                                                            )
+                                                            .child(
+                                                                Button::new(format!(
+                                                                    "queue-send-{id}"
+                                                                ))
+                                                                .label("send now")
+                                                                .xsmall()
+                                                                .ghost()
+                                                                .tooltip(
+                                                                    "Send this one now — \
+                                                                     steers the running turn",
+                                                                )
+                                                                .on_click(cx.listener(
+                                                                    move |this, _, _, cx| {
+                                                                        this
+                                                                            .force_send_followup(
+                                                                                gertie_core::QueuedId(id),
+                                                                                cx,
+                                                                            );
+                                                                    },
+                                                                )),
+                                                            )
+                                                            .child(
+                                                                Button::new(format!(
+                                                                    "queue-edit-{id}"
+                                                                ))
+                                                                .label("edit")
+                                                                .xsmall()
+                                                                .ghost()
+                                                                .tooltip(
+                                                                    "Pull back into the composer",
+                                                                )
+                                                                .on_click(cx.listener(
+                                                                    move |this, _, window, cx| {
+                                                                        this.edit_followup(
+                                                                            gertie_core::QueuedId(id),
+                                                                            window,
+                                                                            cx,
+                                                                        );
+                                                                    },
+                                                                )),
+                                                            )
+                                                            .child(
+                                                                Button::new(format!(
+                                                                    "queue-drop-{id}"
+                                                                ))
+                                                                .label("✕")
+                                                                .xsmall()
+                                                                .ghost()
+                                                                .tooltip(
+                                                                    "Drop this queued message",
+                                                                )
+                                                                .on_click(cx.listener(
+                                                                    move |this, _, _, cx| {
+                                                                        this.remove_followup(
+                                                                            gertie_core::QueuedId(id),
+                                                                            cx,
+                                                                        );
+                                                                    },
+                                                                )),
+                                                            )
+                                                    }),
+                                            ),
                                         )
                                     })
                                     .when(
@@ -4096,6 +4278,24 @@ impl Render for ChatView {
                                                         this.cycle_mode(cx);
                                                     })),
                                             )
+                                            // The verb the send key fires,
+                                            // stated where the key is used:
+                                            // Enter steers a running turn,
+                                            // the secondary queues for the
+                                            // next one. Nothing to say
+                                            // when nothing runs.
+                                            .when(self.streaming, |row| {
+                                                row.child(
+                                                    div()
+                                                        .text_size(px(11.))
+                                                        .text_color(cx.theme().muted_foreground)
+                                                        .child(if self.steer_tx.is_some() {
+                                                            "enter: steer · ctrl-enter: queue"
+                                                        } else {
+                                                            "enter: queue"
+                                                        }),
+                                                )
+                                            })
                                             .child(
                                                 Button::new("attach-file")
                                                     // A word, not a glyph: the

@@ -296,7 +296,14 @@ out of git by the local exclude) and the message cites the path for the agent's
 `read_file` — the context carries the pointer, not the document. An assistant turn worth
 commenting on carries a **quote** action: the response lands in the composer as a
 blockquote (bounded — enough to pin the referent, never the whole answer back into
-the prompt) and the comment types under it; sending shows the model the exact words. The footer's identity
+the prompt) and the comment types under it; sending shows the model the exact words.
+Steer and queue are verbs with a visible stack: while a turn runs, Enter steers it
+(the model reads the words at the next round boundary) and the secondary Enter queues
+a follow-up for the next one — the footer names which action the send key fires.
+Queued messages are **rows in the session store**, rendered as dashed drafts that can
+be sent now, pulled back into the composer, or dropped; they survive stops, crashes,
+and restarts because they were never UI state, and the drain reads the rows, not the
+shadow. The footer's identity
 line leads with the working folder. Slash builtins cover the panel actions (/compact,
 /export, /new, /settings, /agents) beside file templates. Two templates ship,
 write-if-absent like the skills (a user edit is theirs, a project file shadows by

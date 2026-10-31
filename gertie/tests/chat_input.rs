@@ -1599,3 +1599,232 @@ fn a_long_assistant_turn_quotes_truncated() {
     );
     assert!(value.len() < 1_100, "the cap is small by design");
 }
+
+/// The queue is rows, not UI state: a follow-up typed mid-turn
+/// (secondary Enter) persists immediately, renders as a dashed draft
+/// with real actions, and the drain fires it as its own turn when the
+/// running one ends.
+#[test]
+fn a_queued_followup_is_a_row_that_drafts_drains_and_survives() {
+    // A turn that pends on a permission card: stable "running" state —
+    // the queue can be exercised against a live turn.
+    let scenarios = tempfile::tempdir().expect("scenario dir");
+    std::fs::write(
+        scenarios.path().join("held.toml"),
+        "[[steps]]\ntext = ''\n\n\
+         [[steps.tool_calls]]\nname = \"write_file\"\n\
+         arguments = '{\"path\": \"q.txt\", \"content\": \"x\"}'\n\n\
+         [[steps]]\ntext = ''\n",
+    )
+    .expect("scenario file");
+    let workspace = tempfile::tempdir().expect("workspace dir");
+    let endpoint = gertie_providers::Endpoint {
+        name: "replay".into(),
+        base_url: scenarios.path().to_string_lossy().into_owned(),
+        model: "held".into(),
+        api_key: None,
+        context_window: None,
+        wire: gertie_providers::Wire::Replay,
+    };
+    let provider = Arc::new(
+        gertie_providers::AnyProvider::with_endpoints(vec![endpoint]).expect("replay provider"),
+    );
+    let store = Arc::new(SessionStore::open(Path::new(":memory:")).expect("memory store"));
+    let mut fixture = fixture_built(
+        store,
+        None,
+        Some(workspace.path().to_path_buf()),
+        None,
+        Some(provider),
+        None,
+        Vec::new(),
+    );
+    fixture.hold = vec![scenarios, workspace];
+
+    fixture.act(|window, cx| {
+        window.input("go", cx);
+        window.press("enter", cx);
+    });
+    pump(&mut fixture, 20);
+
+    // Mid-turn: the secondary Enter queues.
+    fixture.act(|window, cx| {
+        window.input("follow up please", cx);
+        window.press("secondary-enter", cx);
+    });
+    let session = fixture
+        .cx
+        .update(|cx| {
+            fixture
+                .view
+                .upgrade()
+                .expect("view alive")
+                .read(cx)
+                .session_id()
+        })
+        .expect("session born");
+    let queued = fixture.store.queued_followups(session).expect("rows");
+    assert_eq!(queued.len(), 1, "the follow-up persisted as a row");
+    assert_eq!(queued[0].content, "follow up please");
+    fixture.act(|window, cx| {
+        assert!(
+            window.try_find("queue-edit-1").is_some(),
+            "the draft renders with its actions"
+        );
+    });
+
+    // Approve the held write: the turn finishes and the drain fires
+    // the queued row as its own turn — a real user row, no composer
+    // involvement.
+    fixture.act(|window, cx| {
+        window.click("approve-1", cx);
+    });
+    pump(&mut fixture, 40);
+    let drained = fixture
+        .store
+        .load_messages(session)
+        .expect("rows")
+        .into_iter()
+        .filter(|row| row.role == gertie_core::Role::User && row.content == "follow up please")
+        .count();
+    assert_eq!(drained, 1, "the queued row ran as its own turn");
+    assert!(
+        fixture
+            .store
+            .queued_followups(session)
+            .expect("rows")
+            .is_empty(),
+        "the queue drained"
+    );
+}
+
+/// A queue outlives the view that made it: rows render as drafts on
+/// reopen, "send now" runs one without a composer, "edit" pulls it
+/// back, "✕" removes it for real.
+#[test]
+fn queued_drafts_render_from_rows_and_every_action_is_real() {
+    let store = Arc::new(SessionStore::open(Path::new(":memory:")).expect("memory store"));
+    let session = store.create_session("parked").expect("session");
+    store
+        .append_message(session, None, gertie_core::Role::User, "earlier ask")
+        .expect("row");
+    store
+        .enqueue_followup(session, "the parked words")
+        .expect("row");
+    let store2 = store.clone();
+    let mut fixture = fixture_with_store(store);
+
+    // The resumed session renders the queued row as a draft with
+    // actions — the words survived the restart.
+    fixture.act(|window, cx| {
+        assert!(
+            window.try_find("queue-edit-1").is_some(),
+            "the queued row drafts on reopen"
+        );
+    });
+
+    // "Send now" with no live turn: its own turn, straight from the
+    // row — the composer's draft (if any) untouched.
+    fixture.act(|window, cx| {
+        window.click("queue-send-1", cx);
+    });
+    pump(&mut fixture, 5);
+    let sent = fixture
+        .store
+        .load_messages(session)
+        .expect("rows")
+        .into_iter()
+        .filter(|row| row.role == gertie_core::Role::User && row.content == "the parked words")
+        .count();
+    assert_eq!(sent, 1, "send now ran the row");
+    assert!(
+        fixture
+            .store
+            .queued_followups(session)
+            .expect("rows")
+            .is_empty(),
+        "send now took the row out"
+    );
+    let composer = fixture.cx.update(|cx| {
+        fixture
+            .view
+            .upgrade()
+            .expect("view alive")
+            .read(cx)
+            .composer_value_for_test(cx)
+    });
+    assert!(
+        composer.trim().is_empty(),
+        "send now never touched the composer, got: {composer:?}"
+    );
+
+    // Edit pulls a fresh row back into the composer; ✕ removes one.
+    // The rows land through the store (as a restart's would) — the
+    // view sees them on re-open. Row ids come from the store: a
+    // drained table reuses ids.
+    store2
+        .enqueue_followup(session, "pull me back")
+        .expect("row");
+    eprintln!(
+        "DEBUG rows now: {:?}",
+        store2.queued_followups(session).unwrap()
+    );
+    fixture.act(|window, cx| {
+        window.click("session-1", cx);
+    });
+    eprintln!(
+        "DEBUG rows after reopen: {:?}",
+        store2.queued_followups(session).unwrap()
+    );
+    let edit_id = fixture.store.queued_followups(session).expect("rows")[0]
+        .id
+        .0;
+    fixture.act(|window, cx| {
+        window.click(
+            gpui_kit::SharedString::from(format!("queue-edit-{edit_id}")),
+            cx,
+        );
+    });
+    let composer = fixture.cx.update(|cx| {
+        fixture
+            .view
+            .upgrade()
+            .expect("view alive")
+            .read(cx)
+            .composer_value_for_test(cx)
+    });
+    assert!(
+        composer.starts_with("pull me back"),
+        "edit loads the draft, got: {composer:?}"
+    );
+    assert!(
+        fixture
+            .store
+            .queued_followups(session)
+            .expect("rows")
+            .is_empty(),
+        "edit took the row out"
+    );
+
+    store2.enqueue_followup(session, "drop me").expect("row");
+    fixture.act(|window, cx| {
+        window.click("session-1", cx);
+    });
+    let drop_id = fixture.store.queued_followups(session).expect("rows")[0]
+        .id
+        .0;
+    fixture.act(|window, cx| {
+        window.click(
+            gpui_kit::SharedString::from(format!("queue-drop-{drop_id}")),
+            cx,
+        );
+    });
+    assert!(
+        fixture
+            .store
+            .queued_followups(session)
+            .expect("rows")
+            .is_empty(),
+        "the drop button removed the row"
+    );
+}

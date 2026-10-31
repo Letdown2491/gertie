@@ -33,6 +33,10 @@ pub use tool::{Tool, ToolResult};
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct MessageId(pub u64);
 
+/// Identifies a queued follow-up row.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct QueuedId(pub u64);
+
 /// Identifies a session.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct SessionId(pub u64);
@@ -145,6 +149,15 @@ pub struct Message {
     pub tool_arguments: Option<String>,
 }
 
+/// A follow-up parked while a session's turn runs. Persisted rows, so
+/// a queue survives a stop, a crash, or a restart — the transcript
+/// renders them as editable drafts, and a drain fires them in order.
+#[derive(Clone, Debug)]
+pub struct QueuedFollowup {
+    pub id: QueuedId,
+    pub content: String,
+}
+
 /// A summary row for a session, for sidebars and resumption menus.
 #[derive(Clone, Debug)]
 pub struct SessionSummary {
@@ -216,7 +229,14 @@ impl SessionStore {
                  tool_arguments TEXT
              );
              CREATE INDEX IF NOT EXISTS messages_by_session
-                 ON messages(session_id, id);",
+                 ON messages(session_id, id);
+             CREATE TABLE IF NOT EXISTS queued_followups (
+                 id INTEGER PRIMARY KEY,
+                 session_id INTEGER NOT NULL REFERENCES sessions(id),
+                 content TEXT NOT NULL
+             );
+             CREATE INDEX IF NOT EXISTS queued_followups_by_session
+                 ON queued_followups(session_id, id);",
         )?;
         // Full-text index over message content (FTS5, bundled SQLite).
         // External-content-free on purpose: messages are append-only
@@ -740,8 +760,72 @@ impl SessionStore {
             "DELETE FROM messages WHERE session_id = ?1",
             [session_id.0 as i64],
         )?;
+        transaction.execute(
+            "DELETE FROM queued_followups WHERE session_id = ?1",
+            [session_id.0 as i64],
+        )?;
         transaction.execute("DELETE FROM sessions WHERE id = ?1", [session_id.0 as i64])?;
         transaction.commit()
+    }
+
+    /// Parks a follow-up for a session that is mid-turn: a full user
+    /// message that runs as its own turn when the current one ends.
+    /// Rows, not UI state — a crash keeps the words.
+    pub fn enqueue_followup(
+        &self,
+        session_id: SessionId,
+        content: &str,
+    ) -> Result<(), rusqlite::Error> {
+        let connection = self.connection.lock().unwrap();
+        connection.execute(
+            "INSERT INTO queued_followups (session_id, content) VALUES (?1, ?2)",
+            rusqlite::params![session_id.0 as i64, content],
+        )?;
+        Ok(())
+    }
+
+    /// A session's queued follow-ups, oldest-first.
+    pub fn queued_followups(
+        &self,
+        session_id: SessionId,
+    ) -> Result<Vec<QueuedFollowup>, rusqlite::Error> {
+        let connection = self.connection.lock().unwrap();
+        let mut statement = connection.prepare(
+            "SELECT id, content FROM queued_followups WHERE session_id = ?1 ORDER BY id",
+        )?;
+        let rows = statement.query_map([session_id.0 as i64], |row| {
+            Ok(QueuedFollowup {
+                id: QueuedId(row.get::<_, i64>(0)? as u64),
+                content: row.get(1)?,
+            })
+        })?;
+        rows.collect()
+    }
+
+    /// Pulls one followup out of the queue — sent by the drain or by a
+    /// force-send — returning its text. Unknown id: none.
+    pub fn take_followup(&self, id: QueuedId) -> Result<Option<String>, rusqlite::Error> {
+        let connection = self.connection.lock().unwrap();
+        let content = connection
+            .query_row(
+                "SELECT content FROM queued_followups WHERE id = ?1",
+                [id.0 as i64],
+                |row| row.get::<_, String>(0),
+            )
+            .ok();
+        if content.is_some() {
+            connection.execute("DELETE FROM queued_followups WHERE id = ?1", [id.0 as i64])?;
+        }
+        Ok(content)
+    }
+
+    /// Removes a queued followup without returning it (the UI's remove
+    /// action). True when a row went.
+    pub fn remove_followup(&self, id: QueuedId) -> Result<bool, rusqlite::Error> {
+        let connection = self.connection.lock().unwrap();
+        let gone =
+            connection.execute("DELETE FROM queued_followups WHERE id = ?1", [id.0 as i64])?;
+        Ok(gone > 0)
     }
 
     /// Loads a session's messages oldest-first. Unbounded by design:
