@@ -543,34 +543,30 @@ impl Config {
     }
 
     /// First-run experience: if the default config file does not
-    /// exist, write a working starter (a real endpoint entry that
-    /// needs only an API key) and return the message to surface in the
-    /// status line. Never called for an explicit `--config` path — an
-    /// override pointing at nothing means the user knows what they're
-    /// doing.
+    /// exist, write a starter and return the message to surface in
+    /// the status line. The starter names nothing — no endpoint,
+    /// provider, model, or key is built in; the comments point at the
+    /// in-app settings and a generic shape. Never called for an
+    /// explicit `--config` path — an override pointing at nothing
+    /// means the user knows what they're doing.
     pub fn ensure_skeleton(path: &std::path::Path) -> Option<String> {
         if path.exists() {
             return None;
         }
-        let skeleton = r#"# gertie's config. Full options live in the docs' config.example.toml:
-# endpoints (wire, fallbacks), MCP servers (stdio or HTTP), agents,
-# search backends, sandboxing. Keys resolve from api_key_env first.
-[[endpoints]]
-name = "ppq"
-base_url = "https://api.ppq.ai/v1"
-model = "glm-5.3-flash"
-api_key_env = "PPQ_API_KEY"
-
-# Any OpenAI-compatible endpoint works (OpenRouter, Ollama, vLLM...):
+        let skeleton = r#"# gertie's config. Nothing here is pre-configured: endpoints, models,
+# and keys are all yours to name. The easiest path is in the app —
+# type /settings in the composer (the settings panel owns endpoints
+# and keys). Or add one by hand, any OpenAI-compatible server:
+#
 # [[endpoints]]
-# name = "local"
-# base_url = "http://127.0.0.1:11434/v1"
-# model = "qwen3-coder"
-
-# Anthropic-native endpoints speak a different wire:
-# wire = "anthropic"
-
-default_endpoint = "ppq"
+# name = "mine"
+# base_url = "https://your-provider.example/v1"
+# model = "the-model-id"
+# api_key_env = "MY_API_KEY"
+#
+# Full options live in config.example.toml next to the README: wire
+# selection (openai | anthropic), fallback endpoints, MCP servers,
+# agents, search backends, sandboxing. `gertie doctor` checks the setup.
 "#;
         if let Some(parent) = path.parent()
             && let Err(error) = std::fs::create_dir_all(parent)
@@ -582,7 +578,7 @@ default_endpoint = "ppq"
         }
         match std::fs::write(path, skeleton) {
             Ok(()) => Some(format!(
-                "starter config created at {} — set PPQ_API_KEY or edit it",
+                "starter config created at {} — add an endpoint: /settings in the app, or edit the file",
                 path.display()
             )),
             Err(error) => Some(format!("could not write starter config: {error}")),
@@ -781,11 +777,19 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
 
-        // First run: a starter lands, and it parses as a real config.
+        // First run: a starter lands, it parses, and it names nothing —
+        // no endpoint, provider, model, or key is built in.
         let note = Config::ensure_skeleton(&path).expect("created");
         assert!(note.contains("starter config created"));
+        assert!(!note.contains("ppq") && !note.contains("PPQ"));
         let config = Config::load_from(&path).expect("skeleton parses");
-        assert_eq!(config.selected_endpoint().expect("endpoint").name, "ppq");
+        assert!(config.endpoints.is_empty(), "skeleton invents no endpoint");
+        assert!(config.selected_endpoint().is_none());
+        let raw = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            !raw.contains("ppq") && !raw.contains("glm"),
+            "skeleton carries no provider or model"
+        );
 
         // Second run: silence — the user's edits are untouchable.
         std::fs::write(&path, "[[endpoints]]\nname = \"mine\"").unwrap();

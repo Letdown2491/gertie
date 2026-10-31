@@ -61,22 +61,20 @@ gertie                 # the desktop app
 gertie run "fix the flaky test in ci and explain why"   # one headless turn
 ```
 
-First launch writes a starter `~/.config/gertie/config.toml` — one endpoint entry that
-only needs your API key:
+First launch writes a starter `~/.config/gertie/config.toml` — comments and pointers
+only: no endpoint is built in, so none is invented for you. Add yours in the app
+(`/settings` in the composer) or by hand:
 
 ```toml
 [[endpoints]]
-name = "ppq"
-base_url = "https://api.ppq.ai/v1"
-model = "glm-5.3-flash"
-api_key_env = "PPQ_API_KEY"
-
-default_endpoint = "ppq"
+name = "mine"
+base_url = "https://your-provider.example/v1"   # any OpenAI-compatible server
+model = "the-model-id"                          # the id your endpoint serves
+api_key_env = "MY_API_KEY"
 ```
 
-```sh
-export PPQ_API_KEY=sk-…
-```
+Keys resolve from the environment first (`MY_API_KEY` above); a local server needs
+no key at all.
 
 `config.example.toml` documents everything else: wire selection (`openai` |
 `anthropic`), fallback endpoints, MCP servers, custom agents, search backends,

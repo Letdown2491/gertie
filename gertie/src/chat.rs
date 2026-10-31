@@ -3243,14 +3243,9 @@ impl Render for ChatView {
     }
 }
 
-const NO_ENDPOINT_NOTICE: &str = "No endpoint configured. Run `gertie doctor` to check the setup, or create \
-    ~/.config/gertie/config.toml:\n\n\
-    [[endpoints]]\n\
-    name = \"ppq\"\n\
-    base_url = \"https://api.ppq.ai/v1\"\n\
-    model = \"glm-5.3-flash\"\n\
-    api_key_env = \"PPQ_API_KEY\"\n\n\
-    …set PPQ_API_KEY in your environment, then restart gertie.";
+const NO_ENDPOINT_NOTICE: &str = "No endpoint configured — none is built in. Add one in the \
+    settings panel (type `/settings` in the composer): any OpenAI-compatible URL, the model id it \
+    serves, and the env var holding your key. `gertie doctor` checks the setup.";
 
 /// Stored text as display text: attachment markers become a quiet note
 /// naming the files — the bytes live in the attachments dir, not the

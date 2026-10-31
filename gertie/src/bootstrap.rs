@@ -22,7 +22,7 @@ pub struct Reloaded {
     pub agent_endpoint: Option<gertie_providers::Endpoint>,
     pub label: String,
 
-    /// Just the identity — `ppq · glm-5.3-flash` — for the footer,
+    /// Just the identity — `endpoint · model` — for the footer,
     /// where the capability suffix (skills, agents) and key warnings
     /// would be noise. Headless keeps the full label on stderr.
     pub model_label: String,
