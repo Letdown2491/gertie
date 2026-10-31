@@ -1,8 +1,10 @@
-//! Layered TOML config. M1 reads one file; the full layering
-//! (defaults → user → project → flags) arrives with the project file.
+//! Layered TOML config: the user's file, plus the repo's own overlay
+//! (`<repo>/.gertie/config.toml`) for a safe subset — the overlay
+//! suggests, the user's file decides, and every resolved value says
+//! which tier it came from.
 
-use serde::Deserialize;
-use std::path::PathBuf;
+use serde::{Deserialize, Deserializer};
+use std::path::{Path, PathBuf};
 
 /// The user's config: `~/.config/gertie/config.toml`.
 #[derive(Deserialize, Debug, Clone, Default)]
@@ -40,22 +42,14 @@ pub struct Config {
     pub settle_command: Option<String>,
 }
 
-#[derive(Deserialize, Debug, Clone)]
+#[derive(Deserialize, Debug, Clone, Default)]
 pub struct SecurityConfig {
     /// Landlock-isolate bash children: system reads, workspace//tmp
     /// writes only. Opt-in; when the kernel can't enforce it, sandboxed
-    /// commands fail instead of running free.
+    /// commands fail instead of running free. `Some` = the user's file
+    /// set it; `None` = unset, a lower tier decides.
     #[serde(default)]
-    pub sandbox_bash: bool,
-}
-
-#[allow(clippy::derivable_impls)]
-impl Default for SecurityConfig {
-    fn default() -> Self {
-        Self {
-            sandbox_bash: false, // opt-in: the permission gate is the base layer
-        }
-    }
+    pub sandbox_bash: Option<bool>,
 }
 
 #[derive(Deserialize, Debug, Clone, Default)]
@@ -63,9 +57,125 @@ pub struct PermissionsConfig {
     /// New sessions' permission mode: "supervised", "accept_edits",
     /// "auto" (sandboxed work runs unasked), or "full_access". A
     /// session keeps whatever mode you set in the composer, per
-    /// session; this only sets the starting posture.
+    /// session; this only sets the starting posture. `Some` = the
+    /// user's file set it; `None` = unset, a lower tier decides.
     #[serde(default)]
-    pub default_mode: gertie_core::PermissionMode,
+    pub default_mode: Option<gertie_core::PermissionMode>,
+}
+
+/// Explicit inheritance as a value: a project overlay field may hold
+/// a value, or the string `"inherit"` — the next tier (the user's
+/// config, then the built-in default) decides. Inheritance is a
+/// state you can select and the UI can show, not an absence to
+/// infer.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Inheritable<T> {
+    Set(T),
+    Inherit,
+}
+
+impl<T> serde::Serialize for Inheritable<T>
+where
+    T: serde::Serialize,
+{
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match self {
+            Inheritable::Set(value) => value.serialize(serializer),
+            Inheritable::Inherit => "inherit".serialize(serializer),
+        }
+    }
+}
+
+impl<'de, T: Deserialize<'de>> Deserialize<'de> for Inheritable<T> {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = toml::Value::deserialize(deserializer)?;
+        if value.as_str() == Some("inherit") {
+            return Ok(Inheritable::Inherit);
+        }
+        T::deserialize(value)
+            .map(Inheritable::Set)
+            .map_err(|error| {
+                serde::de::Error::custom(format!("expected a value or \"inherit\": {error}"))
+            })
+    }
+}
+
+/// The repo's own overlay: `<repo>/.gertie/config.toml`. Deliberately
+/// a subset — posture, not process: no endpoints, keys, MCP servers,
+/// or agent types, because a cloned repo never gets to configure what
+/// runs on your machine. It sits below the user's config: it
+/// suggests, you decide.
+#[derive(Deserialize, Debug, Clone, Default)]
+pub struct ProjectOverlay {
+    #[serde(default)]
+    pub permissions: Option<ProjectPermissions>,
+    #[serde(default)]
+    pub security: Option<ProjectSecurity>,
+    #[serde(default)]
+    pub auto_settle_days: Option<Inheritable<u64>>,
+    #[serde(default)]
+    pub settle_command: Option<Inheritable<String>>,
+}
+
+#[derive(Deserialize, Debug, Clone, Default)]
+pub struct ProjectPermissions {
+    #[serde(default)]
+    pub default_mode: Option<Inheritable<gertie_core::PermissionMode>>,
+}
+
+#[derive(Deserialize, Debug, Clone, Default)]
+pub struct ProjectSecurity {
+    #[serde(default)]
+    pub sandbox_bash: Option<Inheritable<bool>>,
+}
+
+/// Where a resolved setting's value came from — the label the
+/// settings panel and doctor show.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Origin {
+    /// The user's config set it: the top tier, always wins.
+    User,
+    /// The repo's overlay set it: your config didn't, so the project
+    /// decided.
+    Project,
+    /// Nothing set it: the built-in default stands.
+    Default,
+}
+
+impl Origin {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Origin::User => "user config",
+            Origin::Project => "project overlay",
+            Origin::Default => "built-in default",
+        }
+    }
+}
+
+/// A resolved setting: the value in force and where it came from.
+#[derive(Clone, Debug)]
+pub struct Resolved<T> {
+    pub value: T,
+    pub origin: Origin,
+}
+
+impl<T> Resolved<T> {
+    fn map<U>(self, value: U) -> Resolved<U> {
+        Resolved {
+            value,
+            origin: self.origin,
+        }
+    }
+}
+
+/// Every overlay-resolvable field's origin at once — for the
+/// settings summary and the doctor's report.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Origins {
+    pub sandbox_bash: Option<Origin>,
+    pub default_mode: Option<Origin>,
+    pub auto_settle_days: Option<Origin>,
+    pub settle_command: Option<Origin>,
 }
 
 #[derive(Deserialize, Debug, Clone)]
@@ -450,6 +560,151 @@ impl Config {
         toml::from_str(&raw).map_err(|error| format!("could not parse {}: {error}", path.display()))
     }
 
+    /// Loads the repo's overlay: `<workspace>/.gertie/config.toml`.
+    /// A missing file is no overlay and no error; an unreadable or
+    /// unparseable one is a reported error (never fatal, never
+    /// silent — the label and the doctor carry it).
+    pub fn load_project_overlay(workspace_root: &Path) -> (Option<ProjectOverlay>, Option<String>) {
+        let path = workspace_root.join(".gertie").join("config.toml");
+        let raw = match std::fs::read_to_string(&path) {
+            Ok(raw) => raw,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return (None, None),
+            Err(error) => {
+                return (
+                    None,
+                    Some(format!("could not read {}: {error}", path.display())),
+                );
+            }
+        };
+        match toml::from_str(&raw) {
+            Ok(overlay) => (Some(overlay), None),
+            Err(error) => (
+                None,
+                Some(format!("could not parse {}: {error}", path.display())),
+            ),
+        }
+    }
+
+    fn overlay_sandbox(overlay: Option<&ProjectOverlay>) -> Option<Resolved<bool>> {
+        overlay
+            .and_then(|overlay| overlay.security.as_ref())
+            .and_then(|security| security.sandbox_bash.as_ref())
+            .map(|inheritable| match inheritable {
+                // Explicit Inherit: the next tier — the built-in
+                // default — decides.
+                Inheritable::Inherit => Resolved {
+                    value: false,
+                    origin: Origin::Default,
+                },
+                Inheritable::Set(value) => Resolved {
+                    value: *value,
+                    origin: Origin::Project,
+                },
+            })
+    }
+
+    /// The bash sandbox in force: your config, else the repo's
+    /// overlay, else off.
+    pub fn resolve_sandbox_bash(&self, overlay: Option<&ProjectOverlay>) -> Resolved<bool> {
+        if let Some(value) = self.security.sandbox_bash {
+            return Resolved {
+                value,
+                origin: Origin::User,
+            };
+        }
+        Self::overlay_sandbox(overlay).unwrap_or(Resolved {
+            value: false,
+            origin: Origin::Default,
+        })
+    }
+
+    /// The starting permission mode: your config, else the repo's
+    /// overlay, else supervised.
+    pub fn resolve_default_mode(
+        &self,
+        overlay: Option<&ProjectOverlay>,
+    ) -> Resolved<gertie_core::PermissionMode> {
+        if let Some(value) = self.permissions.default_mode {
+            return Resolved {
+                value,
+                origin: Origin::User,
+            };
+        }
+        overlay
+            .and_then(|overlay| overlay.permissions.as_ref())
+            .and_then(|permissions| permissions.default_mode.as_ref())
+            .map(|inheritable| match inheritable {
+                Inheritable::Inherit => Resolved {
+                    value: gertie_core::PermissionMode::default(),
+                    origin: Origin::Default,
+                },
+                Inheritable::Set(value) => Resolved {
+                    value: *value,
+                    origin: Origin::Project,
+                },
+            })
+            .unwrap_or(Resolved {
+                value: gertie_core::PermissionMode::default(),
+                origin: Origin::Default,
+            })
+    }
+
+    /// The auto-settle threshold in force.
+    pub fn resolve_auto_settle_days(
+        &self,
+        overlay: Option<&ProjectOverlay>,
+    ) -> Resolved<Option<u64>> {
+        if let Some(value) = self.auto_settle_days {
+            return Resolved {
+                value: Some(value),
+                origin: Origin::User,
+            };
+        }
+        match overlay.and_then(|overlay| overlay.auto_settle_days.as_ref()) {
+            Some(Inheritable::Set(value)) => Resolved {
+                value: Some(*value),
+                origin: Origin::Project,
+            },
+            _ => Resolved {
+                value: None,
+                origin: Origin::Default,
+            },
+        }
+    }
+
+    /// The settle reclaim command in force.
+    pub fn resolve_settle_command(
+        &self,
+        overlay: Option<&ProjectOverlay>,
+    ) -> Resolved<Option<String>> {
+        if let Some(value) = &self.settle_command {
+            return Resolved {
+                value: Some(value.clone()),
+                origin: Origin::User,
+            };
+        }
+        match overlay.and_then(|overlay| overlay.settle_command.as_ref()) {
+            Some(Inheritable::Set(value)) => Resolved {
+                value: Some(value.clone()),
+                origin: Origin::Project,
+            },
+            _ => Resolved {
+                value: None,
+                origin: Origin::Default,
+            },
+        }
+    }
+
+    /// Every resolvable field's origin at once.
+    pub fn resolve_origins(&self, overlay: Option<&ProjectOverlay>) -> Origins {
+        Origins {
+            sandbox_bash: Some(self.resolve_sandbox_bash(overlay).origin),
+            default_mode: Some(self.resolve_default_mode(overlay).origin),
+            auto_settle_days: Some(self.resolve_auto_settle_days(overlay).origin),
+            settle_command: Some(self.resolve_settle_command(overlay).origin),
+        }
+    }
+
     /// The endpoint gertie talks to, with its key resolved from the
     /// environment or the config value. None if nothing is configured.
     pub fn selected_endpoint(&self) -> Option<gertie_providers::Endpoint> {
@@ -624,6 +879,136 @@ mod tests {
         }
     }
 
+    /// Explicit Inherit parses as a value-state, not an absence —
+    /// and a typo'd marker is an error, never a silent stand-down.
+    #[test]
+    fn inheritable_holds_a_value_or_the_inherit_marker() {
+        #[derive(Deserialize, PartialEq, Debug)]
+        struct Field {
+            days: Inheritable<u64>,
+        }
+        let set: Field = toml::from_str("days = 3").unwrap();
+        assert_eq!(set.days, Inheritable::Set(3));
+        let inherit: Field = toml::from_str("days = \"inherit\"").unwrap();
+        assert_eq!(inherit.days, Inheritable::Inherit);
+        assert!(toml::from_str::<Field>("days = \"inheret\"").is_err());
+        assert!(toml::from_str::<Field>("days = \"soon\"").is_err());
+    }
+
+    /// The chain: your config outranks the repo's overlay, which
+    /// outranks the built-in default; explicit "inherit" in the
+    /// overlay stands down to the default.
+    #[test]
+    fn settings_resolve_user_over_project_over_default() {
+        let overlay: ProjectOverlay = toml::from_str(
+            r#"
+auto_settle_days = 3
+settle_command = "cargo clean"
+
+[security]
+sandbox_bash = true
+
+[permissions]
+default_mode = "accept_edits"
+"#,
+        )
+        .unwrap();
+
+        // Nothing anywhere: the defaults, named as defaults.
+        let bare = Config::default();
+        let resolved = bare.resolve_sandbox_bash(None);
+        assert_eq!((resolved.value, resolved.origin), (false, Origin::Default));
+        assert_eq!(
+            bare.resolve_origins(None),
+            Origins {
+                sandbox_bash: Some(Origin::Default),
+                default_mode: Some(Origin::Default),
+                auto_settle_days: Some(Origin::Default),
+                settle_command: Some(Origin::Default),
+            }
+        );
+
+        // No user config: the project's values win, labeled as the
+        // project's.
+        let empty_user = Config::default();
+        let resolved = empty_user.resolve_sandbox_bash(Some(&overlay));
+        assert_eq!((resolved.value, resolved.origin), (true, Origin::Project));
+        let resolved = empty_user.resolve_default_mode(Some(&overlay));
+        assert_eq!(
+            (resolved.value, resolved.origin),
+            (gertie_core::PermissionMode::AcceptEdits, Origin::Project)
+        );
+        let resolved = empty_user.resolve_auto_settle_days(Some(&overlay));
+        assert_eq!(
+            (resolved.value, resolved.origin),
+            (Some(3), Origin::Project)
+        );
+        let resolved = empty_user.resolve_settle_command(Some(&overlay));
+        assert_eq!(
+            (resolved.value.as_deref(), resolved.origin),
+            (Some("cargo clean"), Origin::Project)
+        );
+
+        // The user's config outranks the overlay — even when it sets
+        // the opposite.
+        let mut user = Config::default();
+        user.security.sandbox_bash = Some(false);
+        user.permissions.default_mode = Some(gertie_core::PermissionMode::FullAccess);
+        let resolved = user.resolve_sandbox_bash(Some(&overlay));
+        assert_eq!((resolved.value, resolved.origin), (false, Origin::User));
+        let resolved = user.resolve_default_mode(Some(&overlay));
+        assert_eq!(
+            (resolved.value, resolved.origin),
+            (gertie_core::PermissionMode::FullAccess, Origin::User)
+        );
+
+        // Explicit "inherit" in the overlay stands down to the
+        // default, even though the field is present.
+        let overlay_inherit: ProjectOverlay =
+            toml::from_str("[security]\nsandbox_bash = \"inherit\"").unwrap();
+        let resolved = empty_user.resolve_sandbox_bash(Some(&overlay_inherit));
+        assert_eq!((resolved.value, resolved.origin), (false, Origin::Default));
+    }
+
+    /// The overlay loads from `<workspace>/.gertie/config.toml`:
+    /// missing is no overlay and no error; broken is a reported
+    /// error, never fatal.
+    #[test]
+    fn the_project_overlay_loads_missing_ok_and_broken_loudly() {
+        let root = tempfile::tempdir().unwrap();
+        let (overlay, error) = Config::load_project_overlay(root.path());
+        assert!(overlay.is_none());
+        assert!(error.is_none());
+
+        std::fs::create_dir_all(root.path().join(".gertie")).unwrap();
+        std::fs::write(
+            root.path().join(".gertie/config.toml"),
+            "[security]\nsandbox_bash = true\n",
+        )
+        .unwrap();
+        let (overlay, error) = Config::load_project_overlay(root.path());
+        assert!(error.is_none());
+        let overlay = overlay.expect("the overlay loads");
+        assert_eq!(
+            overlay
+                .security
+                .as_ref()
+                .and_then(|s| s.sandbox_bash.as_ref()),
+            Some(&Inheritable::Set(true))
+        );
+
+        // A broken overlay file is a reported error, not a crash and
+        // not a silent absence.
+        std::fs::write(root.path().join(".gertie/config.toml"), "not [valid toml").unwrap();
+        let (overlay, error) = Config::load_project_overlay(root.path());
+        assert!(overlay.is_none());
+        assert!(
+            error
+                .expect("the parse error surfaces")
+                .contains("could not parse")
+        );
+    }
+
     /// The edited sections are rewritten, the rest of the file is
     /// preserved byte-for-byte in spirit: comments, ordering, unknown
     /// keys.
@@ -658,7 +1043,7 @@ mod tests {
         assert_eq!(config.endpoints.len(), 1);
         assert_eq!(config.endpoints[0].name, "other");
         assert_eq!(config.default_endpoint.as_deref(), Some("other"));
-        assert!(config.security.sandbox_bash);
+        assert_eq!(config.security.sandbox_bash, Some(true));
     }
 
     #[test]
@@ -717,7 +1102,7 @@ mod tests {
         .unwrap();
 
         let config = Config::load_from(&path).unwrap();
-        assert!(config.security.sandbox_bash);
+        assert_eq!(config.security.sandbox_bash, Some(true));
         assert_eq!(config.mcp_servers.len(), 1);
         assert_eq!(config.mcp_servers[0].name, "docs");
         assert_eq!(

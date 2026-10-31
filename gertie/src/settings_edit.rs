@@ -217,7 +217,11 @@ impl SettingsPanelView {
             .map(EndpointDraft::from_config)
             .collect();
         self.default_endpoint = config.default_endpoint.clone();
-        self.sandbox = config.security.sandbox_bash;
+        // The sandbox draft starts from what's in force (the summary
+        // is resolved against the repo's overlay) — flipping the
+        // switch then saves your own choice into your config, which
+        // outranks the overlay from then on.
+        self.sandbox = self.summary.sandbox;
         self.mcp_servers = config
             .mcp_servers
             .iter()
@@ -857,10 +861,17 @@ impl Render for SettingsPanelView {
             .child(section_header("SANDBOX", cx))
             .child(
                 Switch::new("sandbox-switch")
-                    .label("Landlock-isolate bash children")
+                    .label(format!(
+                        "Landlock-isolate bash children — from {}",
+                        self.summary.sandbox_origin.as_str()
+                    ))
                     .small()
                     .checked(self.sandbox)
-                    .tooltip("Restart to apply")
+                    .tooltip(concat!(
+                        "Restart to apply. Your config sets this; while it",
+                        " doesn't, the repo's .gertie/config.toml may —",
+                        " that file may also write \"inherit\" to stand down."
+                    ))
                     .on_click({
                         let panel = cx.entity().downgrade();
                         move |checked, _, cx| {

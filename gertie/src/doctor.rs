@@ -138,25 +138,40 @@ pub fn run(config_override: Option<PathBuf>) -> i32 {
         }
     }
 
-    // Search, sandbox, sessions.
+    // Search, sandbox, sessions. The sandbox resolves through the
+    // chain — your config, else the repo's overlay, else off — and
+    // the doctor says which tier decided.
     match &config.search {
         Some(search) => println!("search      {}", search.backend),
         None => println!("search      none (web_search explains how to set one up)"),
     }
+    let workspace_root = std::env::current_dir().unwrap_or_else(|_| ".".into());
+    let (overlay, overlay_error) = crate::config::Config::load_project_overlay(&workspace_root);
+    if let Some(error) = &overlay_error {
+        println!("overlay     ✗ {error}");
+        ready = false;
+    } else if overlay.is_some() {
+        println!(
+            "overlay     {}",
+            workspace_root.join(".gertie").join("config.toml").display()
+        );
+    }
+    let sandbox = config.resolve_sandbox_bash(overlay.as_ref());
     println!(
-        "sandbox     {}",
-        if config.security.sandbox_bash {
+        "sandbox     {} ({})",
+        if sandbox.value {
             "Landlock, opt-in, on"
         } else {
             "off (the permission gate still prompts for writes)"
-        }
+        },
+        sandbox.origin.as_str()
     );
 
     // The permission mode's honest reach: what the default mode can
     // and cannot enforce. gertie owns every tool, so enforcement is
     // uniform — the caveats are the mode's real edges, not per-provider
     // fallbacks; a mode is never silently downgraded.
-    let mode = config.permissions.default_mode;
+    let mode = config.resolve_default_mode(overlay.as_ref()).value;
     let (promise, caveat) = match mode {
         gertie_core::PermissionMode::Supervised => {
             ("every write, bash, and MCP call asks; reads run free", None)
@@ -166,7 +181,7 @@ pub fn run(config_override: Option<PathBuf>) -> i32 {
             Some("bash and MCP calls still ask"),
         ),
         gertie_core::PermissionMode::Auto => {
-            if config.security.sandbox_bash {
+            if sandbox.value {
                 (
                     "file edits and Landlock-sandboxed bash run unasked",
                     Some("MCP calls still ask"),

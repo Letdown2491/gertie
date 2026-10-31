@@ -59,6 +59,12 @@ pub struct Bootstrap {
     pub sandbox_bash: bool,
     /// The mode new sessions open in (`[permissions] default_mode`).
     pub default_mode: gertie_core::PermissionMode,
+    /// The repo's own overlay file, if one loads — re-resolved
+    /// against the live config on every reload.
+    overlay: Option<crate::config::ProjectOverlay>,
+    /// The overlay's load/parse failure, if any — reported in the
+    /// label and the doctor, never fatal.
+    pub overlay_error: Option<String>,
     pub snapshots: Option<Arc<gertie_core::SnapshotStore>>,
     pub system_prompt: Option<String>,
     /// Human-readable status line: endpoint, warnings, capability counts.
@@ -98,9 +104,18 @@ impl Bootstrap {
         self.reloaded.read().unwrap().model_label.clone()
     }
 
-    /// The settle reclaim command from the live config.
+    /// The settle reclaim command in force — the live config's, else
+    /// the repo overlay's (your config outranks the project's).
     pub fn settle_command(&self) -> Option<String> {
-        self.live_config().settle_command.clone()
+        self.live_config()
+            .resolve_settle_command(self.overlay.as_ref())
+            .value
+    }
+
+    /// Where every overlay-resolvable setting came from, resolved
+    /// against the live config.
+    pub fn origins(&self) -> crate::config::Origins {
+        self.live_config().resolve_origins(self.overlay.as_ref())
     }
 
     pub fn settings(&self) -> Arc<crate::settings::SettingsSummary> {
@@ -144,6 +159,11 @@ impl Bootstrap {
         label.push_str(&self.capability_suffix);
         let (provider, agent_endpoint) = provider_chain(&config);
         let mut settings = crate::settings::SettingsSummary::from_config(&config);
+        // The summary shows what's in force, and from where: the
+        // repo's overlay answers where your config is silent.
+        let sandbox = config.resolve_sandbox_bash(self.overlay.as_ref());
+        settings.sandbox = sandbox.value;
+        settings.sandbox_origin = sandbox.origin;
         settings.skills = self.skill_count;
         *self.reloaded.write().unwrap() = Reloaded {
             config: Arc::new(config),
@@ -179,6 +199,12 @@ impl Bootstrap {
             Ok(None) => (crate::config::Config::default(), None),
             Err(error) => (crate::config::Config::default(), Some(error)),
         };
+        // The workspace is wherever gertie was launched; tools resolve
+        // paths against it and checkpoints land beside the session
+        // store. The repo's own overlay is found (or not) here —
+        // before the label, so its problems surface with the rest.
+        let workspace_root = std::env::current_dir().unwrap_or_else(|_| ".".into());
+        let (overlay, overlay_error) = crate::config::Config::load_project_overlay(&workspace_root);
         let endpoint = config.selected_endpoint();
         let model_label = if let Some(error) = &config_error {
             format!("config error — {error}")
@@ -193,6 +219,9 @@ impl Bootstrap {
         let mut label = model_label.clone();
         for warning in config.key_warnings() {
             label.push_str(&format!(" — ⚠ {warning}"));
+        }
+        if let Some(error) = &overlay_error {
+            label.push_str(&format!(" — ⚠ project overlay: {error}"));
         }
         // Everything appended from here on (skills, MCP, agents) is
         // load-time setup — the reload path reuses it verbatim as the
@@ -232,17 +261,15 @@ impl Bootstrap {
         // The startup sweep: chats idle past the configured days come
         // back settled — state only, never the reclaim command (that
         // runs when a human presses settle). Skipped entirely until
-        // the config opts in.
-        if let Some(days) = config.auto_settle_days
+        // something opts in — your config or the repo's overlay.
+        let auto_settle = config.resolve_auto_settle_days(overlay.as_ref());
+        if let Some(days) = auto_settle.value
             && days > 0
             && let Err(error) = store.settle_idle_sessions(days)
         {
             eprintln!("warning: auto-settle sweep failed: {error}");
         }
 
-        // The workspace is wherever gertie was launched; tools resolve
-        // paths against it and checkpoints land beside the session store.
-        let workspace_root = std::env::current_dir().unwrap_or_else(|_| ".".into());
         let snapshots = crate::config::Config::data_dir().and_then(|data_dir| {
             match gertie_core::SnapshotStore::open(&data_dir.join("snapshots")) {
                 Ok(store) => Some(Arc::new(store)),
@@ -252,10 +279,14 @@ impl Bootstrap {
                 }
             }
         });
-        // Sandbox: opt-in Landlock isolation for bash children.
-        let sandbox = config.security.sandbox_bash.then(|| {
-            std::sync::Arc::new(gertie_tools::sandbox::Sandbox::new(workspace_root.clone()))
-        });
+        // Sandbox: opt-in Landlock isolation for bash children —
+        // yours, else the repo overlay's, else off.
+        let sandbox = config
+            .resolve_sandbox_bash(overlay.as_ref())
+            .value
+            .then(|| {
+                std::sync::Arc::new(gertie_tools::sandbox::Sandbox::new(workspace_root.clone()))
+            });
         let mut tools = gertie_tools::builtin_tools_with(&workspace_root, sandbox);
         let mut root_independent: Vec<String> = Vec::new();
 
@@ -399,8 +430,8 @@ impl Bootstrap {
         let broker = Arc::new(gertie_core::PermissionBroker::new());
         let session_scope = gertie_core::SessionScope::new();
         let mode_scope = gertie_core::ModeScope::new();
-        let sandbox_bash = config.security.sandbox_bash;
-        let default_mode = config.permissions.default_mode;
+        let sandbox_bash = config.resolve_sandbox_bash(overlay.as_ref()).value;
+        let default_mode = config.resolve_default_mode(overlay.as_ref()).value;
 
         // read_session: the model's way back into the record a context
         // compaction selected away. Scoped to the front's open session
@@ -500,6 +531,8 @@ impl Bootstrap {
             mode_scope,
             sandbox_bash,
             default_mode,
+            overlay,
+            overlay_error,
             snapshots,
             system_prompt,
             workspace_root,
@@ -515,10 +548,11 @@ impl Bootstrap {
     /// as-is rather than duplicated. Shared infrastructure (broker,
     /// store, snapshots) is untouched: one approval queue, one history.
     pub fn registry_for_root(&self, root: &Path) -> (gertie_core::ToolRegistry, Option<String>) {
-        let sandbox =
-            self.config.security.sandbox_bash.then(|| {
-                std::sync::Arc::new(gertie_tools::sandbox::Sandbox::new(root.to_path_buf()))
-            });
+        let sandbox = self
+            .live_config()
+            .resolve_sandbox_bash(self.overlay.as_ref())
+            .value
+            .then(|| std::sync::Arc::new(gertie_tools::sandbox::Sandbox::new(root.to_path_buf())));
         let mut tools = gertie_tools::builtin_tools_with(root, sandbox);
         {
             let map = Arc::get_mut(&mut tools).expect("registry not yet shared");

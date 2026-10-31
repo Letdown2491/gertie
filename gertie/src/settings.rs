@@ -26,8 +26,12 @@ pub struct EndpointInfo {
 #[derive(Clone)]
 pub struct SettingsSummary {
     pub endpoints: Vec<EndpointInfo>,
-    /// Landlock sandbox for bash children (opt-in).
+    /// Landlock sandbox for bash children, as resolved — the user's
+    /// config, else the repo overlay's, else off.
     pub sandbox: bool,
+    /// Where the sandbox setting came from — the label beside the
+    /// switch.
+    pub sandbox_origin: crate::config::Origin,
     /// Search backend in force ("brave", "searxng", or "none").
     pub search: String,
     pub mcp_servers: Vec<String>,
@@ -65,7 +69,10 @@ impl SettingsSummary {
             .unwrap_or_else(|| "none".into());
         Self {
             endpoints,
-            sandbox: config.security.sandbox_bash,
+            sandbox: config.security.sandbox_bash.unwrap_or(false),
+            // Honest until the bootstrap resolves it against the
+            // repo's overlay (it always does, load and reload).
+            sandbox_origin: crate::config::Origin::Default,
             search,
             mcp_servers: config
                 .mcp_servers
