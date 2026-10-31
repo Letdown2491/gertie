@@ -82,6 +82,17 @@ The original "Deferred" row — every item shipped or decided:
   never the user's .gitignore). Built-ins and agent tools re-root per tab; web/history/MCP/
   skills carry over by name instead of duplicating connections. Worktrees persist across
   runs (agent work is never deleted behind your back); reopen reuses by name.
+  The tab's branch is named from the session's first message — the temporary
+  `gertie/tab-N` renamed to the message's slug (`gertie/fix-the-flaky-widget`) under the
+  prefix the repo's overlay sets (`[worktree] branch_prefix`, default `gertie/`; anything
+  git-hostile falls back). Only gertie's own temporary branches are renamed: a checked-out
+  branch is the user's, the main checkout is never touched, and any failure (a taken slug,
+  a message with nothing sluggable, a git refusal) leaves the temporary name standing —
+  the naming is a courtesy, never a gate. Cleanup is policy plus report:
+  `[worktree] cleanup_idle_days` in the *user's* config (the repo never sets deletion
+  policy) lets `gertie doctor --clean-worktrees` remove idle gertie-made worktrees —
+  and only clean, fully-merged ones; plain `gertie doctor` prints the same ledger
+  report-only, every entry removed or kept and why.
 - *Settings UI*: shipped as a settings panel — the live config visible in-app (endpoints,
   sandbox, search, MCP, skills, agents, config path), with the theme as the one writable
   setting (persisted outside config.toml). The config file remains the single source of
@@ -121,9 +132,19 @@ The original "Deferred" row — every item shipped or decided:
 
 ## Configuration & secrets
 
-- **TOML**, layered: built-in defaults → `~/.config/gertie/config.toml` → `gertie.toml` in the
-  project root → CLI flags. A directory containing `gertie.toml` is a recognized workspace
+- **TOML**, layered: built-in defaults → `~/.config/gertie/config.toml` → the project
+  overlay → CLI flags. A directory containing `gertie.toml` is a recognized workspace
   (and the project-trust marker).
+- **The project overlay** (`<repo>/.gertie/config.toml`) carries a deliberate subset —
+  starting permission mode, bash sandbox, auto-settle days, the settle command, the
+  worktree branch prefix — and nothing that runs on your machine: no endpoints, keys,
+  MCP servers, or agent types. A cloned repo never configures what executes locally.
+  The chain is user config → project overlay → built-in default (the repo suggests,
+  you decide), and every resolved value says which tier decided: the settings panel
+  and `gertie doctor` print the origin. Inheritance is an explicit value — a field may
+  hold `"inherit"` to stand down to the next tier — a state the UI can show, not an
+  absence to infer. Overlay problems (unreadable, unparseable) surface in the status
+  label and the doctor, never fatal, never silent.
 - **Keys, hybrid**: env vars win (`GERTIE_<PROVIDER>_API_KEY`, falling back to common
   `<PROVIDER>_API_KEY` conventions); plaintext keys allowed in config with a warning and
   enforced 0600 file mode; `gertie keys` command manages a 0600 keys file. No system keyring in v1.
@@ -311,6 +332,19 @@ name): `/explain`, and `/commit` — read the repo's recent subjects for its
 conventions, read the working diff, hand back a message plus the exact command;
 the commit itself stays the human's.
 
+Recall and edit-from-here close the loop on one's own words: ArrowUp in an empty
+composer walks back through the session's sent prompts (ArrowDown returns; typing
+ends the walk — the walked text becomes a normal draft the moment it's edited), and
+any sent user turn carries **Edit from here**: the transcript rewinds to that message,
+the composer carries the text as a draft, and the confirm row asks which flavor of
+rewind — **Revert and keep changes** (the conversation forgets; the files keep what
+the turns did) or **Revert files too** (the checkpoints restore each path to its
+pre-turn content). Rewind is fail-closed: a restore is refused while another tab's
+session is live in the same checkout (the workspace's guard), and history truncation
+and file restore commit as one step — never files-without-history. The rewound work
+is not destroyed either way: the store is append-only, the cut rows remain
+recoverable by a reload.
+
 Turn-scoped diffs came from the source-control chapter: every done tool card carries a
 "turn diff" button, and the panel answers with what *the tools did* — one entry per path
 the turn's checkpoints recorded, before-object against after-object (or disk when never
@@ -321,6 +355,14 @@ checkpoints. The ledger learned turn windows for this: the chat mints one per se
 steered messages resolve to the turn they steered. The checkpoint hook also gained the
 workspace root — a relative tool argument now snapshots the file the tool will actually
 touch, not whatever the process CWD reads.
+
+Runs of finished tool calls collapse into one expandable summary, under honesty rules
+transcribed from t3code's activity-log chapter and binding on the collapse code: the
+counts are the cards' own ("Ran 3× bash, 1 failed") — failures stay counted, never
+rounded into successes; a call still waiting is not a finished one and never joins the
+run; and when a card's details are unavailable the summary says something broader
+rather than guessing how many threads were affected. Expanding shows every call in
+full; nothing is hidden behind the summary but the repetition.
 
 The performance doctrines trimmed the surface too: the spinners came out (static state
 text instead), and the transcript stopped loading whole sessions — it opens on the
@@ -342,6 +384,24 @@ list actions keep no dialog: ✕ removes a session from every list at once — s
 palette — and a toast at the sidebar's foot holds the store row for a five-second undo
 window (button or Ctrl+Z outside the composer, where it stays text undo); the window
 closing purges the row, undo popping the entry beats it.
+
+The keyboard is a surface, not an afterthought. `keymap.toml` (beside the other
+settings) holds rules of `{key, command, when}` — last match wins, the file's order is
+the binding order. The file is created with the defaults; on later startups new
+defaults are appended, never replacing a rule the user wrote: a default is skipped
+when its command already appears in the file, or when a user rule holds its key and
+`when` — including a rule written as `command = "none"`, which claims a key and binds
+nothing. Invalid rules (unknown command, unparsable key, unknown `when`) are ignored
+at runtime and left in the file to fix; an unparseable file falls back to the defaults
+in memory without a rewrite — the user's only copy of their edits is never destroyed
+by the program that failed to read it. `when` names real key contexts:
+`composerFocus`, `editableFocus`, `turnRunning`, `turnDiffFocus`. F6/Shift+F6 cycle
+the surface's areas — sidebar → transcript → composer, the agents panel joining while
+open — wrapping, restoring each area's last-focused control (stale restores fall back
+to the container and the next press self-heals); modals stand the cycle down. The
+palette answers sessions (FTS5, the picked query ranked up for next time — the MRU
+ledger is its own table), and `>` filters to commands: the same set the slash
+commands drive, run from anywhere.
 
 A provider rate limit is a state, not an error. When 429 answers every retry, the turn
 ends **Limited** — its own event through the whole stack (`Event::Limited` → `LoopEvent::Limited`,
@@ -370,10 +430,13 @@ no endpoint is built in, so none is invented for the user — and says so in the
 line; the settings panel (`/settings`) owns endpoints and keys, and an explicit
 `--config` override never gets one written. `gertie doctor` prints the
 setup as gertie sees it: config parse state, endpoint + wire, the API key's resolution
-source (or the exact `export` to run), MCP servers by transport, sandbox, the default
+source (or the exact `export` to run), MCP servers by transport, the project overlay's
+state and the origin tier of what it resolves, sandbox, the default
 permission mode's honest reach (what it enforces and what it deliberately leaves
-asking — with the sandbox off, auto says it degrades), and all-time
-token totals. The missing-key warning names the variable. Exit 0 from doctor = ready.
+asking — with the sandbox off, auto says it degrades), all-time
+token totals, and the worktree ledger — every gertie-made worktree, kept or removed
+and why (`--clean-worktrees` lets the removal happen; report-only without it). The
+missing-key warning names the variable. Exit 0 from doctor = ready.
 
 ## Distribution
 
@@ -392,6 +455,8 @@ boundary:
 - **Labels promise the action.** A visible label, tooltip, menu wording, or accessible
   name describes the same action on the same object — the permission card shows the diff
   it will run, never a verb alone, and a copy-message button never promises to copy a link.
+  This is the standing invariant for every UI change, human- or agent-authored: when a
+  control's name and its behavior disagree, the behavior is the bug.
 - **Authority comes from configuration and the human at the card**, never from
   conversation: no message, tool result, or skill description can grant a permission.
 - **Stored events stay decodable.** Persisted rows load after every upgrade; the reload
