@@ -290,7 +290,10 @@ confirm jumping to the hit's turn (a cross-session hit switches first; the jump 
 tail-follow, scrolling back to the bottom re-engages it). Attachments broadened past
 images: "attach file" opens the picker, paste intercepts images and copied files, PDFs
 ride the wire as typed document/file blocks, and text files inline into the message — the
-extension table refuses (with a reason) what no endpoint can read. The footer's identity
+extension table refuses (with a reason) what no endpoint can read. A paste at or above
+32 KiB never becomes message text: it files into the workspace (`.gertie/pastes/`, kept
+out of git by the local exclude) and the message cites the path for the agent's
+`read_file` — the context carries the pointer, not the document. The footer's identity
 line leads with the working folder. Slash builtins cover the panel actions (/compact,
 /export, /new, /settings, /agents) beside file templates. Two templates ship,
 write-if-absent like the skills (a user edit is theirs, a project file shadows by

@@ -1424,3 +1424,97 @@ fn canceling_the_snooze_leaves_the_session_limited_and_quiet() {
         "a canceled snooze never resumes by itself"
     );
 }
+
+/// A paste bigger than a message should be lands as a file chip: at
+/// send the body is filed into the workspace and the message cites
+/// the path — the context never carries it. A smaller paste stays
+/// text (returns false, the textarea does its thing).
+#[test]
+fn a_big_paste_files_itself_into_the_workspace_and_the_message_cites_it() {
+    let store = Arc::new(SessionStore::open(Path::new(":memory:")).expect("memory store"));
+    let snapshots_dir = tempfile::tempdir().expect("snapshots dir");
+    let snapshots =
+        Arc::new(gertie_core::SnapshotStore::open(snapshots_dir.path()).expect("snapshot store"));
+    let workspace = tempfile::tempdir().expect("workspace dir");
+    let root = workspace.path().to_path_buf();
+    let mut fixture = fixture_built(
+        store,
+        Some(snapshots),
+        Some(root.clone()),
+        None,
+        None,
+        None,
+        Vec::new(),
+    );
+    fixture.hold = vec![snapshots_dir, workspace];
+
+    let small = "tiny paste".to_string();
+    let big = "pasted line of text\n".repeat(2_000); // ~38 KB
+
+    let view = fixture.view.clone();
+    fixture.act(|_window, cx| {
+        view.upgrade().expect("view alive").update(cx, |view, cx| {
+            assert!(
+                !view.attach_big_paste_for_test(&small, cx),
+                "under the threshold the paste stays text"
+            );
+            assert!(
+                view.attach_big_paste_for_test(&big, cx),
+                "at or above 32 KiB the paste becomes a chip"
+            );
+        });
+    });
+
+    // Sending with no provider still persists the user row — enough
+    // to assert the citation and the filed file.
+    fixture.act(|window, cx| {
+        window.input("read what I pasted", cx);
+        window.press("enter", cx);
+    });
+    let session = fixture
+        .cx
+        .update(|cx| {
+            fixture
+                .view
+                .upgrade()
+                .expect("view alive")
+                .read(cx)
+                .session_id()
+        })
+        .expect("session born");
+    let user = fixture
+        .store
+        .load_messages(session)
+        .expect("rows")
+        .into_iter()
+        .find(|row| {
+            row.role == gertie_core::Role::User && row.content.contains("read what I pasted")
+        })
+        .expect("sent row");
+
+    assert!(
+        user.content.contains("saved to .gertie/pastes/paste-"),
+        "the message cites the filed path, got: {:?}",
+        user.content
+    );
+    assert!(
+        !user.content.contains("pasted line of text"),
+        "the body never rides in the message"
+    );
+
+    // Exactly one paste file, holding the whole body.
+    let pastes = root.join(".gertie/pastes");
+    let mut filed = std::fs::read_dir(&pastes)
+        .expect("pastes dir created")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("readable");
+    assert_eq!(filed.len(), 1, "one paste filed");
+    let file = filed.remove(0).path();
+    assert_eq!(
+        std::fs::read_to_string(&file)
+            .expect("paste body")
+            .trim_end_matches('\n'),
+        big.trim_end_matches('\n'),
+        "the filed body is the paste, whole"
+    );
+}

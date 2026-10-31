@@ -50,7 +50,16 @@ enum AttachmentKind {
     /// UTF-8 content inlined into the message text at send. No storage
     /// marker — the stored transcript carries the text itself.
     Text(String),
+    /// A paste too big for the message: held whole here, written into
+    /// the workspace (.gertie/pastes/) at send, and cited by path —
+    /// the agent reads the file with its own tools instead of the
+    /// context carrying the body.
+    Paste { name: String, content: String },
 }
+
+/// At this size a paste stops being a quote and starts being a
+/// document; it rides as a file, not as message text (t3code's rule).
+const PASTE_ATTACHMENT_BYTES: usize = 32 * 1024;
 
 /// How many most-recent rows a transcript loads on open and on
 /// "load earlier": opening a chat touches one page of the store, not
@@ -470,6 +479,13 @@ impl ChatView {
     /// The session the transcript is bound to, for tests and tooling.
     pub fn session_id(&self) -> Option<SessionId> {
         self.session_id
+    }
+
+    /// Runs the big-paste rule directly (the real paste hook needs a
+    /// clipboard item delivered by the textarea). Returns whether the
+    /// paste was consumed as a file chip.
+    pub fn attach_big_paste_for_test(&mut self, text: &str, cx: &mut Context<Self>) -> bool {
+        self.attach_big_paste(text, cx)
     }
 
     /// How many turns the transcript holds, for tests and tooling.
@@ -1497,11 +1513,49 @@ impl ChatView {
                         attached = true;
                     }
                 }
-                // Text entries paste as text, as always.
-                gpui_kit::ClipboardEntry::String(_) => {}
+                // Text entries paste as text, as always — unless the
+                // paste is bigger than a message should be, in which
+                // case it becomes a file chip and the paste is consumed.
+                gpui_kit::ClipboardEntry::String(text) => {
+                    attached |= self.attach_big_paste(&text.text, cx);
+                }
             }
         }
         attached
+    }
+
+    /// A text paste at or above the threshold becomes a file chip
+    /// instead of message text: at send the content is filed into the
+    /// workspace and the message cites the path, so neither the model
+    /// context nor the transcript carries the body. Smaller pastes
+    /// fall through as text (returns false). The chip's id is the
+    /// content hash, so re-pasting the same text replaces the chip.
+    fn attach_big_paste(&mut self, text: &str, cx: &mut Context<Self>) -> bool {
+        if text.len() < PASTE_ATTACHMENT_BYTES {
+            return false;
+        }
+        let id = {
+            use std::hash::{Hash, Hasher as _};
+            let mut hasher = std::hash::DefaultHasher::new();
+            text.hash(&mut hasher);
+            hasher.finish()
+        };
+        let name = format!("paste-{id:016x}.txt");
+        let kb = text.len() / 1024;
+        self.attach_chip(
+            id,
+            format!("{name} · {kb} KB"),
+            AttachmentKind::Paste {
+                name: name.clone(),
+                content: text.to_string(),
+            },
+            cx,
+        );
+        self.push_notice(
+            format!("Big paste ({kb} KB) filed as {name} — it rides as a path the agent reads with read_file, not as message text."),
+            cx,
+        );
+        true
     }
 
     /// One file from the picker or a copied path: read it, classify it
@@ -1588,6 +1642,8 @@ impl ChatView {
     /// turn still sees the image, it just won't survive a restart.
     /// Text attachments never touch the dir — their content joins the
     /// message text itself, so the record and the wire stay identical.
+    /// A big paste is filed inside the workspace (.gertie/pastes/) and
+    /// the message cites the path for the agent's read_file.
     fn take_attachments(&mut self) -> (String, String, Vec<String>) {
         use base64::Engine as _;
         let mut images = Vec::new();
@@ -1607,6 +1663,33 @@ impl ChatView {
                         "\n\n--- attached file: {} ---\n```{extension}\n{content}\n```",
                         attachment.name
                     ));
+                }
+                AttachmentKind::Paste { name, content } => {
+                    // Filed into the workspace — the only place the
+                    // agent's read_file can reach — and cited by path.
+                    // The write is gertie's own, not a tool call, so no
+                    // checkpoint: .gertie/ is scratch by convention, and
+                    // the local exclude keeps it out of git status the
+                    // same way the worktrees are kept out.
+                    let pastes = self.workspace_root.join(".gertie").join("pastes");
+                    let path = pastes.join(&name);
+                    let filed = std::fs::create_dir_all(&pastes).is_ok()
+                        && std::fs::write(&path, &content).is_ok();
+                    if filed {
+                        let _ = crate::worktree::ensure_local_exclude(&self.workspace_root);
+                        inline.push_str(&format!(
+                            "\n\n--- pasted text: {name} ({} KB) — too large for the message, \
+                             saved to .gertie/pastes/{name}; read it with read_file ---",
+                            content.len() / 1024
+                        ));
+                    } else {
+                        // Couldn't file it — the paste still rides, inline.
+                        // Losing the user's text to a disk error is worse
+                        // than a fat message.
+                        inline.push_str(&format!(
+                            "\n\n--- attached paste: {name} (could not be filed to disk) ---\n```\n{content}\n```"
+                        ));
+                    }
                 }
                 AttachmentKind::DataUrl(data_url) => {
                     images.push(data_url.clone());

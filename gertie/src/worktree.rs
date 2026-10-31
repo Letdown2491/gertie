@@ -13,21 +13,33 @@ use std::path::{Path, PathBuf};
 /// are per-run, so a stale one from an earlier run is a legitimate
 /// continuation, not a collision. Fails with git's message if the repo
 /// isn't one or git is unavailable.
-pub fn create(repo_root: &Path, name: &str) -> Result<PathBuf, String> {
-    // The worktrees dir must never show up as untracked noise in the
-    // main checkout; the local exclude is repo-private and reversible.
+/// Keeps `.gertie/` out of git status via the repo-local exclude —
+/// never the user's `.gitignore`. Reversible and repo-private; the
+/// worktrees dir and the pastes dir both live behind it.
+pub fn ensure_local_exclude(repo_root: &Path) -> Result<(), String> {
     let exclude = repo_root.join(".git/info/exclude");
-    if exclude.is_file() {
-        let contents = std::fs::read_to_string(&exclude).map_err(|error| error.to_string())?;
-        if !contents.lines().any(|line| line.trim() == ".gertie/") {
-            use std::io::Write as _;
-            let mut file = std::fs::OpenOptions::new()
-                .append(true)
-                .open(&exclude)
-                .map_err(|error| error.to_string())?;
-            writeln!(file, "\n# gertie worktrees\n.gertie/").map_err(|error| error.to_string())?;
-        }
+    if !exclude.is_file() {
+        return Ok(()); // not a repo, or bare — nothing to exclude from
     }
+    let contents = std::fs::read_to_string(&exclude).map_err(|error| error.to_string())?;
+    if contents.lines().any(|line| line.trim() == ".gertie/") {
+        return Ok(());
+    }
+    use std::io::Write as _;
+    let mut file = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&exclude)
+        .map_err(|error| error.to_string())?;
+    writeln!(file, "\n# gertie worktrees\n.gertie/").map_err(|error| error.to_string())
+}
+
+/// Creates (or reopens) a worktree named `name`, branched from HEAD.
+/// Reuses an existing worktree or branch of the same name — tab ids
+/// are per-run, so a stale one from an earlier run is a legitimate
+/// continuation, not a collision. Fails with git's message if the repo
+/// isn't one or git is unavailable.
+pub fn create(repo_root: &Path, name: &str) -> Result<PathBuf, String> {
+    ensure_local_exclude(repo_root)?;
 
     let target = repo_root.join(".gertie/worktrees").join(name);
     if target.join(".git").is_file() {

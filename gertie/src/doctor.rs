@@ -158,10 +158,9 @@ pub fn run(config_override: Option<PathBuf>) -> i32 {
     // fallbacks; a mode is never silently downgraded.
     let mode = config.permissions.default_mode;
     let (promise, caveat) = match mode {
-        gertie_core::PermissionMode::Supervised => (
-            "every write, bash, and MCP call asks; reads run free",
-            None,
-        ),
+        gertie_core::PermissionMode::Supervised => {
+            ("every write, bash, and MCP call asks; reads run free", None)
+        }
         gertie_core::PermissionMode::AcceptEdits => (
             "checkpointed file edits run unasked (the ledger holds their before-state)",
             Some("bash and MCP calls still ask"),
