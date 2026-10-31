@@ -212,6 +212,12 @@ state, nothing that can fail on the provider. Hard-truncate oversized tool outpu
   responder (the UI went away) resolves as deny: doing nothing is the safe move. Stopping the
   turn drops the tool future, which drops the worker — cancellation by construction.
   (Pinned end to end: `a_worker_ask_bubbles_into_the_transcript_and_the_answer_reaches_the_worker`.)
+- **A brief can't forge its envelope.** The worker's prompt embeds the brief between bare
+  `---` lines, with gertie's own trailer after the closing one. Brief and guidance are
+  model-authored, so every whole-line run of three or more hyphens in them is
+  backslash-escaped at embed time — the only bare `---` lines in the prompt are the
+  envelope's own two, and the persisted run record quotes the same escaped text the
+  prompt showed.
 
 ### Agent types
 
