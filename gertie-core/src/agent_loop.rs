@@ -389,8 +389,14 @@ pub fn run_turn(spec: TurnSpec) -> BoxStream<'static, LoopEvent> {
                                     // before anything mutates it.
                                     if let (Some(store), Some(path)) =
                                         (&snapshots, checkpoint_target)
-                                        && let Err(error) =
-                                            store.record_file(checkpoint_session, &path)
+                                        && let Err(error) = store.record_file(
+                                            checkpoint_session,
+                                            &path,
+                                            // The turn's own root rides the
+                                            // row: the restore's address,
+                                            // however far the chat moves.
+                                            workspace_root.as_deref(),
+                                        )
                                     {
                                         yield LoopEvent::Error {
                                             message: format!(

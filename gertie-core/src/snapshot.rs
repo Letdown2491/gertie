@@ -114,6 +114,13 @@ impl SnapshotStore {
             CREATE INDEX IF NOT EXISTS turns_by_session
                 ON turns(session_id, user_message_id);",
         )?;
+        // A checkpoint remembers the workspace its turn ran in, so a
+        // restore writes back where the turn wrote — even after the
+        // chat moved to another workspace mid-session. Legacy rows
+        // answer NULL and fall back to the caller's root. The store
+        // was opened by us, so the only expected failure here is the
+        // column already existing.
+        let _ = connection.execute("ALTER TABLE checkpoints ADD COLUMN workspace_root TEXT", []);
         Ok(Self {
             connection: std::sync::Mutex::new(connection),
             objects,
@@ -122,12 +129,15 @@ impl SnapshotStore {
 
     /// Records `content_before` as the prior state of `path`. Callers
     /// snapshot *before* running a mutating tool; content is deduplicated
-    /// by hash, so re-recording unchanged files costs one hash.
+    /// by hash, so re-recording unchanged files costs one hash. The
+    /// workspace is the root the calling turn runs in — the restore's
+    /// address for this row, however far the chat travels afterwards.
     pub fn record(
         &self,
         session_id: Option<crate::SessionId>,
         path: &Path,
         content_before: &[u8],
+        workspace: Option<&Path>,
     ) -> Result<CheckpointId, SnapshotError> {
         let hash = format!("{:x}", Sha256::digest(content_before));
         let object = self.objects.join(&hash);
@@ -143,13 +153,33 @@ impl SnapshotStore {
         }
         let connection = self.connection.lock().unwrap();
         connection
-            .prepare("INSERT INTO checkpoints (session_id, path, hash) VALUES (?1, ?2, ?3)")?
+            .prepare(
+                "INSERT INTO checkpoints (session_id, path, hash, workspace_root)
+                 VALUES (?1, ?2, ?3, ?4)",
+            )?
             .execute(rusqlite::params![
                 session_id.map(|id| id.0 as i64),
                 path.to_string_lossy(),
                 hash,
+                workspace.map(|root| root.to_string_lossy()),
             ])?;
         Ok(CheckpointId(connection.last_insert_rowid() as u64))
+    }
+
+    /// The workspace a checkpoint's turn ran in — the restore address
+    /// for its row. `None` for legacy rows (recorded before the
+    /// column existed); their caller's root decides, as it always did.
+    pub fn workspace_of(&self, checkpoint: CheckpointId) -> Option<std::path::PathBuf> {
+        let connection = self.connection.lock().unwrap();
+        connection
+            .query_row(
+                "SELECT workspace_root FROM checkpoints WHERE id = ?1",
+                [checkpoint.0 as i64],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .ok()
+            .flatten()
+            .map(PathBuf::from)
     }
 
     /// Snapshots a file's current content if it exists; a missing file is
@@ -159,9 +189,10 @@ impl SnapshotStore {
         &self,
         session_id: Option<crate::SessionId>,
         path: &Path,
+        workspace: Option<&Path>,
     ) -> Result<CheckpointId, SnapshotError> {
         let content = std::fs::read(path).unwrap_or_default();
-        self.record(session_id, path, &content)
+        self.record(session_id, path, &content, workspace)
     }
 
     /// A session's checkpoints, oldest first.
@@ -181,7 +212,10 @@ impl SnapshotStore {
 
     /// Restores with tool-relative paths resolved against `root` — the
     /// workspace the tools ran in, which is not always the caller's
-    /// process CWD. The restore target is contained within `root` (see
+    /// process CWD. A checkpoint recorded its turn's own workspace (see
+    /// [`Self::record`]); that address wins, and `root` is only the
+    /// legacy fallback for rows that predate the column. The restore
+    /// target is contained within the chosen root (see
     /// [`SnapshotError::EscapesWorkspace`]): there is no uncontained
     /// restore, because a ledger that can write anywhere is not a
     /// reversibility mechanism.
@@ -192,16 +226,18 @@ impl SnapshotStore {
     ) -> Result<PathBuf, SnapshotError> {
         let connection = self.connection.lock().unwrap();
         let row = connection.query_row(
-            "SELECT path, hash FROM checkpoints WHERE id = ?1",
+            "SELECT path, hash, workspace_root FROM checkpoints WHERE id = ?1",
             [checkpoint.0 as i64],
             |row| {
                 Ok((
                     PathBuf::from(row.get::<_, String>(0)?),
                     row.get::<_, String>(1)?,
+                    row.get::<_, Option<String>>(2)?,
                 ))
             },
         )?;
-        let (path, hash) = row;
+        let (path, hash, workspace) = row;
+        let root: PathBuf = workspace.map(PathBuf::from).unwrap_or_else(|| root.into());
         let path = if path.is_absolute() {
             path
         } else {
@@ -455,12 +491,51 @@ mod tests {
         let file = tmp.path().join("notes.txt");
         std::fs::write(&file, "before").unwrap();
 
-        let checkpoint = store.record_file(Some(crate::SessionId(1)), &file).unwrap();
+        let checkpoint = store
+            .record_file(Some(crate::SessionId(1)), &file, None)
+            .unwrap();
         std::fs::write(&file, "after").unwrap();
         store
             .restore_under(checkpoint, tmp.path())
             .expect("contained restore");
         assert_eq!(std::fs::read_to_string(&file).unwrap(), "before");
+    }
+
+    #[test]
+    fn a_restore_writes_where_the_turn_ran_not_where_the_caller_stands() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = store_in(tmp.path());
+        // The turn ran in `origin`; the chat has since moved to
+        // `elsewhere`. The restore must follow the recorded workspace,
+        // not the caller's.
+        let origin = tempfile::tempdir().unwrap();
+        let elsewhere = tempfile::tempdir().unwrap();
+        let file = origin.path().join("notes.txt");
+        std::fs::write(&file, "before").unwrap();
+
+        let checkpoint = store
+            .record_file(Some(crate::SessionId(1)), &file, Some(origin.path()))
+            .unwrap();
+        std::fs::write(&file, "after").unwrap();
+
+        store
+            .restore_under(checkpoint, elsewhere.path())
+            .expect("the recorded workspace wins");
+        assert_eq!(
+            std::fs::read_to_string(&file).unwrap(),
+            "before",
+            "restored into the workspace the turn ran in"
+        );
+        assert_eq!(
+            std::fs::read_dir(elsewhere.path()).unwrap().count(),
+            0,
+            "nothing landed in the caller's root"
+        );
+        assert_eq!(
+            store.workspace_of(checkpoint),
+            Some(origin.path().to_path_buf()),
+            "the recorded address is askable, for guards and read-backs"
+        );
     }
 
     #[test]
@@ -470,8 +545,8 @@ mod tests {
         let file = tmp.path().join("a.txt");
         std::fs::write(&file, "same").unwrap();
 
-        let first = store.record_file(None, &file).unwrap();
-        let second = store.record_file(None, &file).unwrap();
+        let first = store.record_file(None, &file, None).unwrap();
+        let second = store.record_file(None, &file, None).unwrap();
         assert_ne!(first, second);
         let objects: Vec<_> = std::fs::read_dir(tmp.path().join("objects"))
             .unwrap()
@@ -485,8 +560,12 @@ mod tests {
         let store = store_in(tmp.path());
         let file = tmp.path().join("a.txt");
         std::fs::write(&file, "x").unwrap();
-        store.record_file(Some(crate::SessionId(1)), &file).unwrap();
-        store.record_file(Some(crate::SessionId(2)), &file).unwrap();
+        store
+            .record_file(Some(crate::SessionId(1)), &file, None)
+            .unwrap();
+        store
+            .record_file(Some(crate::SessionId(2)), &file, None)
+            .unwrap();
 
         assert_eq!(store.list(crate::SessionId(1)).unwrap().len(), 1);
         assert_eq!(store.list(crate::SessionId(2)).unwrap().len(), 1);
@@ -507,14 +586,14 @@ mod tests {
         std::fs::write(&b, "bee").unwrap();
 
         let turn1 = store.begin_turn(session, first).unwrap();
-        let a_before = store.record_file(Some(session), &a).unwrap();
-        store.record_file(Some(session), &b).unwrap();
+        let a_before = store.record_file(Some(session), &a, None).unwrap();
+        store.record_file(Some(session), &b, None).unwrap();
         std::fs::write(&a, "two").unwrap();
 
         let turn2 = store
             .begin_turn(session, crate::MessageId(first.0 + 1))
             .unwrap();
-        store.record_file(Some(session), &a).unwrap();
+        store.record_file(Some(session), &a, None).unwrap();
 
         // Turn 1 touched two paths; a's before is its first checkpoint,
         // and its after lives in turn 2's checkpoint — not disk.
@@ -586,7 +665,7 @@ mod tests {
         // as the tools spelled it (relative), which is exactly what the
         // resolution under test has to handle.
         let checkpoint = store
-            .record(Some(crate::SessionId(1)), relative, b"before")
+            .record(Some(crate::SessionId(1)), relative, b"before", None)
             .unwrap();
         std::fs::write(&absolute, "after").unwrap();
         store.restore_under(checkpoint, workspace.path()).unwrap();
@@ -613,6 +692,7 @@ mod tests {
                 Some(crate::SessionId(1)),
                 &outside.path().join("victim.txt"),
                 b"attacker content",
+                None,
             )
             .unwrap();
         match store.restore_under(checkpoint, workspace.path()) {
@@ -636,6 +716,7 @@ mod tests {
                     Some(crate::SessionId(1)),
                     std::path::Path::new("sneaky/victim.txt"),
                     b"attacker content",
+                    None,
                 )
                 .unwrap();
             assert!(matches!(
