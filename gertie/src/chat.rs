@@ -51,6 +51,12 @@ enum AttachmentKind {
     Text(String),
 }
 
+/// How many most-recent rows a transcript loads on open and on
+/// "load earlier": opening a chat touches one page of the store, not
+/// the whole archive. Old sessions grow without bound; the view must
+/// not (performance doctrine: bounded loads).
+const RECENT_WINDOW: usize = 400;
+
 /// One rendered turn in the transcript. Plain messages keep their row in
 /// the session store (streaming updates land in SQLite without a row per
 /// token); tool turns are rendered as cards keyed by call id.
@@ -72,6 +78,10 @@ enum Turn {
         /// how a palette hit lands on the right card.
         db_id: Option<MessageId>,
     },
+    /// Synthetic pagination row at the transcript's top: the store
+    /// holds rows older than the loaded window. Clicking pages in the
+    /// next older batch; it is never a turn the loop sees.
+    LoadEarlier,
 }
 
 actions!(gertie, [CloseTurnDiff]);
@@ -409,6 +419,17 @@ impl ChatView {
         self.list_state.logical_scroll_top().item_ix
     }
 
+    /// Scrolls the transcript to an absolute row, for tests — the
+    /// programmatic stand-in for the user scrolling up (tail-follow
+    /// pauses the same way).
+    pub fn scroll_to_item_for_test(&self, ix: usize) {
+        self.list_state.pause_following_tail();
+        self.list_state.scroll_to(gpui_kit::ListOffset {
+            item_ix: ix,
+            offset_in_item: px(0.),
+        });
+    }
+
     /// The turn-diff panel's file count — `None` when closed, `Some(n)`
     /// when open with n files listed, for tests.
     pub fn turn_diff_for_test(&self) -> Option<usize> {
@@ -427,32 +448,28 @@ impl ChatView {
     }
 
     /// Swaps the transcript for a session's stored messages and rebuilds
-    /// the canonical history the loop will extend.
+    /// the canonical history the loop will extend. The transcript takes
+    /// a bounded window (the newest `RECENT_WINDOW` rows); the wire
+    /// history takes everything — the loop resumes with exactly what
+    /// the model saw before.
     fn reload_session(&mut self, cx: &mut Context<Self>) {
         let (turns, history, last_db_id) = match self.session_id {
             Some(session_id) => {
-                let rows = self.store.load_messages(session_id).unwrap_or_default();
-                let turns = rows
-                    .iter()
-                    .map(|row| match row.role {
-                        Role::Tool => Turn::Tool {
-                            call: ToolCall {
-                                id: row.tool_call_id.clone().unwrap_or_default(),
-                                name: row.tool_name.clone().unwrap_or_default(),
-                                arguments: row.tool_arguments.clone().unwrap_or_default(),
-                            },
-                            status: ToolStatus::Done(row.content.clone()),
-                            auto_approved: false,
-                            worker: false,
-                            db_id: Some(row.id),
-                        },
-                        role => Turn::Message {
-                            role,
-                            text: display_text(&row.content),
-                            db_id: Some(row.id),
-                        },
-                    })
-                    .collect();
+                // One page of rows renders the transcript, however deep
+                // the archive grows. `limit + 1` detects a truncation
+                // without a COUNT query.
+                let mut rows = self
+                    .store
+                    .load_recent_messages(session_id, RECENT_WINDOW + 1)
+                    .unwrap_or_default();
+                let older_rows = rows.len() > RECENT_WINDOW;
+                if older_rows {
+                    rows.remove(0);
+                }
+                let mut turns: Vec<Turn> = rows.iter().map(turn_from_row).collect();
+                if older_rows {
+                    turns.insert(0, Turn::LoadEarlier);
+                }
                 let history = self.store.load_wire_history(session_id).unwrap_or_default();
                 let last_db_id = rows.last().map(|row| row.id);
                 (turns, history, last_db_id)
@@ -475,6 +492,71 @@ impl ChatView {
         // Jump to the end AND re-engage tail-following (a session switch
         // or a fresh chat starts following again).
         self.list_state.scroll_to_end();
+        cx.notify();
+    }
+
+    /// "Load earlier": page the next older batch of rows into the
+    /// transcript. The prepend shifts every turn index, so index-keyed
+    /// state (expanded cards, reply inputs) dies here, and the click is
+    /// refused mid-stream — a live turn is still appending and would
+    /// race the renumbering.
+    fn load_earlier(&mut self, cx: &mut Context<Self>) {
+        if self.streaming {
+            return;
+        }
+        let Some(session_id) = self.session_id else {
+            return;
+        };
+        // The anchor is the loaded window's oldest persisted row.
+        let Some(oldest) = self.turns.iter().find_map(|turn| match turn {
+            Turn::Message {
+                db_id: Some(id), ..
+            }
+            | Turn::Tool {
+                db_id: Some(id), ..
+            } => Some(*id),
+            _ => None,
+        }) else {
+            return;
+        };
+        // `limit + 1` detects a truncation without a COUNT query.
+        let mut rows = self
+            .store
+            .load_messages_before(session_id, oldest, RECENT_WINDOW + 1)
+            .unwrap_or_default();
+        let more = rows.len() > RECENT_WINDOW;
+        if more {
+            rows.remove(0);
+        }
+        if rows.is_empty() {
+            // The row that got us here was stale — retire it.
+            let had_row = matches!(self.turns.first(), Some(Turn::LoadEarlier));
+            if had_row {
+                self.turns.remove(0);
+                self.list_state.splice(0..1, 0);
+            }
+            cx.notify();
+            return;
+        }
+        // Reading history pauses tail-following — the next append must
+        // not yank the view to the bottom. (A user who scrolled up here
+        // already paused it; this is for the fresh-session edge.)
+        self.list_state.pause_following_tail();
+        let mut old = std::mem::take(&mut self.turns);
+        old.remove(0); // the clicked row retires; a fresh one leads when more remain
+        let mut page: Vec<Turn> = rows.iter().map(turn_from_row).collect();
+        if more {
+            page.insert(0, Turn::LoadEarlier);
+        }
+        page.extend(old);
+        let added = page.len();
+        self.turns = page;
+        // The clicked row's slot grew into the new page: one splice
+        // keeps the list's height cache and scroll position in step —
+        // the reader holds their place, no snap.
+        self.list_state.splice(0..1, added);
+        self.expanded_tools.clear();
+        self.approval_replies.clear();
         cx.notify();
     }
 
@@ -2108,6 +2190,25 @@ impl ChatView {
                 worker,
                 ..
             } => self.render_tool(index, call, status, *auto_approved, *worker, cx),
+            Turn::LoadEarlier => {
+                // The pagination row: one quiet button, centered —
+                // clearly furniture, not a turn. The handler gates on
+                // streaming; mid-turn the index space is shifting.
+                div()
+                    .w_full()
+                    .flex()
+                    .justify_center()
+                    .py_1()
+                    .child(
+                        Button::new("load-earlier")
+                            .label("load earlier")
+                            .small()
+                            .ghost()
+                            .tooltip("Page in older messages from the archive")
+                            .on_click(cx.listener(|this, _, _, cx| this.load_earlier(cx))),
+                    )
+                    .into_any_element()
+            }
         };
         // Fork affordance: persisted user turns only — "branch from this
         // question" is the mental model that survives contact with use.
@@ -2384,38 +2485,36 @@ impl ChatView {
         // No spinner on the running card: the accent label is the
         // activity, and a repeating animation repaints every frame
         // saying nothing the label doesn't (performance doctrine).
-        let mut inner = v_flex()
-            .gap_2()
-            .child(
-                h_flex()
-                    .gap_2()
-                    .items_center()
-                    .child(
+        let mut inner = v_flex().gap_2().child(
+            h_flex()
+                .gap_2()
+                .items_center()
+                .child(
+                    div()
+                        .text_size(px(13.))
+                        .text_color(cx.theme().accent)
+                        // Labels carry `code` spans (paths, commands) —
+                        // through the inline renderer they become chips
+                        // instead of literal backticks.
+                        .child(crate::markdown::inline_element(&label, cx)),
+                )
+                .when(running, |row| {
+                    row.child(
                         div()
-                            .text_size(px(13.))
-                            .text_color(cx.theme().accent)
-                            // Labels carry `code` spans (paths, commands) —
-                            // through the inline renderer they become chips
-                            // instead of literal backticks.
-                            .child(crate::markdown::inline_element(&label, cx)),
+                            .text_size(px(11.))
+                            .text_color(cx.theme().muted_foreground)
+                            .child("running"),
                     )
-                    .when(running, |row| {
-                        row.child(
-                            div()
-                                .text_size(px(11.))
-                                .text_color(cx.theme().muted_foreground)
-                                .child("running"),
-                        )
-                    })
-                    .when(worker, |row| {
-                        row.child(
-                            div()
-                                .text_size(px(11.))
-                                .text_color(cx.theme().muted_foreground)
-                                .child("worker"),
-                        )
-                    }),
-            );
+                })
+                .when(worker, |row| {
+                    row.child(
+                        div()
+                            .text_size(px(11.))
+                            .text_color(cx.theme().muted_foreground)
+                            .child("worker"),
+                    )
+                }),
+        );
 
         match status {
             ToolStatus::Pending(_) => {
@@ -3246,6 +3345,31 @@ impl Render for ChatView {
 const NO_ENDPOINT_NOTICE: &str = "No endpoint configured — none is built in. Add one in the \
     settings panel (type `/settings` in the composer): any OpenAI-compatible URL, the model id it \
     serves, and the env var holding your key. `gertie doctor` checks the setup.";
+
+/// A stored row as a transcript turn: tool rows render as finished
+/// cards, everything else as its role's bubble. The one mapping both
+/// the reload and the "load earlier" pagination share — a row must
+/// look the same however it reached the screen.
+fn turn_from_row(row: &gertie_core::Message) -> Turn {
+    match row.role {
+        Role::Tool => Turn::Tool {
+            call: ToolCall {
+                id: row.tool_call_id.clone().unwrap_or_default(),
+                name: row.tool_name.clone().unwrap_or_default(),
+                arguments: row.tool_arguments.clone().unwrap_or_default(),
+            },
+            status: ToolStatus::Done(row.content.clone()),
+            auto_approved: false,
+            worker: false,
+            db_id: Some(row.id),
+        },
+        role => Turn::Message {
+            role,
+            text: display_text(&row.content),
+            db_id: Some(row.id),
+        },
+    }
+}
 
 /// Stored text as display text: attachment markers become a quiet note
 /// naming the files — the bytes live in the attachments dir, not the

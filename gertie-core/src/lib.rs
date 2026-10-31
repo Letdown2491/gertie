@@ -569,26 +569,72 @@ impl SessionStore {
         transaction.commit()
     }
 
-    /// Loads a session's messages oldest-first. M1 renders the flat path;
-    /// the tree walk arrives with forking.
+    /// Loads a session's messages oldest-first. Unbounded by design:
+    /// the wire history, export, and fork need every row — the UI
+    /// transcript uses the bounded `load_recent_messages` instead.
     pub fn load_messages(&self, session_id: SessionId) -> Result<Vec<Message>, rusqlite::Error> {
         let connection = self.connection.lock().unwrap();
         let mut statement = connection.prepare(
             "SELECT id, parent_id, role, content, tool_call_id, tool_name, tool_arguments
              FROM messages WHERE session_id = ?1 ORDER BY id",
         )?;
-        let rows = statement.query_map([session_id.0 as i64], |row| {
-            Ok(Message {
-                id: MessageId(row.get::<_, i64>(0)? as u64),
-                parent_id: row.get::<_, Option<i64>>(1)?.map(|id| MessageId(id as u64)),
-                role: Role::from_str(&row.get::<_, String>(2)?),
-                content: row.get(3)?,
-                tool_call_id: row.get(4)?,
-                tool_name: row.get(5)?,
-                tool_arguments: row.get(6)?,
-            })
-        })?;
+        let rows = statement.query_map([session_id.0 as i64], Self::message_from_row)?;
         rows.collect()
+    }
+
+    /// Loads the most recent `limit` messages of a session, oldest-first —
+    /// the bounded window a transcript renders. Opening a chat touches
+    /// one page of rows, not the whole archive.
+    pub fn load_recent_messages(
+        &self,
+        session_id: SessionId,
+        limit: usize,
+    ) -> Result<Vec<Message>, rusqlite::Error> {
+        let connection = self.connection.lock().unwrap();
+        let mut statement = connection.prepare(
+            "SELECT id, parent_id, role, content, tool_call_id, tool_name, tool_arguments
+             FROM messages WHERE session_id = ?1 ORDER BY id DESC LIMIT ?2",
+        )?;
+        let mut rows = statement
+            .query_map([session_id.0 as i64, limit as i64], Self::message_from_row)?
+            .collect::<Result<Vec<_>, _>>()?;
+        rows.reverse();
+        Ok(rows)
+    }
+
+    /// Loads up to `limit` messages strictly older than `before_id`,
+    /// oldest-first — one page of "load earlier" in the transcript.
+    pub fn load_messages_before(
+        &self,
+        session_id: SessionId,
+        before_id: MessageId,
+        limit: usize,
+    ) -> Result<Vec<Message>, rusqlite::Error> {
+        let connection = self.connection.lock().unwrap();
+        let mut statement = connection.prepare(
+            "SELECT id, parent_id, role, content, tool_call_id, tool_name, tool_arguments
+             FROM messages WHERE session_id = ?1 AND id < ?2 ORDER BY id DESC LIMIT ?3",
+        )?;
+        let mut rows = statement
+            .query_map(
+                [session_id.0 as i64, before_id.0 as i64, limit as i64],
+                Self::message_from_row,
+            )?
+            .collect::<Result<Vec<_>, _>>()?;
+        rows.reverse();
+        Ok(rows)
+    }
+
+    fn message_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Message> {
+        Ok(Message {
+            id: MessageId(row.get::<_, i64>(0)? as u64),
+            parent_id: row.get::<_, Option<i64>>(1)?.map(|id| MessageId(id as u64)),
+            role: Role::from_str(&row.get::<_, String>(2)?),
+            content: row.get(3)?,
+            tool_call_id: row.get(4)?,
+            tool_name: row.get(5)?,
+            tool_arguments: row.get(6)?,
+        })
     }
 
     /// Reconstructs the canonical wire history from stored rows: assistant
@@ -928,6 +974,65 @@ mod tests {
         assert_eq!(sessions.len(), 1);
         assert_eq!(sessions[0].id, session);
         assert_eq!(sessions[0].title, "first chat");
+    }
+
+    #[test]
+    fn bounded_loads_window_the_transcript_without_touching_the_archive() {
+        let store = memory_store();
+        let session = store.create_session("long chat").unwrap();
+        let mut parent = None;
+        for round in 0..10 {
+            parent = Some(
+                store
+                    .append_message(session, parent, Role::User, &format!("u{round}"))
+                    .unwrap(),
+            );
+            parent = Some(
+                store
+                    .append_message(session, parent, Role::Assistant, &format!("a{round}"))
+                    .unwrap(),
+            );
+        }
+        // Twenty rows total. A window of 6 gets the LAST 6, oldest first.
+        let window = store.load_recent_messages(session, 6).unwrap();
+        assert_eq!(window.len(), 6);
+        assert_eq!(window[0].content, "u7");
+        assert_eq!(window[5].content, "a9");
+
+        // "Load earlier" pages from the window's oldest id, oldest first.
+        let older = store
+            .load_messages_before(session, window[0].id, 6)
+            .unwrap();
+        assert_eq!(older.len(), 6);
+        assert_eq!(older[0].content, "u4");
+        assert_eq!(older[5].content, "a6");
+
+        // And again — three pages cover eighteen rows.
+        let head = store.load_messages_before(session, older[0].id, 6).unwrap();
+        assert_eq!(head.len(), 6);
+        assert_eq!(head[0].content, "u1");
+        assert_eq!(head[5].content, "a3");
+
+        // The last page is short: pagination stops at the session's
+        // true start, and twenty rows come back whole when asked for.
+        let tail = store.load_messages_before(session, head[0].id, 6).unwrap();
+        assert_eq!(tail.len(), 2);
+        assert_eq!(tail[0].content, "u0");
+        assert_eq!(store.load_recent_messages(session, 100).unwrap().len(), 20);
+
+        // Another session's rows never leak through a window.
+        let other = store.create_session("other").unwrap();
+        store
+            .append_message(other, None, Role::User, "foreign")
+            .unwrap();
+        assert_eq!(store.load_recent_messages(session, 100).unwrap().len(), 20);
+        assert_eq!(store.load_recent_messages(other, 100).unwrap().len(), 1);
+        assert!(
+            store
+                .load_messages_before(other, tail[0].id, 6)
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]

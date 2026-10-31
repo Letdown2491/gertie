@@ -275,11 +275,17 @@ steered messages resolve to the turn they steered. The checkpoint hook also gain
 workspace root — a relative tool argument now snapshots the file the tool will actually
 touch, not whatever the process CWD reads.
 
+The performance doctrines trimmed the surface too: the spinners came out (static state
+text instead), and the transcript stopped loading whole sessions — it opens on the
+newest 400 rows with a "load earlier" row paging the archive in, holding the reader's
+place per batch. A deep session costs one page at open, not the whole record.
+
 ## Onboarding
 
-First run with the default path writes a working starter `config.toml` (one endpoint,
-env-var key) and says so in the status line — the user edits instead of staring at a blank
-wall; an explicit `--config` override never gets one written. `gertie doctor` prints the
+First run with the default path writes a starter `config.toml` of comments and pointers —
+no endpoint is built in, so none is invented for the user — and says so in the status
+line; the settings panel (`/settings`) owns endpoints and keys, and an explicit
+`--config` override never gets one written. `gertie doctor` prints the
 setup as gertie sees it: config parse state, endpoint + wire, the API key's resolution
 source (or the exact `export` to run), MCP servers by transport, sandbox, and all-time
 token totals. The missing-key warning names the variable. Exit 0 from doctor = ready.
@@ -308,6 +314,22 @@ boundary:
   comes back as distinct variants — a turn file's "after" is the next checkpoint's object
   or disk (`AfterState`), a refused file is a refusal with a reason, never `""` meaning
   three things (research/t3code-ideas.md §6.1.4).
+
+Four more, from t3code's performance doctrines (research/t3code-ideas.md §8):
+
+- **No continuously repainting animations.** Motion repaints every frame for as long as
+  it is visible; a state the words already state gains nothing from a spinner. Static
+  text carries state ("running", "thinking…") — animation is for what only motion can
+  say.
+- **Turn end ≠ settlement.** The loop yields `Done` and returns — no trailing
+  persistence, no summary, nothing after the turn's last event (pinned by test). The
+  caller owns any post-turn work, on its own schedule.
+- **Bounded loads.** A view page is not the archive: the transcript opens on the newest
+  window and pages older rows in on demand. Wire history, export, and fork read
+  everything; the render path never does.
+- **Raw output streams on an ephemeral channel.** If long-running tool output ever
+  streams to the UI, it rides a throttled side channel — never a persisted row per
+  delta. (No streaming exists yet; the doctrine pre-empts the tempting table.)
 
 ## Working agreements
 

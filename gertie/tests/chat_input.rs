@@ -466,3 +466,96 @@ fn a_sent_message_mints_a_turn_window_and_the_panel_opens() {
         "panel open with zero files listed"
     );
 }
+
+/// Seeds a session deeper than the transcript's load window: 810 rows,
+/// so paging lands 400 at a time and the last page is short.
+fn archive_store() -> Arc<SessionStore> {
+    let store = Arc::new(SessionStore::open(Path::new(":memory:")).expect("memory store"));
+    let session = store.create_session("the archive").expect("session");
+    let mut parent = None;
+    for i in 0..810 {
+        parent = Some(
+            store
+                .append_message(
+                    session,
+                    parent,
+                    gertie_core::Role::User,
+                    &format!("row {i}"),
+                )
+                .expect("row"),
+        );
+    }
+    store
+}
+
+/// An archive deeper than the load window pages in: the newest 400 rows
+/// render, "load earlier" brings one batch at a time, and the last
+/// click retires the pagination row. The store keeps every row
+/// throughout — paging is a view concern, the record is not.
+#[test]
+fn a_long_transcript_loads_in_pages_and_load_earlier_exhausts_cleanly() {
+    let store = archive_store();
+    let mut fixture = fixture_with_store(store);
+
+    let turns = fixture.cx.update(|cx| {
+        fixture
+            .view
+            .upgrade()
+            .expect("view alive")
+            .read(cx)
+            .turn_count_for_test()
+    });
+    assert_eq!(turns, 401, "400 newest rows plus the load-earlier row");
+
+    // The pagination row lives at the top; bring it on screen (the
+    // programmatic stand-in for the user scrolling up) and click it
+    // for real.
+    for expected in [801, 810] {
+        fixture.cx.update(|cx| {
+            fixture
+                .view
+                .upgrade()
+                .expect("view alive")
+                .update(cx, |view, _| view.scroll_to_item_for_test(0));
+        });
+        fixture.act(|window, cx| {
+            window.click("load-earlier", cx);
+        });
+        let turns = fixture.cx.update(|cx| {
+            fixture
+                .view
+                .upgrade()
+                .expect("view alive")
+                .read(cx)
+                .turn_count_for_test()
+        });
+        assert_eq!(turns, expected, "one page of 400 per click");
+        let scroll = fixture.cx.update(|cx| {
+            fixture
+                .view
+                .upgrade()
+                .expect("view alive")
+                .read(cx)
+                .scroll_top_for_test()
+        });
+        assert_eq!(scroll, 0, "the reader stays on the oldest content");
+    }
+
+    // Exhausted: the pagination row retired — no stale control, and
+    // nothing was deleted from the record.
+    fixture.act(|window, _| {
+        assert!(
+            window.try_find("load-earlier").is_none(),
+            "the pagination row must retire when the archive is exhausted"
+        );
+    });
+    assert_eq!(fixture.store.list_sessions().unwrap().len(), 1);
+    assert_eq!(
+        fixture
+            .store
+            .load_messages(gertie_core::SessionId(1))
+            .unwrap()
+            .len(),
+        810
+    );
+}
