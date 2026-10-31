@@ -1832,3 +1832,94 @@ fn queued_drafts_render_from_rows_and_every_action_is_real() {
         "the drop button removed the row"
     );
 }
+
+/// Reads the composer through the view — the same bytes a user sees.
+fn composer_text(fixture: &mut Fixture) -> String {
+    fixture.cx.update(|cx| {
+        fixture
+            .view
+            .upgrade()
+            .expect("view alive")
+            .read(cx)
+            .composer_value_for_test(cx)
+    })
+}
+
+/// A session with two sent prompts and the answer between them.
+fn seeded_two_turn_session() -> Arc<SessionStore> {
+    let store = Arc::new(SessionStore::open(Path::new(":memory:")).expect("memory store"));
+    let session = store.create_session("recalled").expect("session");
+    let parent = store
+        .append_message(session, None, gertie_core::Role::User, "first ask")
+        .expect("row");
+    let parent = store
+        .append_message(
+            session,
+            Some(parent),
+            gertie_core::Role::Assistant,
+            "first answer",
+        )
+        .expect("row");
+    store
+        .append_message(session, Some(parent), gertie_core::Role::User, "second ask")
+        .expect("row");
+    store
+}
+
+/// Prompt recall: ArrowUp in an empty composer walks the session's
+/// sent prompts, newest first; ArrowDown walks back and, past the
+/// newest, hands the composer its (empty) draft back.
+#[test]
+fn arrow_up_recalls_sent_prompts_and_arrow_down_returns() {
+    let store = seeded_two_turn_session();
+    let mut fixture = fixture_with_store(store);
+
+    assert_eq!(composer_text(&mut fixture), "");
+    fixture.act(|window, cx| window.press("up", cx));
+    assert_eq!(composer_text(&mut fixture), "second ask");
+    fixture.act(|window, cx| window.press("up", cx));
+    assert_eq!(composer_text(&mut fixture), "first ask");
+    // Clamped at the oldest sent prompt.
+    fixture.act(|window, cx| window.press("up", cx));
+    assert_eq!(composer_text(&mut fixture), "first ask");
+    // Down walks back to the newest, then past it restores the draft.
+    fixture.act(|window, cx| window.press("down", cx));
+    assert_eq!(composer_text(&mut fixture), "second ask");
+    fixture.act(|window, cx| window.press("down", cx));
+    assert_eq!(composer_text(&mut fixture), "");
+}
+
+/// Typing ends the walk: the next ArrowUp is a cursor move again, not
+/// a jump through history — the edit survives.
+#[test]
+fn typing_ends_the_recall_walk() {
+    let store = seeded_two_turn_session();
+    let mut fixture = fixture_with_store(store);
+
+    fixture.act(|window, cx| window.press("up", cx));
+    fixture.act(|window, cx| window.input("!", cx));
+    fixture.act(|window, cx| window.press("up", cx));
+    assert_eq!(composer_text(&mut fixture), "second ask!");
+}
+
+/// A half-typed draft never gets clobbered: with content in the
+/// composer, the arrows stay cursor moves.
+#[test]
+fn arrows_never_clobber_a_half_typed_draft() {
+    let store = seeded_two_turn_session();
+    let mut fixture = fixture_with_store(store);
+
+    fixture.act(|window, cx| window.input("draft in progress", cx));
+    fixture.act(|window, cx| window.press("up", cx));
+    assert_eq!(composer_text(&mut fixture), "draft in progress");
+}
+
+/// A fresh install has nothing sent: ArrowUp is a no-op, not a panic,
+/// not a phantom prompt.
+#[test]
+fn arrow_up_with_no_history_leaves_the_composer_alone() {
+    let mut fixture = fixture();
+
+    fixture.act(|window, cx| window.press("up", cx));
+    assert_eq!(composer_text(&mut fixture), "");
+}

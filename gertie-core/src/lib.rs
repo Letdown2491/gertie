@@ -914,13 +914,13 @@ impl SessionStore {
         let mut tool_children: std::collections::HashMap<i64, Vec<i64>> =
             std::collections::HashMap::new();
         for row in rows {
-            if row.role == Role::Tool {
-                if let Some(parent) = row.parent_id {
-                    tool_children
-                        .entry(parent.0 as i64)
-                        .or_default()
-                        .push(row.id.0 as i64);
-                }
+            if row.role == Role::Tool
+                && let Some(parent) = row.parent_id
+            {
+                tool_children
+                    .entry(parent.0 as i64)
+                    .or_default()
+                    .push(row.id.0 as i64);
             }
         }
         // The ancestor chain, tip → root.

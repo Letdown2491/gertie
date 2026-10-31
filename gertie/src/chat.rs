@@ -12,11 +12,13 @@ use gertie_core::{
 use gertie_providers::AnyProvider;
 use gpui_kit::component::button::{Button, ButtonCustomVariant, ButtonVariants as _};
 use gpui_kit::component::command::{Command, CommandState};
-use gpui_kit::component::input::{Input, InputEvent, InputState, Textarea, TextareaState};
+use gpui_kit::component::input::{
+    Input, InputEvent, InputState, MoveDown, MoveToEnd, MoveUp, Textarea, TextareaState,
+};
 use gpui_kit::component::{ActiveTheme, Sizable as _, h_flex, v_flex};
 use gpui_kit::{
-    AnyElement, App, AppContext as _, Context, Entity, EventEmitter, Focusable, IntoElement,
-    KeyBinding, ListAlignment, ListState, ParentElement, Render, SharedString,
+    Action, AnyElement, App, AppContext as _, Context, Entity, EventEmitter, Focusable,
+    IntoElement, KeyBinding, ListAlignment, ListState, ParentElement, Render, SharedString,
     StatefulInteractiveElement as _, Styled, Window, actions, div, list, prelude::*, px,
 };
 use std::sync::Arc;
@@ -94,16 +96,36 @@ enum Turn {
     LoadEarlier,
 }
 
-actions!(gertie, [CloseTurnDiff, UndoDeleteSession]);
+/// Composer recall: which sent prompt the composer is sitting on
+/// (counting back from the newest) and what was typed before recall
+/// began — ArrowDown past the newest restores it. `set` is the exact
+/// text recall last wrote: a Change carrying anything else is the
+/// user typing, which ends recall.
+struct Recall {
+    index: usize,
+    saved: String,
+    set: String,
+}
+
+actions!(
+    gertie,
+    [CloseTurnDiff, UndoDeleteSession, RecallUp, RecallDown]
+);
 
 /// The chat surface's key map, bound once at app start: escape closes
-/// the turn-diff panel while focus sits inside it, and Ctrl+Z outside
+/// the turn-diff panel while focus sits inside it, Ctrl+Z outside
 /// the composer undoes a sidebar delete inside its window (inside the
-/// composer it stays text undo — the input consumes the keystroke).
+/// composer it stays text undo — the input consumes the keystroke),
+/// and ArrowUp/Down recall sent prompts from an empty composer —
+/// bound after gpui_kit::init so they outbid the input's own cursor
+/// move, and the handler re-dispatches the move whenever the
+/// keystroke shouldn't recall.
 pub fn bind_chat_keys(cx: &mut App) {
     cx.bind_keys([
         KeyBinding::new("escape", CloseTurnDiff, Some("TurnDiffPanel")),
         KeyBinding::new("ctrl-z", UndoDeleteSession, None::<&str>),
+        KeyBinding::new("up", RecallUp, Some("Input")),
+        KeyBinding::new("down", RecallDown, Some("Input")),
     ]);
 }
 
@@ -283,6 +305,9 @@ pub struct ChatView {
     /// turns when the current one ends, and they survive a stop, a
     /// crash, or a restart because they were rows all along.
     queued: Vec<gertie_core::QueuedFollowup>,
+    /// The prompt-recall walk (ArrowUp in an empty composer), when the
+    /// composer is riding one.
+    recall: Option<Recall>,
     /// Images waiting to ride with the next sent message.
     attachments: Vec<Attachment>,
     /// Bytes of the streaming assistant row already written to the
@@ -352,6 +377,16 @@ impl ChatView {
                 // match instead of sending.
                 if !this.accept_slash_top(window, cx) {
                     this.send(*secondary, window, cx)
+                }
+            }
+            // Typing ends the recall walk — but recall's own writes
+            // don't: the set text is the walk's, until the user edits.
+            if let InputEvent::Change = event
+                && let Some(recall) = &this.recall
+            {
+                let value = this.input.read(cx).value().to_string();
+                if value != recall.set {
+                    this.recall = None;
                 }
             }
         })
@@ -468,6 +503,7 @@ impl ChatView {
             streaming: false,
             steer_tx: None,
             queued: Vec::new(),
+            recall: None,
             attachments: Vec::new(),
             stream_persisted: 0,
             expanded_tools: Default::default(),
@@ -1797,6 +1833,9 @@ impl ChatView {
         if typed.is_empty() {
             return;
         }
+        // Whatever leaves the composer ends a recall walk — the walk's
+        // place in history is superseded by the send itself.
+        self.recall = None;
         // Slash commands act on the session, not through the model:
         // builtins first, then file templates. An unknown name reports
         // and keeps the input — the user fixes the spelling instead of
@@ -1959,6 +1998,7 @@ impl ChatView {
         if db_id.is_some() {
             self.last_db_id = db_id;
         }
+        self.recall = None;
         self.turns.push(Turn::Message {
             role: Role::User,
             text: display_text(&stored),
@@ -2775,6 +2815,93 @@ impl ChatView {
             .update(cx, |input, cx| input.set_value(value, window, cx));
         window.focus(&self.input.read(cx).focus_handle(cx), cx);
         cx.notify();
+    }
+
+    /// The sent prompts recall walks, newest first: user turns that
+    /// actually landed in the ledger. A queued draft was never sent,
+    /// and a rewound-away branch is no longer this view's history.
+    fn sent_user_texts(&self) -> Vec<String> {
+        self.turns
+            .iter()
+            .rev()
+            .filter_map(|turn| match turn {
+                Turn::Message {
+                    role: Role::User,
+                    text,
+                    db_id: Some(_),
+                } => Some(text.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// One ArrowUp/Down step in the composer. Recall claims the
+    /// keystroke only when the composer is focused and empty (or
+    /// already riding the walk); every other case hands the cursor
+    /// move back — a half-typed draft never gets clobbered, and other
+    /// inputs on the surface keep their own arrow behavior.
+    fn recall_step(&mut self, up: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let focused = self.input.read(cx).focus_handle(cx).is_focused(window);
+        let value = self.input.read(cx).value().to_string();
+        if !focused || (!value.trim().is_empty() && self.recall.is_none()) {
+            let move_cursor: Box<dyn Action> = if up {
+                Box::new(MoveUp)
+            } else {
+                Box::new(MoveDown)
+            };
+            window.dispatch_action(move_cursor, cx);
+            return;
+        }
+        let entries = self.sent_user_texts();
+        if entries.is_empty() {
+            // Nothing sent yet — nothing to recall. (The composer is
+            // empty; the cursor move this keystroke would have done
+            // has nothing to move past either.)
+            self.recall = None;
+            return;
+        }
+        let Some(active) = self.recall.take() else {
+            // Starting the walk: save the (empty) draft, land on the
+            // newest sent prompt. Down with nothing riding is just a
+            // cursor move.
+            if !up {
+                window.dispatch_action(Box::new(MoveDown), cx);
+                return;
+            }
+            let text = entries[0].clone();
+            self.recall = Some(Recall {
+                index: 0,
+                saved: value,
+                set: text.clone(),
+            });
+            self.input
+                .update(cx, |input, cx| input.set_value(text, window, cx));
+            window.dispatch_action(Box::new(MoveToEnd), cx);
+            return;
+        };
+        // Riding the walk: Up goes older (clamped at the oldest sent
+        // prompt), Down goes newer.
+        let index = if up {
+            (active.index + 1).min(entries.len() - 1)
+        } else {
+            active.index.saturating_sub(1)
+        };
+        // Down past the newest hands the composer back its saved draft
+        // — the walk ends where it started.
+        if !up && active.index == 0 {
+            self.input
+                .update(cx, |input, cx| input.set_value(active.saved, window, cx));
+            return;
+        }
+        let text = entries[index].clone();
+        self.recall = Some(Recall {
+            index,
+            saved: active.saved,
+            set: text.clone(),
+        });
+        self.input
+            .update(cx, |input, cx| input.set_value(text, window, cx));
+        window.dispatch_action(Box::new(MoveToEnd), cx);
     }
 
     fn render_turn(
@@ -3678,6 +3805,14 @@ impl Render for ChatView {
                     this.open_palette(window, cx);
                 },
             ))
+            // Prompt recall: ArrowUp/Down in an empty composer walks
+            // the session's sent prompts (see recall_step).
+            .on_action(cx.listener(|this, _: &RecallUp, window, cx| {
+                this.recall_step(true, window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &RecallDown, window, cx| {
+                this.recall_step(false, window, cx);
+            }))
             // Escape inside the turn-diff panel closes it (focus is
             // handed to the panel on open).
             .on_action(cx.listener(
