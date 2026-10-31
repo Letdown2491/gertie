@@ -214,6 +214,10 @@ pub struct ChatView {
     /// click confirms. A destructive action with no dialog needs a
     /// speed bump.
     confirming_delete: Option<SessionId>,
+    /// Whether the sidebar's settled fold is expanded. Collapsed by
+    /// default — settled work is put down, not gone; one click brings
+    /// it back.
+    settled_open: bool,
     /// The right column: this chat's worker runs, or the settings view.
     /// One slot — opening one closes the other.
     panel: Panel,
@@ -370,6 +374,7 @@ impl ChatView {
             renaming: None,
             rename_input,
             confirming_delete: None,
+            settled_open: false,
             panel: Panel::None,
             worker_runs: Vec::new(),
             settings_panel,
@@ -406,6 +411,16 @@ impl ChatView {
     /// Whether the palette is on screen, for tests.
     pub fn palette_open_for_test(&self) -> bool {
         self.palette_open
+    }
+
+    /// The sidebar's settled sessions, for tests — the ids that folded
+    /// out of the active list.
+    pub fn settled_ids_for_test(&self) -> Vec<SessionId> {
+        self.sessions
+            .iter()
+            .filter(|summary| summary.settled)
+            .map(|summary| summary.id)
+            .collect()
     }
 
     /// How many hits the palette is showing, for tests.
@@ -445,6 +460,13 @@ impl ChatView {
             Some(summary) => summary.title.clone().into(),
             None => "new chat".into(),
         }
+    }
+
+    /// Whether a turn is alive in this chat, for the tab strip — a tab
+    /// working in the background reads as busy even when its window is
+    /// elsewhere.
+    pub fn is_streaming(&self) -> bool {
+        self.streaming
     }
 
     /// Swaps the transcript for a session's stored messages and rebuilds
@@ -631,6 +653,12 @@ impl ChatView {
             .iter()
             .find(|summary| summary.id == session_id)
             .cloned();
+        // Opening a settled conversation is activity: it comes back to
+        // the active list. The one un-settle door besides its own ↩.
+        if summary.as_ref().is_some_and(|summary| summary.settled) {
+            let _ = self.store.set_session_settled(session_id, false);
+            self.sessions = self.store.list_sessions().unwrap_or_default();
+        }
         self.usage = summary
             .as_ref()
             .map(|summary| (summary.input_tokens, summary.output_tokens))
@@ -1174,6 +1202,21 @@ impl ChatView {
             self.renaming = None;
             cx.notify();
         }
+    }
+
+    /// The ✓ on a sidebar row: settle — the human put the work down.
+    /// Out of the active list, never out of the record; opening it
+    /// again un-settles. Reversible on the row itself (↩).
+    fn settle_clicked(&mut self, session_id: SessionId, settled: bool, cx: &mut Context<Self>) {
+        // A live turn is neither done nor abandoned; settling it would
+        // lie about the state.
+        if settled && self.streaming && self.session_id == Some(session_id) {
+            return;
+        }
+        if self.store.set_session_settled(session_id, settled).is_ok() {
+            self.sessions = self.store.list_sessions().unwrap_or_default();
+        }
+        cx.notify();
     }
 
     /// The attach affordance, three ways in, one destination:
@@ -2845,6 +2888,127 @@ fn diff_lines(call: &ToolCall, cx: &App) -> Option<AnyElement> {
     Some(container.into_any_element())
 }
 
+impl ChatView {
+    /// The sidebar's active rows: every session not yet settled, in the
+    /// store's attention order (most recent activity first).
+    fn active_session_rows(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        self.sessions
+            .iter()
+            .filter(|summary| !summary.settled)
+            .map(|summary| self.session_row(summary, cx))
+            .collect()
+    }
+
+    /// The fold's rows: settled work, muted, restore affordance up front.
+    fn settled_session_rows(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        self.sessions
+            .iter()
+            .filter(|summary| summary.settled)
+            .map(|summary| self.session_row(summary, cx))
+            .collect()
+    }
+
+    /// One sidebar row — active or settled; the settled variant renders
+    /// muted with the restore glyph. The one shape both lists share.
+    fn session_row(
+        &self,
+        summary: &gertie_core::SessionSummary,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let session_id = summary.id;
+        let settled = summary.settled;
+        if !settled && self.renaming == Some(session_id) {
+            // Rename row: the field replaces the row; Enter commits.
+            return h_flex()
+                .w_full()
+                .child(Input::new(&self.rename_input).small())
+                .into_any_element();
+        }
+        let confirming = self.confirming_delete == Some(session_id);
+        let delete_label = if confirming { "sure?" } else { "✕" };
+        let is_active = self.session_id == Some(session_id);
+        let delete_button = Button::new(SharedString::from(format!("delete-{}", session_id.0)))
+            .label(delete_label)
+            .xsmall()
+            .ghost()
+            .tooltip(if confirming {
+                "Click again to delete permanently"
+            } else {
+                "Delete this conversation"
+            });
+        let delete_button = if confirming {
+            delete_button.danger()
+        } else {
+            delete_button
+        };
+        h_flex()
+            .w_full()
+            .min_w_0()
+            .gap_0p5()
+            .child(
+                Button::new(SharedString::from(format!("session-{}", session_id.0)))
+                    .label(summary.title.clone())
+                    .small()
+                    .flex_1()
+                    .min_w_0()
+                    .when(is_active, |button| {
+                        // The open conversation is tinted, not loud — the
+                        // accent at conversation weight.
+                        button.custom(
+                            ButtonCustomVariant::new(cx)
+                                .color(cx.theme().accent.opacity(0.14))
+                                .hover(cx.theme().accent.opacity(0.2))
+                                .active(cx.theme().accent.opacity(0.24)),
+                        )
+                    })
+                    .when(settled, |button| {
+                        // Put down, not deleted: the muted tint keeps the
+                        // row readable without competing with live work.
+                        button.custom(
+                            ButtonCustomVariant::new(cx)
+                                .color(cx.theme().muted_foreground.opacity(0.4))
+                                .hover(cx.theme().muted_foreground.opacity(0.55))
+                                .active(cx.theme().muted_foreground.opacity(0.7)),
+                        )
+                    })
+                    .tooltip(summary.title.clone())
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.switch_to_session(session_id, window, cx);
+                    })),
+            )
+            .child(
+                Button::new(SharedString::from(format!("rename-{}", session_id.0)))
+                    .label("✎")
+                    .xsmall()
+                    .ghost()
+                    .tooltip("Rename this conversation")
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.start_rename(session_id, window, cx);
+                    })),
+            )
+            .child(
+                Button::new(SharedString::from(format!("settle-{}", session_id.0)))
+                    .label(if settled { "↩" } else { "✓" })
+                    .xsmall()
+                    .ghost()
+                    .tooltip(if settled {
+                        "Un-settle — back to the active list"
+                    } else {
+                        "Settle — done; folds out of the list"
+                    })
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.settle_clicked(session_id, !settled, cx);
+                    })),
+            )
+            .child(
+                delete_button.on_click(cx.listener(move |this, _, window, cx| {
+                    this.delete_clicked(session_id, window, cx);
+                })),
+            )
+            .into_any_element()
+    }
+}
+
 impl Render for ChatView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let view = cx.entity().downgrade();
@@ -2920,88 +3084,35 @@ impl Render for ChatView {
                                     .text_color(cx.theme().muted_foreground)
                                     .child("SESSIONS"),
                             )
-                            .children(self.sessions.iter().map(|summary| {
-                                let session_id = summary.id;
-                                if self.renaming == Some(session_id) {
-                                    // Rename row: the field replaces the
-                                    // row; Enter commits.
-                                    return h_flex()
-                                        .w_full()
-                                        .child(Input::new(&self.rename_input).small());
-                                }
-                                let confirming = self.confirming_delete == Some(session_id);
-                                let delete_label = if confirming { "sure?" } else { "✕" };
-                                let is_active = self.session_id == Some(session_id);
-                                let delete_button = Button::new(SharedString::from(format!(
-                                    "delete-{}",
-                                    session_id.0
-                                )))
-                                .label(delete_label)
-                                .xsmall()
-                                .ghost()
-                                .tooltip(if confirming {
-                                    "Click again to delete permanently"
-                                } else {
-                                    "Delete this conversation"
-                                });
-                                let delete_button = if confirming {
-                                    delete_button.danger()
-                                } else {
-                                    delete_button
-                                };
-                                h_flex()
-                                    .w_full()
-                                    .min_w_0()
-                                    .gap_0p5()
-                                    .child(
-                                        Button::new(SharedString::from(format!(
-                                            "session-{}",
-                                            session_id.0
-                                        )))
-                                        .label(summary.title.clone())
-                                        .small()
-                                        .flex_1()
-                                        .min_w_0()
-                                        .when(is_active, |button| {
-                                            // The open conversation is
-                                            // tinted, not loud — the
-                                            // accent at conversation
-                                            // weight.
-                                            button.custom(
-                                                ButtonCustomVariant::new(cx)
-                                                    .color(cx.theme().accent.opacity(0.14))
-                                                    .hover(cx.theme().accent.opacity(0.2))
-                                                    .active(cx.theme().accent.opacity(0.24)),
-                                            )
-                                        })
-                                        .tooltip(summary.title.clone())
-                                        .on_click(
-                                            cx.listener(move |this, _, window, cx| {
-                                                this.switch_to_session(session_id, window, cx);
-                                            }),
-                                        ),
+                            .children(self.active_session_rows(cx))
+                            // The settled fold: put-down work, collapsed
+                            // by default — findable, never in the way.
+                            .when(
+                                self.sessions.iter().any(|summary| summary.settled),
+                                |col| {
+                                    col.child(
+                                        Button::new("settled-fold")
+                                            .label(format!(
+                                                "{} SETTLED ({})",
+                                                if self.settled_open { "▾" } else { "▸" },
+                                                self.sessions
+                                                    .iter()
+                                                    .filter(|summary| summary.settled)
+                                                    .count()
+                                            ))
+                                            .xsmall()
+                                            .ghost()
+                                            .tooltip("Conversations put down — expand to bring one back")
+                                            .on_click(cx.listener(|this, _, _, cx| {
+                                                this.settled_open = !this.settled_open;
+                                                cx.notify();
+                                            })),
                                     )
-                                    .child(
-                                        Button::new(SharedString::from(format!(
-                                            "rename-{}",
-                                            session_id.0
-                                        )))
-                                        .label("✎")
-                                        .xsmall()
-                                        .ghost()
-                                        .tooltip("Rename this conversation")
-                                        .on_click(
-                                            cx.listener(move |this, _, window, cx| {
-                                                this.start_rename(session_id, window, cx);
-                                            }),
-                                        ),
-                                    )
-                                    .child(delete_button.on_click(cx.listener(
-                                        move |this, _, window, cx| {
-                                            this.delete_clicked(session_id, window, cx);
-                                        },
-                                    )))
-                            })),
+                                    .when(self.settled_open, |col| {
+                                        col.children(self.settled_session_rows(cx))
+                                    })
+                                },
+                            ),
                     )
                     .child(
                         // The utilities: stacked at the

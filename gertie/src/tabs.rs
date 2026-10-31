@@ -266,6 +266,14 @@ impl Render for WorkspaceView {
                             Some(_) => format!("⎇ {title}"),
                             None => title.to_string(),
                         };
+                        // A live turn marks its tab: the attention
+                        // signal for work running while another tab is
+                        // up. Static glyph — no repaint to say busy.
+                        let label = if tab.view.read(cx).is_streaming() {
+                            format!("● {label}")
+                        } else {
+                            label
+                        };
                         Tab::new().label(label)
                     }))
                     .suffix(suffix),

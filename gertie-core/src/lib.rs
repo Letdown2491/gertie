@@ -132,6 +132,9 @@ pub struct SessionSummary {
     /// number the compaction threshold watches. Persisted so a resumed
     /// session shows its distance to the window immediately.
     pub context_tokens: u64,
+    /// Settled: the human put the work down. Out of the active list,
+    /// never out of the record; opening it un-settles.
+    pub settled: bool,
 }
 
 /// One full-text search hit: which session, what role, and a marked
@@ -240,6 +243,7 @@ impl SessionStore {
             ("input_tokens", "INTEGER DEFAULT 0"),
             ("output_tokens", "INTEGER DEFAULT 0"),
             ("last_context_tokens", "INTEGER DEFAULT 0"),
+            ("settled_at", "TEXT"),
         ] {
             if !session_columns.contains(&column.to_string()) {
                 connection.execute(
@@ -298,6 +302,9 @@ impl SessionStore {
                     input_tokens: row.get::<_, i64>(2)?.max(0) as u64,
                     output_tokens: row.get::<_, i64>(3)?.max(0) as u64,
                     context_tokens: row.get::<_, i64>(4)?.max(0) as u64,
+                    // Child sessions live in the agents panel, never
+                    // the sidebar's lifecycle machine.
+                    settled: false,
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -368,7 +375,8 @@ impl SessionStore {
     pub fn list_sessions(&self) -> Result<Vec<SessionSummary>, rusqlite::Error> {
         let connection = self.connection.lock().unwrap();
         let mut statement = connection.prepare(
-            "SELECT s.id, s.title, s.input_tokens, s.output_tokens, s.last_context_tokens
+            "SELECT s.id, s.title, s.input_tokens, s.output_tokens, s.last_context_tokens,
+                    s.settled_at IS NOT NULL
              FROM sessions s
              LEFT JOIN messages m ON m.session_id = s.id
              WHERE s.kind = 'chat'
@@ -382,9 +390,28 @@ impl SessionStore {
                 input_tokens: row.get::<_, i64>(2)?.max(0) as u64,
                 output_tokens: row.get::<_, i64>(3)?.max(0) as u64,
                 context_tokens: row.get::<_, i64>(4)?.max(0) as u64,
+                settled: row.get::<_, i64>(5)? != 0,
             })
         })?;
         rows.collect()
+    }
+
+    /// Settles or un-settles a session: the human put the work down
+    /// (or picked it back up). A timestamp, not a bool — when auto-settle
+    /// arrives it needs to know how long the session has been resting.
+    pub fn set_session_settled(
+        &self,
+        session_id: SessionId,
+        settled: bool,
+    ) -> Result<(), rusqlite::Error> {
+        let connection = self.connection.lock().unwrap();
+        connection.execute(
+            "UPDATE sessions SET settled_at = CASE WHEN ?2
+                THEN strftime('%Y-%m-%dT%H:%M:%fZ','now') ELSE NULL END
+             WHERE id = ?1",
+            rusqlite::params![session_id.0 as i64, settled],
+        )?;
+        Ok(())
     }
 
     /// Full-text search over every message ever recorded — the model's
@@ -974,6 +1001,28 @@ mod tests {
         assert_eq!(sessions.len(), 1);
         assert_eq!(sessions[0].id, session);
         assert_eq!(sessions[0].title, "first chat");
+    }
+
+    #[test]
+    fn settle_is_persistent_state_not_a_view_filter() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("store.db");
+        let store = SessionStore::open(&path).unwrap();
+        let session = store.create_session("done deal").unwrap();
+        assert!(!store.list_sessions().unwrap()[0].settled);
+
+        // Settled: out of the active list, never out of the record.
+        store.set_session_settled(session, true).unwrap();
+        assert!(store.list_sessions().unwrap()[0].settled);
+
+        // Reopen — a fresh process reads the same state.
+        drop(store);
+        let store = SessionStore::open(&path).unwrap();
+        assert!(store.list_sessions().unwrap()[0].settled);
+
+        // Picking the work back up clears it.
+        store.set_session_settled(session, false).unwrap();
+        assert!(!store.list_sessions().unwrap()[0].settled);
     }
 
     #[test]

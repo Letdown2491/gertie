@@ -559,3 +559,96 @@ fn a_long_transcript_loads_in_pages_and_load_earlier_exhausts_cleanly() {
         810
     );
 }
+
+impl Fixture {
+    /// The view's settled session ids, for the lifecycle tests.
+    fn view_settled(&mut self) -> Vec<gertie_core::SessionId> {
+        let view = self.view.clone();
+        self.cx.update(|cx| {
+            view.upgrade()
+                .expect("view alive")
+                .read(cx)
+                .settled_ids_for_test()
+        })
+    }
+}
+
+/// Two stored sessions; the fixture resumes the newest (id 2).
+fn two_session_store() -> Arc<SessionStore> {
+    let store = Arc::new(SessionStore::open(Path::new(":memory:")).expect("memory store"));
+    let first = store.create_session("the older chore").expect("session");
+    store
+        .append_message(first, None, gertie_core::Role::User, "old work")
+        .expect("row");
+    let second = store.create_session("the newer chat").expect("session");
+    store
+        .append_message(second, None, gertie_core::Role::User, "new work")
+        .expect("row");
+    store
+}
+
+/// Settle is a lifecycle, not a filter: ✓ folds a session out of the
+/// active list, the fold expands, ↩ (or just opening the session)
+/// brings it back. The record is untouched throughout.
+#[test]
+fn settling_folds_a_session_and_opening_brings_it_back() {
+    let store = two_session_store();
+    let mut fixture = fixture_with_store(store.clone());
+
+    // Settle the older session by its row's ✓.
+    fixture.act(|window, cx| {
+        window.click("settle-1", cx);
+    });
+    assert_eq!(fixture.view_settled(), [gertie_core::SessionId(1)]);
+    assert!(
+        store
+            .list_sessions()
+            .unwrap()
+            .iter()
+            .find(|summary| summary.id == gertie_core::SessionId(1))
+            .expect("session survives settling")
+            .settled,
+        "settled state persists in the store, not just the view"
+    );
+
+    // The fold is collapsed: the settled row paints nothing — its
+    // restore click must miss until the fold expands.
+    fixture.act(|window, cx| {
+        assert!(window.try_find("session-1").is_none());
+        window.click("settled-fold", cx);
+    });
+
+    // Open the settled session from the expanded fold — opening it
+    // is activity: it comes back to the active list on its own.
+    fixture.act(|window, cx| {
+        window.click("session-1", cx);
+    });
+    assert!(
+        fixture.view_settled().is_empty(),
+        "opening a settled session un-settles it"
+    );
+}
+
+/// Settling by hand folds; the fold's own ↩ restores without opening.
+#[test]
+fn the_folds_restore_button_unsettles_without_opening() {
+    let store = two_session_store();
+    let mut fixture = fixture_with_store(store);
+    let view = fixture.view.clone();
+
+    fixture.act(|window, cx| {
+        window.click("settle-1", cx);
+    });
+    fixture.act(|window, cx| {
+        window.click("settled-fold", cx);
+    });
+    fixture.act(|window, cx| {
+        window.click("settle-1", cx);
+    });
+    assert!(fixture.view_settled().is_empty());
+    // Restore never opened the session: the transcript kept its chat.
+    let active = fixture
+        .cx
+        .update(|cx| view.upgrade().expect("view alive").read(cx).tab_title());
+    assert_eq!(active, "the newer chat");
+}

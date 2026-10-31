@@ -280,6 +280,15 @@ text instead), and the transcript stopped loading whole sessions — it opens on
 newest 400 rows with a "load earlier" row paging the archive in, holding the reader's
 place per batch. A deep session costs one page at open, not the whole record.
 
+The sidebar became a lifecycle machine (t3code's inbox chapter): the ✓ on a session row
+settles it — the human put the work down — folding it into a collapsed "settled"
+section (muted rows, ↩ to restore) while the record keeps everything; opening a
+settled session is activity and un-settles it. Settling refuses a session with a turn
+in flight, and settle is manual for now: auto-settle needs pending-work state for
+*closed* sessions (only open ones know), and snooze waits for the Limited state that
+gives it a clock. The tab strip carries the working marker — a live turn shows ● on
+its tab, the attention signal for work running while another tab is up.
+
 ## Onboarding
 
 First run with the default path writes a starter `config.toml` of comments and pointers —
