@@ -185,15 +185,6 @@ pub struct Resolved<T> {
     pub origin: Origin,
 }
 
-impl<T> Resolved<T> {
-    fn map<U>(self, value: U) -> Resolved<U> {
-        Resolved {
-            value,
-            origin: self.origin,
-        }
-    }
-}
-
 /// Every overlay-resolvable field's origin at once — for the
 /// settings summary and the doctor's report.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
