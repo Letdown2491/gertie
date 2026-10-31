@@ -957,6 +957,50 @@ mod tests {
     }
 
     #[test]
+    fn nothing_follows_done_turn_end_is_not_settlement() {
+        // The heaviest path (a tool round) must still end the instant
+        // Done is yielded: the loop does no settlement work — no
+        // trailing persistence, no summary, nothing after the turn's
+        // last event. If anything ever follows Done, this fails and
+        // the doctrine needs a deliberate rewrite, not a silent slip.
+        let provider = Arc::new(ScriptedProvider {
+            seen: std::sync::Mutex::new(Vec::new()),
+            scripts: std::sync::Mutex::new(vec![
+                vec![
+                    Event::ToolCall {
+                        id: "c1".into(),
+                        name: "peek".into(),
+                        arguments: "{}".into(),
+                    },
+                    Event::Done,
+                ],
+                vec![
+                    Event::Token {
+                        delta: "all done".into(),
+                    },
+                    Event::Done,
+                ],
+            ]),
+        });
+        let peek: Arc<dyn Tool> = Arc::new(StubTool::new("peek", false, "peeked"));
+        let history: SharedHistory = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let (spec, broker) = turn(provider, registry(&[peek]), history.clone(), "look");
+        let events = drain(run_turn(spec), &broker, |_| {
+            panic!("read-only tools must not prompt")
+        });
+
+        let done = events
+            .iter()
+            .position(|event| matches!(event, LoopEvent::Done))
+            .expect("the turn yields Done");
+        assert_eq!(
+            done,
+            events.len() - 1,
+            "nothing may follow Done — turn end is not settlement"
+        );
+    }
+
+    #[test]
     fn mutating_tools_ask_and_honor_the_answer() {
         for (decided, expected) in [
             (PermissionDecision::Approve, "wrote"),
