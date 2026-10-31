@@ -32,7 +32,7 @@
 use crate::{Tool, ToolResult, blocking};
 use serde_json::{Value, json};
 use std::future::Future;
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, RecvTimeoutError, channel};
@@ -388,9 +388,15 @@ impl McpClient {
             .and_then(|value| value.to_str().ok())
             .unwrap_or_default()
             .to_string();
-        let body = response
-            .text()
+        // Cap the read: a hostile or broken server's answer does not
+        // eat memory. 8 MiB matches web_fetch's ceiling — far past any
+        // honest tool payload.
+        let mut raw = Vec::new();
+        response
+            .take(8 * 1024 * 1024)
+            .read_to_end(&mut raw)
             .map_err(|error| format!("mcp `{server_name}`: {error}"))?;
+        let body = String::from_utf8_lossy(&raw);
         let payload = if content_type.contains("text/event-stream") {
             body.lines()
                 .filter_map(|line| line.strip_prefix("data:"))
