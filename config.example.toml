@@ -49,6 +49,15 @@ api_key_env = "MY_API_KEY"
 # [security]
 # sandbox_bash = true
 
+# The permission mode new sessions open in: "supervised" (every write
+# and command prompts), "accept_edits" (checkpointed file edits run
+# unasked; commands still prompt), "auto" (sandboxed work runs unasked
+# too — with sandbox_bash off this prompts like accept_edits), or
+# "full_access" (nothing prompts). Sessions keep whatever mode you set
+# in the composer; this only sets the starting posture.
+# [permissions]
+# default_mode = "accept_edits"
+
 # The sidebar's lifecycle. Settling a session (✓ on its row) folds it
 # out of the active list; opening it brings it back.
 #

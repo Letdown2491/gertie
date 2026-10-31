@@ -2,6 +2,7 @@
 //! permission policy, feed results back, repeat — bounded.
 
 use crate::Role;
+use crate::permissions::PermissionMode;
 use crate::request::{Request, ToolCall, ToolSpec, WireMessage};
 use crate::snapshot::SnapshotStore;
 use crate::tool::Tool;
@@ -129,6 +130,14 @@ pub struct TurnSpec {
     /// means nobody can approve: mutations are denied, doing nothing is
     /// the safe move.
     pub permission_broker: Option<Arc<crate::PermissionBroker>>,
+    /// How this turn's mutating-tool asks resolve — supervised, or a
+    /// mode that pre-approves a class of asks outright. Fixed for the
+    /// turn's life: a flip mid-turn applies to the next turn.
+    pub permission_mode: PermissionMode,
+    /// Whether bash runs inside the Landlock sandbox. Process-wide
+    /// config, mirrored here so the Auto mode never guesses about
+    /// enforcement it can't see.
+    pub sandbox_bash: bool,
     /// Whose ask this loop's prompts are: the leader's surface as loop
     /// events, a worker's through the broker subscription.
     pub prompt_source: crate::PromptSource,
@@ -175,6 +184,8 @@ pub fn run_turn(spec: TurnSpec) -> BoxStream<'static, LoopEvent> {
         workspace_root,
         context_window,
         permission_broker,
+        permission_mode,
+        sandbox_bash,
         prompt_source,
         system_prompt,
         steer,
@@ -324,60 +335,78 @@ pub fn run_turn(spec: TurnSpec) -> BoxStream<'static, LoopEvent> {
                         if let Err(blocked) = tool.vet(&call.arguments) {
                             Err(format!("blocked by policy: {blocked}"))
                         }
-                        // Mutating tools face the permission prompt; the
-                        // ask registers with the broker (so the UI can
+                        // Mutating tools: the turn's mode pre-approves
+                        // a class of asks outright — an edit the
+                        // checkpoint will snapshot is reversible, a
+                        // sandboxed command is contained — and the
+                        // rest face the permission prompt: the ask
+                        // registers with the broker (so the UI can
                         // answer it) and the loop awaits the answer.
                         else if tool.mutates() {
-                            match &permission_broker {
-                                Some(broker) => {
+                            let checkpoint_target = checkpoint_path(
+                                &call.arguments,
+                                workspace_root.as_deref(),
+                            );
+                            let pre_approved = permission_mode
+                                .auto_allows(checkpoint_target.is_some(), sandbox_bash);
+                            let decision = match (&permission_broker, pre_approved) {
+                                // The mode settled it before any ask.
+                                (_, true) => Ok(PermissionDecision::Approve),
+                                (Some(broker), false) => {
                                     let (request_id, answer) =
                                         broker.request(call.clone(), prompt_source);
                                     yield LoopEvent::ToolCallRequested {
                                         id: request_id,
                                         call: call.clone(),
                                     };
-                                    match answer.await {
-                                        Ok(PermissionDecision::Approve) => {
-                                            // Checkpoint the file's prior
-                                            // state before anything
-                                            // mutates it.
-                                            if let (Some(store), Some(path)) = (
-                                                &snapshots,
-                                                checkpoint_path(&call.arguments, workspace_root.as_deref()),
-                                            ) && let Err(error) =
-                                                store.record_file(checkpoint_session, &path)
-                                            {
-                                                yield LoopEvent::Error {
-                                                    message: format!(
-                                                        "checkpoint before {} failed: {error}",
-                                                        call.name
-                                                    ),
-                                                };
-                                                return;
-                                            }
-                                            tool.run(&call.arguments).await
-                                        }
-                                        // The human said no — and possibly
-                                        // why. Their reply rides in the tool
-                                        // result, so the next round can act
-                                        // on it instead of repeating itself.
-                                        Ok(PermissionDecision::Deny { feedback }) => Err(
-                                            match feedback {
-                                                Some(text) if !text.trim().is_empty() => {
-                                                    format!(
-                                                        "denied by user — their reply: {text}"
-                                                    )
-                                                }
-                                                _ => "denied by user".to_string(),
-                                            },
-                                        ),
-                                        // A dropped responder (UI went
-                                        // away) denies too: doing
-                                        // nothing is safe.
-                                        Err(_) => Err("denied by user".to_string()),
-                                    }
+                                    // A dropped responder (UI went
+                                    // away) denies too: doing nothing
+                                    // is safe.
+                                    answer
+                                        .await
+                                        .map_err(|_| "denied by user".to_string())
                                 }
-                                None => Err("no permission channel available — denied".to_string()),
+                                (None, false) => {
+                                    Err("no permission channel available — denied".to_string())
+                                }
+                            };
+                            // The pre-approved path and the human's
+                            // approval converge here on purpose: the
+                            // checkpoint is what makes an auto-approval
+                            // honest, so pre-approval must not be a way
+                            // around the ledger.
+                            match decision {
+                                Ok(PermissionDecision::Approve) => {
+                                    // Checkpoint the file's prior state
+                                    // before anything mutates it.
+                                    if let (Some(store), Some(path)) =
+                                        (&snapshots, checkpoint_target)
+                                        && let Err(error) =
+                                            store.record_file(checkpoint_session, &path)
+                                    {
+                                        yield LoopEvent::Error {
+                                            message: format!(
+                                                "checkpoint before {} failed: {error}",
+                                                call.name
+                                            ),
+                                        };
+                                        return;
+                                    }
+                                    tool.run(&call.arguments).await
+                                }
+                                // The human said no — and possibly
+                                // why. Their reply rides in the tool
+                                // result, so the next round can act
+                                // on it instead of repeating itself.
+                                Ok(PermissionDecision::Deny { feedback }) => Err(
+                                    match feedback {
+                                        Some(text) if !text.trim().is_empty() => {
+                                            format!("denied by user — their reply: {text}")
+                                        }
+                                        _ => "denied by user".to_string(),
+                                    },
+                                ),
+                                Err(denied) => Err(denied),
                             }
                         } else {
                             yield LoopEvent::ToolCallStarted { call: call.clone() };
@@ -762,6 +791,8 @@ mod tests {
                 workspace_root: None,
                 context_window: None,
                 permission_broker: Some(broker.clone()),
+                permission_mode: crate::permissions::PermissionMode::Supervised,
+                sandbox_bash: false,
                 prompt_source: crate::PromptSource::Leader,
                 system_prompt: None,
                 steer: None,
@@ -1179,6 +1210,138 @@ mod tests {
         assert_eq!(objects.len(), 1);
         let object = objects[0].as_ref().unwrap().path();
         assert_eq!(std::fs::read(object).unwrap(), b"before");
+    }
+
+    #[test]
+    fn accept_edits_auto_approves_checkpointed_edits_and_still_asks_the_rest() {
+        let tmp = tempfile::tempdir().unwrap();
+        let snapshots = Arc::new(SnapshotStore::open(&tmp.path().join("snaps")).unwrap());
+        let workspace = tempfile::tempdir().unwrap();
+        std::fs::write(workspace.path().join("thing.txt"), "before").unwrap();
+
+        let provider = Arc::new(ScriptedProvider {
+            seen: std::sync::Mutex::new(Vec::new()),
+            scripts: std::sync::Mutex::new(vec![
+                vec![
+                    Event::ToolCall {
+                        id: "c1".into(),
+                        name: "edit_file".into(),
+                        arguments: r#"{"path": "thing.txt"}"#.into(),
+                    },
+                    Event::ToolCall {
+                        id: "c2".into(),
+                        name: "bash".into(),
+                        arguments: r#"{"command": "ls"}"#.into(),
+                    },
+                    Event::Done,
+                ],
+                vec![Event::Done],
+            ]),
+        });
+        let editor: Arc<dyn Tool> = Arc::new(StubTool::new("edit_file", true, "edited"));
+        let shell: Arc<dyn Tool> = Arc::new(StubTool::new("bash", true, "shelled"));
+        let (mut spec, broker) = turn(
+            provider,
+            registry(&[editor, shell]),
+            Arc::new(tokio::sync::Mutex::new(Vec::new())),
+            "",
+        );
+        spec.snapshots = Some(snapshots.clone());
+        spec.workspace_root = Some(workspace.path().to_path_buf());
+        spec.permission_mode = PermissionMode::AcceptEdits;
+
+        let events = drain(run_turn(spec), &broker, |call| {
+            // The edit is checkpointed and reversible — it ran unasked.
+            // Bash touches the world outside a single file: it asks.
+            assert_eq!(call.name, "bash", "only the non-checkpointed call asks");
+            PermissionDecision::Approve
+        });
+
+        assert_eq!(tool_result(&events, "edit_file"), "edited");
+        assert_eq!(tool_result(&events, "bash"), "shelled");
+        // The auto-approved edit is on the ledger exactly like an
+        // approved one.
+        assert_eq!(
+            std::fs::read_dir(tmp.path().join("snaps/objects"))
+                .unwrap()
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn the_auto_mode_keys_bash_off_the_sandbox() {
+        // Sandbox on: contained bash runs unasked. Sandbox off: the
+        // same ask prompts — the mode never pretends a kernel that
+        // isn't enforcing is enforcing.
+        for (sandboxed, expected_asks) in [(true, 0), (false, 1)] {
+            let provider = Arc::new(ScriptedProvider {
+                seen: std::sync::Mutex::new(Vec::new()),
+                scripts: std::sync::Mutex::new(vec![
+                    vec![
+                        Event::ToolCall {
+                            id: "c1".into(),
+                            name: "bash".into(),
+                            arguments: r#"{"command": "ls"}"#.into(),
+                        },
+                        Event::Done,
+                    ],
+                    vec![Event::Done],
+                ]),
+            });
+            let shell: Arc<dyn Tool> = Arc::new(StubTool::new("bash", true, "shelled"));
+            let (mut spec, broker) = turn(
+                provider,
+                registry(&[shell]),
+                Arc::new(tokio::sync::Mutex::new(Vec::new())),
+                "",
+            );
+            spec.permission_mode = PermissionMode::Auto;
+            spec.sandbox_bash = sandboxed;
+            let asks = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let count = asks.clone();
+            let events = drain(run_turn(spec), &broker, move |call| {
+                assert_eq!(call.name, "bash");
+                count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                PermissionDecision::Approve
+            });
+            assert_eq!(tool_result(&events, "bash"), "shelled");
+            assert_eq!(
+                asks.load(std::sync::atomic::Ordering::Relaxed),
+                expected_asks,
+                "sandbox = {sandboxed}"
+            );
+        }
+    }
+
+    #[test]
+    fn full_access_runs_mutations_without_an_ask() {
+        let provider = Arc::new(ScriptedProvider {
+            seen: std::sync::Mutex::new(Vec::new()),
+            scripts: std::sync::Mutex::new(vec![
+                vec![
+                    Event::ToolCall {
+                        id: "c1".into(),
+                        name: "bash".into(),
+                        arguments: r#"{"command": "ls"}"#.into(),
+                    },
+                    Event::Done,
+                ],
+                vec![Event::Done],
+            ]),
+        });
+        let shell: Arc<dyn Tool> = Arc::new(StubTool::new("bash", true, "shelled"));
+        let (mut spec, broker) = turn(
+            provider,
+            registry(&[shell]),
+            Arc::new(tokio::sync::Mutex::new(Vec::new())),
+            "",
+        );
+        spec.permission_mode = PermissionMode::FullAccess;
+        let events = drain(run_turn(spec), &broker, |_| {
+            panic!("full access must not ask — the human is the only thing removed")
+        });
+        assert_eq!(tool_result(&events, "bash"), "shelled");
     }
 
     #[test]

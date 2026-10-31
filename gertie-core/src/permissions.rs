@@ -119,6 +119,111 @@ impl PermissionBroker {
     }
 }
 
+/// How a turn's mutating-tool asks resolve. A property of the turn —
+/// carried on the `TurnSpec`, fixed for its whole life: flipping the
+/// mode mid-turn would change the rules under a running agent, so a
+/// flip applies to the next turn instead.
+///
+/// The hard base layer sits below every mode: the tools' own policy
+/// vet (destructive commands) blocks before any ask could happen, and
+/// a mode never re-approves what the vet refused.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PermissionMode {
+    /// Every mutating tool asks. The default: the prompt gate is the
+    /// base layer.
+    #[default]
+    Supervised,
+    /// Edit-class work runs unasked — exactly what the checkpoint hook
+    /// snapshots, so every auto-approved change is reversible. Bash
+    /// still asks: it touches the world outside any single file.
+    AcceptEdits,
+    /// Edits as in AcceptEdits, plus bash that runs inside the Landlock
+    /// sandbox — contained, so contained work needs no chaperone. With
+    /// the sandbox off, this mode asks like AcceptEdits; it never
+    /// pretends a kernel that isn't enforcing is enforcing.
+    Auto,
+    /// Nothing asks. The vet stays; the human is the only thing
+    /// removed from the path.
+    FullAccess,
+}
+
+impl PermissionMode {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            PermissionMode::Supervised => "supervised",
+            PermissionMode::AcceptEdits => "accept_edits",
+            PermissionMode::Auto => "auto",
+            PermissionMode::FullAccess => "full_access",
+        }
+    }
+
+    /// Whether this mode settles a mutating-tool ask without the
+    /// broker. `checkpointed` — the checkpoint hook will snapshot
+    /// what the call touches, so the change is reversible;
+    /// `sandboxed_bash` — the process runs bash inside the Landlock
+    /// sandbox.
+    pub fn auto_allows(&self, checkpointed: bool, sandboxed_bash: bool) -> bool {
+        match self {
+            PermissionMode::Supervised => false,
+            PermissionMode::AcceptEdits => checkpointed,
+            PermissionMode::Auto => checkpointed || sandboxed_bash,
+            PermissionMode::FullAccess => true,
+        }
+    }
+}
+
+impl std::str::FromStr for PermissionMode {
+    type Err = ();
+
+    /// The mode a stored row or config key names. Unknown values (a
+    /// hand-edited database) read as Err; callers fall back to the
+    /// default.
+    fn from_str(raw: &str) -> Result<Self, Self::Err> {
+        match raw {
+            "supervised" => Ok(PermissionMode::Supervised),
+            "accept_edits" => Ok(PermissionMode::AcceptEdits),
+            "auto" => Ok(PermissionMode::Auto),
+            "full_access" => Ok(PermissionMode::FullAccess),
+            _ => Err(()),
+        }
+    }
+}
+
+/// The front's active permission mode, shared so worker dispatch can
+/// inherit the leader's turn mode (a worker's `TurnSpec` is built
+/// inside the agent tool, which sees no turn of its own). Set once at
+/// turn start, read at dispatch — never mutated mid-turn.
+#[derive(Clone, Default)]
+pub struct ModeScope(std::sync::Arc<std::sync::atomic::AtomicU8>);
+
+impl ModeScope {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn set(&self, mode: PermissionMode) {
+        self.0.store(
+            match mode {
+                PermissionMode::Supervised => 0,
+                PermissionMode::AcceptEdits => 1,
+                PermissionMode::Auto => 2,
+                PermissionMode::FullAccess => 3,
+            },
+            std::sync::atomic::Ordering::Relaxed,
+        );
+    }
+
+    pub fn get(&self) -> PermissionMode {
+        match self.0.load(std::sync::atomic::Ordering::Relaxed) {
+            1 => PermissionMode::AcceptEdits,
+            2 => PermissionMode::Auto,
+            3 => PermissionMode::FullAccess,
+            _ => PermissionMode::Supervised,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

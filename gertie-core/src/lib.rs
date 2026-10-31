@@ -16,7 +16,7 @@ pub use agent::{AgentTool, AgentType, builtin_agent_types, sanitize_untrusted, w
 pub use agent_loop::{
     LoopEvent, PermissionDecision, SharedHistory, ToolRegistry, TurnSpec, run_turn,
 };
-pub use permissions::{PendingAsk, PermissionBroker, PromptSource};
+pub use permissions::{ModeScope, PendingAsk, PermissionBroker, PermissionMode, PromptSource};
 pub use provider::Provider;
 pub use request::{
     IMAGE_MARKER_PREFIX, Request, ToolCall, ToolSpec, WireMessage, data_url_parts,
@@ -165,6 +165,9 @@ pub struct SessionSummary {
     /// the way back in. Survives restarts — the crash-restart affordance
     /// falls out of it. Cleared by resuming or by any new send.
     pub limited: bool,
+    /// The session's permission mode, chosen in the composer and kept
+    /// here — reopening a chat reopens its posture.
+    pub mode: PermissionMode,
 }
 
 /// One full-text search hit: which session, what role, and a marked
@@ -277,6 +280,7 @@ impl SessionStore {
             ("last_activity_at", "TEXT"),
             ("workspace_root", "TEXT"),
             ("limited_at", "TEXT"),
+            ("mode", "TEXT NOT NULL DEFAULT 'supervised'"),
         ] {
             if !session_columns.contains(&column.to_string()) {
                 connection.execute(
@@ -333,7 +337,7 @@ impl SessionStore {
     ) -> Result<Vec<SessionSummary>, rusqlite::Error> {
         let connection = self.connection.lock().unwrap();
         let mut statement = connection
-            .prepare("SELECT id, title, input_tokens, output_tokens, last_context_tokens FROM sessions WHERE parent_id = ?1 ORDER BY id")?;
+            .prepare("SELECT id, title, input_tokens, output_tokens, last_context_tokens, mode FROM sessions WHERE parent_id = ?1 ORDER BY id")?;
         let rows = statement
             .query_map([parent.0 as i64], |row| {
                 Ok(SessionSummary {
@@ -346,6 +350,11 @@ impl SessionStore {
                     // the sidebar's lifecycle machine.
                     settled: false,
                     limited: false,
+                    mode: row
+                        .get::<_, String>(5)
+                        .ok()
+                        .and_then(|raw| raw.parse::<PermissionMode>().ok())
+                        .unwrap_or_default(),
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -417,7 +426,7 @@ impl SessionStore {
         let connection = self.connection.lock().unwrap();
         let mut statement = connection.prepare(
             "SELECT s.id, s.title, s.input_tokens, s.output_tokens, s.last_context_tokens,
-                    s.settled_at IS NOT NULL, s.limited_at IS NOT NULL
+                    s.settled_at IS NOT NULL, s.limited_at IS NOT NULL, s.mode
              FROM sessions s
              LEFT JOIN messages m ON m.session_id = s.id
              WHERE s.kind = 'chat'
@@ -433,6 +442,11 @@ impl SessionStore {
                 context_tokens: row.get::<_, i64>(4)?.max(0) as u64,
                 settled: row.get::<_, i64>(5)? != 0,
                 limited: row.get::<_, i64>(6)? != 0,
+                mode: row
+                    .get::<_, String>(7)
+                    .ok()
+                    .and_then(|raw| raw.parse::<PermissionMode>().ok())
+                    .unwrap_or_default(),
             })
         })?;
         rows.collect()
@@ -470,6 +484,21 @@ impl SessionStore {
                 THEN strftime('%Y-%m-%dT%H:%M:%fZ','now') ELSE NULL END
              WHERE id = ?1",
             rusqlite::params![session_id.0 as i64, limited],
+        )?;
+        Ok(())
+    }
+
+    /// Persists a session's permission mode. Applies from the next
+    /// turn on — a running turn keeps the mode it was built with.
+    pub fn set_session_mode(
+        &self,
+        session_id: SessionId,
+        mode: PermissionMode,
+    ) -> Result<(), rusqlite::Error> {
+        let connection = self.connection.lock().unwrap();
+        connection.execute(
+            "UPDATE sessions SET mode = ?2 WHERE id = ?1",
+            rusqlite::params![session_id.0 as i64, mode.as_str()],
         )?;
         Ok(())
     }
@@ -1041,6 +1070,36 @@ mod tests {
         let alive = "\u{1F468}\u{200D}\u{1F4BB} cau\u{00AD}tion\u{FE0F}";
         assert_eq!(strip_invisible(alive), alive);
         assert_eq!(strip_invisible(""), "");
+    }
+
+    #[test]
+    fn the_mode_persists_with_the_session() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = SessionStore::open(&tmp.path().join("store.db")).unwrap();
+        let session = store.create_session("chat").unwrap();
+        // A fresh session reads the default posture.
+        assert_eq!(
+            store.list_sessions().unwrap()[0].mode,
+            PermissionMode::Supervised
+        );
+
+        store
+            .set_session_mode(session, PermissionMode::AcceptEdits)
+            .unwrap();
+        assert_eq!(
+            store.list_sessions().unwrap()[0].mode,
+            PermissionMode::AcceptEdits
+        );
+
+        // A hand-edited row can't name a real mode — it reads as the
+        // default rather than inventing a posture.
+        let raw = rusqlite::Connection::open(tmp.path().join("store.db")).unwrap();
+        raw.execute("UPDATE sessions SET mode = 'weird'", [])
+            .unwrap();
+        assert_eq!(
+            store.list_sessions().unwrap()[0].mode,
+            PermissionMode::Supervised
+        );
     }
 
     #[test]

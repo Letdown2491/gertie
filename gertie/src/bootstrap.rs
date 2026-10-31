@@ -51,6 +51,14 @@ pub struct Bootstrap {
     /// The front's current session — subagent dispatch reads it to link
     /// worker runs to the chat that dispatched them.
     pub session_scope: gertie_core::SessionScope,
+    /// The front's active permission mode — the chat sets it per turn,
+    /// worker dispatch reads it so workers inherit the posture.
+    pub mode_scope: gertie_core::ModeScope,
+    /// Whether bash runs inside the Landlock sandbox. Static config,
+    /// mirrored into every turn's spec.
+    pub sandbox_bash: bool,
+    /// The mode new sessions open in (`[permissions] default_mode`).
+    pub default_mode: gertie_core::PermissionMode,
     pub snapshots: Option<Arc<gertie_core::SnapshotStore>>,
     pub system_prompt: Option<String>,
     /// Human-readable status line: endpoint, warnings, capability counts.
@@ -390,6 +398,9 @@ impl Bootstrap {
 
         let broker = Arc::new(gertie_core::PermissionBroker::new());
         let session_scope = gertie_core::SessionScope::new();
+        let mode_scope = gertie_core::ModeScope::new();
+        let sandbox_bash = config.security.sandbox_bash;
+        let default_mode = config.permissions.default_mode;
 
         // read_session: the model's way back into the record a context
         // compaction selected away. Scoped to the front's open session
@@ -443,6 +454,8 @@ impl Bootstrap {
                     workspace_root.clone(),
                     Some(store.clone()),
                     session_scope.clone(),
+                    mode_scope.clone(),
+                    sandbox_bash,
                 );
                 match &target.endpoint {
                     Some(pinned) => label.push_str(&format!(
@@ -484,6 +497,9 @@ impl Bootstrap {
             tools,
             broker,
             session_scope,
+            mode_scope,
+            sandbox_bash,
+            default_mode,
             snapshots,
             system_prompt,
             workspace_root,
@@ -537,6 +553,8 @@ impl Bootstrap {
                     root.to_path_buf(),
                     Some(self.store.clone()),
                     self.session_scope.clone(),
+                    self.mode_scope.clone(),
+                    self.sandbox_bash,
                 );
                 additions.push((tool.name().to_string(), Arc::new(tool)));
             }

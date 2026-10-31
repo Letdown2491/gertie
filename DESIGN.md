@@ -144,6 +144,16 @@ directories beyond the optional `gertie.toml`.
 - **Middle ground by default**: reads and searches auto-approved; **writes and bash always
   prompt**, with the diff shown. Both stricter and looser are config. (Persistent allowlists
   and per-workspace trust are deferred.)
+- **Permission modes live on the turn, not the broker** (shipped — `PermissionMode`): the
+  composer's selector picks a session's mode — *supervised* (everything asks), *accept-edits*
+  (exactly what the checkpoint hook snapshots runs unasked — reversible by construction;
+  bash still asks), *auto* (edits as accept-edits, plus bash that runs inside the Landlock
+  sandbox — with the sandbox off it asks like accept-edits, never pretending a kernel that
+  isn't enforcing is enforcing), *full_access* (nothing asks). The mode rides the `TurnSpec`,
+  fixed for the turn's life — a flip mid-turn applies next turn — and workers inherit it at
+  dispatch. Pre-approval converges on the same checkpoint-and-run path a human's approval
+  takes: the ledger is not optional. The tools' policy vet stays below every mode; persisted
+  per session (`sessions.mode`), default from `[permissions] default_mode`.
 - Subagents **inherit** the leader's broker and can never escalate it: worker asks surface in
   the same approval queue, tagged as worker cards. Depth-1 is structural — workers have no
   agent tools at all.

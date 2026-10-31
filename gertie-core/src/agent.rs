@@ -22,7 +22,7 @@ use crate::SessionScope;
 use crate::SessionStore;
 use crate::ToolRegistry;
 use crate::agent_loop::{LoopEvent, SharedHistory, TurnSpec, run_turn};
-use crate::permissions::{PermissionBroker, PromptSource};
+use crate::permissions::{ModeScope, PermissionBroker, PromptSource};
 use crate::snapshot::SnapshotStore;
 use crate::tool::{Tool, ToolResult};
 use futures_util::StreamExt;
@@ -239,6 +239,12 @@ pub struct AgentTool {
     store: Option<Arc<SessionStore>>,
     /// The front's current session, read at dispatch to link the run.
     scope: SessionScope,
+    /// The front's active permission mode, read at dispatch so the
+    /// worker's turn inherits the posture its leader ran under.
+    mode_scope: ModeScope,
+    /// Whether bash runs inside the Landlock sandbox — mirrored into
+    /// the worker's turn, whose Auto mode keys off the same fact.
+    sandbox_bash: bool,
 }
 
 #[derive(serde::Deserialize)]
@@ -263,6 +269,8 @@ impl AgentTool {
         workspace_root: PathBuf,
         store: Option<Arc<SessionStore>>,
         scope: SessionScope,
+        mode_scope: ModeScope,
+        sandbox_bash: bool,
     ) -> Self {
         Self {
             tool_name: Box::leak(
@@ -278,6 +286,8 @@ impl AgentTool {
             workspace_root,
             store,
             scope,
+            mode_scope,
+            sandbox_bash,
         }
     }
 
@@ -410,6 +420,10 @@ impl Tool for AgentTool {
                 workspace_root: Some(self.workspace_root.clone()),
                 context_window: self.context_window,
                 permission_broker: Some(self.broker.clone()),
+                // The worker runs under the posture its leader's turn
+                // was built with — read once at dispatch, never again.
+                permission_mode: self.mode_scope.get(),
+                sandbox_bash: self.sandbox_bash,
                 prompt_source: PromptSource::Worker,
                 system_prompt: Some(self.system_prompt.clone()),
             });
@@ -508,6 +522,8 @@ mod tests {
             tmp.path().to_path_buf(),
             None,
             crate::SessionScope::new(),
+            ModeScope::new(),
+            false,
         );
 
         // Poll to completion — no runtime needed for these futures.
@@ -565,6 +581,8 @@ mod tests {
             tmp.path().to_path_buf(),
             Some(store.clone()),
             scope,
+            ModeScope::new(),
+            false,
         );
 
         let future = tool.run(r#"{"brief_path": "brief.md"}"#);
@@ -637,6 +655,8 @@ mod tests {
             tmp.path().to_path_buf(),
             Some(store.clone()),
             scope,
+            ModeScope::new(),
+            false,
         );
 
         let future =
@@ -802,6 +822,8 @@ mod tests {
             PathBuf::from("/tmp"),
             None,
             crate::SessionScope::new(),
+            ModeScope::new(),
+            false,
         );
         // Path outside the root: canonicalize keeps it outside — rejected.
         assert!(tool.read_brief("../../etc/passwd").is_err());

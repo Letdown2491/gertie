@@ -1900,6 +1900,10 @@ impl ChatView {
             context_window,
             steer: Some(steer_rx),
             permission_broker: Some(self.broker.clone()),
+            // The composer's mode selector lands next; until then the
+            // front runs supervised.
+            permission_mode: gertie_core::PermissionMode::Supervised,
+            sandbox_bash: false,
             prompt_source: gertie_core::PromptSource::Leader,
             system_prompt: self.system_prompt.clone(),
         });

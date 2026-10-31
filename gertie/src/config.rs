@@ -26,6 +26,9 @@ pub struct Config {
     /// Security posture. Absent = defaults (sandbox off).
     #[serde(default)]
     pub security: SecurityConfig,
+    /// Permission defaults. Absent = supervised.
+    #[serde(default)]
+    pub permissions: PermissionsConfig,
     /// Auto-settle chats idle for at least this many days, on startup.
     /// Absent or zero = off: settle is manual until you opt in.
     #[serde(default)]
@@ -53,6 +56,16 @@ impl Default for SecurityConfig {
             sandbox_bash: false, // opt-in: the permission gate is the base layer
         }
     }
+}
+
+#[derive(Deserialize, Debug, Clone, Default)]
+pub struct PermissionsConfig {
+    /// New sessions' permission mode: "supervised", "accept_edits",
+    /// "auto" (sandboxed work runs unasked), or "full_access". A
+    /// session keeps whatever mode you set in the composer, per
+    /// session; this only sets the starting posture.
+    #[serde(default)]
+    pub default_mode: gertie_core::PermissionMode,
 }
 
 #[derive(Deserialize, Debug, Clone)]
