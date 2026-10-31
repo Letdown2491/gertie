@@ -69,6 +69,32 @@ impl Clone for SessionScope {
     }
 }
 
+/// Characters a human can paste but never see: bidirectional controls
+/// that reorder displayed text, zero-width spaces and joiners that
+/// glue tokens together, and Unicode tag characters — an invisible
+/// alphabet that smuggles text past the eye. Stripped from user text
+/// at the system's entrance, so the database, the transcript, and the
+/// prompt all hold the same words. Invisible characters that carry
+/// meaning survive: emoji ZWJ sequences, soft hyphens, and variation
+/// selectors are left alone.
+pub fn strip_invisible(text: &str) -> String {
+    fn invisible(c: char) -> bool {
+        matches!(c,
+            // Bidirectional controls: LRM, RLM, the Arabic letter mark,
+            // the embedding/override block, the isolate block.
+            '\u{061C}' | '\u{200E}' | '\u{200F}'
+            | '\u{202A}'..='\u{202E}'
+            | '\u{2066}'..='\u{2069}'
+            // Zero-width space, zero-width non-joiner, word joiner,
+            // and the byte-order mark read mid-text.
+            | '\u{200B}' | '\u{200C}' | '\u{2060}' | '\u{FEFF}'
+            // Tag characters: an invisible block of letters.
+            | '\u{E0000}'..='\u{E007F}'
+        )
+    }
+    text.chars().filter(|c| !invisible(*c)).collect()
+}
+
 /// Who authored a message.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Role {
@@ -994,6 +1020,27 @@ mod tests {
 
     fn memory_store() -> SessionStore {
         SessionStore::open(Path::new(":memory:")).expect("open in-memory store")
+    }
+
+    #[test]
+    fn strip_invisible_removes_bidi_zero_width_and_tag_characters() {
+        // Zero-width spacing and joiners, the bidi marks, the
+        // embeddings/overrides, the isolates, the Arabic letter mark,
+        // and the tag alphabet: all vanish.
+        let dirty = "pay\u{200B}to\u{2060}x\u{FEFF} \u{200E}a\u{200F}b\u{061C}c";
+        assert_eq!(strip_invisible(dirty), "paytox abc");
+        let flipped = "1\u{202E}st\u{202C}2 \u{2066}iso\u{2069}";
+        assert_eq!(strip_invisible(flipped), "1st2 iso");
+        assert_eq!(strip_invisible("ok\u{E0000}\u{E0041}"), "ok");
+    }
+
+    #[test]
+    fn strip_invisible_leaves_meaningful_invisible_text_alone() {
+        // Emoji ZWJ sequences, soft hyphens, and variation selectors
+        // carry meaning — stripping would corrupt the words they shape.
+        let alive = "\u{1F468}\u{200D}\u{1F4BB} cau\u{00AD}tion\u{FE0F}";
+        assert_eq!(strip_invisible(alive), alive);
+        assert_eq!(strip_invisible(""), "");
     }
 
     #[test]

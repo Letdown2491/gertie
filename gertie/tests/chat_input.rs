@@ -192,6 +192,50 @@ fn typing_and_enter_persists_the_user_message() {
 }
 
 #[test]
+fn invisible_characters_are_stripped_when_a_message_is_sent() {
+    let mut fixture = fixture();
+
+    // Bidi and zero-width characters ride in with whatever they were
+    // pasted from; entering the message strips them at the system's
+    // entrance.
+    fixture.act(|window, cx| {
+        window.input("pay\u{200B}to\u{202E}x\u{200F}", cx);
+        window.press("enter", cx);
+    });
+
+    let session_id = fixture
+        .cx
+        .update(|cx| {
+            fixture
+                .view
+                .upgrade()
+                .expect("view alive")
+                .read(cx)
+                .session_id()
+        })
+        .expect("session created lazily");
+    // The record and the session title hold the cleaned words only.
+    let messages = fixture.store.load_messages(session_id).unwrap();
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0].content, "paytox");
+    assert_eq!(fixture.store.list_sessions().unwrap()[0].title, "paytox");
+    // The user hears that cleaning happened.
+    let notices = fixture.cx.update(|cx| {
+        fixture
+            .view
+            .upgrade()
+            .expect("view alive")
+            .read(cx)
+            .notice_texts_for_test()
+    });
+    assert!(
+        notices
+            .iter()
+            .any(|text| text.contains("Invisible characters"))
+    );
+}
+
+#[test]
 fn the_sidebar_shows_only_real_conversations() {
     let mut fixture = fixture();
 

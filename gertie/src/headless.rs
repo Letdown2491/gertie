@@ -47,7 +47,9 @@ pub fn run(prompt: Option<String>, yes: bool, config_path: Option<PathBuf>) -> i
             text
         }
     };
-    let prompt = prompt.trim().to_string();
+    // Same entrance rule as the app: invisible characters never reach
+    // a prompt, so a headless run reads exactly what the UI would send.
+    let prompt = gertie_core::strip_invisible(prompt.trim());
     if prompt.is_empty() {
         eprintln!("error: empty prompt");
         return 2;

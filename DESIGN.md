@@ -154,6 +154,12 @@ directories beyond the optional `gertie.toml`.
   get read-only system paths, write only the workspace and /tmp. Fail-closed — a kernel that
   can't enforce refuses the spawn rather than downgrading silently. The prompt gate + hard
   deny list remain the base layer.
+- **Invisible characters never reach a prompt**: bidi controls, zero-width spacing and
+  joiners, and Unicode tag letters are stripped from user text at the system's entrance —
+  composer send (queued, steered, and template-expanded text included) and `gertie run`
+  alike — so the database, the transcript, and the prompt hold the same words. Emoji ZWJ
+  sequences, soft hyphens, and variation selectors survive; a transcript notice says when
+  cleaning happened.
 
 ## Tools
 

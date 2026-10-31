@@ -445,6 +445,21 @@ impl ChatView {
         self.turns.len()
     }
 
+    /// The text of the transcript's notice rows, for tests.
+    pub fn notice_texts_for_test(&self) -> Vec<String> {
+        self.turns
+            .iter()
+            .filter_map(|turn| match turn {
+                Turn::Message {
+                    role: Role::System,
+                    text,
+                    ..
+                } => Some(text.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
     /// Whether the palette is on screen, for tests.
     pub fn palette_open_for_test(&self) -> bool {
         self.palette_open
@@ -1599,7 +1614,12 @@ impl ChatView {
     }
 
     fn send(&mut self, queue_only: bool, window: &mut Window, cx: &mut Context<Self>) {
-        let typed = self.input.read(cx).value().trim().to_string();
+        let raw = self.input.read(cx).value().trim().to_string();
+        // Invisible characters never reach a prompt — or a title. Bidi
+        // controls and zero-width letters can't be typed but paste in
+        // fine; stripped here at the system's entrance, so the record,
+        // the transcript, and the model all read the same words.
+        let typed = gertie_core::strip_invisible(&raw);
         if typed.is_empty() {
             return;
         }
@@ -1671,6 +1691,14 @@ impl ChatView {
             },
             None => typed.clone(),
         };
+        // A template's body is front-authored too, so it rides through
+        // the same strip. One notice when anything was actually
+        // removed — the message itself proceeds cleaned.
+        let cleaned = gertie_core::strip_invisible(&text);
+        if cleaned != text || typed != raw {
+            self.push_notice("Invisible characters were removed from the message.", cx);
+        }
+        let text = cleaned;
         // The run is busy: the words still land. Enter steers the
         // running turn (the model reads it at the next round
         // boundary); the secondary Enter queues a follow-up that
