@@ -38,6 +38,16 @@ pub trait Tool: Send + Sync {
         Ok(())
     }
 
+    /// Whether the capability comes from outside gertie — an MCP server,
+    /// whose path handling and side effects gertie cannot vouch for.
+    /// Third-party tools face the prompt in every mode except the one
+    /// where the human asked for nothing to ask (full_access): a mode
+    /// that trusts gertie's own checkpoint-and-revert machinery must
+    /// not silently extend that trust to code it didn't write.
+    fn third_party(&self) -> bool {
+        false
+    }
+
     /// Runs the tool with the model's JSON arguments.
     fn run<'a>(
         &'a self,

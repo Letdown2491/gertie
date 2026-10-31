@@ -162,12 +162,16 @@ impl PermissionMode {
     /// broker. `checkpointed` — the checkpoint hook will snapshot
     /// what the call touches, so the change is reversible;
     /// `sandboxed_bash` — the process runs bash inside the Landlock
-    /// sandbox.
-    pub fn auto_allows(&self, checkpointed: bool, sandboxed_bash: bool) -> bool {
+    /// sandbox; `third_party` — an MCP tool, whose side effects
+    /// gertie cannot vouch for. The reversibility argument only
+    /// covers gertie's own tools: a third-party tool's notion of a
+    /// "path" is its own, so accept-edits and auto never pre-approve
+    /// one — every mode short of full_access asks.
+    pub fn auto_allows(&self, checkpointed: bool, sandboxed_bash: bool, third_party: bool) -> bool {
         match self {
             PermissionMode::Supervised => false,
-            PermissionMode::AcceptEdits => checkpointed,
-            PermissionMode::Auto => checkpointed || sandboxed_bash,
+            PermissionMode::AcceptEdits => checkpointed && !third_party,
+            PermissionMode::Auto => (checkpointed && !third_party) || sandboxed_bash,
             PermissionMode::FullAccess => true,
         }
     }

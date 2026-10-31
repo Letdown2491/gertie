@@ -347,8 +347,11 @@ pub fn run_turn(spec: TurnSpec) -> BoxStream<'static, LoopEvent> {
                                 &call.arguments,
                                 workspace_root.as_deref(),
                             );
-                            let pre_approved = permission_mode
-                                .auto_allows(checkpoint_target.is_some(), sandbox_bash);
+                            let pre_approved = permission_mode.auto_allows(
+                                checkpoint_target.is_some(),
+                                sandbox_bash,
+                                tool.third_party(),
+                            );
                             let decision = match (&permission_broker, pre_approved) {
                                 // The mode settled it before any ask.
                                 (_, true) => Ok(PermissionDecision::Approve),
@@ -658,19 +661,120 @@ fn argument_path(arguments: &str) -> Option<std::path::PathBuf> {
 
 /// The path the checkpoint hook snapshots: the tool's argument, with a
 /// relative name resolved against the workspace root — the same
-/// resolution every path-naming tool applies. Absolute paths and a
-/// missing root pass through.
+/// resolution every path-naming tool applies. The result is always
+/// *contained*: lexical `..` walks plus a canonicalize check on the
+/// nearest existing ancestor, the same rules the file tools' resolve()
+/// applies. A path that escapes (or an absolute one outside the
+/// workspace) is None — the ask is not pre-approvable, because the
+/// checkpoint's reversibility argument does not reach past the
+/// workspace. Absolute paths inside the workspace are contained and
+/// snapshot-able; absolute paths outside are None.
 fn checkpoint_path(arguments: &str, root: Option<&std::path::Path>) -> Option<std::path::PathBuf> {
     let path = argument_path(arguments)?;
-    match root {
-        Some(root) if !path.is_absolute() => Some(root.join(path)),
-        _ => Some(path),
+    let root = root?;
+    if path.is_absolute() {
+        return contained(root, &path);
+    }
+    let joined = root.join(path);
+    contained(root, &joined)
+}
+
+/// Containment for a checkpoint target: the nearest existing ancestor
+/// must canonicalize back inside the workspace root — a symlink inside
+/// the workspace pointing out of it turns a pre-approved write into
+/// filesystem access the permission gate never saw. An unresolvable
+/// path (broken chain, permission error) is None: fail closed.
+fn contained(root: &std::path::Path, path: &std::path::Path) -> Option<std::path::PathBuf> {
+    // Lexical check first: whatever remains after the root's prefix may
+    // only use `..` to cancel normals it first added.
+    let suffix = path.strip_prefix(root).ok()?;
+    let mut offset: isize = 0;
+    for component in suffix.components() {
+        match component {
+            std::path::Component::ParentDir => offset -= 1,
+            std::path::Component::Normal(_) => offset += 1,
+            std::path::Component::CurDir => {}
+            std::path::Component::RootDir | std::path::Component::Prefix(_) => return None,
+        }
+        if offset < 0 {
+            return None;
+        }
+    }
+    let canonical_root = root.canonicalize().ok()?;
+    // Walk up to the nearest ancestor that exists and canonicalize it;
+    // the nonexistent tail is joined back on.
+    let mut ancestor = path.to_path_buf();
+    let mut tail = Vec::new();
+    loop {
+        match ancestor.canonicalize() {
+            Ok(resolved) => {
+                if !resolved.starts_with(&canonical_root) {
+                    return None;
+                }
+                let mut contained = resolved;
+                for part in tail.iter().rev() {
+                    contained = contained.join(part);
+                }
+                return Some(contained);
+            }
+            Err(_) => {
+                let last = ancestor.file_name().map(std::path::PathBuf::from)?;
+                ancestor = ancestor.parent()?.to_path_buf();
+                tail.push(last);
+            }
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn checkpoint_paths_stay_inside_the_workspace() {
+        let root = tempfile::tempdir().unwrap();
+        let root = root.path().canonicalize().unwrap();
+        std::fs::create_dir_all(root.join("deep/dir")).unwrap();
+        std::fs::write(root.join("exists.txt"), "x").unwrap();
+
+        let ok = |args: &str| checkpoint_path(args, Some(root.as_path())).expect("contained");
+        // A plain relative name...
+        assert_eq!(ok(r#"{"path": "thing.txt"}"#), root.join("thing.txt"));
+        // ...one in a directory that exists...
+        assert_eq!(
+            ok(r#"{"path": "deep/thing.txt"}"#),
+            root.join("deep/thing.txt")
+        );
+        // ...and a new file under an existing directory (the tail is
+        // joined back onto the canonicalized ancestor).
+        assert_eq!(
+            ok(r#"{"path": "deep/dir/new.txt"}"#),
+            root.join("deep/dir/new.txt")
+        );
+        // `..` that stays inside is fine.
+        assert_eq!(
+            ok(r#"{"file_path": "deep/../thing.txt"}"#),
+            root.join("thing.txt")
+        );
+
+        let refused = |args: &str| checkpoint_path(args, Some(root.as_path())).is_none();
+        // Absolute paths outside the workspace — the model's home
+        // directory is not the workspace's business.
+        assert!(refused(r#"{"path": "/etc/passwd"}"#));
+        assert!(refused(r#"{"file_path": "/home/someone/.bashrc"}"#));
+        // `..` that walks out.
+        assert!(refused(r#"{"path": "../../escape.txt"}"#));
+        // A symlink inside the workspace pointing out of it.
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink("/etc", root.join("sneaky")).unwrap();
+            assert!(refused(r#"{"path": "sneaky/passwd"}"#));
+        }
+        // No workspace root at all: nothing is pre-approvable.
+        assert!(checkpoint_path(r#"{"path": "thing.txt"}"#, None).is_none());
+        // Arguments with no path at all.
+        assert!(checkpoint_path(r#"{"command": "ls"}"#, Some(root.as_path())).is_none());
+    }
+
     use crate::Event;
     use crate::ToolResult;
     use crate::permissions::PermissionBroker;

@@ -485,8 +485,14 @@ impl Tool for McpTool {
     }
 
     // Third-party code: gertie cannot know whether it mutates, so every
-    // call prompts. The user is the capability system.
+    // call prompts. The user is the capability system — and the mode
+    // machinery honours this too: accept-edits' pre-approval stops at
+    // gertie's own tools (see `third_party`).
     fn mutates(&self) -> bool {
+        true
+    }
+
+    fn third_party(&self) -> bool {
         true
     }
 
