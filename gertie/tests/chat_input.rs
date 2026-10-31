@@ -880,3 +880,106 @@ fn a_worker_ask_bubbles_into_the_transcript_and_the_answer_reaches_the_worker() 
             .collect::<Vec<_>>()
     );
 }
+
+/// The §2.4 pin: ✕ deletes without a "sure?" step — the row leaves
+/// every list at once and the undo toast is the speed bump. The store
+/// row survives the five-second window; when it closes, the purge task
+/// removes the row for real.
+#[test]
+fn deleting_hides_the_session_then_the_undo_window_purges_it() {
+    let store = two_session_store();
+    let mut fixture = fixture_with_store(store.clone());
+
+    fixture.act(|window, cx| {
+        window.click("delete-1", cx);
+    });
+    fixture.act(|window, cx| {
+        assert!(
+            window.try_find("session-1").is_none(),
+            "the row leaves the list the moment ✕ is clicked"
+        );
+        assert!(
+            window.try_find("undo-delete").is_some(),
+            "the undo toast is up for the window's duration"
+        );
+    });
+    assert_eq!(
+        store.list_sessions().unwrap().len(),
+        2,
+        "the store row survives while the window is open"
+    );
+
+    // The window closes: the purge task deletes the row and the toast
+    // goes with it.
+    fixture
+        .cx
+        .background_executor
+        .advance_clock(std::time::Duration::from_secs(6));
+    settle(&mut fixture.cx, fixture.window.into());
+    assert_eq!(store.list_sessions().unwrap().len(), 1);
+    fixture.act(|window, cx| {
+        assert!(
+            window.try_find("undo-delete").is_none(),
+            "a spent window has nothing left to undo"
+        );
+    });
+}
+
+/// Undo (the toast's button, or Ctrl+Z outside the composer) pops the
+/// pending delete: the row returns untouched, and the purge task that
+/// fires later finds nothing to do.
+#[test]
+fn undo_brings_a_deleted_session_back_before_the_window_closes() {
+    let store = two_session_store();
+    let mut fixture = fixture_with_store(store.clone());
+
+    fixture.act(|window, cx| {
+        window.click("delete-1", cx);
+    });
+    fixture.act(|window, cx| {
+        window.click("undo-delete", cx);
+    });
+    fixture.act(|window, cx| {
+        assert!(
+            window.try_find("session-1").is_some(),
+            "the undone row returns to its list"
+        );
+        assert!(
+            window.try_find("undo-delete").is_none(),
+            "the toast is spent"
+        );
+    });
+
+    // The window's task still fires — and finds nothing pending.
+    fixture
+        .cx
+        .background_executor
+        .advance_clock(std::time::Duration::from_secs(6));
+    settle(&mut fixture.cx, fixture.window.into());
+    assert_eq!(
+        store.list_sessions().unwrap().len(),
+        2,
+        "undo beat the purge: both sessions survive"
+    );
+}
+
+/// Ctrl+Z outside the composer fires the undo-delete action — the
+/// binding is global (no context), so it works from wherever focus
+/// sits that doesn't consume the keystroke.
+#[test]
+fn ctrl_z_outside_the_composer_undoes_the_delete() {
+    let store = two_session_store();
+    let mut fixture = fixture_with_store(store);
+    fixture.act(|window, cx| {
+        window.click("delete-1", cx);
+    });
+    fixture.act(|window, cx| {
+        window.press("ctrl-z", cx);
+    });
+    fixture.act(|window, cx| {
+        assert!(
+            window.try_find("session-1").is_some(),
+            "ctrl-z undid the delete via the global binding"
+        );
+    });
+}

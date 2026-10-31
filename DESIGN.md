@@ -298,7 +298,11 @@ live turn can't race it. `settle_command = "cargo clean"` is the reclaim hook: a
 manual settle runs it in the settling session's recorded workspace (recorded at first
 send, so whichever tab presses ✓ later, the command lands in the right checkout) —
 off the UI thread, outcome surfaced in the transcript; the sweep never runs commands,
-and a session older than the recording says so instead of guessing a folder. Snooze
+and a session older than the recording says so instead of guessing a folder. Destructive
+list actions keep no dialog: ✕ removes a session from every list at once — sidebar, fold,
+palette — and a toast at the sidebar's foot holds the store row for a five-second undo
+window (button or Ctrl+Z outside the composer, where it stays text undo); the window
+closing purges the row, undo popping the entry beats it. Snooze
 still waits for the Limited state that gives it a clock. The tab strip carries the
 working marker — a live turn shows ● on its tab, the attention signal for work
 running while another tab is up.

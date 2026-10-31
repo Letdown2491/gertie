@@ -84,17 +84,17 @@ enum Turn {
     LoadEarlier,
 }
 
-actions!(gertie, [CloseTurnDiff]);
+actions!(gertie, [CloseTurnDiff, UndoDeleteSession]);
 
 /// The chat surface's key map, bound once at app start: escape closes
-/// the turn-diff panel while focus sits inside it. (The palette binds
-/// its own keys — `palette::bind_palette_keys` and the kit.)
+/// the turn-diff panel while focus sits inside it, and Ctrl+Z outside
+/// the composer undoes a sidebar delete inside its window (inside the
+/// composer it stays text undo — the input consumes the keystroke).
 pub fn bind_chat_keys(cx: &mut App) {
-    cx.bind_keys([KeyBinding::new(
-        "escape",
-        CloseTurnDiff,
-        Some("TurnDiffPanel"),
-    )]);
+    cx.bind_keys([
+        KeyBinding::new("escape", CloseTurnDiff, Some("TurnDiffPanel")),
+        KeyBinding::new("ctrl-z", UndoDeleteSession, None::<&str>),
+    ]);
 }
 
 /// One file's change in the turn-diff panel, resolved at open time —
@@ -129,6 +129,16 @@ enum TurnDiffRow {
     Diff(crate::diff::Line),
     /// A muted note: unchanged, omitted count, binary refusal.
     Note(String),
+}
+
+/// A session inside its undo window: ✕ clicked, store row still there,
+/// purge task scheduled. The vec membership is the "not yet purged"
+/// marker — undo removes the entry, the purge finds nothing to do.
+struct PendingDelete {
+    session_id: SessionId,
+    /// The title at delete time — the toast speaks in past tense about
+    /// a row that no longer exists to ask.
+    title: String,
 }
 
 pub struct ChatView {
@@ -213,10 +223,11 @@ pub struct ChatView {
     /// model in the tool result. Created on first render (that's where
     /// a window handle exists), dropped when the card is answered.
     approval_replies: std::collections::HashMap<usize, Entity<InputState>>,
-    /// Two-step delete: the row whose ✕ was clicked once — the second
-    /// click confirms. A destructive action with no dialog needs a
-    /// speed bump.
-    confirming_delete: Option<SessionId>,
+    /// Deleted-but-restorable sessions: off every list the moment ✕ is
+    /// clicked, still in the store behind the undo toast at the
+    /// sidebar's foot. The purge task drops the row when the window
+    /// closes; undo pulls the entry back out first.
+    pending_deletes: Vec<PendingDelete>,
     /// Whether the sidebar's settled fold is expanded. Collapsed by
     /// default — settled work is put down, not gone; one click brings
     /// it back.
@@ -386,7 +397,7 @@ impl ChatView {
             input,
             renaming: None,
             rename_input,
-            confirming_delete: None,
+            pending_deletes: Vec::new(),
             settled_open: false,
             panel: Panel::None,
             worker_runs: Vec::new(),
@@ -705,10 +716,22 @@ impl ChatView {
 
     /// The palette's query callback: the store's FTS index answers,
     /// bounded — twenty hits is a page a human can actually scan.
+    /// Sessions inside their undo window never show up here.
     fn palette_search(&mut self, query: &str, cx: &mut Context<Self>) {
         self.palette_hits.clear();
         if !query.trim().is_empty() {
-            self.palette_hits = self.store.search(query, 20).unwrap_or_default();
+            self.palette_hits = self
+                .store
+                .search(query, 20)
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|hit| {
+                    !self
+                        .pending_deletes
+                        .iter()
+                        .any(|pending| pending.session_id == hit.session_id)
+                })
+                .collect();
         }
         cx.notify();
     }
@@ -1153,7 +1176,6 @@ impl ChatView {
     /// Puts a sidebar row into rename mode, prefilled with its title.
     fn start_rename(&mut self, session_id: SessionId, window: &mut Window, cx: &mut Context<Self>) {
         self.renaming = Some(session_id);
-        self.confirming_delete = None;
         let title = self
             .sessions
             .iter()
@@ -1182,37 +1204,78 @@ impl ChatView {
         cx.notify();
     }
 
-    /// The ✕ on a sidebar row: first click arms the confirm ("sure?"),
-    /// second click deletes. Deleting the open session returns to the
-    /// blank transcript.
+    /// The ✕ on a sidebar row: the session leaves every list right now,
+    /// but the store row survives a five-second undo window — the toast
+    /// at the sidebar's foot is the speed bump the "sure?" step used to
+    /// be. Undo puts it back; the window closing purges it for real.
+    /// Deleting the open session returns to the blank transcript.
     fn delete_clicked(
         &mut self,
         session_id: SessionId,
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        // A streaming transcript can't be torn down; also refuse to arm
-        // a confirm for it so the double-click can't race the stream.
+        // A streaming transcript can't be torn down; also no toast for
+        // a row that's already inside its undo window.
         if self.streaming && self.session_id == Some(session_id) {
             return;
         }
-        if self.confirming_delete == Some(session_id) {
-            self.confirming_delete = None;
-            if self.store.delete_session(session_id).is_ok() && self.session_id == Some(session_id)
-            {
-                self.session_id = None;
-                self.turns.clear();
-                self.approval_replies.clear();
-                self.last_db_id = None;
-                self.streaming_assistant = None;
-                self.history.blocking_lock().clear();
-            }
+        let Some(summary) = self.sessions.iter().find(|s| s.id == session_id) else {
+            return;
+        };
+        self.pending_deletes.push(PendingDelete {
+            session_id,
+            title: summary.title.clone(),
+        });
+        self.renaming = None;
+        if self.session_id == Some(session_id) {
+            // The human asked for this transcript gone: blank it now,
+            // not after the purge — the view never contradicts ✕.
+            self.session_id = None;
+            self.turns.clear();
+            self.approval_replies.clear();
+            self.last_db_id = None;
+            self.streaming_assistant = None;
+            self.history.blocking_lock().clear();
+        }
+        self.refresh_agent_runs(cx);
+        self.sync_list(cx);
+        cx.notify();
+
+        // The window itself: a task holding the deadline. Undo removes
+        // the entry first, so this purge finds nothing and does less.
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(Duration::from_secs(5)).await;
+            let _ = this.update(cx, |this, cx| this.purge_expired_delete(session_id, cx));
+        })
+        .detach();
+    }
+
+    /// The undo window closed on `session_id`: really delete it. If the
+    /// human undid first, the entry is gone and this is a no-op.
+    fn purge_expired_delete(&mut self, session_id: SessionId, cx: &mut Context<Self>) {
+        if !self
+            .pending_deletes
+            .iter()
+            .any(|pending| pending.session_id == session_id)
+        {
+            return;
+        }
+        self.pending_deletes
+            .retain(|pending| pending.session_id != session_id);
+        let _ = self.store.delete_session(session_id);
+        self.sessions = self.store.list_sessions().unwrap_or_default();
+        self.refresh_agent_runs(cx);
+        cx.notify();
+    }
+
+    /// Undo on the toast (button or Ctrl+Z outside the composer): pop
+    /// the most recent pending delete — the row returns to its lists
+    /// untouched, the store row was never gone.
+    fn undo_delete_clicked(&mut self, cx: &mut Context<Self>) {
+        if self.pending_deletes.pop().is_some() {
             self.sessions = self.store.list_sessions().unwrap_or_default();
             self.refresh_agent_runs(cx);
-            self.sync_list(cx);
-        } else {
-            self.confirming_delete = Some(session_id);
-            self.renaming = None;
             cx.notify();
         }
     }
@@ -2956,10 +3019,26 @@ fn diff_lines(call: &ToolCall, cx: &App) -> Option<AnyElement> {
 }
 
 impl ChatView {
+    /// The sessions the UI may show: everything in the store except
+    /// rows inside their undo window — ✕ already answered, the purge
+    /// pending. The sidebar, its fold, and the palette all look here.
+    fn visible_sessions(&self) -> Vec<gertie_core::SessionSummary> {
+        self.sessions
+            .iter()
+            .filter(|summary| {
+                !self
+                    .pending_deletes
+                    .iter()
+                    .any(|pending| pending.session_id == summary.id)
+            })
+            .cloned()
+            .collect()
+    }
+
     /// The sidebar's active rows: every session not yet settled, in the
     /// store's attention order (most recent activity first).
     fn active_session_rows(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
-        self.sessions
+        self.visible_sessions()
             .iter()
             .filter(|summary| !summary.settled)
             .map(|summary| self.session_row(summary, cx))
@@ -2968,7 +3047,7 @@ impl ChatView {
 
     /// The fold's rows: settled work, muted, restore affordance up front.
     fn settled_session_rows(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
-        self.sessions
+        self.visible_sessions()
             .iter()
             .filter(|summary| summary.settled)
             .map(|summary| self.session_row(summary, cx))
@@ -2991,23 +3070,12 @@ impl ChatView {
                 .child(Input::new(&self.rename_input).small())
                 .into_any_element();
         }
-        let confirming = self.confirming_delete == Some(session_id);
-        let delete_label = if confirming { "sure?" } else { "✕" };
         let is_active = self.session_id == Some(session_id);
         let delete_button = Button::new(SharedString::from(format!("delete-{}", session_id.0)))
-            .label(delete_label)
+            .label("✕")
             .xsmall()
             .ghost()
-            .tooltip(if confirming {
-                "Click again to delete permanently"
-            } else {
-                "Delete this conversation"
-            });
-        let delete_button = if confirming {
-            delete_button.danger()
-        } else {
-            delete_button
-        };
+            .tooltip("Delete this conversation — five seconds to undo");
         h_flex()
             .w_full()
             .min_w_0()
@@ -3110,6 +3178,11 @@ impl Render for ChatView {
             .on_action(cx.listener(
                 |this, _: &CloseTurnDiff, _, cx| this.close_turn_diff(cx),
             ))
+            // Ctrl+Z outside the composer: undo a sidebar delete still
+            // inside its window.
+            .on_action(cx.listener(|this, _: &UndoDeleteSession, _, cx| {
+                this.undo_delete_clicked(cx)
+            }))
             // h_flex centers children on the cross axis by default —
             // stretch instead, so the main row fills the window height
             // and the transcript list keeps its flex sizing.
@@ -3155,14 +3228,16 @@ impl Render for ChatView {
                             // The settled fold: put-down work, collapsed
                             // by default — findable, never in the way.
                             .when(
-                                self.sessions.iter().any(|summary| summary.settled),
+                                self.visible_sessions()
+                                    .iter()
+                                    .any(|summary| summary.settled),
                                 |col| {
                                     col.child(
                                         Button::new("settled-fold")
                                             .label(format!(
                                                 "{} SETTLED ({})",
                                                 if self.settled_open { "▾" } else { "▸" },
-                                                self.sessions
+                                                self.visible_sessions()
                                                     .iter()
                                                     .filter(|summary| summary.settled)
                                                     .count()
@@ -3190,6 +3265,49 @@ impl Render for ChatView {
                             .px_3()
                             .pt_2()
                             .pb_3()
+                            // The undo toast: sessions inside their
+                            // five-second window, newest first. One
+                            // line, one button — the whole mechanism.
+                            .when(!self.pending_deletes.is_empty(), |util| {
+                                let newest = self
+                                    .pending_deletes
+                                    .last()
+                                    .expect("non-empty just checked");
+                                let older = self.pending_deletes.len() - 1;
+                                util.child(
+                                    h_flex()
+                                        .gap_2()
+                                        .items_center()
+                                        .child(
+                                            div()
+                                                .flex_1()
+                                                .min_w_0()
+                                                .truncate()
+                                                .text_size(px(11.))
+                                                .text_color(cx.theme().muted_foreground)
+                                                .child(if older > 0 {
+                                                    format!(
+                                                        "deleted “{}” and {} more",
+                                                        newest.title, older
+                                                    )
+                                                } else {
+                                                    format!("deleted “{}”", newest.title)
+                                                }),
+                                        )
+                                        .child(
+                                            Button::new("undo-delete")
+                                                .label("Undo")
+                                                .xsmall()
+                                                .outline()
+                                                .tooltip("Put it back (Ctrl+Z outside the composer)")
+                                                .on_click(cx.listener(
+                                                    |this, _, _, cx| {
+                                                        this.undo_delete_clicked(cx)
+                                                    },
+                                                )),
+                                        ),
+                                )
+                            })
                             .child(
                                 Button::new("search-history")
                                     .label("search")
