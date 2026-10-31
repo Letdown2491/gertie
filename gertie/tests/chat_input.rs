@@ -71,7 +71,7 @@ fn fixture_with_snapshots() -> Fixture {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn fixture_built(
+fn fixture_full(
     store: Arc<SessionStore>,
     snapshots: Option<Arc<gertie_core::SnapshotStore>>,
     workspace: Option<std::path::PathBuf>,
@@ -84,6 +84,8 @@ fn fixture_built(
     broker: Option<Arc<gertie_core::PermissionBroker>>,
     // Extra tools beside the builtins (None = builtins alone).
     extra_tools: Vec<Arc<dyn gertie_core::Tool>>,
+    // The worktree branch naming (None = a shared-workspace tab).
+    naming: Option<gertie::worktree::BranchNaming>,
     // The rewind safety guard (None = single-tab tests, nothing ever
     // streams elsewhere).
     guard: Option<gertie::chat::LiveElsewhere>,
@@ -129,6 +131,7 @@ fn fixture_built(
                     gertie_core::PermissionMode::Supervised,
                     panel,
                     true,
+                    naming,
                     guard.clone(),
                     window,
                     cx,
@@ -147,6 +150,31 @@ fn fixture_built(
         snapshots,
         hold: Vec::new(),
     }
+}
+
+/// The common fixture: no naming (a shared-workspace tab), no guard.
+#[allow(clippy::too_many_arguments)]
+fn fixture_built(
+    store: Arc<SessionStore>,
+    snapshots: Option<Arc<gertie_core::SnapshotStore>>,
+    workspace: Option<std::path::PathBuf>,
+    settle_command: Option<String>,
+    provider: Option<Arc<gertie_providers::AnyProvider>>,
+    broker: Option<Arc<gertie_core::PermissionBroker>>,
+    extra_tools: Vec<Arc<dyn gertie_core::Tool>>,
+    guard: Option<gertie::chat::LiveElsewhere>,
+) -> Fixture {
+    fixture_full(
+        store,
+        snapshots,
+        workspace,
+        settle_command,
+        provider,
+        broker,
+        extra_tools,
+        None,
+        guard,
+    )
 }
 
 impl Fixture {
@@ -477,6 +505,7 @@ fn markdown_and_tool_rows_draw_clean() {
                     gertie_core::PermissionMode::Supervised,
                     panel,
                     true,
+                    None,
                     guard.clone(),
                     window,
                     cx,
@@ -2547,5 +2576,81 @@ fn a_picked_session_ranks_first_when_the_query_returns() {
     assert_eq!(
         after[0], beta,
         "the picked session ranks first on the repeated query"
+    );
+}
+
+#[test]
+fn a_worktree_tabs_first_message_names_its_branch() {
+    // A real repo, a real worktree under it, the chat bound to the
+    // worktree with naming on: the send that creates the session also
+    // names the branch.
+    let repo = tempfile::tempdir().expect("repo dir");
+    let run = |args: &[&str]| {
+        std::process::Command::new("git")
+            .args(args)
+            .current_dir(repo.path())
+            .output()
+            .expect("git runs")
+    };
+    run(&["init"]);
+    std::fs::write(repo.path().join("f.txt"), "x").unwrap();
+    run(&["add", "-A"]);
+    run(&[
+        "-c",
+        "user.email=g@t",
+        "-c",
+        "user.name=g",
+        "commit",
+        "-m",
+        "init",
+    ]);
+
+    let root = gertie::worktree::create(repo.path(), "tab-0").expect("worktree created");
+    let naming = gertie::worktree::BranchNaming {
+        root: root.clone(),
+        prefix: "gertie/".into(),
+    };
+    let store = Arc::new(SessionStore::open(Path::new(":memory:")).expect("memory store"));
+    let mut fixture = fixture_full(
+        store,
+        None,
+        Some(root.clone()),
+        None,
+        None,
+        None,
+        Vec::new(),
+        Some(naming),
+        None,
+    );
+    fixture.hold.push(repo);
+
+    fixture.act(|window, cx| {
+        window.input("Fix the flaky widget test", cx);
+        window.press("enter", cx);
+    });
+
+    // The session exists (the send ran end to end) and the branch was
+    // renamed from tab-0 to the first message's slug under the prefix.
+    let _ = fixture
+        .cx
+        .update(|cx| {
+            fixture
+                .view
+                .upgrade()
+                .expect("view alive")
+                .read(cx)
+                .session_id()
+        })
+        .expect("session created lazily");
+    let branch = std::process::Command::new("git")
+        .arg("-C")
+        .arg(&root)
+        .args(["rev-parse", "--abbrev-ref", "HEAD"])
+        .output()
+        .expect("git runs");
+    let branch = String::from_utf8_lossy(&branch.stdout);
+    assert!(
+        branch.contains("gertie/fix-the-flaky-widget-test"),
+        "the branch is the first message's slug under the prefix, got: {branch}"
     );
 }

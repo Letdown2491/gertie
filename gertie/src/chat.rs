@@ -361,6 +361,11 @@ pub struct ChatView {
     /// The rewind safety guard, built by the workspace (see
     /// `LiveElsewhere`): consulted before any file restore.
     live_elsewhere: LiveElsewhere,
+    /// The worktree branch naming, when this chat works in its own
+    /// worktree: the branch is renamed from the session's first
+    /// message, so a tab reads `gertie/fix-the-flaky-widget` where it
+    /// read `gertie/tab-3`. None for shared-workspace tabs.
+    branch_naming: Option<crate::worktree::BranchNaming>,
     /// F6's area containers: the sidebar, the transcript, and the
     /// right column each track one of these; focusing one means the
     /// area (or some control inside it) holds focus.
@@ -417,6 +422,10 @@ impl ChatView {
         // Resume the newest stored session (window open), or start
         // blank (a new tab — two views on one session would diverge).
         resume: bool,
+        // The worktree branch naming, when this chat works in its own
+        // worktree: the branch is renamed from the session's first
+        // message. None = a shared-workspace tab (nothing to rename).
+        branch_naming: Option<crate::worktree::BranchNaming>,
         // The rewind safety guard, built by the workspace: refuses a
         // file restore while another tab streams in the same checkout.
         live_elsewhere: LiveElsewhere,
@@ -577,6 +586,7 @@ impl ChatView {
             recall: None,
             pending_rewind: None,
             live_elsewhere,
+            branch_naming,
             sidebar_focus: cx.focus_handle(),
             transcript_focus: cx.focus_handle(),
             side_focus: cx.focus_handle(),
@@ -2208,6 +2218,16 @@ impl ChatView {
         images: Vec<String>,
         cx: &mut Context<Self>,
     ) {
+        // The session's first message names the worktree's branch —
+        // computed from the same text that's about to be persisted,
+        // before any state moves. Only the first: the branch name is
+        // the opening request's slug, fixed once. Failures are
+        // swallowed (the temporary tab-N name remains, the work goes
+        // on) — the branch name is a courtesy, never a gate.
+        let is_first = self.last_db_id.is_none();
+        if is_first && let Some(naming) = &self.branch_naming {
+            let _ = crate::worktree::name_branch_from_first_message(naming, &stored);
+        }
         let db_id = self
             .store
             .append_message(session_id, self.last_db_id, Role::User, &stored)

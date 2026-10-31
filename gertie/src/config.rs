@@ -115,6 +115,8 @@ pub struct ProjectOverlay {
     pub auto_settle_days: Option<Inheritable<u64>>,
     #[serde(default)]
     pub settle_command: Option<Inheritable<String>>,
+    #[serde(default)]
+    pub worktree: Option<ProjectWorktree>,
 }
 
 #[derive(Deserialize, Debug, Clone, Default)]
@@ -127,6 +129,16 @@ pub struct ProjectPermissions {
 pub struct ProjectSecurity {
     #[serde(default)]
     pub sandbox_bash: Option<Inheritable<bool>>,
+}
+
+#[derive(Deserialize, Debug, Clone, Default)]
+pub struct ProjectWorktree {
+    /// The prefix on the branch a worktree tab's session names from
+    /// its first message ("feat/", "gertie/"). Repo-owned policy;
+    /// validated, not rewritten — anything git-hostile falls back to
+    /// "gertie/".
+    #[serde(default)]
+    pub branch_prefix: Option<String>,
 }
 
 /// Where a resolved setting's value came from — the label the
@@ -703,6 +715,18 @@ impl Config {
             auto_settle_days: Some(self.resolve_auto_settle_days(overlay).origin),
             settle_command: Some(self.resolve_settle_command(overlay).origin),
         }
+    }
+
+    /// The branch prefix the repo's overlay asks for on worktree
+    /// branches — "gertie/" when it says nothing (or something
+    /// git-hostile).
+    pub fn overlay_branch_prefix(overlay: Option<&ProjectOverlay>) -> String {
+        crate::worktree::sane_prefix(
+            overlay
+                .and_then(|overlay| overlay.worktree.as_ref())
+                .and_then(|worktree| worktree.branch_prefix.as_deref())
+                .unwrap_or("gertie/"),
+        )
     }
 
     /// The endpoint gertie talks to, with its key resolved from the

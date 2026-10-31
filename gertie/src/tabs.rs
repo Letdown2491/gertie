@@ -119,6 +119,9 @@ impl WorkspaceView {
                 boot.default_mode,
                 panel,
                 true,
+                // The first tab shares the workspace: no worktree
+                // branch to name.
+                None,
                 guard,
                 window,
                 cx,
@@ -210,6 +213,7 @@ impl WorkspaceView {
         &self,
         tools: gertie_core::ToolRegistry,
         system_prompt: Option<String>,
+        naming: Option<crate::worktree::BranchNaming>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Entity<ChatView> {
@@ -233,6 +237,7 @@ impl WorkspaceView {
                 self.boot.default_mode,
                 panel,
                 false,
+                naming,
                 guard,
                 window,
                 cx,
@@ -248,6 +253,7 @@ impl WorkspaceView {
         let view = self.make_view(
             self.boot.tools.clone(),
             self.boot.system_prompt.clone(),
+            None,
             window,
             cx,
         );
@@ -270,7 +276,17 @@ impl WorkspaceView {
             Ok(root) => {
                 self.next_worktree += 1;
                 let (tools, system_prompt) = self.boot.registry_for_root(&root);
-                let view = self.make_view(tools.clone(), system_prompt.clone(), window, cx);
+                let naming = crate::worktree::BranchNaming {
+                    root: root.clone(),
+                    prefix: self.boot.worktree_branch_prefix(),
+                };
+                let view = self.make_view(
+                    tools.clone(),
+                    system_prompt.clone(),
+                    Some(naming),
+                    window,
+                    cx,
+                );
                 self.tabs.push(TabState {
                     view,
                     worktree: Some(root),

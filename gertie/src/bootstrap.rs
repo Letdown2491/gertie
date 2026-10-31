@@ -118,6 +118,12 @@ impl Bootstrap {
         self.live_config().resolve_origins(self.overlay.as_ref())
     }
 
+    /// The branch prefix the repo's overlay asks for on worktree
+    /// branches.
+    pub fn worktree_branch_prefix(&self) -> String {
+        crate::config::Config::overlay_branch_prefix(self.overlay.as_ref())
+    }
+
     pub fn settings(&self) -> Arc<crate::settings::SettingsSummary> {
         self.reloaded.read().unwrap().settings.clone()
     }
