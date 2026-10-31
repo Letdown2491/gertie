@@ -2171,3 +2171,138 @@ fn turn_count_of(fixture: &mut Fixture) -> usize {
             .turn_count_for_test()
     })
 }
+
+/// Consecutive finished tool cards collapse into one summary row; the
+/// reader expands it to the full cards and collapses it back.
+#[test]
+fn finished_tool_runs_collapse_into_one_summary() {
+    let store = Arc::new(SessionStore::open(Path::new(":memory:")).expect("memory store"));
+    let session = store.create_session("run of tools").expect("session");
+    let parent = store
+        .append_message(session, None, gertie_core::Role::User, "run the checks")
+        .expect("row");
+    let parent = store
+        .append_tool_result(
+            session,
+            Some(parent),
+            "c1",
+            "read_file",
+            "{}",
+            "read one\nline two",
+        )
+        .expect("row");
+    let parent = store
+        .append_tool_result(
+            session,
+            Some(parent),
+            "c2",
+            "read_file",
+            "{}",
+            "read two\nline two",
+        )
+        .expect("row");
+    store
+        .append_tool_result(
+            session,
+            Some(parent),
+            "c3",
+            "bash",
+            "{}",
+            "error: nope\nline two",
+        )
+        .expect("row");
+    let mut fixture = fixture_with_store(store);
+
+    // Collapsed: one summary, no member cards in sight.
+    fixture.act(|window, cx| {
+        assert!(window.try_find("tool-run-1").is_some(), "the summary shows");
+        assert!(
+            window.try_find("tool-toggle-2").is_none(),
+            "member cards hide inside the run"
+        );
+    });
+    // Expanded: every card is back, failures included.
+    fixture.act(|window, cx| window.click("tool-run-1", cx));
+    fixture.act(|window, cx| {
+        assert!(window.try_find("tool-toggle-2").is_some(), "expanded");
+        assert!(window.try_find("tool-toggle-3").is_some(), "expanded");
+    });
+    // Collapsed again.
+    fixture.act(|window, cx| window.click("tool-run-1", cx));
+    fixture.act(|window, cx| {
+        assert!(window.try_find("tool-toggle-2").is_none(), "hidden again");
+    });
+}
+
+/// A pending card breaks a run: finished reads before it stay
+/// stand-alone (an approval hiding inside a collapsed summary would be
+/// a trap); approving it lets the run close over both.
+#[test]
+fn a_pending_card_breaks_the_run_until_it_settles() {
+    let scenarios = tempfile::tempdir().expect("scenario dir");
+    std::fs::write(
+        scenarios.path().join("edits.toml"),
+        "[[steps]]\ntext = ''\n\n\
+         [[steps.tool_calls]]\nname = \"read_file\"\n\
+         arguments = '{\"path\": \"scratch.txt\"}'\n\n\
+         [[steps]]\ntext = ''\n\n\
+         [[steps.tool_calls]]\nname = \"write_file\"\n\
+         arguments = '{\"path\": \"out.txt\", \"content\": \"x\"}'\n\n\
+         [[steps]]\ntext = ''\n",
+    )
+    .expect("scenario file");
+    let workspace = tempfile::tempdir().expect("workspace dir");
+    let snapshots_dir = tempfile::tempdir().expect("snapshots dir");
+    let snapshots =
+        Arc::new(gertie_core::SnapshotStore::open(snapshots_dir.path()).expect("snapshot store"));
+    let endpoint = gertie_providers::Endpoint {
+        name: "replay".into(),
+        base_url: scenarios.path().to_string_lossy().into_owned(),
+        model: "edits".into(),
+        api_key: None,
+        context_window: None,
+        wire: gertie_providers::Wire::Replay,
+    };
+    let provider = Arc::new(
+        gertie_providers::AnyProvider::with_endpoints(vec![endpoint]).expect("replay provider"),
+    );
+    let store = Arc::new(SessionStore::open(Path::new(":memory:")).expect("memory store"));
+    let mut fixture = fixture_built(
+        store,
+        Some(snapshots),
+        Some(workspace.path().to_path_buf()),
+        None,
+        Some(provider),
+        None,
+        Vec::new(),
+        None,
+    );
+    fixture.hold = vec![scenarios, workspace, snapshots_dir];
+
+    fixture.act(|window, cx| {
+        window.input("go", cx);
+        window.press("enter", cx);
+    });
+    pump(&mut fixture, 30);
+    fixture.act(|window, cx| {
+        assert!(
+            window.try_find("tool-run-1").is_none(),
+            "the pending write breaks the run — no summary over a live ask"
+        );
+        assert!(
+            window.try_find("approve-2").is_some(),
+            "the pending card stands alone, its approval in view"
+        );
+    });
+
+    // Approve: the write settles, the run of finished cards closes
+    // over both.
+    fixture.act(|window, cx| window.click("approve-2", cx));
+    pump(&mut fixture, 40);
+    fixture.act(|window, cx| {
+        assert!(
+            window.try_find("tool-run-1").is_some(),
+            "both finished — the run collapses"
+        );
+    });
+}

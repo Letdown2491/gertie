@@ -129,13 +129,37 @@ fn humanize_name(name: &str) -> String {
     name.replace('_', " ")
 }
 
+/// Whether a finished tool result reads as a failure — the card's
+/// danger face and the collapsed-run counts share one predicate, so a
+/// failure can never round away into a success.
+pub fn result_failed(result: &str) -> bool {
+    result.starts_with("error:")
+        || result.starts_with("exit ")
+        || result.starts_with("blocked by policy")
+        || result.ends_with("denied by user")
+}
+
+/// The collapsed face of a run of finished tool calls: counts the
+/// cards themselves back, never guesses — a run of one tool reads
+/// "Ran 3× read_file", a mix reads "Ran 4 tool calls", and failures
+/// ride the line whenever there are any.
+pub fn tool_run_summary(names: &[&str], failed: usize) -> String {
+    let count = names.len();
+    let mut label = if count > 0 && names.iter().all(|name| *name == names[0]) {
+        format!("Ran {count}× {}", names[0])
+    } else {
+        format!("Ran {count} tool calls")
+    };
+    if failed > 0 {
+        label.push_str(&format!(", {failed} failed"));
+    }
+    label
+}
+
 /// A friendly one-line outcome for a finished tool call — the summary
 /// line under the label. Raw output stays behind the expander.
 pub fn result_summary(name: &str, result: &str) -> String {
-    let failed = result.starts_with("error:")
-        || result.starts_with("exit ")
-        || result.starts_with("blocked by policy")
-        || result.ends_with("denied by user");
+    let failed = result_failed(result);
     let line_count = result.lines().count();
 
     if failed {
@@ -282,6 +306,23 @@ mod tests {
             result_summary("edit_file", "error: denied by user"),
             "error: denied by user"
         );
+    }
+
+    #[test]
+    fn run_summaries_count_honestly() {
+        // A run of one tool speaks its name; a mix stays generic;
+        // failures are counted on the line — never rounded away into
+        // an unqualified "ran".
+        assert_eq!(tool_run_summary(&["read_file"; 3], 0), "Ran 3× read_file");
+        assert_eq!(
+            tool_run_summary(&["read_file", "bash", "edit_file", "bash"], 0),
+            "Ran 4 tool calls"
+        );
+        assert_eq!(
+            tool_run_summary(&["bash", "bash"], 1),
+            "Ran 2× bash, 1 failed"
+        );
+        assert_eq!(tool_run_summary(&[], 0), "Ran 0 tool calls");
     }
 
     #[test]

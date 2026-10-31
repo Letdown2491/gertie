@@ -356,6 +356,10 @@ pub struct ChatView {
     /// Tool cards with expanded output (beyond the 12-line preview),
     /// keyed by turn index; cleared on session switch.
     expanded_tools: std::collections::HashSet<usize>,
+    /// Runs of finished tool calls shown expanded into their full
+    /// cards, keyed by the run's first index; cleared with the rest
+    /// of the index-keyed state.
+    expanded_runs: std::collections::HashSet<usize>,
 }
 
 impl ChatView {
@@ -551,6 +555,7 @@ impl ChatView {
             attachments: Vec::new(),
             stream_persisted: 0,
             expanded_tools: Default::default(),
+            expanded_runs: Default::default(),
             approval_replies: Default::default(),
         };
         view.reload_session(cx);
@@ -710,6 +715,7 @@ impl ChatView {
         self.thinking = false;
         self.streaming_assistant = None;
         self.expanded_tools.clear();
+        self.expanded_runs.clear();
         self.approval_replies.clear();
         // Queued follow-ups are rows: they come back with the session.
         self.sync_queue();
@@ -785,6 +791,7 @@ impl ChatView {
         // the reader holds their place, no snap.
         self.list_state.splice(0..1, added);
         self.expanded_tools.clear();
+        self.expanded_runs.clear();
         self.approval_replies.clear();
         cx.notify();
     }
@@ -2832,6 +2839,101 @@ impl ChatView {
         &self.workspace_root
     }
 
+    /// Whether a turn joins a collapsible run: a finished tool card.
+    /// Anything alive — pending, running — stands alone: an approval
+    /// hiding inside a summary is a trap.
+    fn joins_run(turn: &Turn) -> bool {
+        matches!(
+            turn,
+            Turn::Tool {
+                status: ToolStatus::Done(_),
+                ..
+            }
+        )
+    }
+
+    /// The collapsible run at `index`: 0 = this card hides inside a
+    /// run that started earlier; 1 = no collapse (stand-alone card or
+    /// not a tool at all); n ≥ 2 = a run starts here.
+    fn tool_run_at(&self, index: usize) -> usize {
+        let turn = &self.turns[index];
+        if !Self::joins_run(turn) {
+            return 1;
+        }
+        if index > 0 && Self::joins_run(&self.turns[index - 1]) {
+            // A run began earlier — this card hides inside it, unless
+            // the reader expanded the run to see its cards.
+            let mut first = index;
+            while first > 0 && Self::joins_run(&self.turns[first - 1]) {
+                first -= 1;
+            }
+            if !self.expanded_runs.contains(&first) {
+                return 0;
+            }
+        }
+        let mut count = 1;
+        while index + count < self.turns.len() && Self::joins_run(&self.turns[index + count]) {
+            count += 1;
+        }
+        count
+    }
+
+    /// The collapsed face of a run of finished tool calls: one button
+    /// stating what happened in the cards' own counts — failures on
+    /// the line, never rounded away. Clicking expands to the full
+    /// cards.
+    fn render_tool_run(&self, index: usize, count: usize, cx: &mut Context<Self>) -> AnyElement {
+        let mut names = Vec::with_capacity(count);
+        let mut failed = 0;
+        for turn in &self.turns[index..index + count] {
+            if let Turn::Tool {
+                call,
+                status: ToolStatus::Done(result),
+                ..
+            } = turn
+            {
+                names.push(call.name.as_str());
+                if crate::tools_ui::result_failed(result) {
+                    failed += 1;
+                }
+            }
+        }
+        let expanded = self.expanded_runs.contains(&index);
+        let mut col = v_flex().gap_2().child(
+            Button::new(SharedString::from(format!("tool-run-{index}")))
+                .label(crate::tools_ui::tool_run_summary(&names, failed))
+                .xsmall()
+                .ghost()
+                .tooltip(if expanded {
+                    "Hide the calls"
+                } else {
+                    "Show every call in full"
+                })
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    if !this.expanded_runs.remove(&index) {
+                        this.expanded_runs.insert(index);
+                    }
+                    cx.notify();
+                })),
+        );
+        if expanded {
+            for at in index..index + count {
+                if let Turn::Tool {
+                    call,
+                    status,
+                    auto_approved,
+                    worker,
+                    ..
+                } = &self.turns[at]
+                {
+                    col =
+                        col.child(self.render_tool(at, call, status, *auto_approved, *worker, cx));
+                }
+            }
+        }
+        div().w_full().px_4().child(col).into_any_element()
+    }
+
     /// "Edit from here" on a sent user turn: the transcript rewinds to
     /// the turn's question, which returns to the composer as a draft.
     /// The rewind is real on the next send — until then nothing is
@@ -2992,6 +3094,7 @@ impl ChatView {
         // The expanded tool cards and unanswered reply boxes belonged
         // to turns the transcript no longer shows.
         self.expanded_tools.clear();
+        self.expanded_runs.clear();
         self.approval_replies.clear();
         // The edited question returns as the composer's draft.
         self.input
@@ -3152,6 +3255,17 @@ impl ChatView {
                 .pb_2()
                 .child(self.render_activity_row(cx))
                 .into_any_element();
+        }
+        // Runs of finished tool calls collapse into one honest summary
+        // (the counts are the cards', failures stay counted); a hidden
+        // member renders nothing — the list's index space is the
+        // turns'.
+        let run = self.tool_run_at(index);
+        if run == 0 {
+            return div().w_full().into_any_element();
+        }
+        if run > 1 {
+            return self.render_tool_run(index, run, cx);
         }
         // The reply input for a pending permission card must exist
         // before the turn is borrowed below: creating it takes &mut
