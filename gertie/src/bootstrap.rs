@@ -354,10 +354,17 @@ impl Bootstrap {
         // line is context paid on every turn.
         let system_prompt = system_prompt_for(&workspace_root, &skill_index);
 
-        // Web tools: fetch always; search gracefully-disabled unless a
-        // backend resolves; history search rides the session store.
+        // Web tools: fetch always (private-network targets gated by
+        // the user's config — the model may not choose to open them);
+        // search gracefully-disabled unless a backend resolves; history
+        // search rides the session store.
         let map = Arc::get_mut(&mut tools).expect("registry not yet shared");
-        map.insert("web_fetch".into(), Arc::new(gertie_tools::web::WebFetch));
+        map.insert(
+            "web_fetch".into(),
+            Arc::new(gertie_tools::web::WebFetch::new(
+                config.resolve_allow_private_fetch(overlay.as_ref()).value,
+            )),
+        );
         root_independent.push("web_fetch".into());
         let search_tool = match &config.search {
             Some(search) => match search.to_backend() {

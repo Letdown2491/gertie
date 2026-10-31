@@ -64,6 +64,12 @@ pub struct SecurityConfig {
     /// set it; `None` = unset, a lower tier decides.
     #[serde(default)]
     pub sandbox_bash: Option<bool>,
+    /// Let web_fetch reach private-network targets — localhost dev
+    /// servers, the LAN, tailnets. Off by default: the model has no
+    /// business probing a router or a cloud-metadata endpoint. `Some`
+    /// = the user's file set it; `None` = unset, a lower tier decides.
+    #[serde(default)]
+    pub allow_private_fetch: Option<bool>,
 }
 
 #[derive(Deserialize, Debug, Clone, Default)]
@@ -142,6 +148,8 @@ pub struct ProjectPermissions {
 pub struct ProjectSecurity {
     #[serde(default)]
     pub sandbox_bash: Option<Inheritable<bool>>,
+    #[serde(default)]
+    pub allow_private_fetch: Option<Inheritable<bool>>,
 }
 
 #[derive(Deserialize, Debug, Clone, Default)]
@@ -189,6 +197,7 @@ pub struct Resolved<T> {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Origins {
     pub sandbox_bash: Option<Origin>,
+    pub allow_private_fetch: Option<Origin>,
     pub default_mode: Option<Origin>,
     pub auto_settle_days: Option<Origin>,
     pub settle_command: Option<Origin>,
@@ -634,6 +643,41 @@ impl Config {
         })
     }
 
+    fn overlay_fetch(overlay: Option<&ProjectOverlay>) -> Option<Resolved<bool>> {
+        overlay
+            .and_then(|overlay| overlay.security.as_ref())
+            .and_then(|security| security.allow_private_fetch.as_ref())
+            .map(|inheritable| match inheritable {
+                // Explicit Inherit: the next tier — the built-in
+                // default — decides.
+                Inheritable::Inherit => Resolved {
+                    value: false,
+                    origin: Origin::Default,
+                },
+                Inheritable::Set(value) => Resolved {
+                    value: *value,
+                    origin: Origin::Project,
+                },
+            })
+    }
+
+    /// The private-fetch gate: your config, else the repo's overlay,
+    /// else closed. Open is a *posture* the repo may suggest — its dev
+    /// server may be the whole point of the checkout — but only the
+    /// user's config or the overlay says so, never a model ask.
+    pub fn resolve_allow_private_fetch(&self, overlay: Option<&ProjectOverlay>) -> Resolved<bool> {
+        if let Some(value) = self.security.allow_private_fetch {
+            return Resolved {
+                value,
+                origin: Origin::User,
+            };
+        }
+        Self::overlay_fetch(overlay).unwrap_or(Resolved {
+            value: false,
+            origin: Origin::Default,
+        })
+    }
+
     /// The starting permission mode: your config, else the repo's
     /// overlay, else supervised.
     pub fn resolve_default_mode(
@@ -713,6 +757,7 @@ impl Config {
     pub fn resolve_origins(&self, overlay: Option<&ProjectOverlay>) -> Origins {
         Origins {
             sandbox_bash: Some(self.resolve_sandbox_bash(overlay).origin),
+            allow_private_fetch: Some(self.resolve_allow_private_fetch(overlay).origin),
             default_mode: Some(self.resolve_default_mode(overlay).origin),
             auto_settle_days: Some(self.resolve_auto_settle_days(overlay).origin),
             settle_command: Some(self.resolve_settle_command(overlay).origin),
@@ -932,6 +977,7 @@ auto_settle_days = 3
 
 [security]
 sandbox_bash = true
+allow_private_fetch = true
 
 [permissions]
 default_mode = "accept_edits"
@@ -947,11 +993,14 @@ default_mode = "accept_edits"
             bare.resolve_origins(None),
             Origins {
                 sandbox_bash: Some(Origin::Default),
+                allow_private_fetch: Some(Origin::Default),
                 default_mode: Some(Origin::Default),
                 auto_settle_days: Some(Origin::Default),
                 settle_command: Some(Origin::Default),
             }
         );
+        // The private-fetch gate: closed by default.
+        assert!(!bare.resolve_allow_private_fetch(None).value);
 
         // No user config: the project's values win, labeled as the
         // project's.
@@ -968,6 +1017,10 @@ default_mode = "accept_edits"
             (resolved.value, resolved.origin),
             (Some(3), Origin::Project)
         );
+        // The private-fetch gate is posture: the repo's overlay may
+        // open it — the user's config still outranks it.
+        let resolved = empty_user.resolve_allow_private_fetch(Some(&overlay));
+        assert_eq!((resolved.value, resolved.origin), (true, Origin::Project));
 
         // The settle command is the user's alone — an overlay that
         // writes one is ignored (a shell command is process, not

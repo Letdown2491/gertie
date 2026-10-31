@@ -10,6 +10,7 @@
 use crate::{Tool, ToolResult, blocking};
 use serde_json::json;
 use std::io::Read as _;
+use std::net::ToSocketAddrs as _;
 use std::sync::Arc;
 
 /// Matches the builtin tools' cap: one result may not eat the window.
@@ -101,7 +102,59 @@ fn html_to_text(html: &str) -> String {
 }
 
 /// Fetches a URL and returns extracted text with the title.
-pub struct WebFetch;
+pub struct WebFetch {
+    /// Whether private-network targets may be fetched: loopback, the
+    /// RFC 1918 ranges, link-local (cloud metadata), and friends. Off
+    /// by default — the model has no business probing the user's
+    /// router or a metadata endpoint — but a localhost dev server is a
+    /// legitimate target for a coding agent, so the user's config can
+    /// open the gate (`security.allow_private_fetch`).
+    allow_private: bool,
+}
+
+impl WebFetch {
+    pub fn new(allow_private: bool) -> Self {
+        Self { allow_private }
+    }
+
+    /// The URL-level gate: scheme already checked, now the host. A
+    /// literal private IP is refused outright; a localhost-ish name
+    /// likewise; a public name is resolved and every answer checked —
+    /// a public name over a private address is the same request
+    /// wearing a disguise. The gate re-opens nothing on redirect:
+    /// every hop dials through the same checked resolver.
+    fn check_target(url: &reqwest::Url, allow_private: bool) -> Result<(), String> {
+        if allow_private {
+            return Ok(());
+        }
+        let host = url
+            .host_str()
+            .ok_or_else(|| "web_fetch: the URL names no host".to_string())?;
+        // IPv6 literals arrive bracketed; parse the address, not the
+        // punctuation.
+        let bare = host.trim_start_matches('[').trim_end_matches(']');
+        let reason = |what: &str| {
+            format!(
+                "web_fetch refuses {host}: {what} — the open web only, \
+                 unless your config sets security.allow_private_fetch = true"
+            )
+        };
+        if let Ok(ip) = bare.parse::<std::net::IpAddr>() {
+            if !publicly_fetchable(ip) {
+                return Err(reason("a private-network address"));
+            }
+        } else if host == "localhost"
+            || host.ends_with(".localhost")
+            || host.ends_with(".local")
+            || host.ends_with(".home.arpa")
+        {
+            return Err(reason("a private-network name"));
+        } else {
+            resolve_checked(host, false)?;
+        }
+        Ok(())
+    }
+}
 
 impl Tool for WebFetch {
     fn name(&self) -> &'static str {
@@ -134,18 +187,27 @@ impl Tool for WebFetch {
                 url: String,
             }
             let args: Args = crate::parse(arguments, "web_fetch")?;
+            let url: reqwest::Url = args
+                .url
+                .parse()
+                .map_err(|_| format!("web_fetch: not a URL: {url}", url = args.url))?;
             // Scheme gate: no file://, no ftp://, no surprises.
-            if !args.url.starts_with("http://") && !args.url.starts_with("https://") {
+            if url.scheme() != "http" && url.scheme() != "https" {
                 return Err("only http and https URLs are fetched".into());
             }
+            Self::check_target(&url, self.allow_private)?;
 
             let client = reqwest::blocking::Client::builder()
                 .timeout(FETCH_TIMEOUT)
                 .user_agent(USER_AGENT)
+                .redirect(reqwest::redirect::Policy::custom(redirect_hop))
+                .dns_resolver(Arc::new(PublicDnsOnly {
+                    allow_private: self.allow_private,
+                }))
                 .build()
                 .map_err(|error| format!("web_fetch: {error}"))?;
             let response = client
-                .get(&args.url)
+                .get(url)
                 .send()
                 .map_err(|error| format!("web_fetch {url}: {error}", url = args.url))?;
             let status = response.status();
@@ -183,6 +245,113 @@ impl Tool for WebFetch {
             Ok(out)
         })
     }
+}
+
+/// True when an address names somewhere the open web lives. Private,
+/// loopback, link-local, and reserved ranges are refused by default:
+/// the model has no business probing the user's router, an internal
+/// service, or a cloud-metadata endpoint, and a public name that
+/// resolves into one of these is the same request wearing a disguise.
+fn publicly_fetchable(ip: std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(ip) => {
+            !(ip.is_private() // RFC 1918
+                || ip.is_loopback()
+                || ip.is_link_local() // 169.254/16: APIPA, cloud metadata
+                || ip.is_unspecified()
+                || ip.is_broadcast()
+                || ip.is_documentation()
+                || ip.is_multicast()
+                || ip.octets()[0] == 0 // 0.0.0.0/8, "this network"
+                || ip.octets()[0] == 100
+                    && (64..=127).contains(&ip.octets()[1]) // 100.64/10: CGNAT, tailnets
+                || ip.octets()[0] == 198
+                    && (18..=19).contains(&ip.octets()[1]) // benchmarking
+                || ip.octets()[0] >= 240) // reserved, incl. broadcast
+        }
+        std::net::IpAddr::V6(ip) => {
+            // An IPv4 address in IPv6 clothes is still that IPv4
+            // address — mapped and NAT64-embedded forms are unwrapped
+            // and judged as their v4 selves.
+            if let Some(mapped) = ip.to_ipv4_mapped() {
+                return publicly_fetchable(std::net::IpAddr::V4(mapped));
+            }
+            let segments = ip.segments();
+            if segments[0] == 0x64 && segments[1] == 0xff9b && segments[2..6] == [0, 0, 0, 0] {
+                let v4 = std::net::Ipv4Addr::new(
+                    (segments[6] >> 8) as u8,
+                    segments[6] as u8,
+                    (segments[7] >> 8) as u8,
+                    segments[7] as u8,
+                );
+                return publicly_fetchable(std::net::IpAddr::V4(v4));
+            }
+            !(ip.is_loopback()
+                || ip.is_unspecified()
+                || ip.is_unique_local() // fc00::/7
+                || ip.is_unicast_link_local() // fe80::/10
+                || ip.is_multicast())
+        }
+    }
+}
+
+/// Resolve a host, refusing any answer that is not publicly routable.
+/// Blocking resolution is fine here: the fetch client is per-call and
+/// the call already runs on the blocking seam.
+fn resolve_checked(host: &str, allow_private: bool) -> Result<Vec<std::net::SocketAddr>, String> {
+    let addrs: Vec<_> = (host, 0)
+        .to_socket_addrs()
+        .map_err(|error| format!("web_fetch: could not resolve {host}: {error}"))?
+        .collect();
+    if !allow_private {
+        for addr in &addrs {
+            if !publicly_fetchable(addr.ip()) {
+                return Err(format!(
+                    "web_fetch refuses {host}: it resolves to {addr}, a \
+                     private-network address — the open web only, unless \
+                     your config sets security.allow_private_fetch = true"
+                ));
+            }
+        }
+    }
+    Ok(addrs)
+}
+
+/// The DNS resolver behind the fetch client: it hands out only
+/// publicly routable addresses, so every connection — the first fetch
+/// and every redirect hop — is re-checked at the moment it dials. The
+/// gap between "checked the name" and "dialed the address" has no
+/// room for a rebinding server to live in.
+struct PublicDnsOnly {
+    allow_private: bool,
+}
+
+impl reqwest::dns::Resolve for PublicDnsOnly {
+    fn resolve(&self, name: reqwest::dns::Name) -> reqwest::dns::Resolving {
+        let host = name.as_str().to_string();
+        let allow_private = self.allow_private;
+        Box::pin(std::future::ready(
+            resolve_checked(&host, allow_private)
+                .map(|addrs| -> reqwest::dns::Addrs { Box::new(addrs.into_iter()) })
+                .map_err(Box::<dyn std::error::Error + Send + Sync>::from),
+        ))
+    }
+}
+
+/// Redirect hops stay http or https and stay bounded. Exotic schemes
+/// are refused rather than followed; every hop's address is checked
+/// by the resolver anyway.
+fn redirect_hop(attempt: reqwest::redirect::Attempt) -> reqwest::redirect::Action {
+    let scheme = attempt.url().scheme().to_owned();
+    if scheme != "http" && scheme != "https" {
+        return attempt.error(format!(
+            "web_fetch follows only http and https redirects, not {scheme}:"
+        ));
+    }
+    if attempt.previous().len() >= 10 {
+        return attempt.error("web_fetch: too many redirects");
+    }
+    attempt.follow()
 }
 
 /// Web search. Configured backends: Brave (API key) and SearXNG
@@ -555,5 +724,95 @@ mod tests {
         assert!(!text.contains("evil"));
         assert!(!text.contains("comment"));
         assert!(!text.contains("<"));
+    }
+
+    #[test]
+    fn the_fetch_predicate_judges_addresses_not_strings() {
+        let public: &[&str] = &[
+            "8.8.8.8",
+            "93.184.216.34",
+            "2001:4860:4860::8888",
+            "2606:4700:4700::1111",
+        ];
+        for ip in public {
+            assert!(
+                publicly_fetchable(ip.parse().unwrap()),
+                "{ip} is publicly routable"
+            );
+        }
+        let private: &[&str] = &[
+            "127.0.0.1",        // loopback
+            "10.1.2.3",         // RFC 1918
+            "192.168.0.1",      // RFC 1918
+            "172.31.255.255",   // RFC 1918
+            "169.254.169.254",  // link-local: the cloud-metadata ask
+            "0.0.0.0",          // unspecified
+            "100.64.0.1",       // CGNAT / tailnet
+            "100.127.255.255",  // CGNAT's last address
+            "198.18.0.1",       // benchmarking
+            "203.0.113.9",      // documentation
+            "224.0.0.1",        // multicast
+            "255.255.255.255",  // broadcast
+            "240.0.0.1",        // reserved
+            "::1",              // v6 loopback
+            "::",               // v6 unspecified
+            "fd00::1",          // v6 unique-local
+            "fe80::1",          // v6 link-local
+            "ff02::1",          // v6 multicast
+            "::ffff:10.0.0.5",  // private v4 in v6 clothes
+            "::ffff:127.0.0.1", // loopback in v6 clothes
+            "64:ff9b::a00:1",   // NAT64-embedded private v4 (10.0.0.1)
+        ];
+        for ip in private {
+            assert!(
+                !publicly_fetchable(ip.parse().unwrap()),
+                "{ip} is not publicly routable"
+            );
+        }
+        // The CGNAT band's edges: 100.64/10 spans 100.64–100.127, so
+        // 100.63 and 100.128 are ordinary public space.
+        assert!(publicly_fetchable("100.63.255.255".parse().unwrap()));
+        assert!(publicly_fetchable("100.128.0.1".parse().unwrap()));
+    }
+
+    #[test]
+    fn the_fetch_gate_refuses_private_targets() {
+        let url = |text: &str| text.parse::<reqwest::Url>().unwrap();
+        // Literal private addresses, by range and by disguise.
+        for target in [
+            "http://127.0.0.1:8080/dev",
+            "http://10.0.0.5/",
+            "http://192.168.1.1/router",
+            "http://172.16.0.9/",
+            "http://169.254.169.254/latest/meta-data/",
+            "http://100.100.1.1/",
+            "http://[::1]/",
+            "http://[fe80::1]/",
+            "http://[::ffff:10.0.0.5]/",
+        ] {
+            assert!(
+                WebFetch::check_target(&url(target), false).is_err(),
+                "must refuse {target}"
+            );
+        }
+        // Private names: known without touching the network.
+        for target in ["http://localhost/dev", "http://printer.local/"] {
+            assert!(
+                WebFetch::check_target(&url(target), false).is_err(),
+                "must refuse {target}"
+            );
+        }
+        // The gate opens when the user's config opens it.
+        assert!(WebFetch::check_target(&url("http://127.0.0.1:8080/dev"), true).is_ok());
+        // Literal public addresses pass with no DNS at all.
+        assert!(WebFetch::check_target(&url("http://93.184.216.34/"), false).is_ok());
+    }
+
+    #[test]
+    fn the_dns_resolver_refuses_private_answers() {
+        // A literal loopback "resolves" from the local tables with no
+        // network — enough to prove the filter answers for the dial.
+        assert!(resolve_checked("127.0.0.1", false).is_err());
+        assert!(resolve_checked("127.0.0.1", true).is_ok());
     }
 }
