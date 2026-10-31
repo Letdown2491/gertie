@@ -1928,6 +1928,13 @@ impl ChatView {
         self.sync_list(cx);
     }
 
+    /// A notice from the harness side — the window-close gate is the
+    /// one caller — saying why something the user just did did
+    /// nothing. Display-only, like every notice row.
+    pub fn warn(&mut self, text: &str, cx: &mut Context<Self>) {
+        self.push_notice(text, cx);
+    }
+
     /// Hands the turn to the agent loop and renders its event stream:
     /// deltas stream into an assistant row, tool calls become cards, and
     /// results persist as tool rows the model also sees on reload.

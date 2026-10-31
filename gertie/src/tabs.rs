@@ -29,6 +29,30 @@ pub struct WorkspaceView {
     /// Why the last worktree request failed, shown beside the tab bar
     /// until the next attempt. Worktree creation must never be silent.
     last_error: Option<String>,
+    /// When the close gate refused the first close attempt: the second
+    /// one inside the confirm window means it.
+    armed_close: Option<std::time::Instant>,
+}
+
+/// How long a refused close stays armed: the notice says "close
+/// again", and for this long, closing again is believed.
+const CLOSE_CONFIRM_WINDOW: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Whether a window close goes through. A turn running anywhere holds
+/// the first close — an accidental quit kills a running agent turn —
+/// and arms the second.
+fn close_confirmed(
+    any_streaming: bool,
+    armed_at: Option<std::time::Instant>,
+    now: std::time::Instant,
+) -> bool {
+    if !any_streaming {
+        return true;
+    }
+    match armed_at {
+        Some(armed_at) => now.duration_since(armed_at) <= CLOSE_CONFIRM_WINDOW,
+        None => false,
+    }
 }
 
 struct TabState {
@@ -74,9 +98,46 @@ impl WorkspaceView {
             active: 0,
             next_worktree: 0,
             last_error: None,
+            armed_close: None,
         };
         this.subscribe_config_saved(0, window, cx);
+        // The window-close gate: registered once, asked on every close
+        // attempt (titlebar ✕, Alt+F4, WM gesture — there is no other
+        // quit). Returning false holds the window open.
+        let handle = cx.entity();
+        window.on_window_should_close(cx, move |_, cx| {
+            handle.update(cx, |this, cx| this.confirm_close(cx))
+        });
         this
+    }
+
+    /// The close gate's body: a turn running anywhere holds the first
+    /// close and says so in that tab; a second close inside the
+    /// confirm window means it.
+    fn confirm_close(&mut self, cx: &mut Context<Self>) -> bool {
+        let any_streaming = self.tabs.iter().any(|tab| tab.view.read(cx).is_streaming());
+        let now = std::time::Instant::now();
+        let confirmed = close_confirmed(any_streaming, self.armed_close, now);
+        if confirmed {
+            self.armed_close = None;
+        } else {
+            self.armed_close = Some(now);
+            // Say why in every tab that's running — the refused close
+            // leaves no other trace, and the running tab may be in
+            // the background.
+            for tab in &self.tabs {
+                if tab.view.read(cx).is_streaming() {
+                    tab.view.update(cx, |chat, cx| {
+                        chat.warn(
+                            "A turn is still running — close the window again to stop it \
+                             and quit.",
+                            cx,
+                        );
+                    });
+                }
+            }
+        }
+        confirmed
     }
 
     /// A settings save anywhere reloads the bootstrap once and fans the
@@ -287,5 +348,28 @@ impl Render for WorkspaceView {
                     .suffix(suffix),
             )
             .child(view)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_running_turn_holds_the_first_close_the_second_inside_the_window_goes() {
+        let now = std::time::Instant::now();
+        // Nothing running: a close is a close, armed or not.
+        assert!(close_confirmed(false, None, now));
+        assert!(close_confirmed(false, Some(now), now));
+        // Turn running: the first close holds, the second inside the
+        // confirm window means it, and a late one holds again — the
+        // arm expires with the notice it came from.
+        assert!(!close_confirmed(true, None, now));
+        assert!(close_confirmed(true, Some(now), now + CLOSE_CONFIRM_WINDOW));
+        assert!(!close_confirmed(
+            true,
+            Some(now),
+            now + CLOSE_CONFIRM_WINDOW + std::time::Duration::from_millis(1)
+        ));
     }
 }

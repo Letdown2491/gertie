@@ -345,7 +345,10 @@ t3code's three-consecutive-auto-resumes cap has nothing to cap. The reported res
 again for a human decision. The timer lives in the running app like every clock gertie
 has: close it and the snooze dies with it, the persisted limited state doesn't. The tab strip carries the
 working marker — a live turn shows ● on its tab, the attention signal for work
-running while another tab is up.
+running while another tab is up. The window holds running work to the same
+standard: with a turn live anywhere, the first close is refused with a notice in
+each running tab, and a second close inside five seconds is taken at its word —
+an accidental quit kills a running turn, so it costs one deliberate repeat.
 
 ## Onboarding
 
