@@ -786,7 +786,7 @@ impl ChatView {
     }
 
     fn reload_session(&mut self, cx: &mut Context<Self>) {
-        let (turns, history, last_db_id) = match self.session_id {
+        let (turns, history, last_db_id, archived_session) = match self.session_id {
             Some(session_id) => {
                 // One page of rows renders the transcript, however deep
                 // the archive grows. `limit + 1` detects a truncation
@@ -796,6 +796,10 @@ impl ChatView {
                     .load_recent_messages(session_id, RECENT_WINDOW + 1)
                     .unwrap_or_default();
                 let older_rows = rows.len() > RECENT_WINDOW;
+                // The wire history starts as the page's rows — opening
+                // a chat is one page of work, and the archive behind
+                // the page loads in the background (below).
+                let seed = SessionStore::wire_history_from_rows(&rows);
                 if older_rows {
                     rows.remove(0);
                 }
@@ -803,11 +807,10 @@ impl ChatView {
                 if older_rows {
                     turns.insert(0, Turn::LoadEarlier);
                 }
-                let history = self.store.load_wire_history(session_id).unwrap_or_default();
                 let last_db_id = rows.last().map(|row| row.id);
-                (turns, history, last_db_id)
+                (turns, seed, last_db_id, Some(session_id))
             }
-            None => (Vec::new(), Vec::new(), None),
+            None => (Vec::new(), Vec::new(), None, None),
         };
         self.turns = turns;
         // The turn indexes name different turns now — no cached parse
@@ -815,6 +818,32 @@ impl ChatView {
         self.markdown_cache.borrow_mut().clear();
         self.history = Arc::new(tokio::sync::Mutex::new(history));
         self.last_db_id = last_db_id;
+        // The archive behind the page — every row, every image
+        // re-read — loads off the UI thread and lands here: the seed
+        // is replaced wholesale, unless the in-memory history diverged
+        // meanwhile (a compaction shrank it: never re-inflate it; a
+        // send grew it: its new wires ride along).
+        if let Some(session_id) = archived_session {
+            let store = self.store.clone();
+            let history = self.history.clone();
+            let seed_len = history.blocking_lock().len();
+            cx.spawn(async move |this, cx| {
+                let full = store.load_wire_history(session_id).unwrap_or_default();
+                let _ = this.update(cx, |_this, cx| {
+                    let mut current = history.blocking_lock();
+                    if current.len() == seed_len {
+                        *current = full;
+                    } else if current.len() > seed_len {
+                        let grown = current.split_off(seed_len);
+                        let mut merged = full;
+                        merged.extend(grown);
+                        *current = merged;
+                    }
+                    cx.notify();
+                });
+            })
+            .detach();
+        }
         // A rewind confirm names turns of THIS transcript — switching
         // sessions invalidates the question.
         self.pending_rewind = None;
