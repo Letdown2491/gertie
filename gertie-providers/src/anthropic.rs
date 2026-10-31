@@ -345,6 +345,7 @@ async fn parse_sse(
     let mut buffer: Vec<u8> = Vec::new();
     let mut partials: Vec<(usize, PartialToolUse)> = Vec::new();
     let mut input_tokens: Option<u64> = None;
+    let mut cache_read: Option<u64> = None;
     while let Some(chunk) = stream.next().await {
         let Ok(chunk) = chunk else {
             break; // transport died mid-stream; what landed still stands
@@ -363,6 +364,13 @@ async fn parse_sse(
                 Some("message_start") => {
                     input_tokens = value
                         .pointer("/message/usage/input_tokens")
+                        .and_then(|count| count.as_u64());
+                    // Cache reads are the honest "saved" number (billed
+                    // near-zero); cache_creation_input_tokens is a write
+                    // cost at a different multiplier and is deliberately
+                    // not folded into this counter.
+                    cache_read = value
+                        .pointer("/message/usage/cache_read_input_tokens")
                         .and_then(|count| count.as_u64());
                 }
                 Some("content_block_start") => {
@@ -436,6 +444,7 @@ async fn parse_sse(
                     let _ = sender.send(Event::Usage {
                         input_tokens: input_tokens.unwrap_or(0),
                         output_tokens,
+                        cached_input_tokens: cache_read.unwrap_or(0),
                     });
                 }
                 Some("message_stop") => {
@@ -530,7 +539,7 @@ mod tests {
     #[test]
     fn streams_text_usage_and_done_from_sse() {
         let server = FakeServer::start(
-            "data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":25}}}\n\n\
+            "data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":25,\"cache_read_input_tokens\":15}}}\n\n\
              data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n\
              data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Hel\"}}\n\n\
              data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"lo\"}}\n\n\
@@ -547,7 +556,8 @@ mod tests {
         assert!(events.contains(&Event::Token { delta: "lo".into() }));
         assert!(events.contains(&Event::Usage {
             input_tokens: 25,
-            output_tokens: 2
+            output_tokens: 2,
+            cached_input_tokens: 15
         }));
         assert_eq!(events.last(), Some(&Event::Done));
     }
@@ -576,7 +586,8 @@ mod tests {
                 },
                 Event::Usage {
                     input_tokens: 10,
-                    output_tokens: 7
+                    output_tokens: 7,
+                    cached_input_tokens: 0
                 },
                 Event::Done,
             ]

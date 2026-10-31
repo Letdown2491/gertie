@@ -15,10 +15,12 @@ use std::sync::Arc;
 /// pauses resumable rather than dies. Runaway loops are how token bills
 /// happen; the pause keeps the human in the loop instead of burning a
 /// session's history on an error.
-const MAX_TOOL_ROUNDS: usize = 25;
+/// The round budget, a public constant because the settings panel
+/// displays it beside the field that overrides it.
+pub const DEFAULT_MAX_TOOL_ROUNDS: usize = 60;
 /// The grace window after the nudge: a model that ignores the wrap-up
 /// ask this many rounds in a row pauses the turn.
-const GRACE_ROUNDS: usize = 5;
+pub const DEFAULT_GRACE_ROUNDS: usize = 10;
 
 /// What the UI (or any embedder) observes while a turn runs.
 pub enum LoopEvent {
@@ -50,6 +52,7 @@ pub enum LoopEvent {
     Usage {
         input_tokens: u64,
         output_tokens: u64,
+        cached_input_tokens: u64,
     },
     /// History was compacted in place: `kept` of `total` messages remain
     /// (a summary plus a safe tail). DB rows are not rewritten, the
@@ -162,6 +165,20 @@ pub struct TurnSpec {
     /// history: it is per-turn framing, not conversation record (the
     /// DB stays canonical; the next turn may have a different index).
     pub system_prompt: Option<String>,
+    /// Session instructions loaded from AGENTS.md files: sent as one
+    /// user-role message right after the system prompt, before
+    /// history, on every request. Framing like the prompt, never
+    /// record: history can be compacted away, the instructions must
+    /// not be lost with it.
+    pub instructions: Option<String>,
+    /// The memory index, snapshotted at session start and frozen for
+    /// the session: sent as one user-role message after the
+    /// instructions, before history, on every request. Framing, never
+    /// record. Frozen because cache prefixes build tools -> system ->
+    /// messages: a mutable index riding every request would bust the
+    /// cache for the whole session (research/MEMORY-RESEARCH.md,
+    /// finding 5). Mutations land next session's snapshot.
+    pub memory_index: Option<String>,
     /// Mid-run steering: user messages typed while the turn is already
     /// running. Drained at round boundaries, each becomes a user push
     /// plus a `LoopEvent::Steered`, and a steer landing on what would
@@ -172,6 +189,14 @@ pub struct TurnSpec {
     /// messages are text-only; the first message of the turn carries
     /// the attachments.
     pub user_attachments: Vec<String>,
+    /// The turn's round budgets: tool rounds before the wrap-up nudge,
+    /// grace rounds after it before the pause. None = the built-in
+    /// defaults (`DEFAULT_MAX_TOOL_ROUNDS`,
+    /// `DEFAULT_GRACE_ROUNDS`). Long-running
+    /// sessions (a big migration, a wide sweep) raise them; the safety
+    /// valve's purpose, stopping runaway loops, is the constant's.
+    pub max_tool_rounds: Option<usize>,
+    pub grace_rounds: Option<usize>,
 }
 
 /// Runs one user turn to completion: request → (text | tool calls)* →
@@ -205,9 +230,15 @@ pub fn run_turn(spec: TurnSpec) -> BoxStream<'static, LoopEvent> {
         sandbox_bash,
         prompt_source,
         system_prompt,
+        instructions,
+        memory_index,
         steer,
         user_attachments,
+        max_tool_rounds,
+        grace_rounds,
     } = spec;
+    let max_tool_rounds = max_tool_rounds.unwrap_or(DEFAULT_MAX_TOOL_ROUNDS);
+    let grace_rounds = grace_rounds.unwrap_or(DEFAULT_GRACE_ROUNDS);
     let mut steer = steer;
     let specs = tool_specs(&tools);
     Box::pin(async_stream::stream! {
@@ -224,7 +255,7 @@ pub fn run_turn(spec: TurnSpec) -> BoxStream<'static, LoopEvent> {
         // the provider reported any; the chars/4 estimate covers the rest.
         let mut last_input_tokens: Option<u64> = None;
 
-        for round in 1..=(MAX_TOOL_ROUNDS + GRACE_ROUNDS) {
+        for round in 1..=(max_tool_rounds + grace_rounds) {
             // Compaction check happens at round start, before the
             // request is built, the point is to shrink what we're
             // about to send.
@@ -283,6 +314,46 @@ pub fn run_turn(spec: TurnSpec) -> BoxStream<'static, LoopEvent> {
                     .messages
                     .insert(0, WireMessage { role: Role::System, content: Some(prompt.clone()), ..WireMessage::default() });
             }
+            // Session instructions are framing too: one user-role
+            // message after the prompt, before history, on every
+            // round. A user role because the model should treat the
+            // text as binding direction, not as its own context
+            // block; it is never persisted, so it cannot masquerade
+            // as conversation.
+            if let Some(instructions) = &instructions {
+                let at = usize::from(system_prompt.is_some());
+                request.messages.insert(
+                    at,
+                    WireMessage {
+                        role: Role::User,
+                        content: Some(format!(
+                            "[session instructions]\n{instructions}\n[end session instructions]"
+                        )),
+                        ..WireMessage::default()
+                    },
+                );
+            }
+            // The memory index rides last in the framing block, after
+            // instructions, before history. The order is the cache
+            // story: the static prompt (byte-stable), then per-session
+            // framing that never changes mid-session. Memory itself is
+            // advisory recall; the framing text says so, because an
+            // index that reads like policy gets obeyed like policy.
+            if let Some(index) = &memory_index {
+                let at = usize::from(system_prompt.is_some())
+                    + usize::from(instructions.is_some());
+                request.messages.insert(
+                    at,
+                    WireMessage {
+                        role: Role::User,
+                        content: Some(format!(
+                            "[memory index -- frozen for this session; use the memory or \
+                             search_memory tools for the rest]\n{index}\n[end memory index]"
+                        )),
+                        ..WireMessage::default()
+                    },
+                );
+            }
 
             let mut stream = provider.stream(request);
             let mut assistant_text = String::new();
@@ -298,9 +369,17 @@ pub fn run_turn(spec: TurnSpec) -> BoxStream<'static, LoopEvent> {
                     crate::Event::ToolCall { id, name, arguments } => {
                         calls.push(ToolCall { id, name, arguments });
                     }
-                    crate::Event::Usage { input_tokens, output_tokens } => {
+                    crate::Event::Usage {
+                        input_tokens,
+                        output_tokens,
+                        cached_input_tokens,
+                    } => {
                         last_input_tokens = Some(input_tokens);
-                        yield LoopEvent::Usage { input_tokens, output_tokens };
+                        yield LoopEvent::Usage {
+                            input_tokens,
+                            output_tokens,
+                            cached_input_tokens,
+                        };
                     }
                     crate::Event::Done => {}
                     crate::Event::Error { message } => {
@@ -467,7 +546,7 @@ pub fn run_turn(spec: TurnSpec) -> BoxStream<'static, LoopEvent> {
                 };
             }
 
-            if round >= MAX_TOOL_ROUNDS {
+            if round >= max_tool_rounds {
                 // A steer never dies at the budget boundary: drained
                 // here first, each one buys the next round (same rule
                 // as the plain-done path above, so the budget bounds
@@ -485,7 +564,7 @@ pub fn run_turn(spec: TurnSpec) -> BoxStream<'static, LoopEvent> {
                     }
                     continue;
                 }
-                if round == MAX_TOOL_ROUNDS {
+                if round == max_tool_rounds {
                     // First over-budget round: tell the model, in band,
                     // to land the turn. History ends with the tool
                     // results plus this nudge, so a resume turn
@@ -498,15 +577,15 @@ pub fn run_turn(spec: TurnSpec) -> BoxStream<'static, LoopEvent> {
                     yield LoopEvent::Nudged;
                     continue;
                 }
-                if round >= MAX_TOOL_ROUNDS + GRACE_ROUNDS {
+                if round >= max_tool_rounds + grace_rounds {
                     // The model ignored the wrap-up ask through the
                     // whole grace window: stop spending. Pause like a
                     // rate limit, history intact, the human resumes
                     // when ready.
                     yield LoopEvent::Budgeted {
                         message: format!(
-                            "paused after {MAX_TOOL_ROUNDS} tool rounds plus \
-                             {GRACE_ROUNDS} grace rounds without wrapping up"
+                            "paused after {max_tool_rounds} tool rounds plus \
+                             {grace_rounds} grace rounds without wrapping up"
                         ),
                     };
                     return;
@@ -972,8 +1051,12 @@ mod tests {
                 sandbox_bash: false,
                 prompt_source: crate::PromptSource::Leader,
                 system_prompt: None,
+                instructions: None,
+                memory_index: None,
                 steer: None,
                 user_attachments: Vec::new(),
+                max_tool_rounds: None,
+                grace_rounds: None,
             },
             broker,
         )
@@ -1059,14 +1142,14 @@ mod tests {
         )
     }
 
-    /// The round budget is a soft edge: at MAX_TOOL_ROUNDS the loop
+    /// The round budget is a soft edge: at DEFAULT_MAX_TOOL_ROUNDS the loop
     /// nudges the model to wrap up (in band, a history row) and keeps
     /// going, so ordinary work that merely runs long is never cut off.
     #[test]
     fn the_round_budget_nudges_and_keeps_going() {
         let (mut provider, tools) = peek_registry();
         provider.scripts.lock().unwrap().extend(round_scripts(
-            MAX_TOOL_ROUNDS,
+            DEFAULT_MAX_TOOL_ROUNDS,
             Event::Token {
                 delta: "wrapped up".into(),
             },
@@ -1105,6 +1188,46 @@ mod tests {
         );
     }
 
+    /// The budgets are the spec's: a lowered budget nudges at its
+    /// round, not the constant's, and the pause reports the resolved
+    /// numbers.
+    #[test]
+    fn the_budgets_are_the_specs() {
+        let (mut provider, tools) = peek_registry();
+        // Two tool rounds, then the nudge round, then a round that
+        // ignores the nudge, then the pause.
+        provider.scripts.lock().unwrap().extend(round_scripts(
+            4,
+            Event::Token {
+                delta: "still going".into(),
+            },
+        ));
+        let history: SharedHistory = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let (mut spec, broker) = turn(provider, tools, history.clone(), "go");
+        spec.max_tool_rounds = Some(2);
+        spec.grace_rounds = Some(1);
+        let events = drain(run_turn(spec), &broker, |_| {
+            panic!("read-only tools must not prompt")
+        });
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, LoopEvent::Nudged)),
+            "the nudge fired at the spec's budget, round 2"
+        );
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, LoopEvent::Budgeted { message, .. }
+                    if message.contains("2 tool rounds") && message.contains("1 grace rounds"))),
+            "the pause reports the resolved numbers"
+        );
+        assert!(
+            !events.iter().any(|event| matches!(event, LoopEvent::Done)),
+            "the model ignored the nudge through the grace window"
+        );
+    }
+
     /// A model that ignores the wrap-up nudge through the whole grace
     /// window pauses the turn like a rate limit: Budgeted, history
     /// intact, resumable. Not an error, the work is not lost.
@@ -1112,7 +1235,7 @@ mod tests {
     fn ignoring_the_wrap_up_nudge_pauses_the_turn_resumable() {
         let (mut provider, tools) = peek_registry();
         provider.scripts.lock().unwrap().extend(round_scripts(
-            MAX_TOOL_ROUNDS + GRACE_ROUNDS,
+            DEFAULT_MAX_TOOL_ROUNDS + DEFAULT_GRACE_ROUNDS,
             Event::ToolCall {
                 id: "still-going".into(),
                 name: "peek".into(),
@@ -1166,7 +1289,7 @@ mod tests {
     fn a_steer_at_the_budget_boundary_buys_its_round() {
         let (mut provider, tools) = peek_registry();
         provider.scripts.lock().unwrap().extend(round_scripts(
-            MAX_TOOL_ROUNDS,
+            DEFAULT_MAX_TOOL_ROUNDS,
             Event::Token {
                 delta: "answering the steer".into(),
             },
@@ -1747,6 +1870,7 @@ mod tests {
                     Event::Usage {
                         input_tokens: 90_000,
                         output_tokens: 10,
+                        cached_input_tokens: 0,
                     },
                     Event::ToolCall {
                         id: "c1".into(),
@@ -1885,6 +2009,109 @@ mod tests {
         assert!(history.len() <= 2);
         assert!(history.iter().all(|message| message.role != Role::System));
         assert_eq!(history[0].role, Role::User);
+    }
+
+    #[test]
+    fn session_instructions_frame_every_request_but_stay_out_of_history() {
+        let provider = Arc::new(ScriptedProvider {
+            seen: std::sync::Mutex::new(Vec::new()),
+            scripts: std::sync::Mutex::new(vec![
+                vec![
+                    Event::ToolCall {
+                        id: "c1".into(),
+                        name: "peek".into(),
+                        arguments: "{}".into(),
+                    },
+                    Event::Done,
+                ],
+                vec![
+                    Event::Token {
+                        delta: "noted".into(),
+                    },
+                    Event::Done,
+                ],
+            ]),
+        });
+        let peeker: Arc<dyn Tool> = Arc::new(StubTool::new("peek", false, "peeked"));
+        let history: SharedHistory = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let (mut spec, broker) = turn(provider.clone(), registry(&[peeker]), history.clone(), "go");
+        spec.system_prompt = Some("You are gertie.".into());
+        spec.instructions = Some("no em dashes".into());
+        let _ = drain(run_turn(spec), &broker, |_| {
+            panic!("a read-only tool must not ask")
+        });
+
+        // Every request carries the prompt, then the instructions,
+        // then the conversation. Framing order is load-bearing: the
+        // instructions sit after the static prefix so caching survives.
+        let seen = provider.seen.lock().unwrap();
+        assert!(seen.len() >= 2, "a tool round means two requests");
+        for request in seen.iter() {
+            assert_eq!(request.messages[0].role, Role::System);
+            assert_eq!(request.messages[1].role, Role::User);
+            let text = request.messages[1].content.as_deref().unwrap();
+            assert!(text.starts_with("[session instructions]\n"));
+            assert!(text.contains("no em dashes"));
+            assert!(text.ends_with("\n[end session instructions]"));
+        }
+        // The record holds the conversation, not the framing.
+        let history = history.blocking_lock();
+        assert!(history.iter().all(|message| {
+            !message
+                .content
+                .as_deref()
+                .unwrap_or("")
+                .contains("[session instructions]")
+        }));
+    }
+
+    #[test]
+    fn without_instructions_nothing_is_injected() {
+        let provider = Arc::new(ScriptedProvider {
+            seen: std::sync::Mutex::new(Vec::new()),
+            scripts: std::sync::Mutex::new(vec![vec![Event::Done]]),
+        });
+        let history: SharedHistory = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let (mut spec, broker) = turn(provider.clone(), registry(&[]), history.clone(), "go");
+        spec.system_prompt = Some("You are gertie.".into());
+        let _ = drain(run_turn(spec), &broker, |_| panic!("nothing to prompt for"));
+
+        let seen = provider.seen.lock().unwrap();
+        assert_eq!(seen[0].messages[0].role, Role::System);
+        assert_eq!(seen[0].messages[1].role, Role::User);
+        assert_ne!(
+            seen[0].messages[1].content.as_deref().unwrap(),
+            "[session instructions]"
+        );
+        assert!(seen[0].messages.iter().all(|message| {
+            !message
+                .content
+                .as_deref()
+                .unwrap_or("")
+                .starts_with("[session instructions]")
+        }));
+    }
+
+    #[test]
+    fn the_memory_index_frames_alone_when_instructions_are_absent() {
+        let provider = Arc::new(ScriptedProvider {
+            seen: std::sync::Mutex::new(Vec::new()),
+            scripts: std::sync::Mutex::new(vec![vec![Event::Done]]),
+        });
+        let history: SharedHistory = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let (mut spec, broker) = turn(provider.clone(), registry(&[]), history.clone(), "go");
+        spec.system_prompt = Some("You are gertie.".into());
+        spec.memory_index = Some("- [p1] helpful=0 harmful=0 tabs over spaces".into());
+        let _ = drain(run_turn(spec), &broker, |_| panic!("nothing to prompt for"));
+
+        let seen = provider.seen.lock().unwrap();
+        assert_eq!(seen[0].messages[0].role, Role::System);
+        // The index slots directly after the prompt when no
+        // instructions sit between them.
+        assert_eq!(seen[0].messages[1].role, Role::User);
+        let index = seen[0].messages[1].content.as_deref().unwrap();
+        assert!(index.starts_with("[memory index"));
+        assert!(index.contains("tabs over spaces"));
     }
 
     #[test]

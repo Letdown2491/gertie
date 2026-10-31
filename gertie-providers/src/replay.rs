@@ -214,6 +214,7 @@ impl gertie_core::Provider for ReplayProvider {
             let _ = sender.send(Event::Usage {
                 input_tokens,
                 output_tokens: (output_bytes / 4) as u64,
+                cached_input_tokens: 0,
             });
             let _ = sender.send(Event::Done);
         });

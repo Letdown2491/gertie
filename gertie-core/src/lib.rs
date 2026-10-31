@@ -6,6 +6,8 @@
 
 pub mod agent;
 pub mod agent_loop;
+pub mod memory;
+pub mod memory_extract;
 pub mod permissions;
 pub mod provider;
 pub mod request;
@@ -14,8 +16,10 @@ pub mod tool;
 
 pub use agent::{AgentTool, AgentType, builtin_agent_types, sanitize_untrusted, worker_registry};
 pub use agent_loop::{
-    LoopEvent, PermissionDecision, SharedHistory, ToolRegistry, TurnSpec, run_turn,
+    DEFAULT_GRACE_ROUNDS, DEFAULT_MAX_TOOL_ROUNDS, LoopEvent, PermissionDecision, SharedHistory,
+    ToolRegistry, TurnSpec, run_turn,
 };
+pub use memory::{MemoryEntry, MemoryHit, MemoryStore, Op, Tier};
 pub use permissions::{ModeScope, PendingAsk, PermissionBroker, PermissionMode, PromptSource};
 pub use provider::Provider;
 pub use request::{
@@ -166,6 +170,9 @@ pub struct SessionSummary {
     /// Cumulative token totals, persisted from usage events. A resumed
     /// session shows what it spent before, not just since reopen.
     pub input_tokens: u64,
+    /// Cache-hit input tokens, as reported by the wire. See the Usage
+    /// event's note on per-wire semantics before computing shares.
+    pub cached_input_tokens: u64,
     pub output_tokens: u64,
     /// The last request's context size (prompt + completion), the live
     /// number the compaction threshold watches. Persisted so a resumed
@@ -308,6 +315,7 @@ impl SessionStore {
             ("input_tokens", "INTEGER DEFAULT 0"),
             ("output_tokens", "INTEGER DEFAULT 0"),
             ("last_context_tokens", "INTEGER DEFAULT 0"),
+            ("cached_input_tokens", "INTEGER DEFAULT 0"),
             ("settled_at", "TEXT"),
             ("last_activity_at", "TEXT"),
             ("workspace_root", "TEXT"),
@@ -346,9 +354,20 @@ impl SessionStore {
              CREATE INDEX IF NOT EXISTS sessions_unsettled_by_activity
                  ON sessions(last_activity_at) WHERE settled_at IS NULL;",
         )?;
+        // Memory's sidecar tables (the always-layer's index). No
+        // triggers: the sync pass owns these rows in batches.
+        crate::memory::migrate(&connection)?;
         Ok(Self {
             connection: std::sync::Mutex::new(connection),
         })
+    }
+
+    /// Runs one closure with the store's connection. Memory's sidecar
+    /// needs raw access (batched rewrites, FTS maintenance); the lock
+    /// stays inside, callers never hold it across awaits.
+    pub fn with_connection<T>(&self, run: impl FnOnce(&rusqlite::Connection) -> T) -> T {
+        let connection = self.connection.lock().unwrap();
+        run(&connection)
     }
 
     /// Creates a session titled from its first user message (callers may
@@ -386,7 +405,7 @@ impl SessionStore {
     ) -> Result<Vec<SessionSummary>, rusqlite::Error> {
         let connection = self.connection.lock().unwrap();
         let mut statement = connection
-            .prepare("SELECT s.id, s.title, s.input_tokens, s.output_tokens, s.last_context_tokens, s.mode, s.limited_at IS NOT NULL, s.workspace_root FROM sessions s WHERE s.parent_id = ?1 ORDER BY s.id")?;
+            .prepare("SELECT s.id, s.title, s.input_tokens, s.output_tokens, s.cached_input_tokens, s.last_context_tokens, s.mode, s.limited_at IS NOT NULL, s.workspace_root FROM sessions s WHERE s.parent_id = ?1 ORDER BY s.id")?;
         let rows = statement
             .query_map([parent.0 as i64], |row| {
                 Ok(SessionSummary {
@@ -394,19 +413,20 @@ impl SessionStore {
                     title: row.get(1)?,
                     input_tokens: row.get::<_, i64>(2)?.max(0) as u64,
                     output_tokens: row.get::<_, i64>(3)?.max(0) as u64,
-                    context_tokens: row.get::<_, i64>(4)?.max(0) as u64,
+                    cached_input_tokens: row.get::<_, i64>(4)?.max(0) as u64,
+                    context_tokens: row.get::<_, i64>(5)?.max(0) as u64,
                     // Child sessions stay out of the sidebar's
                     // lifecycle machine (settled/open lists); the
                     // limited flag stays queryable: a stopped run
                     // waits for the human.
                     settled: false,
-                    limited: row.get::<_, i64>(6)? != 0,
+                    limited: row.get::<_, i64>(7)? != 0,
                     mode: row
-                        .get::<_, String>(5)
+                        .get::<_, String>(6)
                         .ok()
                         .and_then(|raw| raw.parse::<PermissionMode>().ok())
                         .unwrap_or_default(),
-                    workspace_root: row.get::<_, Option<String>>(7).ok().flatten(),
+                    workspace_root: row.get::<_, Option<String>>(8).ok().flatten(),
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -432,39 +452,44 @@ impl SessionStore {
         session: SessionId,
         input_tokens: u64,
         output_tokens: u64,
+        cached_input_tokens: u64,
     ) -> Result<(), rusqlite::Error> {
         let connection = self.connection.lock().unwrap();
         connection
             .prepare(
                 "UPDATE sessions SET input_tokens = input_tokens + ?2,
                         output_tokens = output_tokens + ?3,
+                        cached_input_tokens = cached_input_tokens + ?4,
                         last_context_tokens = ?2 + ?3 WHERE id = ?1",
             )?
             .execute(rusqlite::params![
                 session.0 as i64,
                 input_tokens as i64,
-                output_tokens as i64
+                output_tokens as i64,
+                cached_input_tokens as i64
             ])?;
         Ok(())
     }
 
     /// Token totals across every session (chats and worker runs). The
     /// settings panel's bottom line: what gertie has cost, in tokens.
-    pub fn total_usage(&self) -> (u64, u64) {
+    pub fn total_usage(&self) -> (u64, u64, u64) {
         let connection = self.connection.lock().unwrap();
         connection
             .query_row(
-                "SELECT COALESCE(SUM(input_tokens), 0), COALESCE(SUM(output_tokens), 0)
-                 FROM sessions",
+                "SELECT COALESCE(SUM(input_tokens), 0), COALESCE(SUM(output_tokens), 0),
+                       COALESCE(SUM(cached_input_tokens), 0)
+                FROM sessions",
                 [],
                 |row| {
                     Ok((
                         row.get::<_, i64>(0)?.max(0) as u64,
                         row.get::<_, i64>(1)?.max(0) as u64,
+                        row.get::<_, i64>(2)?.max(0) as u64,
                     ))
                 },
             )
-            .unwrap_or((0, 0))
+            .unwrap_or((0, 0, 0))
     }
 
     /// The sidebar as an inbox: the session whose record moved most
@@ -477,7 +502,8 @@ impl SessionStore {
     pub fn list_sessions(&self) -> Result<Vec<SessionSummary>, rusqlite::Error> {
         let connection = self.connection.lock().unwrap();
         let mut statement = connection.prepare(
-            "SELECT s.id, s.title, s.input_tokens, s.output_tokens, s.last_context_tokens,
+            "SELECT s.id, s.title, s.input_tokens, s.output_tokens, s.cached_input_tokens,
+                    s.last_context_tokens,
                     s.settled_at IS NOT NULL, s.limited_at IS NOT NULL, s.mode, s.workspace_root
              FROM sessions s
              LEFT JOIN messages m ON m.session_id = s.id
@@ -491,15 +517,16 @@ impl SessionStore {
                 title: row.get(1)?,
                 input_tokens: row.get::<_, i64>(2)?.max(0) as u64,
                 output_tokens: row.get::<_, i64>(3)?.max(0) as u64,
-                context_tokens: row.get::<_, i64>(4)?.max(0) as u64,
-                settled: row.get::<_, i64>(5)? != 0,
-                limited: row.get::<_, i64>(6)? != 0,
+                cached_input_tokens: row.get::<_, i64>(4)?.max(0) as u64,
+                context_tokens: row.get::<_, i64>(5)?.max(0) as u64,
+                settled: row.get::<_, i64>(6)? != 0,
+                limited: row.get::<_, i64>(7)? != 0,
                 mode: row
-                    .get::<_, String>(7)
+                    .get::<_, String>(8)
                     .ok()
                     .and_then(|raw| raw.parse::<PermissionMode>().ok())
                     .unwrap_or_default(),
-                workspace_root: row.get::<_, Option<String>>(8).ok().flatten(),
+                workspace_root: row.get::<_, Option<String>>(9).ok().flatten(),
             })
         })?;
         rows.collect()
@@ -1415,10 +1442,15 @@ pub enum Event {
         name: String,
         arguments: String,
     },
-    /// Final usage accounting for the request.
+    /// Final usage accounting for the request. `cached_input_tokens`
+    /// is as-reported by the wire: Anthropic counts it separately (its
+    /// `input_tokens` excludes cache reads); OpenAI-compatible counts
+    /// it as a subset of `input_tokens`. Zero when absent. Share math
+    /// is the consumer's job, per wire.
     Usage {
         input_tokens: u64,
         output_tokens: u64,
+        cached_input_tokens: u64,
     },
     /// The stream finished normally.
     Done,
@@ -1668,9 +1700,9 @@ mod tests {
         let chat = store.create_session("chat").unwrap();
         let worker = store.create_worker_run(Some(chat), "worker").unwrap();
 
-        store.add_usage(chat, 100, 10).unwrap();
-        store.add_usage(chat, 40, 5).unwrap();
-        store.add_usage(worker, 200, 30).unwrap();
+        store.add_usage(chat, 100, 10, 0).unwrap();
+        store.add_usage(chat, 40, 5, 0).unwrap();
+        store.add_usage(worker, 200, 30, 0).unwrap();
 
         let chats = store.list_sessions().unwrap();
         let chat_row = chats.iter().find(|summary| summary.id == chat).unwrap();
@@ -1680,7 +1712,30 @@ mod tests {
         assert_eq!(chat_row.context_tokens, 40 + 5);
         // The all-sessions total includes worker runs too: that's the
         // real cost.
-        assert_eq!(store.total_usage(), (340, 45));
+        assert_eq!(store.total_usage(), (340, 45, 0));
+    }
+
+    #[test]
+    fn cached_input_tokens_persist_and_sum() {
+        let store = memory_store();
+        let chat = store.create_session("cached").unwrap();
+
+        // Two requests with cache hits, one without: the column
+        // accumulates across calls, both the per-session row and the
+        // all-sessions tuple surface the sum.
+        store.add_usage(chat, 100, 10, 80).unwrap();
+        store.add_usage(chat, 100, 10, 90).unwrap();
+        store.add_usage(chat, 100, 10, 0).unwrap();
+
+        let row = store
+            .list_sessions()
+            .unwrap()
+            .iter()
+            .find(|summary| summary.id == chat)
+            .unwrap()
+            .clone();
+        assert_eq!(row.cached_input_tokens, 170);
+        assert_eq!(store.total_usage(), (300, 30, 170));
     }
 
     #[test]

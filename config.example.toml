@@ -117,3 +117,34 @@ api_key_env = "MY_API_KEY"
 # tools = ["read_file", "glob", "grep", "load_skill"]
 
 # default_endpoint = "mine"   # defaults to the first listed endpoint
+
+# Long-term memory (M6). The store is markdown files (.gertie/memory/
+# in this repo, plus a global tier in the data dir); the tools
+# (memory, search_memory) are always available. Extraction turns
+# settled or compacted sessions into proposed entries, shown as a
+# review card you approve or deny. On by default (the read path
+# costs nothing until the store has entries); the token footer's
+# cached-% is the scoreboard.
+#[memory]
+#enabled = true
+## The frozen index's token budget (roughly, chars/4).
+#index_budget = 600
+## Endpoint name for the session-end extraction call. Absent = the
+## session's own endpoint.
+#extract_endpoint = "ppq"
+## Apply proposals without the review card. Default off.
+#auto_apply = false
+## Consolidate (merge duplicates, archive counter-dead entries,
+## rebuild the index) at most this often, riding the startup sweep.
+## Default 7; zero = never.
+#dream_days = 7
+
+# Turn budgets. A turn that loops this many tool rounds without
+# finishing gets a wrap-up nudge, then this many grace rounds to land
+# it before the turn pauses (resumable, history intact). Defaults:
+# 60 + 10. Raise max_tool_rounds further for especially long work;
+# the pause still stops runaway loops. Empty settings fields show
+# the defaults as placeholders.
+#[turn]
+#max_tool_rounds = 60
+#grace_rounds = 10

@@ -6,6 +6,7 @@
 //! one sandbox rule, applied identically by every tool.
 
 pub mod mcp;
+pub mod memory;
 pub mod sandbox;
 pub mod shape;
 pub mod skills;

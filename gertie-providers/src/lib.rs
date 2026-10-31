@@ -430,9 +430,17 @@ async fn parse_sse(
                     usage.get("completion_tokens").and_then(count),
                 )
             {
+                // prompt_tokens_details.cached_tokens is a subset of
+                // prompt_tokens on this wire; absent on providers that
+                // do not pass cache fields through (stays 0).
+                let cached = usage
+                    .pointer("/prompt_tokens_details/cached_tokens")
+                    .and_then(count)
+                    .unwrap_or(0);
                 let _ = sender.send(Event::Usage {
                     input_tokens: input,
                     output_tokens: output,
+                    cached_input_tokens: cached,
                 });
             }
         }
@@ -783,7 +791,7 @@ mod tests {
         let server = FakeServer::start(
             "data: {\"choices\":[{\"delta\":{\"role\":\"assistant\",\"content\":\"Hel\"}}]}\n\n\
              data: {\"choices\":[{\"delta\":{\"content\":\"lo\"}}]}\n\n\
-             data: {\"choices\":[{\"delta\":{}}],\"usage\":{\"prompt_tokens\":7,\"completion_tokens\":2}}\n\n\
+             data: {\"choices\":[{\"delta\":{}}],\"usage\":{\"prompt_tokens\":7,\"completion_tokens\":2,\"prompt_tokens_details\":{\"cached_tokens\":5}}}\n\n\
              data: [DONE]\n\n",
         );
         let provider = OpenAICompatible::new(server.endpoint(Wire::OpenAI)).unwrap();
@@ -796,6 +804,7 @@ mod tests {
         assert!(events.contains(&Event::Usage {
             input_tokens: 7,
             output_tokens: 2,
+            cached_input_tokens: 5,
         }));
         assert_eq!(events.last(), Some(&Event::Done));
     }

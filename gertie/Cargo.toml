@@ -20,6 +20,7 @@ directories = "6"
 futures-util = { version = "0.3", default-features = false, features = ["alloc"] }
 gpui-kit = "=0.7.0"
 serde = { version = "1", features = ["derive"] }
+sha2 = "0.10"
 serde_json = "1"
 tokio = { version = "1", features = ["sync", "macros"] }
 toml = "0.9"

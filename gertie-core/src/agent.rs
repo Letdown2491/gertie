@@ -307,6 +307,20 @@ impl AgentTool {
         std::fs::read_to_string(&canonical).map_err(|error| format!("brief {brief_path}: {error}"))
     }
 
+    /// The repo's AGENTS.md, read with the same escape rule as a brief
+    /// and sanitized like every untrusted entrance (MCP, skills). The
+    /// always-layer rides the brief envelope: a worker's spec carries
+    /// none, the brief is the whole world.
+    fn project_instructions(&self) -> Option<String> {
+        let canonical = self.workspace_root.canonicalize().ok()?;
+        let path = canonical.join("AGENTS.md");
+        if !path.is_file() {
+            return None;
+        }
+        let text = std::fs::read_to_string(&path).ok()?;
+        Some(sanitize_untrusted(&text, 2048))
+    }
+
     /// The agent type's name, for run titles: `agent_explore` → `explore`.
     fn worker_label(&self) -> String {
         self.tool_name
@@ -375,7 +389,11 @@ impl Tool for AgentTool {
                             None,
                             crate::Role::User,
                             &format!(
-                                "Brief {}{}\n\n---\n{}\n---",
+                                "{}Brief {}{}\n\n---\n{}\n---",
+                                self.project_instructions()
+                                    .map_or_else(String::new, |text| {
+                                        format!("Project instructions (binding):\n\n{text}\n\n")
+                                    }),
                                 args.brief_path,
                                 if guidance.is_empty() {
                                     String::new()
@@ -402,11 +420,16 @@ impl Tool for AgentTool {
                 // Workers don't take steering, the brief is the job.
                 steer: None,
                 user_attachments: Vec::new(),
+                // The worker's budget is its own safety valve, the
+                // same defaults as the leader's.
+                max_tool_rounds: None,
+                grace_rounds: None,
                 // Brief and guidance are model-authored; their
                 // hyphen lines are escaped so neither can forge the
                 // envelope around them.
                 user_message: Some(format!(
-                    "A brief file has been written for you:\n\n---\n{}\n---\n\n\
+                    "{}\
+                     A brief file has been written for you:\n\n---\n{}\n---\n\n\
                      {}\n\n\
                      Execute the brief with your tools. Verify your work. \
                      Finish with a report:\n\
@@ -414,6 +437,10 @@ impl Tool for AgentTool {
                      EVIDENCE: what you did (commands, files, results)\n\
                      SUMMARY: one line\n\
                      CONCERNS: anything the leader should know",
+                    self.project_instructions()
+                        .map_or_else(String::new, |text| format!(
+                            "Project instructions (binding):\n\n{text}\n\n"
+                        )),
                     escape_envelope_delimiters(&brief),
                     escape_envelope_delimiters(&guidance)
                 )),
@@ -427,6 +454,13 @@ impl Tool for AgentTool {
                 permission_mode: self.mode_scope.get(),
                 sandbox_bash: self.sandbox_bash,
                 prompt_source: PromptSource::Worker,
+                // Instructions reach the worker through its brief
+                // envelope, not the spec: the brief is the whole world.
+                // Workers get no memory index either: they are
+                // brief-scoped (PR 3 plan; the librarian mines memory
+                // explicitly).
+                instructions: None,
+                memory_index: None,
                 system_prompt: Some(self.system_prompt.clone()),
             });
 
@@ -566,6 +600,91 @@ mod tests {
         let report = result.expect("worker report");
         assert!(report.contains("STATUS: done"));
         assert!(report.contains("SUMMARY: fine"));
+    }
+
+    #[test]
+    fn a_worker_brief_carries_the_projects_instructions() {
+        struct ReportProvider {
+            seen: std::sync::Mutex<Vec<crate::Request>>,
+        }
+        impl crate::Provider for ReportProvider {
+            fn stream(&self, request: crate::Request) -> BoxStream<'static, crate::Event> {
+                self.seen.lock().unwrap().push(request);
+                Box::pin(futures_util::stream::iter(vec![
+                    crate::Event::Token {
+                        delta: "STATUS: done".into(),
+                    },
+                    crate::Event::Done,
+                ]))
+            }
+        }
+
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("brief.md"), "Do the thing.").unwrap();
+        std::fs::write(tmp.path().join("AGENTS.md"), "no em dashes\n").unwrap();
+
+        let store = Arc::new(crate::SessionStore::open(std::path::Path::new(":memory:")).unwrap());
+        let parent = store.create_session("the chat").unwrap();
+        let scope = crate::SessionScope::new();
+        scope.set(Some(parent));
+
+        let provider = Arc::new(ReportProvider {
+            seen: std::sync::Mutex::new(Vec::new()),
+        });
+        let broker = Arc::new(PermissionBroker::new());
+        let tool = AgentTool::new(
+            AgentType {
+                name: "worker".into(),
+                description: "does the thing".into(),
+                system_prompt: "work hard".into(),
+                tools: None,
+            },
+            provider.clone(),
+            &worker_registry(&Arc::new(Default::default()), None),
+            None,
+            broker,
+            None,
+            tmp.path().to_path_buf(),
+            Some(store.clone()),
+            scope,
+            ModeScope::new(),
+            false,
+        );
+
+        let future = tool.run(r#"{"brief_path": "brief.md"}"#);
+        let waker = Waker::noop();
+        let mut cx = TaskContext::from_waker(waker);
+        let mut future = Box::pin(future);
+        let result = loop {
+            match Pin::new(&mut future).poll(&mut cx) {
+                Poll::Ready(result) => break result,
+                Poll::Pending => std::thread::sleep(Duration::from_millis(10)),
+            }
+        };
+        result.expect("worker report");
+
+        // Two carriers, both checked: the stored run row is the audit
+        // trail, the captured request is what the model was told.
+        let children = store.list_child_sessions(parent).unwrap();
+        assert_eq!(children.len(), 1);
+        let messages = store.load_messages(children[0].id).unwrap();
+        assert_eq!(messages[0].role, crate::Role::User);
+        let row = messages[0].content.as_str();
+        assert!(row.contains("Project instructions (binding):"));
+        assert!(row.contains("no em dashes"));
+        assert!(row.contains("Do the thing."));
+
+        let seen = provider.seen.lock().unwrap();
+        let envelope = seen[0]
+            .messages
+            .iter()
+            .find(|message| message.role == crate::Role::User)
+            .and_then(|message| message.content.as_deref())
+            .expect("the worker's envelope");
+        assert!(envelope.contains("Project instructions (binding):"));
+        assert!(envelope.contains("no em dashes"));
+        assert!(envelope.contains("A brief file has been written for you:"));
+        assert!(envelope.contains("Do the thing."));
     }
 
     #[test]
