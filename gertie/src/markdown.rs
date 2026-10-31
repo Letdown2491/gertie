@@ -636,6 +636,63 @@ pub fn render(text: &str, cx: &App) -> AnyElement {
     }
 }
 
+/// Per-row parse memoization for the transcript. The view re-renders
+/// every frame, and each frame used to re-parse every visible message —
+/// during streaming, the whole parser ran on every row on every token.
+/// Turn text is append-only, so a (row, text length) match means the
+/// parse is still exactly this text's: the growing row re-parses per
+/// throttled frame, every settled row parses once, ever.
+#[derive(Default)]
+pub struct ParseCache {
+    rows: std::collections::HashMap<u64, (usize, std::rc::Rc<Vec<Block>>)>,
+}
+
+impl ParseCache {
+    /// Render with a memoized parse. `key` identifies the row (the
+    /// turn index; a reload clears the cache, so identities may be
+    /// reused after one).
+    pub fn render(&mut self, key: u64, text: &str, cx: &App) -> AnyElement {
+        if self.rows.len() > 1024 {
+            // "Load earlier" reindexes every row; the bound keeps a
+            // long-lived session's map honest without tuning.
+            self.rows.clear();
+        }
+        let blocks = match self.rows.get(&key) {
+            Some((len, blocks)) if *len == text.len() => blocks.clone(),
+            Some(_) | None => {
+                let blocks = std::rc::Rc::new(parse_blocks(text));
+                self.rows.insert(key, (text.len(), blocks.clone()));
+                blocks
+            }
+        };
+        render_parsed(&blocks, cx)
+    }
+
+    /// A reload replaces every turn — no cached parse can survive it.
+    pub fn clear(&mut self) {
+        self.rows.clear();
+    }
+}
+
+/// The element-building half of [`render`], over an already-parsed
+/// block list.
+fn render_parsed(blocks: &[Block], cx: &App) -> AnyElement {
+    let elements = blocks
+        .iter()
+        .filter(|block| !matches!(block, Block::Paragraph(p) if p.trim().is_empty()))
+        .map(|block| render_block(block, cx))
+        .collect::<Vec<_>>();
+    if elements.is_empty() {
+        div().into_any_element()
+    } else {
+        v_flex()
+            .w_full()
+            .gap_2()
+            .children(elements)
+            .into_any_element()
+    }
+}
+
 fn render_block(block: &Block, cx: &App) -> AnyElement {
     let theme = cx.theme();
     match block {

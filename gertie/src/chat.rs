@@ -69,6 +69,12 @@ const PASTE_ATTACHMENT_BYTES: usize = 32 * 1024;
 /// not (performance doctrine: bounded loads).
 const RECENT_WINDOW: usize = 400;
 
+/// The cadence streaming repaints at. Deltas arrive in bursts; each
+/// repaint re-parses the growing row, so a token's cost must be a
+/// frame's cost, not a token-shaped pile of them. 16 ms is one frame —
+/// and the turn's transitions (flush_stream) notify regardless.
+const STREAM_NOTIFY_CADENCE: std::time::Duration = std::time::Duration::from_millis(16);
+
 /// One rendered turn in the transcript. Plain messages keep their row in
 /// the session store (streaming updates land in SQLite without a row per
 /// token); tool turns are rendered as cards keyed by call id.
@@ -388,6 +394,13 @@ pub struct ChatView {
     /// cards, keyed by the run's first index; cleared with the rest
     /// of the index-keyed state.
     expanded_runs: std::collections::HashSet<usize>,
+    /// Memoized markdown parses per transcript row (the turn index):
+    /// text is append-only per row, so a length match reuses the
+    /// parse. Cleared when a reload replaces the turns.
+    markdown_cache: std::cell::RefCell<crate::markdown::ParseCache>,
+    /// The last repaint a streaming delta asked for — deltas coalesce
+    /// to [`STREAM_NOTIFY_CADENCE`].
+    stream_notify: Option<std::time::Instant>,
 }
 
 impl ChatView {
@@ -595,6 +608,8 @@ impl ChatView {
             stream_persisted: 0,
             expanded_tools: Default::default(),
             expanded_runs: Default::default(),
+            markdown_cache: Default::default(),
+            stream_notify: None,
             approval_replies: Default::default(),
         };
         view.reload_session(cx);
@@ -795,6 +810,9 @@ impl ChatView {
             None => (Vec::new(), Vec::new(), None),
         };
         self.turns = turns;
+        // The turn indexes name different turns now — no cached parse
+        // may survive the reload.
+        self.markdown_cache.borrow_mut().clear();
         self.history = Arc::new(tokio::sync::Mutex::new(history));
         self.last_db_id = last_db_id;
         // A rewind confirm names turns of THIS transcript — switching
@@ -2621,7 +2639,19 @@ impl ChatView {
                 self.stream_persisted = text.len();
             }
         }
-        cx.notify();
+        // Repaints coalesce to the frame cadence: the growing row's
+        // parse is real work, and deltas arrive in bursts. The turn's
+        // transitions flush and notify regardless, so nothing sits
+        // stale.
+        let now = std::time::Instant::now();
+        let due = match self.stream_notify {
+            Some(last) => now.duration_since(last) >= STREAM_NOTIFY_CADENCE,
+            None => true,
+        };
+        if due {
+            self.stream_notify = Some(now);
+            cx.notify();
+        }
     }
 
     /// Writes the streaming row's unsaved tail to the store. Called when
@@ -3539,7 +3569,9 @@ impl ChatView {
             self.approval_reply_for(index, window, cx);
         }
         let inner = match &self.turns[index] {
-            Turn::Message { role, text, .. } => self.render_message(role, text, cx),
+            Turn::Message { role, text, .. } => {
+                self.render_message(role, text, index as u64, cx)
+            }
             Turn::Tool {
                 call,
                 status,
@@ -3828,7 +3860,7 @@ impl ChatView {
             .into_any_element()
     }
 
-    fn render_message(&self, role: &Role, text: &str, cx: &App) -> AnyElement {
+    fn render_message(&self, role: &Role, text: &str, key: u64, cx: &App) -> AnyElement {
         match role {
             Role::User => h_flex()
                 .w_full()
@@ -3877,7 +3909,13 @@ impl ChatView {
                         row.child(text.to_string())
                     })
                     .when(!is_error, |row| {
-                        row.child(crate::markdown::render(text, cx))
+                        // The memoized parse: settled rows parse once,
+                        // the streaming row once per throttled frame.
+                        row.child(
+                            self.markdown_cache
+                                .borrow_mut()
+                                .render(key, text, cx),
+                        )
                     })
                     .into_any_element()
             }
