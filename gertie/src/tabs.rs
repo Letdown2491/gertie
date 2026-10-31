@@ -281,42 +281,43 @@ impl WorkspaceView {
         let repo_root = self.boot.workspace_root.clone();
         let prefix = self.boot.worktree_branch_prefix();
         let this = cx.entity();
-        window.spawn(cx, async move |cx| {
-            let created = cx
-                .background_executor()
-                .spawn(async move { crate::worktree::create(&repo_root, &name) })
-                .await;
-            let _ = this.update_in(cx, |this, window, cx| match created {
-                Ok(root) => {
-                    let (tools, system_prompt) = this.boot.registry_for_root(&root);
-                    let naming = crate::worktree::BranchNaming {
-                        root: root.clone(),
-                        prefix,
-                    };
-                    let view = this.make_view(
-                        tools.clone(),
-                        system_prompt.clone(),
-                        Some(naming),
-                        window,
-                        cx,
-                    );
-                    this.tabs.push(TabState {
-                        view,
-                        worktree: Some(root),
-                    });
-                    let index = this.tabs.len() - 1;
-                    this.active = index;
-                    this.subscribe_config_saved(index, window, cx);
-                    this.last_error = None;
-                    cx.notify();
-                }
-                Err(error) => {
-                    this.last_error = Some(error);
-                    cx.notify();
-                }
-            });
-        })
-        .detach();
+        window
+            .spawn(cx, async move |cx| {
+                let created = cx
+                    .background_executor()
+                    .spawn(async move { crate::worktree::create(&repo_root, &name) })
+                    .await;
+                let _ = this.update_in(cx, |this, window, cx| match created {
+                    Ok(root) => {
+                        let (tools, system_prompt) = this.boot.registry_for_root(&root);
+                        let naming = crate::worktree::BranchNaming {
+                            root: root.clone(),
+                            prefix,
+                        };
+                        let view = this.make_view(
+                            tools.clone(),
+                            system_prompt.clone(),
+                            Some(naming),
+                            window,
+                            cx,
+                        );
+                        this.tabs.push(TabState {
+                            view,
+                            worktree: Some(root),
+                        });
+                        let index = this.tabs.len() - 1;
+                        this.active = index;
+                        this.subscribe_config_saved(index, window, cx);
+                        this.last_error = None;
+                        cx.notify();
+                    }
+                    Err(error) => {
+                        this.last_error = Some(error);
+                        cx.notify();
+                    }
+                });
+            })
+            .detach();
     }
 
     /// Closes the tab at `index`. The last tab stays — an empty window
