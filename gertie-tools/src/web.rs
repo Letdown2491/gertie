@@ -181,12 +181,14 @@ impl Tool for WebFetch {
         &'a self,
         arguments: &'a str,
     ) -> std::pin::Pin<Box<dyn Future<Output = ToolResult> + Send + 'a>> {
+        let allow_private = self.allow_private;
+        let arguments = arguments.to_string();
         blocking(move || {
             #[derive(serde::Deserialize)]
             struct Args {
                 url: String,
             }
-            let args: Args = crate::parse(arguments, "web_fetch")?;
+            let args: Args = crate::parse(&arguments, "web_fetch")?;
             let url: reqwest::Url = args
                 .url
                 .parse()
@@ -195,15 +197,13 @@ impl Tool for WebFetch {
             if url.scheme() != "http" && url.scheme() != "https" {
                 return Err("only http and https URLs are fetched".into());
             }
-            Self::check_target(&url, self.allow_private)?;
+            Self::check_target(&url, allow_private)?;
 
             let client = reqwest::blocking::Client::builder()
                 .timeout(FETCH_TIMEOUT)
                 .user_agent(USER_AGENT)
                 .redirect(reqwest::redirect::Policy::custom(redirect_hop))
-                .dns_resolver(Arc::new(PublicDnsOnly {
-                    allow_private: self.allow_private,
-                }))
+                .dns_resolver(Arc::new(PublicDnsOnly { allow_private }))
                 .build()
                 .map_err(|error| format!("web_fetch: {error}"))?;
             let response = client
@@ -362,6 +362,7 @@ pub struct WebSearch {
     backend: Option<SearchBackend>,
 }
 
+#[derive(Clone)]
 enum SearchBackend {
     Brave { api_key: String },
     Searxng { base_url: String },
@@ -411,16 +412,18 @@ impl Tool for WebSearch {
         &'a self,
         arguments: &'a str,
     ) -> std::pin::Pin<Box<dyn Future<Output = ToolResult> + Send + 'a>> {
+        let backend = self.backend.clone();
+        let arguments = arguments.to_string();
         blocking(move || {
             #[derive(serde::Deserialize)]
             struct Args {
                 query: String,
                 count: Option<usize>,
             }
-            let args: Args = crate::parse(arguments, "web_search")?;
+            let args: Args = crate::parse(&arguments, "web_search")?;
             let count = args.count.unwrap_or(5).clamp(1, 10);
 
-            let Some(backend) = &self.backend else {
+            let Some(backend) = &backend else {
                 return Err(
                     "no search backend configured. Add to ~/.config/gertie/config.toml:\n\
                      \x20 [search]\n\
@@ -556,15 +559,16 @@ impl Tool for SearchHistory {
         &'a self,
         arguments: &'a str,
     ) -> std::pin::Pin<Box<dyn Future<Output = ToolResult> + Send + 'a>> {
+        let store = self.store.clone();
+        let arguments = arguments.to_string();
         blocking(move || {
             #[derive(serde::Deserialize)]
             struct Args {
                 query: String,
                 limit: Option<usize>,
             }
-            let args: Args = crate::parse(arguments, "search_history")?;
-            let hits = self
-                .store
+            let args: Args = crate::parse(&arguments, "search_history")?;
+            let hits = store
                 .search(&args.query, args.limit.unwrap_or(10).clamp(1, 50))
                 .map_err(|error| format!("search_history: {error}"))?;
             if hits.is_empty() {
@@ -625,14 +629,17 @@ impl Tool for ReadSession {
         &'a self,
         arguments: &'a str,
     ) -> std::pin::Pin<Box<dyn Future<Output = ToolResult> + Send + 'a>> {
+        let store = self.store.clone();
+        let scope = self.scope.clone();
+        let arguments = arguments.to_string();
         blocking(move || {
             #[derive(serde::Deserialize)]
             struct Args {
                 query: Option<String>,
                 limit: Option<usize>,
             }
-            let args: Args = crate::parse(arguments, "read_session")?;
-            let Some(session) = self.scope.get() else {
+            let args: Args = crate::parse(&arguments, "read_session")?;
+            let Some(session) = scope.get() else {
                 return Ok("no session is open — nothing to read".into());
             };
             let query = args
@@ -640,8 +647,7 @@ impl Tool for ReadSession {
                 .as_deref()
                 .map(str::trim)
                 .filter(|q| !q.is_empty());
-            let hits = self
-                .store
+            let hits = store
                 .read_session(session, query, args.limit.unwrap_or(20).clamp(1, 100))
                 .map_err(|error| format!("read_session: {error}"))?;
             if hits.is_empty() {

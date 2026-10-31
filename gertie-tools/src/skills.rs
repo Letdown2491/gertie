@@ -193,10 +193,11 @@ impl Tool for LoadSkill {
         &'a self,
         arguments: &'a str,
     ) -> std::pin::Pin<Box<dyn Future<Output = ToolResult> + Send + 'a>> {
+        let skills = self.skills.clone();
+        let arguments = arguments.to_string();
         blocking(move || {
-            let args: LoadArgs = crate::parse(arguments, "load_skill")?;
-            let dir = self
-                .skills
+            let args: LoadArgs = crate::parse(&arguments, "load_skill")?;
+            let dir = skills
                 .get(&args.skill)
                 .ok_or_else(|| {
                     format!(

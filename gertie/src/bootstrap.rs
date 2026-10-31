@@ -7,6 +7,7 @@ use gertie_core::Tool as _;
 use gertie_providers::AnyProvider;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::mpsc::channel;
 
 /// The bootstrap parts a settings save replaces live: the provider
 /// (and its fallback chain), the preferred agent endpoint, the status
@@ -388,44 +389,76 @@ impl Bootstrap {
         // status-line warning, never a failed launch — gertie's local
         // tools carry the session alone if needed.
         if !config.mcp_servers.is_empty() {
+            // MCP servers connect in parallel: startup costs the
+            // slowest server's own connect time, not the sum. npm-based
+            // servers legitimately take tens of seconds to boot —
+            // serially, each added one to the wait. Each thread owns
+            // its server's config (cheap clones); answers come back
+            // through a channel and apply in config order, so the
+            // status label reads the same as a serial connect.
+            let servers = &config.mcp_servers;
+            let mut results: Vec<Option<Result<Vec<gertie_tools::mcp::McpTool>, String>>> =
+                (0..servers.len()).map(|_| None).collect();
+            {
+                let (tx, rx) = channel();
+                for (index, server) in servers.iter().enumerate() {
+                    let name = server.name.clone();
+                    let url = server.url.clone();
+                    let command = server.command.clone();
+                    let args = server.args.clone();
+                    let env: Vec<(String, String)> = server
+                        .env
+                        .iter()
+                        .map(|(key, value)| (key.clone(), value.clone()))
+                        .collect();
+                    let tx = tx.clone();
+                    let spawned = std::thread::Builder::new()
+                        .name(format!("mcp-{name}-connect"))
+                        .spawn(move || {
+                            // The error text is label-ready: connect
+                            // failures already name the server; the
+                            // others are given its name here.
+                            let connected = match (&url, &command) {
+                                (Some(url), _) => {
+                                    gertie_tools::mcp::McpClient::connect_url(&name, url)
+                                }
+                                (None, Some(command)) => gertie_tools::mcp::McpClient::connect(
+                                    &name, command, &args, &env,
+                                ),
+                                (None, None) => {
+                                    Err(format!("mcp {name}: needs a url or a command"))
+                                }
+                            };
+                            let result = match connected {
+                                Ok(client) => match Arc::new(client).list_tools() {
+                                    Ok(mcp_tools) => Ok(mcp_tools),
+                                    Err(error) => Err(format!("mcp {name}: {error}")),
+                                },
+                                Err(error) => Err(error),
+                            };
+                            let _ = tx.send((index, result));
+                        });
+                    if let Err(error) = spawned {
+                        results[index] = Some(Err(format!("mcp {}: {error}", server.name)));
+                    }
+                }
+                drop(tx); // the iteration ends when every thread has answered
+                for (index, result) in rx {
+                    results[index] = Some(result);
+                }
+            }
             let map = Arc::get_mut(&mut tools).expect("registry not yet shared");
-            for server in &config.mcp_servers {
-                // Streamable HTTP when a URL is configured; stdio
-                // (spawned process) otherwise.
-                let connection = match &server.url {
-                    Some(url) => gertie_tools::mcp::McpClient::connect_url(&server.name, url),
-                    None => match &server.command {
-                        Some(command) => gertie_tools::mcp::McpClient::connect(
-                            &server.name,
-                            command,
-                            &server.args,
-                            &server
-                                .env
-                                .iter()
-                                .map(|(key, value)| (key.clone(), value.clone()))
-                                .collect::<Vec<_>>(),
-                        ),
-                        None => {
-                            label.push_str(&format!(
-                                " — ⚠ mcp {}: needs a url or a command",
-                                server.name
-                            ));
-                            continue;
+            for (index, result) in results.into_iter().enumerate() {
+                let server = &servers[index];
+                match result.expect("every configured server reports") {
+                    Ok(mcp_tools) => {
+                        let count = mcp_tools.len();
+                        for tool in mcp_tools {
+                            root_independent.push(tool.name().to_string());
+                            map.insert(tool.name().to_string(), Arc::new(tool));
                         }
-                    },
-                };
-                match connection {
-                    Ok(client) => match Arc::new(client).list_tools() {
-                        Ok(mcp_tools) => {
-                            let count = mcp_tools.len();
-                            for tool in mcp_tools {
-                                root_independent.push(tool.name().to_string());
-                                map.insert(tool.name().to_string(), Arc::new(tool));
-                            }
-                            label.push_str(&format!(" · mcp:{}×{count}", server.name));
-                        }
-                        Err(error) => label.push_str(&format!(" — ⚠ mcp {}: {error}", server.name)),
-                    },
+                        label.push_str(&format!(" · mcp:{}×{count}", server.name));
+                    }
                     Err(error) => label.push_str(&format!(" — ⚠ {error}")),
                 }
             }

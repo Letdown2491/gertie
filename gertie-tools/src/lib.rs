@@ -98,16 +98,13 @@ fn resolve(root: &Path, path: &str) -> Result<PathBuf, String> {
                         break resolved;
                     }
                     Err(_) => {
-                        let Some(last) =
-                            ancestor.file_name().map(std::path::PathBuf::from)
-                        else {
+                        let Some(last) = ancestor.file_name().map(std::path::PathBuf::from) else {
                             // Walked past the root: nothing exists to
                             // traverse through; the caller's own error
                             // (and create_dir_all) handles it.
                             return Ok(joined);
                         };
-                        let Some(parent) =
-                            ancestor.parent().map(std::path::Path::to_path_buf)
+                        let Some(parent) = ancestor.parent().map(std::path::Path::to_path_buf)
                         else {
                             return Ok(joined);
                         };
@@ -136,15 +133,30 @@ fn limit(text: String) -> String {
 }
 
 /// Shared plumbing: every tool holds its workspace root and turns the
-/// model's JSON into a result on the polling thread. Local file/process
-/// I/O is short and synchronous by nature; the loop runs on a background
-/// executor, so a bounded block costs nothing interactive (bash's timeout
-/// is the hard ceiling).
-fn blocking<'a, F>(run: F) -> Pin<Box<dyn Future<Output = ToolResult> + Send + 'a>>
+/// model's JSON into a result. Local file/process I/O is short and
+/// synchronous by nature — but not *bounded* by anything but the
+/// tool's own ceiling (bash: 300 s). The closure runs on its own OS
+/// thread and hands the result back through a oneshot: a wedged call
+/// pins one anonymous thread, never the executor's polling loop.
+/// Cancellation drops the future and abandons the thread — each tool
+/// still bounds its own work, so an orphan self-terminates. The
+/// closure owns what it captures (call sites clone their roots and
+/// arguments; all cheap) because a detached thread outlives the poll.
+fn blocking<F>(run: F) -> Pin<Box<dyn Future<Output = ToolResult> + Send>>
 where
-    F: FnOnce() -> ToolResult + Send + 'a,
+    F: FnOnce() -> ToolResult + Send + 'static,
 {
-    Box::pin(async move { run() })
+    Box::pin(async move {
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        std::thread::spawn(move || {
+            let _ = sender.send(run());
+        });
+        match receiver.await {
+            Ok(result) => result,
+            // The sender only disappears if the thread panicked.
+            Err(_) => Err("tool thread panicked".into()),
+        }
+    })
 }
 
 macro_rules! rooted {
@@ -332,9 +344,11 @@ impl Tool for ReadFile {
         &'a self,
         arguments: &'a str,
     ) -> Pin<Box<dyn Future<Output = ToolResult> + Send + 'a>> {
+        let root = self.root.clone();
+        let arguments = arguments.to_string();
         blocking(move || {
-            let args: ReadArgs = parse(arguments, "read_file")?;
-            let path = resolve(&self.root, &args.path)?;
+            let args: ReadArgs = parse(&arguments, "read_file")?;
+            let path = resolve(&root, &args.path)?;
             let text = std::fs::read_to_string(&path)
                 .map_err(|error| format!("{}: {error}", args.path))?;
 
@@ -382,9 +396,11 @@ impl Tool for WriteFile {
         &'a self,
         arguments: &'a str,
     ) -> Pin<Box<dyn Future<Output = ToolResult> + Send + 'a>> {
+        let root = self.root.clone();
+        let arguments = arguments.to_string();
         blocking(move || {
-            let args: WriteArgs = parse(arguments, "write_file")?;
-            let path = resolve(&self.root, &args.path)?;
+            let args: WriteArgs = parse(&arguments, "write_file")?;
+            let path = resolve(&root, &args.path)?;
             if let Some(parent) = path.parent() {
                 std::fs::create_dir_all(parent)
                     .map_err(|error| format!("{}: {error}", parent.display()))?;
@@ -436,9 +452,11 @@ impl Tool for EditFile {
         &'a self,
         arguments: &'a str,
     ) -> Pin<Box<dyn Future<Output = ToolResult> + Send + 'a>> {
+        let root = self.root.clone();
+        let arguments = arguments.to_string();
         blocking(move || {
-            let args: EditArgs = parse(arguments, "edit_file")?;
-            let path = resolve(&self.root, &args.path)?;
+            let args: EditArgs = parse(&arguments, "edit_file")?;
+            let path = resolve(&root, &args.path)?;
             let text = std::fs::read_to_string(&path)
                 .map_err(|error| format!("{}: {error}", args.path))?;
 
@@ -527,8 +545,11 @@ impl Tool for Bash {
         &'a self,
         arguments: &'a str,
     ) -> Pin<Box<dyn Future<Output = ToolResult> + Send + 'a>> {
+        let root = self.root.clone();
+        let sandbox = self.sandbox.clone();
+        let arguments = arguments.to_string();
         blocking(move || {
-            let args: BashArgs = parse(arguments, "bash")?;
+            let args: BashArgs = parse(&arguments, "bash")?;
             let timeout = std::time::Duration::from_secs(args.timeout.unwrap_or(30).clamp(1, 300));
 
             let mut child = {
@@ -536,10 +557,10 @@ impl Tool for Bash {
                 command
                     .arg("-c")
                     .arg(&args.command)
-                    .current_dir(&self.root)
+                    .current_dir(&root)
                     .stdout(std::process::Stdio::piped())
                     .stderr(std::process::Stdio::piped());
-                if let Some(sandbox) = &self.sandbox {
+                if let Some(sandbox) = &sandbox {
                     sandbox.apply(&mut command)?;
                 }
                 command.spawn().map_err(|error| format!("bash: {error}"))?
@@ -608,15 +629,17 @@ impl Tool for Glob {
         &'a self,
         arguments: &'a str,
     ) -> Pin<Box<dyn Future<Output = ToolResult> + Send + 'a>> {
+        let root = self.root.clone();
+        let arguments = arguments.to_string();
         blocking(move || {
-            let args: GlobArgs = parse(arguments, "glob")?;
-            let full = resolve(&self.root, &args.pattern)?;
+            let args: GlobArgs = parse(&arguments, "glob")?;
+            let full = resolve(&root, &args.pattern)?;
             let mut matches: Vec<String> = glob::glob(&full.to_string_lossy())
                 .map_err(|error| format!("glob: bad pattern ({error})"))?
                 .filter_map(|entry| entry.ok())
                 .filter(|path| path.is_file())
                 .map(|path| {
-                    path.strip_prefix(&self.root)
+                    path.strip_prefix(&root)
                         .unwrap_or(&path)
                         .to_string_lossy()
                         .to_string()
@@ -659,13 +682,15 @@ impl Tool for Grep {
         &'a self,
         arguments: &'a str,
     ) -> Pin<Box<dyn Future<Output = ToolResult> + Send + 'a>> {
+        let root = self.root.clone();
+        let arguments = arguments.to_string();
         blocking(move || {
-            let args: GrepArgs = parse(arguments, "grep")?;
+            let args: GrepArgs = parse(&arguments, "grep")?;
             let pattern = regex::Regex::new(&args.pattern)
                 .map_err(|error| format!("grep: bad pattern ({error})"))?;
             let base = match &args.path {
-                Some(path) => resolve(&self.root, path)?,
-                None => self.root.clone(),
+                Some(path) => resolve(&root, path)?,
+                None => root.clone(),
             };
 
             let mut matches: Vec<String> = Vec::new();
@@ -702,7 +727,7 @@ impl Tool for Grep {
                             "{}:{}: {}",
                             entry
                                 .path()
-                                .strip_prefix(&self.root)
+                                .strip_prefix(&root)
                                 .unwrap_or(entry.path())
                                 .display(),
                             index + 1,
@@ -780,10 +805,7 @@ mod tests {
                 resolved.starts_with(&canonical_root),
                 "resolved through the link's spelling: {resolved:?}"
             );
-            assert_eq!(
-                resolved,
-                canonical_root.join("a").join("b").join("c.txt")
-            );
+            assert_eq!(resolved, canonical_root.join("a").join("b").join("c.txt"));
         }
     }
 

@@ -35,7 +35,7 @@ use std::future::Future;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::pin::Pin;
 use std::sync::Arc;
-use std::sync::mpsc::{Receiver, RecvTimeoutError, channel};
+use std::sync::mpsc::{RecvTimeoutError, channel};
 use std::time::Duration;
 
 /// How long a request may sit unanswered before it fails. Generous:
@@ -65,6 +65,10 @@ fn sanitize_name(raw: &str) -> String {
         .collect()
 }
 
+/// What one waiting request listens on. The reader thread routes
+/// each answer to exactly one of these, by the answer's `id`.
+type Waiter = std::sync::mpsc::Sender<Result<Value, String>>;
+
 pub struct McpClient {
     server_name: String,
     inner: Arc<std::sync::Mutex<Inner>>,
@@ -81,8 +85,11 @@ struct Inner {
 enum Transport {
     Stdio {
         stdin: std::process::ChildStdin,
-        /// Lines from the reader thread.
-        responses: Receiver<String>,
+        /// Requests waiting on their answers, shared with the reader
+        /// thread: it routes every line by its `id`. Keyed dispatch is
+        /// what lets two tool calls run at once — each waits on its
+        /// own answer instead of whoever spoke first.
+        pending: Arc<std::sync::Mutex<std::collections::HashMap<u64, Waiter>>>,
     },
     Http {
         url: String,
@@ -136,9 +143,18 @@ impl McpClient {
             .take()
             .ok_or_else(|| format!("mcp `{server_name}`: no stdout"))?;
 
-        // Reader thread: the child owns the pipe's read side; requests
-        // wait on the channel with a timeout instead of blocking forever.
-        let (tx, rx) = channel();
+        // Reader thread: the child owns the pipe's read side. Each
+        // line is parsed here and routed by its `id` to whoever is
+        // waiting on it — notifications and unparseable noise are
+        // dropped, model-visible output stays clean. When the server
+        // dies, every waiter learns immediately instead of at its
+        // timeout.
+        let pending = Arc::new(std::sync::Mutex::new(std::collections::HashMap::<
+            u64,
+            Waiter,
+        >::new()));
+        let reader_pending = pending.clone();
+        let reader_name = server_name.to_string();
         std::thread::Builder::new()
             .name(format!("mcp-{server_name}-reader"))
             .spawn(move || {
@@ -147,28 +163,31 @@ impl McpClient {
                 loop {
                     line.clear();
                     match reader.read_line(&mut line) {
-                        Ok(0) | Err(_) => {
-                            // EOF or read error: nothing more will come.
-                            // The next recv times out and reports it.
-                            break;
-                        }
+                        Ok(0) | Err(_) => break,
                         Ok(_) => {
-                            if tx.send(line.trim_end().to_string()).is_err() {
-                                break;
+                            let Ok(value) = serde_json::from_str::<Value>(line.trim_end()) else {
+                                continue; // not JSON — server noise
+                            };
+                            let Some(id) = value.get("id").and_then(Value::as_u64) else {
+                                continue; // a notification — nothing waits on it
+                            };
+                            let answer = Self::rpc_result(&reader_name, id, &value);
+                            let waiter = reader_pending.lock().unwrap().remove(&id);
+                            if let Some(waiter) = waiter {
+                                let _ = waiter.send(answer);
                             }
                         }
                     }
                 }
+                // The server is gone; nothing more will arrive.
+                reader_pending.lock().unwrap().clear();
             })
             .map_err(|error| format!("mcp `{server_name}`: {error}"))?;
 
         let client = Self {
             server_name: server_name.to_string(),
             inner: Arc::new(std::sync::Mutex::new(Inner {
-                transport: Transport::Stdio {
-                    stdin,
-                    responses: rx,
-                },
+                transport: Transport::Stdio { stdin, pending },
                 next_id: 1,
             })),
             child: Some(Arc::new(std::sync::Mutex::new(child))),
@@ -296,47 +315,102 @@ impl McpClient {
         if let Some(params) = params {
             message["params"] = params;
         }
-        // The lock guards the send and session-id state only — the
-        // stdio wait re-locks per line, so it must run lock-free. The
-        // HTTP round trip is self-contained (no re-lock), so it can
-        // finish under the guard; requests are serialized either way.
-        enum Pending {
-            Stdio,
-            Done(Result<Value, String>),
+        // The lock guards the send and session-id state only. The wait
+        // happens on the request's own channel (the reader routes by
+        // id), and the HTTP round trip runs after the lock is dropped —
+        // so two tool calls may be in flight at once against either
+        // transport.
+        enum Sent {
+            Stdio(std::sync::mpsc::Receiver<Result<Value, String>>),
+            Http {
+                url: String,
+                client: reqwest::blocking::Client,
+                session_id: Option<String>,
+            },
+            Failed(Result<Value, String>),
         }
         let sent = {
             let mut inner = self.inner.lock().unwrap();
             match &mut inner.transport {
-                Transport::Stdio { stdin, .. } => {
-                    writeln!(stdin, "{message}")
-                        .map_err(|error| format!("mcp `{}`: {error}", self.server_name))?;
-                    Pending::Stdio
+                Transport::Stdio { stdin, pending } => {
+                    // Registered before the write: the server may
+                    // answer the moment the line lands.
+                    let (waiter, answers) = channel();
+                    pending.lock().unwrap().insert(id, waiter);
+                    match writeln!(stdin, "{message}") {
+                        Ok(()) => Sent::Stdio(answers),
+                        Err(error) => {
+                            pending.lock().unwrap().remove(&id);
+                            Sent::Failed(Err(format!("mcp `{}`: {error}", self.server_name)))
+                        }
+                    }
                 }
                 Transport::Http {
                     url,
                     client,
                     session_id,
                 } => {
-                    let (result, issued) = Self::http_round_trip(
-                        &self.server_name,
-                        url,
-                        client,
-                        session_id.as_deref(),
-                        id,
-                        &message,
-                    );
-                    // The initialize response may issue a session id;
-                    // every later request echoes it.
-                    if issued.is_some() {
-                        *session_id = issued;
+                    // Snapshot what the round trip needs and get out of
+                    // the lock's way: it is network I/O, bounded by the
+                    // client's own timeout, and no other request —
+                    // stdio or HTTP — should queue behind it. The lock
+                    // returns only to remember a session id, below.
+                    Sent::Http {
+                        url: url.clone(),
+                        client: client.clone(),
+                        session_id: session_id.clone(),
                     }
-                    Pending::Done(result)
                 }
             }
         };
         match sent {
-            Pending::Stdio => self.await_response_stdio(id),
-            Pending::Done(result) => result,
+            Sent::Stdio(answers) => match answers.recv_timeout(RESPONSE_TIMEOUT) {
+                Ok(result) => result,
+                Err(RecvTimeoutError::Timeout) => {
+                    // A late answer finds no one: take the registration
+                    // back before reporting.
+                    let inner = self.inner.lock().unwrap();
+                    if let Transport::Stdio { pending, .. } = &inner.transport {
+                        pending.lock().unwrap().remove(&id);
+                    }
+                    Err(format!(
+                        "mcp `{}`: no response within {}s",
+                        self.server_name,
+                        RESPONSE_TIMEOUT.as_secs()
+                    ))
+                }
+                Err(RecvTimeoutError::Disconnected) => Err(format!(
+                    "mcp `{}`: server closed its output",
+                    self.server_name
+                )),
+            },
+            Sent::Http {
+                url,
+                client,
+                session_id,
+            } => {
+                let (result, issued) = Self::http_round_trip(
+                    &self.server_name,
+                    &url,
+                    &client,
+                    session_id.as_deref(),
+                    id,
+                    &message,
+                );
+                // The initialize response may issue a session id; every
+                // later request echoes it.
+                if issued.is_some() {
+                    let mut inner = self.inner.lock().unwrap();
+                    if let Transport::Http {
+                        session_id: stored, ..
+                    } = &mut inner.transport
+                    {
+                        *stored = issued;
+                    }
+                }
+                result
+            }
+            Sent::Failed(result) => result,
         }
     }
 
@@ -428,46 +502,6 @@ impl McpClient {
         }
         Ok(value.get("result").cloned().unwrap_or(Value::Null))
     }
-
-    /// stdio: reads buffered lines until the response with `id`
-    /// arrives. Server notifications and stale lines are skipped;
-    /// timeout or EOF is an error carrying the server's last words if
-    /// any.
-    fn await_response_stdio(&self, id: u64) -> Result<Value, String> {
-        loop {
-            let line = {
-                let mut inner = self.inner.lock().unwrap();
-                let Transport::Stdio { responses, .. } = &mut inner.transport else {
-                    unreachable!("await_response_stdio outside the stdio transport");
-                };
-                match responses.recv_timeout(RESPONSE_TIMEOUT) {
-                    Ok(line) => line,
-                    Err(RecvTimeoutError::Timeout) => {
-                        return Err(format!(
-                            "mcp `{}`: no response within {}s",
-                            self.server_name,
-                            RESPONSE_TIMEOUT.as_secs()
-                        ));
-                    }
-                    Err(RecvTimeoutError::Disconnected) => {
-                        return Err(format!(
-                            "mcp `{}`: server closed its output",
-                            self.server_name
-                        ));
-                    }
-                }
-            };
-            let value: Value = match serde_json::from_str(&line) {
-                Ok(value) => value,
-                Err(_) => continue, // not JSON — skip (server noise)
-            };
-            if value.get("id").and_then(Value::as_u64) == Some(id) {
-                return Self::rpc_result(&self.server_name, id, &value);
-            }
-            // Any other line (notifications, responses to nothing we're
-            // waiting on) is dropped: model-visible output stays clean.
-        }
-    }
 }
 impl Drop for McpClient {
     fn drop(&mut self) {
@@ -506,12 +540,15 @@ impl Tool for McpTool {
         &'a self,
         arguments: &'a str,
     ) -> Pin<Box<dyn Future<Output = ToolResult> + Send + 'a>> {
+        let client = self.client.clone();
+        let remote_name = self.remote_name.clone();
+        let arguments = arguments.to_string();
         blocking(move || {
             // Arguments arrive as a JSON string; tools/call wants an
             // object. Unparseable arguments are the model's mistake —
             // reported back, not a panic.
-            let parsed: Value = serde_json::from_str(arguments)
-                .map_err(|error| format!("bad arguments for {}: {error}", self.remote_name))?;
+            let parsed: Value = serde_json::from_str(&arguments)
+                .map_err(|error| format!("bad arguments for {remote_name}: {error}"))?;
             let arguments = if parsed.is_object() {
                 parsed
             } else {
@@ -519,10 +556,10 @@ impl Tool for McpTool {
             };
             // request() is private; go through the same lock-serialized
             // path by calling it on the client.
-            self.client
+            client
                 .request(
                     "tools/call",
-                    Some(json!({"name": self.remote_name, "arguments": arguments})),
+                    Some(json!({"name": remote_name, "arguments": arguments})),
                 )
                 .and_then(|result| {
                     let text = result
