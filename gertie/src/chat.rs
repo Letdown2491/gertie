@@ -398,6 +398,8 @@ pub struct ChatView {
     /// text is append-only per row, so a length match reuses the
     /// parse. Cleared when a reload replaces the turns.
     markdown_cache: std::cell::RefCell<crate::markdown::ParseCache>,
+    /// Memoized tool-card faces per turn index (see [`ToolFace`]).
+    tool_face: std::cell::RefCell<std::collections::HashMap<usize, ToolFace>>,
     /// The last repaint a streaming delta asked for — deltas coalesce
     /// to [`STREAM_NOTIFY_CADENCE`].
     stream_notify: Option<std::time::Instant>,
@@ -609,6 +611,7 @@ impl ChatView {
             expanded_tools: Default::default(),
             expanded_runs: Default::default(),
             markdown_cache: Default::default(),
+            tool_face: Default::default(),
             stream_notify: None,
             approval_replies: Default::default(),
         };
@@ -814,8 +817,9 @@ impl ChatView {
         };
         self.turns = turns;
         // The turn indexes name different turns now — no cached parse
-        // may survive the reload.
+        // or card face may survive the reload.
         self.markdown_cache.borrow_mut().clear();
+        self.tool_face.borrow_mut().clear();
         self.history = Arc::new(tokio::sync::Mutex::new(history));
         self.last_db_id = last_db_id;
         // The archive behind the page — every row, every image
@@ -927,9 +931,13 @@ impl ChatView {
         // keeps the list's height cache and scroll position in step —
         // the reader holds their place, no snap.
         self.list_state.splice(0..1, added);
+        // Every turn's index just shifted by the page's size — all
+        // index-keyed state is stale at once.
         self.expanded_tools.clear();
         self.expanded_runs.clear();
         self.approval_replies.clear();
+        self.markdown_cache.borrow_mut().clear();
+        self.tool_face.borrow_mut().clear();
         cx.notify();
     }
 
@@ -3960,7 +3968,24 @@ impl ChatView {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let running = matches!(status, ToolStatus::Running);
-        let label = crate::tools_ui::action_label(&call.name, &call.arguments, running);
+        // Label and diff data parse once per card (see ToolFace); the
+        // elements rebuild per frame from the memoized data.
+        let (label, diff) = {
+            let mut cache = self.tool_face.borrow_mut();
+            let face = cache.entry(index).or_insert_with(|| ToolFace {
+                label_running: crate::tools_ui::action_label(&call.name, &call.arguments, true),
+                label_done: crate::tools_ui::action_label(&call.name, &call.arguments, false),
+                diff: diff_data(call),
+            });
+            (
+                if running {
+                    face.label_running.clone()
+                } else {
+                    face.label_done.clone()
+                },
+                face.diff.clone(),
+            )
+        };
 
         // No spinner on the running card: the accent label is the
         // activity, and a repeating animation repaints every frame
@@ -4010,7 +4035,7 @@ impl ChatView {
                                 "This changes files in the workspace — your OK first."
                             }),
                     )
-                    .children(diff_lines(call, cx))
+                    .children(diff.as_ref().map(|diff| diff_element(diff, cx)))
                     .child(
                         h_flex()
                             .gap_2()
@@ -4077,11 +4102,11 @@ impl ChatView {
                     || result.ends_with("denied by user");
                 // The diff tells the story for file changes — but never
                 // for a call that didn't happen (denied or failed).
-                if !failed && let Some(diff) = diff_lines(call, cx) {
-                    inner = inner.child(diff);
+                if !failed && let Some(diff) = &diff {
+                    inner = inner.child(diff_element(diff, cx));
                 }
                 let summary = crate::tools_ui::result_summary(&call.name, result);
-                let lines: Vec<&str> = result.lines().collect();
+                let line_count = result.lines().count();
                 let expanded = self.expanded_tools.contains(&index);
 
                 // Default face: the one-line outcome. The raw result —
@@ -4097,7 +4122,7 @@ impl ChatView {
                         })
                         .child(summary),
                 );
-                if lines.len() > 1 {
+                if line_count > 1 {
                     if expanded {
                         inner = inner.child(
                             div()
@@ -4118,7 +4143,7 @@ impl ChatView {
                         )
                     } else {
                         (
-                            format!("show raw output ({} lines)", lines.len()),
+                            format!("show raw output ({} lines)", line_count),
                             "What the model actually received".to_string(),
                         )
                     };
@@ -4303,16 +4328,12 @@ fn resolve_tool_path(root: &std::path::Path, path: &std::path::Path) -> std::pat
     }
 }
 
-fn diff_lines(call: &ToolCall, cx: &App) -> Option<AnyElement> {
+/// The diff's data — (added, removed) lines, capped — parsed from the
+/// call's arguments. Pure: the card cache holds this; element
+/// construction (`diff_lines`) rebuilds per frame from it.
+fn diff_data(call: &ToolCall) -> Option<(Vec<String>, Vec<String>)> {
     let value: serde_json::Value = serde_json::from_str(&call.arguments).ok()?;
-    let mut container = v_flex()
-        .rounded_md()
-        .border_1()
-        .border_color(cx.theme().border)
-        .text_size(px(12.))
-        .overflow_hidden();
-
-    let (add, remove): (Vec<&str>, Vec<&str>) = match call.name.as_str() {
+    let (add, remove): (Vec<String>, Vec<String>) = match call.name.as_str() {
         "edit_file" => {
             let old = value.get("old_text")?.as_str()?;
             let new = value
@@ -4320,16 +4341,30 @@ fn diff_lines(call: &ToolCall, cx: &App) -> Option<AnyElement> {
                 .and_then(|text| text.as_str())
                 .unwrap_or("");
             (
-                new.lines().take(24).collect(),
-                old.lines().take(24).collect(),
+                new.lines().take(24).map(str::to_string).collect(),
+                old.lines().take(24).map(str::to_string).collect(),
             )
         }
         "write_file" => {
             let content = value.get("content")?.as_str()?;
-            (content.lines().take(24).collect(), Vec::new())
+            (
+                content.lines().take(24).map(str::to_string).collect(),
+                Vec::new(),
+            )
         }
         _ => return None,
     };
+    Some((add, remove))
+}
+
+fn diff_element(diff: &(Vec<String>, Vec<String>), cx: &App) -> AnyElement {
+    let (add, remove) = (&diff.0, &diff.1);
+    let mut container = v_flex()
+        .rounded_md()
+        .border_1()
+        .border_color(cx.theme().border)
+        .text_size(px(12.))
+        .overflow_hidden();
 
     for line in remove {
         container = container.child(
@@ -4347,7 +4382,7 @@ fn diff_lines(call: &ToolCall, cx: &App) -> Option<AnyElement> {
                 .child(format!("+ {line}")),
         );
     }
-    Some(container.into_any_element())
+    container.into_any_element()
 }
 
 impl ChatView {
@@ -4499,6 +4534,10 @@ impl ChatView {
 impl Render for ChatView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let view = cx.entity().downgrade();
+        // The composer's slash matches, computed once per frame: the
+        // popup's guard and its rows share the one computation.
+        let value = self.input.read(cx).value().to_string();
+        let slash = slash_matches(&value, &self.templates);
         let pending = self.turns.iter().any(|turn| {
             matches!(
                 turn,
@@ -5084,35 +5123,26 @@ impl Render for ChatView {
                                             ),
                                         )
                                     })
-                                    .when(
-                                        !slash_matches(
-                                            &self.input.read(cx).value(),
-                                            &self.templates,
-                                        )
-                                        .is_empty(),
-                                        |composer| {
-                                            // Slash discovery: typing `/` lists
-                                            // every command; typing narrows it.
-                                            // Enter (or a click) accepts — a
-                                            // template expands into the composer
-                                            // so the real prompt is visible
-                                            // before it goes anywhere.
-                                            let value = self.input.read(cx).value().to_string();
-                                            let matches =
-                                                slash_matches(&value, &self.templates);
-                                            composer.child(
-                                                v_flex()
-                                                    .id("slash-popup")
-                                                    .mx_4()
-                                                    .mt_2()
-                                                    .max_h(px(220.))
-                                                    .overflow_y_scroll()
-                                                    .rounded_md()
-                                                    .border_1()
+                                    .when(!slash.is_empty(), |composer| {
+                                        // Slash discovery: typing `/` lists
+                                        // every command; typing narrows it.
+                                        // Enter (or a click) accepts — a
+                                        // template expands into the composer
+                                        // so the real prompt is visible
+                                        // before it goes anywhere.
+                                        composer.child(
+                                            v_flex()
+                                                .id("slash-popup")
+                                                .mx_4()
+                                                .mt_2()
+                                                .max_h(px(220.))
+                                                .overflow_y_scroll()
+                                                .rounded_md()
+                                                .border_1()
                                                     .border_color(cx.theme().border)
                                                     .bg(cx.theme().background)
                                                     .py_1()
-                                                    .children(matches.iter().enumerate().map(
+                                                    .children(slash.iter().enumerate().map(
                                                         |(row_index, matched)| {
                                                             let (name, description, builtin,
                                                                 accept_text) = match matched {
@@ -5420,6 +5450,19 @@ fn tildify(path: &std::path::Path) -> String {
 enum SlashMatch {
     Builtin(&'static str, &'static str),
     Template(usize),
+}
+
+/// A tool card's parsed face, memoized per turn index: the label in
+/// both tenses and the diff's line data. Element construction stays
+/// per-frame — gpui elements are consumed on render — but the JSON
+/// parses and label shaping behind a card only need happen once: a
+/// card's arguments never change, only its tense. Cleared wherever
+/// the turns are replaced or shifted, with the other index-keyed
+/// state.
+struct ToolFace {
+    label_running: String,
+    label_done: String,
+    diff: Option<(Vec<String>, Vec<String>)>,
 }
 
 /// What the current composer text would complete to, for the popup and
