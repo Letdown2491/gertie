@@ -600,13 +600,76 @@ impl Config {
                 );
             }
         };
-        match toml::from_str(&raw) {
-            Ok(overlay) => (Some(overlay), None),
+        match toml::from_str::<ProjectOverlay>(&raw) {
+            Ok(overlay) => {
+                // The overlay is the repo speaking — untrusted input.
+                // Unknown keys do nothing silently; a typo that does
+                // nothing and a key that stopped meaning something both
+                // deserve a word. (The user's config accepts unknown
+                // keys without complaint: forward compatibility is a
+                // feature there, not here.)
+                let unknown = Self::unknown_overlay_keys(
+                    &toml::from_str::<toml::Value>(&raw).unwrap_or(toml::Value::Table(
+                        Default::default(),
+                    )),
+                );
+                let warning = match unknown.as_slice() {
+                    [] => None,
+                    [one] => Some(format!("unrecognized key {one:?} — ignored")),
+                    many => Some(format!(
+                        "unrecognized keys {}: ignored",
+                        many.iter().map(|key| format!("{key:?}")).collect::<Vec<_>>().join(", ")
+                    )),
+                };
+                (Some(overlay), warning)
+            }
             Err(error) => (
                 None,
                 Some(format!("could not parse {}: {error}", path.display())),
             ),
         }
+    }
+
+    /// The overlay's known keys, for the unknown-key warning. Two
+    /// levels: the top-level keys, and the keys of each known section.
+    fn unknown_overlay_keys(value: &toml::Value) -> Vec<String> {
+        let Some(table) = value.as_table() else {
+            return Vec::new();
+        };
+        let mut unknown = Vec::new();
+        for (key, item) in table {
+            match key.as_str() {
+                "security" => unknown.extend(Self::unknown_section_keys(
+                    item,
+                    &["sandbox_bash", "allow_private_fetch"],
+                )),
+                "permissions" => unknown.extend(Self::unknown_section_keys(
+                    item,
+                    &["default_mode"],
+                )),
+                "worktree" => unknown.extend(Self::unknown_section_keys(
+                    item,
+                    &["branch_prefix"],
+                )),
+                // auto_settle_days is the leaf that needs no section
+                // check; everything else at top level is unrecognized.
+                "auto_settle_days" => {}
+                other => unknown.push(other.to_string()),
+            }
+        }
+        unknown
+    }
+
+    fn unknown_section_keys(item: &toml::Value, known: &[&str]) -> Vec<String> {
+        item.as_table()
+            .map(|table| {
+                table
+                    .keys()
+                    .filter(|key| !known.contains(&key.as_str()))
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     fn overlay_sandbox(overlay: Option<&ProjectOverlay>) -> Option<Resolved<bool>> {
@@ -1122,6 +1185,36 @@ default_mode = "accept_edits"
                 .expect("the parse error surfaces")
                 .contains("could not parse")
         );
+    }
+
+    /// Unknown keys in the repo's overlay are named, not swallowed —
+    /// the file is untrusted input, and a typo that does nothing (or a
+    /// key that no longer means anything) should say so.
+    #[test]
+    fn the_overlay_names_keys_it_does_not_know() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(root.path().join(".gertie")).unwrap();
+        // `settle_command` is a key the overlay once had and must never
+        // mean again; `nonsense` is a plain typo.
+        std::fs::write(
+            root.path().join(".gertie/config.toml"),
+            "auto_settle_days = 3\nsettle_command = \"cargo clean\"\n\n[security]\nsandbox_bash = true\nnonsense = 1\n",
+        )
+        .unwrap();
+        let (overlay, warning) = Config::load_project_overlay(root.path());
+        assert!(overlay.is_some(), "the known keys still load");
+        let warning = warning.expect("the unknown keys are named");
+        assert!(warning.contains("settle_command"), "{warning}");
+        assert!(warning.contains("nonsense"), "{warning}");
+
+        // A clean overlay is quiet.
+        std::fs::write(
+            root.path().join(".gertie/config.toml"),
+            "[security]\nsandbox_bash = true\n",
+        )
+        .unwrap();
+        let (_, warning) = Config::load_project_overlay(root.path());
+        assert!(warning.is_none());
     }
 
     /// The edited sections are rewritten, the rest of the file is
