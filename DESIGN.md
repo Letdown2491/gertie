@@ -339,7 +339,7 @@ processes in the user's environment. Linux-only packaging until macOS support la
 
 ## Doctrine
 
-Four lines taken from t3code's AGENTS.md (research/t3code-ideas.md §9) — they pass the
+Four lines taken from t3code's AGENTS.md — they pass the
 gertie test of restating what we already believe, from the other side of the harness
 boundary:
 
@@ -354,9 +354,9 @@ boundary:
 - **Answers are typed, not sentinel strings.** What can be empty, unknown, or errored
   comes back as distinct variants — a turn file's "after" is the next checkpoint's object
   or disk (`AfterState`), a refused file is a refusal with a reason, never `""` meaning
-  three things (research/t3code-ideas.md §6.1.4).
+  three things.
 
-Four more, from t3code's performance doctrines (research/t3code-ideas.md §8):
+Four more, from t3code's performance doctrines:
 
 - **No continuously repainting animations.** Motion repaints every frame for as long as
   it is visible; a state the words already state gains nothing from a spinner. Static

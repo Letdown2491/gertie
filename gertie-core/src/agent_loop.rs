@@ -418,8 +418,7 @@ pub const KEEP_TAIL: usize = 8;
 
 /// An item of the compaction digest keeps a 240-char prefix — enough
 /// to know what happened, not enough to fill a window. (t3code's
-/// handoff rule: a budgeted selection, not an agent-written summary;
-/// see research/t3code-ideas.md §7.)
+/// handoff rule: a budgeted selection, not an agent-written summary.)
 const ITEM_PREFIX: usize = 240;
 
 /// The original request keeps a bigger allowance than the digest's

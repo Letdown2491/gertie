@@ -1,7 +1,7 @@
 //! The replay provider: scripted turns through the real machinery.
 //!
 //! "Do not spend a paid model to see a turn render" (learned from
-//! t3code's dev tooling — see research/t3code-ideas.md §9): a replay
+//! t3code's dev tooling): a replay
 //! endpoint's model names a *scenario*, a TOML file of assistant steps
 //! (prose, tool calls), and the provider streams the next step with
 //! simulated pacing through the same [`Event`] contract as the real

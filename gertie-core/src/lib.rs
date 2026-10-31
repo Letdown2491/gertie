@@ -382,7 +382,7 @@ impl SessionStore {
 
     /// The sidebar as an inbox: the session whose record moved most
     /// recently first — "ordered by when each thread last came back to
-    /// you" (t3code's threads list; research/t3code-ideas.md §2).
+    /// you" (t3code's threads list).
     /// Message ids are monotonic across all sessions, so MAX(messages.id)
     /// orders by last activity; sessions with no messages yet sink
     /// below every active one and fall back to creation order among
