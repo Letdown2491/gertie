@@ -1989,12 +1989,12 @@ impl ChatView {
             return;
         };
         self.sync_queue();
-        if self.streaming {
-            if let Some(steer_tx) = &self.steer_tx {
-                let _ = steer_tx.send(text);
-                cx.notify();
-                return;
-            }
+        if self.streaming
+            && let Some(steer_tx) = &self.steer_tx
+        {
+            let _ = steer_tx.send(text);
+            cx.notify();
+            return;
         }
         let Some(session_id) = self.session_id else {
             return;
