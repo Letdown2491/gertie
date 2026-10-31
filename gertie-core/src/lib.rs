@@ -135,6 +135,10 @@ pub struct SessionSummary {
     /// Settled: the human put the work down. Out of the active list,
     /// never out of the record; opening it un-settles.
     pub settled: bool,
+    /// The turn ended on the provider's rate limit: a manual Resume is
+    /// the way back in. Survives restarts — the crash-restart affordance
+    /// falls out of it. Cleared by resuming or by any new send.
+    pub limited: bool,
 }
 
 /// One full-text search hit: which session, what role, and a marked
@@ -246,6 +250,7 @@ impl SessionStore {
             ("settled_at", "TEXT"),
             ("last_activity_at", "TEXT"),
             ("workspace_root", "TEXT"),
+            ("limited_at", "TEXT"),
         ] {
             if !session_columns.contains(&column.to_string()) {
                 connection.execute(
@@ -314,6 +319,7 @@ impl SessionStore {
                     // Child sessions live in the agents panel, never
                     // the sidebar's lifecycle machine.
                     settled: false,
+                    limited: false,
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -385,7 +391,7 @@ impl SessionStore {
         let connection = self.connection.lock().unwrap();
         let mut statement = connection.prepare(
             "SELECT s.id, s.title, s.input_tokens, s.output_tokens, s.last_context_tokens,
-                    s.settled_at IS NOT NULL
+                    s.settled_at IS NOT NULL, s.limited_at IS NOT NULL
              FROM sessions s
              LEFT JOIN messages m ON m.session_id = s.id
              WHERE s.kind = 'chat'
@@ -400,6 +406,7 @@ impl SessionStore {
                 output_tokens: row.get::<_, i64>(3)?.max(0) as u64,
                 context_tokens: row.get::<_, i64>(4)?.max(0) as u64,
                 settled: row.get::<_, i64>(5)? != 0,
+                limited: row.get::<_, i64>(6)? != 0,
             })
         })?;
         rows.collect()
@@ -419,6 +426,24 @@ impl SessionStore {
                 THEN strftime('%Y-%m-%dT%H:%M:%fZ','now') ELSE NULL END
              WHERE id = ?1",
             rusqlite::params![session_id.0 as i64, settled],
+        )?;
+        Ok(())
+    }
+
+    /// Marks (or clears) a session's rate-limited state: the turn ended
+    /// on the provider's limit and a manual Resume is the way back in.
+    /// Cleared by resuming, or by any new send.
+    pub fn set_session_limited(
+        &self,
+        session_id: SessionId,
+        limited: bool,
+    ) -> Result<(), rusqlite::Error> {
+        let connection = self.connection.lock().unwrap();
+        connection.execute(
+            "UPDATE sessions SET limited_at = CASE WHEN ?2
+                THEN strftime('%Y-%m-%dT%H:%M:%fZ','now') ELSE NULL END
+             WHERE id = ?1",
+            rusqlite::params![session_id.0 as i64, limited],
         )?;
         Ok(())
     }
@@ -956,6 +981,11 @@ pub enum Event {
     /// The stream failed. Retries are the provider layer's job; by the time
     /// an `Error` surfaces, the policy in DESIGN.md has been exhausted.
     Error { message: String },
+    /// The provider's usage/rate limit answered every retry. Not an
+    /// error to report and forget: the turn ends *limited*, the state
+    /// is persisted, and the UI offers a manual Resume — the ask is
+    /// "wait, then continue", not "something broke".
+    Limited { message: String },
 }
 
 #[cfg(test)]

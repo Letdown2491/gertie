@@ -1726,7 +1726,11 @@ impl ChatView {
         if let (Some(snapshots), Some(db_id)) = (&self.snapshots, db_id) {
             let _ = snapshots.begin_turn(session_id, db_id);
         }
-        self.drive_turn(text, images, cx);
+        // A fresh send is the human driving again: whatever limit
+        // stopped the last turn, this one supersedes it.
+        let _ = self.store.set_session_limited(session_id, false);
+        self.sessions = self.store.list_sessions().unwrap_or_default();
+        self.drive_turn(Some(text), images, cx);
     }
 
     /// `/compact`: replace the in-memory history with its selection now
@@ -1815,9 +1819,11 @@ impl ChatView {
     /// Hands the turn to the agent loop and renders its event stream:
     /// deltas stream into an assistant row, tool calls become cards, and
     /// results persist as tool rows the model also sees on reload.
+    /// `user_text` None means *resume* — continue from history as it
+    /// stands, no new user row.
     fn drive_turn(
         &mut self,
-        user_text: String,
+        user_text: Option<String>,
         user_attachments: Vec<String>,
         cx: &mut Context<Self>,
     ) {
@@ -1927,6 +1933,9 @@ impl ChatView {
                     LoopEvent::Error { message } => {
                         let _ = this.update(cx, |this, cx| this.on_error(&message, cx));
                     }
+                    LoopEvent::Limited { message } => {
+                        let _ = this.update(cx, |this, cx| this.on_limited(&message, cx));
+                    }
                     LoopEvent::Done => break,
                         }
                     }
@@ -1959,6 +1968,10 @@ impl ChatView {
                         Some(session_id) => session_id,
                         None => return,
                     };
+                    // A queued follow-up is the human driving again;
+                    // whatever limited the last turn, this supersedes.
+                    let _ = this.store.set_session_limited(session_id, false);
+                    this.sessions = this.store.list_sessions().unwrap_or_default();
                     let db_id = this
                         .store
                         .append_message(session_id, this.last_db_id, Role::User, &next)
@@ -1971,7 +1984,7 @@ impl ChatView {
                         text: next.clone(),
                         db_id,
                     });
-                    this.drive_turn(next, Vec::new(), cx);
+                    this.drive_turn(Some(next), Vec::new(), cx);
                 }
             });
         })
@@ -2208,9 +2221,36 @@ impl ChatView {
 
     fn on_error(&mut self, message: &str, cx: &mut Context<Self>) {
         self.flush_stream(cx);
-        let rendered = format!("[error] {message}");
         self.activity = "Something went wrong".into();
         self.thinking = false;
+        self.persist_stream_note(format!("[error] {message}"));
+        self.list_state.reset(self.item_count());
+        self.list_state.scroll_to_end();
+        cx.notify();
+    }
+
+    /// The turn ended on the provider's rate limit: like an error, but
+    /// the state persists — the ask is "wait, then continue", so the
+    /// session goes Limited (badge on the row, Resume affordance) and
+    /// comes back clear on resume or the next send.
+    fn on_limited(&mut self, message: &str, cx: &mut Context<Self>) {
+        self.flush_stream(cx);
+        self.activity = "Rate limited — pick it up when you're ready".into();
+        self.thinking = false;
+        self.persist_stream_note(format!("[limited] {message}"));
+        if let Some(session_id) = self.session_id {
+            let _ = self.store.set_session_limited(session_id, true);
+            self.sessions = self.store.list_sessions().unwrap_or_default();
+        }
+        self.list_state.reset(self.item_count());
+        self.list_state.scroll_to_end();
+        cx.notify();
+    }
+
+    /// Appends a terminal note (`[error] …` / `[limited] …`) to the
+    /// assistant message in flight, or opens a fresh assistant row with
+    /// it when nothing streamed.
+    fn persist_stream_note(&mut self, rendered: String) {
         match self.streaming_assistant {
             Some(index) => {
                 let persisted =
@@ -2233,9 +2273,23 @@ impl ChatView {
                 db_id: None,
             }),
         }
-        self.list_state.reset(self.item_count());
-        self.list_state.scroll_to_end();
-        cx.notify();
+    }
+
+    /// Resume on a limited session: a new turn with no new user message
+    /// — history already ends with what the model should continue from
+    /// (the user's ask, or the tool result of the round that got
+    /// rate-limited). The flag clears up front; if the resume hits the
+    /// limit again, the turn ends limited once more.
+    fn resume_clicked(&mut self, cx: &mut Context<Self>) {
+        let Some(session_id) = self.session_id else {
+            return;
+        };
+        if self.streaming {
+            return;
+        }
+        let _ = self.store.set_session_limited(session_id, false);
+        self.sessions = self.store.list_sessions().unwrap_or_default();
+        self.drive_turn(None, Vec::new(), cx);
     }
 
     /// Answers a pending permission card through the broker. A dropped
@@ -3035,6 +3089,15 @@ impl ChatView {
             .collect()
     }
 
+    /// Whether the open session's last turn ended on a rate limit —
+    /// the resume bar's condition. Test-visible: the limited state is
+    /// the §2.3 contract.
+    pub fn open_session_limited(&self) -> bool {
+        self.session_id
+            .and_then(|id| self.sessions.iter().find(|summary| summary.id == id))
+            .is_some_and(|summary| summary.limited)
+    }
+
     /// The sidebar's active rows: every session not yet settled, in the
     /// store's attention order (most recent activity first).
     fn active_session_rows(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
@@ -3111,6 +3174,17 @@ impl ChatView {
                         this.switch_to_session(session_id, window, cx);
                     })),
             )
+            // The limited chip: the session's last turn died on the
+            // provider's rate limit. Static text, warning tint — the
+            // open transcript carries the Resume button.
+            .when(summary.limited, |row| {
+                row.child(
+                    div()
+                        .text_size(px(10.))
+                        .text_color(cx.theme().warning)
+                        .child("limited"),
+                )
+            })
             .child(
                 Button::new(SharedString::from(format!("rename-{}", session_id.0)))
                     .label("✎")
@@ -3411,6 +3485,43 @@ impl Render for ChatView {
                                 v_flex()
                                     .border_t_1()
                                     .border_color(cx.theme().border)
+                                    // The resume bar: the open session's
+                                    // last turn ended on the provider's
+                                    // rate limit. One static line, one
+                                    // button — the way back in without
+                                    // retyping the ask.
+                                    .when(
+                                        self.open_session_limited() && !self.streaming,
+                                        |composer| {
+                                            composer.child(
+                                                h_flex()
+                                                    .px_4()
+                                                    .pt_2()
+                                                    .gap_2()
+                                                    .items_center()
+                                                    .text_size(px(11.))
+                                                    .text_color(cx.theme().warning)
+                                                    .child(
+                                                        "rate limited — the turn stopped \
+                                                         on the provider's limit",
+                                                    )
+                                                    .child(
+                                                        Button::new("resume-turn")
+                                                            .label("Resume")
+                                                            .xsmall()
+                                                            .outline()
+                                                            .tooltip(
+                                                                "Continue from where the turn stopped",
+                                                            )
+                                                            .on_click(cx.listener(
+                                                                |this, _, _, cx| {
+                                                                    this.resume_clicked(cx)
+                                                                },
+                                                            )),
+                                                    ),
+                                            )
+                                        },
+                                    )
                                     .when(!self.queued.is_empty(), |composer| {
                                         composer.child(
                                             h_flex()

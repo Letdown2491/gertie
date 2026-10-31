@@ -60,6 +60,13 @@ pub enum LoopEvent {
     Error {
         message: String,
     },
+    /// The provider's rate limit answered every retry: the turn ends
+    /// limited. The UI persists the state and offers a manual Resume —
+    /// a fresh turn that continues from history without a new user
+    /// message.
+    Limited {
+        message: String,
+    },
     Done,
 }
 
@@ -102,7 +109,10 @@ pub struct TurnSpec {
     pub provider: Arc<dyn crate::provider::Provider>,
     pub tools: ToolRegistry,
     pub history: SharedHistory,
-    pub user_message: String,
+    /// The message opening the turn — None means *resume*: continue
+    /// from history as it stands (it already ends with the user's
+    /// message, or a tool result from the round that got rate-limited).
+    pub user_message: Option<String>,
     pub snapshots: Option<Arc<SnapshotStore>>,
     /// Checkpoint attribution: rows recorded for this turn's mutating
     /// tools carry this session, so the ledger's turn windows can find
@@ -178,10 +188,14 @@ pub fn run_turn(spec: TurnSpec) -> BoxStream<'static, LoopEvent> {
             ..Request::default()
         };
 
-        history
-            .lock()
-            .await
-            .push(WireMessage::user_with_attachments(user_message, user_attachments));
+        // A resume turn pushes nothing: history already ends with what
+        // the model should continue from.
+        if let Some(text) = user_message {
+            history
+                .lock()
+                .await
+                .push(WireMessage::user_with_attachments(text, user_attachments));
+        }
 
         // Observed prompt size from the last request's usage events, if
         // the provider reported any; the chars/4 estimate covers the rest.
@@ -258,6 +272,10 @@ pub fn run_turn(spec: TurnSpec) -> BoxStream<'static, LoopEvent> {
                     crate::Event::Done => {}
                     crate::Event::Error { message } => {
                         yield LoopEvent::Error { message };
+                        return;
+                    }
+                    crate::Event::Limited { message } => {
+                        yield LoopEvent::Limited { message };
                         return;
                     }
                 }
@@ -739,7 +757,7 @@ mod tests {
                 provider,
                 tools,
                 history,
-                user_message: message.into(),
+                user_message: Some(message.into()),
                 snapshots: None,
                 checkpoint_session: None,
                 workspace_root: None,
@@ -766,6 +784,76 @@ mod tests {
                 _ => None,
             })
             .unwrap_or_else(|| panic!("no ToolResult for {name}"))
+    }
+
+    /// A limited turn is terminal and reaches the UI as its own event —
+    /// the resume affordance hangs on telling it apart from an error.
+    #[test]
+    fn a_rate_limited_turn_ends_in_loop_event_limited() {
+        let provider = Arc::new(ScriptedProvider {
+            seen: std::sync::Mutex::new(Vec::new()),
+            scripts: std::sync::Mutex::new(vec![vec![
+                Event::Started,
+                Event::Limited {
+                    message: "429: rate limit exceeded".into(),
+                },
+            ]]),
+        });
+        let history: SharedHistory = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let (spec, broker) = turn(provider, registry(&[]), history.clone(), "go");
+        let events = drain(run_turn(spec), &broker, |_| PermissionDecision::Approve);
+
+        assert!(
+            events.iter().any(
+                |event| matches!(event, LoopEvent::Limited { message } if message.contains("429"))
+            ),
+            "the limit relays as LoopEvent::Limited"
+        );
+        // Nothing after it: the turn is over. And the user message that
+        // opened the turn is in history — what a resume continues from.
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, LoopEvent::Done | LoopEvent::Error { .. }))
+        );
+        assert_eq!(
+            history.blocking_lock().last().unwrap().content.as_deref(),
+            Some("go")
+        );
+    }
+
+    /// A resume turn pushes nothing: it continues from history as it
+    /// stands — the rate-limited round's rows are still there.
+    #[test]
+    fn a_resume_turn_continues_from_history_without_a_new_user_message() {
+        let call = ToolCall {
+            id: "c1".into(),
+            name: "stub".into(),
+            arguments: "{}".into(),
+        };
+        let history: SharedHistory = Arc::new(tokio::sync::Mutex::new(vec![
+            WireMessage::user("go"),
+            WireMessage::assistant_with_tool_calls(Some("on it".into()), vec![call.clone()]),
+            WireMessage::tool_result(&call, "done"),
+        ]));
+        let provider = Arc::new(ScriptedProvider {
+            seen: std::sync::Mutex::new(Vec::new()),
+            scripts: std::sync::Mutex::new(vec![vec![Event::Started, Event::Done]]),
+        });
+        let (mut spec, broker) = turn(provider, registry(&[]), history.clone(), "ignored");
+        spec.user_message = None; // resume
+        let events = drain(run_turn(spec), &broker, |_| PermissionDecision::Approve);
+
+        assert!(matches!(events.last(), Some(LoopEvent::Done)));
+        let history = history.blocking_lock();
+        assert_eq!(
+            history
+                .iter()
+                .filter(|message| message.role == Role::User)
+                .count(),
+            1,
+            "no second user row: the resume continued the existing history"
+        );
     }
 
     #[test]

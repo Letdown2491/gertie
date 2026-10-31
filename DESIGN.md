@@ -302,8 +302,18 @@ and a session older than the recording says so instead of guessing a folder. Des
 list actions keep no dialog: ✕ removes a session from every list at once — sidebar, fold,
 palette — and a toast at the sidebar's foot holds the store row for a five-second undo
 window (button or Ctrl+Z outside the composer, where it stays text undo); the window
-closing purges the row, undo popping the entry beats it. Snooze
-still waits for the Limited state that gives it a clock. The tab strip carries the
+closing purges the row, undo popping the entry beats it.
+
+A provider rate limit is a state, not an error. When 429 answers every retry, the turn
+ends **Limited** — its own event through the whole stack (`Event::Limited` → `LoopEvent::Limited`,
+distinct from `Error` at every seam, so no string-matching), persisted as `limited_at` on
+the session. The sidebar row carries a `limited` chip and the transcript a slim bar with
+**Resume**: a new turn that continues from history as it stands — no new user message, no
+retyped ask — and clears the flag. So does any new send (the human is driving; a fresh
+limit re-marks it). Divergence from t3code, deliberate: no scheduled resume-at-reset and
+no auto-resume after restarts — gertie has no daemon to keep a clock, so the affordance
+is manual and the three-consecutive-auto-resumes cap has nothing to cap. Snooze (deferred)
+now has its clock: the persisted `limited_at`. The tab strip carries the
 working marker — a live turn shows ● on its tab, the attention signal for work
 running while another tab is up.
 

@@ -983,3 +983,105 @@ fn ctrl_z_outside_the_composer_undoes_the_delete() {
         );
     });
 }
+
+/// The §2.3 pin, end to end through the replay provider: a turn that
+/// ends on the provider's rate limit leaves the session Limited —
+/// persisted, resumed from the bar above the composer, cleared the
+/// moment the resumed turn runs.
+#[test]
+fn a_rate_limited_turn_offers_resume_and_resuming_clears_it() {
+    // Step one refuses (the limit); step two is what the resumed turn
+    // gets. Empty texts keep the replay pacing out of the picture.
+    let scenarios = tempfile::tempdir().expect("scenario dir");
+    std::fs::write(
+        scenarios.path().join("worker.toml"),
+        "[[steps]]\nlimited = true\n\n[[steps]]\ntext = ''\n",
+    )
+    .expect("scenario file");
+    let endpoint = gertie_providers::Endpoint {
+        name: "replay".into(),
+        base_url: scenarios.path().to_string_lossy().into_owned(),
+        model: "worker".into(),
+        api_key: None,
+        context_window: None,
+        wire: gertie_providers::Wire::Replay,
+    };
+    let provider = Arc::new(
+        gertie_providers::AnyProvider::with_endpoints(vec![endpoint]).expect("replay provider"),
+    );
+    let store = Arc::new(SessionStore::open(Path::new(":memory:")).expect("memory store"));
+    let mut fixture = fixture_built(
+        store.clone(),
+        None,
+        None,
+        None,
+        Some(provider),
+        None,
+        Vec::new(),
+    );
+
+    fixture.act(|window, cx| {
+        window.input("go", cx);
+        window.press("enter", cx);
+    });
+    pump(&mut fixture, 30);
+    let session_id = fixture
+        .cx
+        .update(|cx| {
+            fixture
+                .view
+                .upgrade()
+                .expect("view alive")
+                .read(cx)
+                .session_id()
+        })
+        .expect("session created by send");
+    assert!(
+        fixture.cx.update(|cx| fixture
+            .view
+            .upgrade()
+            .expect("view alive")
+            .read(cx)
+            .open_session_limited()),
+        "the turn ended limited"
+    );
+    assert!(
+        store
+            .list_sessions()
+            .unwrap()
+            .iter()
+            .find(|summary| summary.id == session_id)
+            .expect("summary")
+            .limited,
+        "limited persists in the store — it survives a restart"
+    );
+    fixture.act(|window, cx| {
+        assert!(
+            window.try_find("resume-turn").is_some(),
+            "the resume bar is up on a limited session"
+        );
+    });
+
+    // Resume: the scripted step two answers; the flag clears and the
+    // bar goes with it.
+    fixture.act(|window, cx| {
+        window.click("resume-turn", cx);
+    });
+    pump(&mut fixture, 30);
+    assert!(
+        !store
+            .list_sessions()
+            .unwrap()
+            .iter()
+            .find(|summary| summary.id == session_id)
+            .expect("summary")
+            .limited,
+        "a resumed turn clears the limited state"
+    );
+    fixture.act(|window, cx| {
+        assert!(
+            window.try_find("resume-turn").is_none(),
+            "the bar drops once the session is no longer limited"
+        );
+    });
+}

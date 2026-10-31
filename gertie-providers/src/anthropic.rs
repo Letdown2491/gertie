@@ -10,7 +10,7 @@
 //! produces content, commit on first content. Two adapters share the
 //! shape; a third would justify extracting it.
 
-use crate::{Endpoint, Outcome, RequestScoped};
+use crate::{Endpoint, Outcome, RequestScoped, Terminal};
 use futures_core::stream::BoxStream;
 use futures_util::StreamExt;
 use gertie_core::Event;
@@ -221,7 +221,14 @@ impl Anthropic {
         if status.as_u16() == 401 || status.as_u16() == 403 {
             return Outcome::Fatal(format!("auth rejected ({status}) — check the API key"));
         }
-        if status.is_server_error() || status.as_u16() == 429 || status.as_u16() == 529 {
+        // 429 is the rate limit: own outcome, terminal as Limited. 529
+        // is Anthropic's overloaded signal — a server blip, retried as
+        // a transient.
+        if status.as_u16() == 429 {
+            let detail = response.text().await.unwrap_or_default();
+            return Outcome::Limited(format!("{status}: {}", crate::truncate(&detail, 200)));
+        }
+        if status.is_server_error() || status.as_u16() == 529 {
             let detail = response.text().await.unwrap_or_default();
             return Outcome::Transient(format!("{status}: {}", crate::truncate(&detail, 200)));
         }
@@ -260,10 +267,20 @@ impl gertie_core::Provider for Anthropic {
                         let _ = proxy.send(Event::Started);
                         match Anthropic::attempt_once(&scoped, &request, &proxy).await {
                             Outcome::Done => break Ok(()),
-                            Outcome::Fatal(message) => break Err(message),
+                            Outcome::Fatal(message) => break Err(Terminal::Error(message)),
                             Outcome::Transient(message) => {
                                 if attempt >= crate::MAX_ATTEMPTS {
-                                    break Err(format!("{message} (after {attempt} attempts)"));
+                                    break Err(Terminal::Error(format!(
+                                        "{message} (after {attempt} attempts)"
+                                    )));
+                                }
+                                tokio::time::sleep(crate::backoff(attempt)).await;
+                            }
+                            Outcome::Limited(message) => {
+                                if attempt >= crate::MAX_ATTEMPTS {
+                                    break Err(Terminal::Limited(format!(
+                                        "{message} (after {attempt} attempts)"
+                                    )));
                                 }
                                 tokio::time::sleep(crate::backoff(attempt)).await;
                             }
@@ -289,13 +306,21 @@ impl gertie_core::Provider for Anthropic {
                 }
                 let outcome = driver
                     .await
-                    .unwrap_or_else(|_| Err("stream driver failed".into()));
+                    .unwrap_or_else(|_| Err(Terminal::Error("stream driver failed".into())));
                 match outcome {
                     Ok(()) => {
                         let _ = sender.send(Event::Done);
                         return;
                     }
-                    Err(message) => last_error = Some(message),
+                    Err(Terminal::Error(message)) => last_error = Some(message),
+                    // A limit isn't an endpoint failure to fall back
+                    // from — other endpoints share the same account.
+                    Err(Terminal::Limited(message)) => {
+                        let _ = sender.send(Event::Limited {
+                            message: format!("rate limited — {message}"),
+                        });
+                        return;
+                    }
                 }
             }
             let detail = last_error.unwrap_or_else(|| "no endpoints configured".into());

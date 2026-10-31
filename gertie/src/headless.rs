@@ -93,7 +93,7 @@ pub fn run(prompt: Option<String>, yes: bool, config_path: Option<PathBuf>) -> i
         provider,
         tools: boot.tools.clone(),
         history,
-        user_message: prompt,
+        user_message: Some(prompt),
         snapshots: boot.snapshots.clone(),
         checkpoint_session: Some(session),
         workspace_root: Some(boot.workspace_root.clone()),
@@ -157,6 +157,10 @@ pub fn run(prompt: Option<String>, yes: bool, config_path: Option<PathBuf>) -> i
             eprintln!("[error] {message}");
             1
         }
+        Outcome::Limited { message } => {
+            eprintln!("[limited] {message}");
+            1
+        }
     }
 }
 
@@ -166,6 +170,10 @@ pub(crate) enum Outcome {
     Done,
     /// The loop surfaced an exhausted error.
     Error { message: String },
+    /// The loop ended on the provider's rate limit. The transcript and
+    /// the exit say so distinctly — an error asks "what broke", a limit
+    /// asks "when do we go again".
+    Limited { message: String },
 }
 
 /// Drives one turn to completion on the current thread. Returns the
@@ -270,6 +278,10 @@ pub(crate) fn pump(
                 LoopEvent::Error { message } => {
                     recorder.flush();
                     return (Outcome::Error { message }, recorder.text);
+                }
+                LoopEvent::Limited { message } => {
+                    recorder.flush();
+                    return (Outcome::Limited { message }, recorder.text);
                 }
                 LoopEvent::Done => {
                     recorder.flush();
@@ -467,7 +479,7 @@ mod tests {
             provider,
             tools,
             history: Arc::new(tokio::sync::Mutex::new(Vec::new())),
-            user_message: "do it".into(),
+            user_message: Some("do it".into()),
             snapshots: None,
             checkpoint_session: None,
             workspace_root: None,
@@ -543,7 +555,7 @@ mod tests {
             provider,
             tools,
             history: Arc::new(tokio::sync::Mutex::new(Vec::new())),
-            user_message: "do it".into(),
+            user_message: Some("do it".into()),
             snapshots: None,
             checkpoint_session: None,
             workspace_root: None,

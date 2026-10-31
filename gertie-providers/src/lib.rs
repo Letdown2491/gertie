@@ -149,6 +149,19 @@ pub(crate) enum Outcome {
     Fatal(String),
     /// Worth retrying per the policy.
     Transient(String),
+    /// The usage/rate limit refused the call (HTTP 429). Retried like a
+    /// transient — brief blips recover — but the terminal outcome is
+    /// Limited, not Error: the turn ends with a Resume affordance, not
+    /// a failure report.
+    Limited(String),
+}
+
+/// Why the retry policy gave up. The distinction is the UI's: an error
+/// is a report; a limit ends the turn in a persisted Limited state
+/// with a manual Resume.
+pub(crate) enum Terminal {
+    Error(String),
+    Limited(String),
 }
 
 /// One partially accumulated tool call: OpenAI-compatible servers stream a
@@ -226,7 +239,7 @@ impl Provider for OpenAICompatible {
                 }
                 let outcome = driver
                     .await
-                    .unwrap_or_else(|_| Err("stream driver failed".into()));
+                    .unwrap_or_else(|_| Err(Terminal::Error("stream driver failed".into())));
                 match outcome {
                     // Clean end with no content: the server chose to
                     // send nothing. Report Done, don't fall back.
@@ -234,7 +247,16 @@ impl Provider for OpenAICompatible {
                         let _ = sender.send(Event::Done);
                         return;
                     }
-                    Err(message) => last_error = Some(message),
+                    Err(Terminal::Error(message)) => last_error = Some(message),
+                    // A limit isn't an endpoint failure to fall back
+                    // from — other endpoints share the same account.
+                    // End the turn limited.
+                    Err(Terminal::Limited(message)) => {
+                        let _ = sender.send(Event::Limited {
+                            message: format!("rate limited — {message}"),
+                        });
+                        return;
+                    }
                 }
             }
             let detail = last_error.unwrap_or_else(|| "no endpoints configured".into());
@@ -256,17 +278,27 @@ async fn run_with_retries(
     scoped: &RequestScoped,
     request: &Request,
     sender: &tokio::sync::mpsc::UnboundedSender<Event>,
-) -> Result<(), String> {
+) -> Result<(), Terminal> {
     let mut attempt = 0;
     loop {
         attempt += 1;
         let _ = sender.send(Event::Started);
         match scoped.attempt_once(request, sender).await {
             Outcome::Done => return Ok(()),
-            Outcome::Fatal(message) => return Err(message),
+            Outcome::Fatal(message) => return Err(Terminal::Error(message)),
             Outcome::Transient(message) => {
                 if attempt >= MAX_ATTEMPTS {
-                    return Err(format!("{message} (after {attempt} attempts)"));
+                    return Err(Terminal::Error(format!(
+                        "{message} (after {attempt} attempts)"
+                    )));
+                }
+                tokio::time::sleep(backoff(attempt)).await;
+            }
+            Outcome::Limited(message) => {
+                if attempt >= MAX_ATTEMPTS {
+                    return Err(Terminal::Limited(format!(
+                        "{message} (after {attempt} attempts)"
+                    )));
                 }
                 tokio::time::sleep(backoff(attempt)).await;
             }
@@ -320,7 +352,13 @@ impl RequestScoped {
         if status.as_u16() == 401 || status.as_u16() == 403 {
             return Outcome::Fatal(format!("auth rejected ({status}) — check the API key"));
         }
-        if status.is_server_error() || status.as_u16() == 429 {
+        // The rate limit is a 4xx, not a server error — but it gets its
+        // own outcome: retried like a transient, terminal as Limited.
+        if status.as_u16() == 429 {
+            let detail = response.text().await.unwrap_or_default();
+            return Outcome::Limited(format!("{status}: {}", truncate(&detail, 200)));
+        }
+        if status.is_server_error() {
             let detail = response.text().await.unwrap_or_default();
             return Outcome::Transient(format!("{status}: {}", truncate(&detail, 200)));
         }
@@ -664,6 +702,8 @@ pub(crate) mod test_support {
 mod tests {
     use super::test_support::{FakeServer, drain, user_request};
     use super::*;
+    use std::io::{Read as _, Write as _};
+    use std::net::TcpListener;
 
     #[test]
     fn wire_translation_expresses_the_tool_protocol() {
@@ -741,6 +781,54 @@ mod tests {
             output_tokens: 2,
         }));
         assert_eq!(events.last(), Some(&Event::Done));
+    }
+
+    /// A 429 that answers every retry ends the turn Limited — its own
+    /// event, not an error. The ask is "wait, then continue", so the UI
+    /// must be able to tell the two apart without string-matching.
+    #[test]
+    fn an_exhausted_rate_limit_ends_limited_not_errored() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let address = listener.local_addr().expect("addr").to_string();
+        std::thread::spawn(move || {
+            // Every attempt gets the same 429; the retry policy burns
+            // out and reports Limited.
+            for socket in listener.incoming().flatten() {
+                let body = "rate limit exceeded";
+                let response = format!(
+                    "HTTP/1.1 429 Too Many Requests\r\ncontent-type: text/plain\r\n\
+                     content-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let mut socket = socket;
+                let mut buffer = [0u8; 8192];
+                let _ = socket.read(&mut buffer);
+                let _ = socket.write_all(response.as_bytes());
+            }
+        });
+        let endpoint = Endpoint {
+            name: "fake".into(),
+            base_url: format!("http://{address}"),
+            model: "fake-model".into(),
+            api_key: Some("fake-key".into()),
+            context_window: None,
+            wire: Wire::OpenAI,
+        };
+        let provider = OpenAICompatible::new(endpoint).unwrap();
+        let events = drain(provider.stream(user_request()));
+
+        assert!(
+            events.iter().any(
+                |event| matches!(event, Event::Limited { message } if message.contains("429"))
+            ),
+            "the exhausted limit surfaces as Event::Limited: {events:?}"
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, Event::Done | Event::Error { .. })),
+            "a limit is terminal — no Done, no Error riding along"
+        );
     }
 
     #[test]

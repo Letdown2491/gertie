@@ -367,7 +367,7 @@ impl Tool for AgentTool {
                 // Workers don't take steering — the brief is the job.
                 steer: None,
                 user_attachments: Vec::new(),
-                user_message: format!(
+                user_message: Some(format!(
                     "A brief file has been written for you:\n\n---\n{brief}\n---\n\n\
                      {guidance}\n\n\
                      Execute the brief with your tools. Verify your work. \
@@ -376,7 +376,7 @@ impl Tool for AgentTool {
                      EVIDENCE: what you did (commands, files, results)\n\
                      SUMMARY: one line\n\
                      CONCERNS: anything the leader should know"
-                ),
+                )),
                 snapshots: self.snapshots.clone(),
                 checkpoint_session: run,
                 workspace_root: Some(self.workspace_root.clone()),

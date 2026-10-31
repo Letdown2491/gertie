@@ -38,6 +38,11 @@ struct Step {
     text: String,
     #[serde(default)]
     tool_calls: Vec<ScriptedCall>,
+    /// The limit rehearsal: the provider refuses the request outright —
+    /// no tokens, no usage — and the turn ends Limited. For testing the
+    /// resume affordance without a paid model anywhere.
+    #[serde(default)]
+    limited: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -178,6 +183,12 @@ impl gertie_core::Provider for ReplayProvider {
                 });
                 return;
             };
+            if step.limited {
+                let _ = sender.send(Event::Limited {
+                    message: "429: rate limit exceeded (after 3 attempts)".into(),
+                });
+                return;
+            }
 
             for chunk in text_chunks(&step.text, 16) {
                 let _ = sender.send(Event::Token {
