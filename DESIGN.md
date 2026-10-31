@@ -293,7 +293,10 @@ ride the wire as typed document/file blocks, and text files inline into the mess
 extension table refuses (with a reason) what no endpoint can read. A paste at or above
 32 KiB never becomes message text: it files into the workspace (`.gertie/pastes/`, kept
 out of git by the local exclude) and the message cites the path for the agent's
-`read_file` — the context carries the pointer, not the document. The footer's identity
+`read_file` — the context carries the pointer, not the document. An assistant turn worth
+commenting on carries a **quote** action: the response lands in the composer as a
+blockquote (bounded — enough to pin the referent, never the whole answer back into
+the prompt) and the comment types under it; sending shows the model the exact words. The footer's identity
 line leads with the working folder. Slash builtins cover the panel actions (/compact,
 /export, /new, /settings, /agents) beside file templates. Two templates ship,
 write-if-absent like the skills (a user edit is theirs, a project file shadows by

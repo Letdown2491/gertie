@@ -488,6 +488,11 @@ impl ChatView {
         self.attach_big_paste(text, cx)
     }
 
+    /// The composer's current text, for tests.
+    pub fn composer_value_for_test(&self, cx: &App) -> String {
+        self.input.read(cx).value().to_string()
+    }
+
     /// How many turns the transcript holds, for tests and tooling.
     pub fn turn_count_for_test(&self) -> usize {
         self.turns.len()
@@ -2638,6 +2643,45 @@ impl ChatView {
         }
     }
 
+    /// "Quote" on an assistant turn: the response lands in the composer
+    /// as a blockquote and your comment types after it — sending shows
+    /// the model exactly which words you're talking about. A long
+    /// response quotes bounded: enough to pin the referent, never the
+    /// whole answer back into the prompt.
+    fn quote_into_composer(
+        &mut self,
+        text: std::sync::Arc<str>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        const QUOTE_LIMIT: usize = 800;
+        let mut quoted = text.trim().to_string();
+        if quoted.len() > QUOTE_LIMIT {
+            let mut cut = QUOTE_LIMIT;
+            while !quoted.is_char_boundary(cut) {
+                cut -= 1;
+            }
+            quoted = format!("{}… [truncated]", &quoted[..cut]);
+        }
+        let quoted = quoted
+            .lines()
+            .map(|line| format!("> {line}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let draft = self.input.read(cx).value().to_string();
+        let value = if draft.trim().is_empty() {
+            format!("{quoted}\n\n")
+        } else {
+            // The comment you already typed rides under the quote —
+            // the quote is context, the draft is the point.
+            format!("{quoted}\n\n{draft}")
+        };
+        self.input
+            .update(cx, |input, cx| input.set_value(value, window, cx));
+        window.focus(&self.input.read(cx).focus_handle(cx), cx);
+        cx.notify();
+    }
+
     fn render_turn(
         &mut self,
         index: usize,
@@ -2720,10 +2764,33 @@ impl ChatView {
             }
             _ => None,
         };
-        let inner = match fork_button {
+        // The quote affordance: an assistant turn worth commenting on,
+        // dropped into the composer as a blockquote (the citation is
+        // exact — the agent reads back the same words you sent).
+        let quote_button = match &self.turns[index] {
+            Turn::Message {
+                role: Role::Assistant,
+                text,
+                ..
+            } if !text.trim().is_empty() => {
+                let text: std::sync::Arc<str> = text.as_str().into();
+                Some(
+                    Button::new(format!("quote-{index}"))
+                        .label("quote")
+                        .small()
+                        .ghost()
+                        .tooltip("Quote this into the composer — comment under it, send it back")
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.quote_into_composer(text.clone(), window, cx);
+                        })),
+                )
+            }
+            _ => None,
+        };
+        let inner = match (fork_button, quote_button) {
             // The user bubble is right-aligned; the fork button tucks
             // under it, same side, quiet.
-            Some(button) => div()
+            (Some(button), _) => div()
                 .w_full()
                 .flex()
                 .flex_col()
@@ -2731,7 +2798,19 @@ impl ChatView {
                 .child(inner)
                 .child(button)
                 .into_any_element(),
-            None => inner,
+            // The assistant bubble is left-aligned; its button keeps
+            // the same side.
+            (None, Some(button)) => div()
+                .w_full()
+                .flex()
+                .flex_col()
+                .items_start()
+                .child(inner)
+                .child(button)
+                .into_any_element(),
+            (None, None) => inner,
+            // One role per turn — never both.
+            (Some(_), Some(_)) => inner,
         };
         // Horizontal padding lives on each item, not the list: gpui's
         // `list` paints items at the container's left edge and ignores

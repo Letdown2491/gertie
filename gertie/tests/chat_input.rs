@@ -1518,3 +1518,84 @@ fn a_big_paste_files_itself_into_the_workspace_and_the_message_cites_it() {
         "the filed body is the paste, whole"
     );
 }
+
+/// "Quote" on an assistant turn drops a blockquote into the composer —
+/// the exact words the user is talking about, with typing room under.
+#[test]
+fn quoting_an_assistant_turn_lands_a_blockquote_in_the_composer() {
+    let store = Arc::new(SessionStore::open(Path::new(":memory:")).expect("memory store"));
+    let session = store.create_session("quote test").expect("session");
+    store
+        .append_message(
+            session,
+            None,
+            gertie_core::Role::User,
+            "tell me about widgets",
+        )
+        .expect("user row");
+    store
+        .append_message(
+            session,
+            None,
+            gertie_core::Role::Assistant,
+            "Widgets are small.\nSecond line.",
+        )
+        .expect("assistant row");
+    let mut fixture = fixture_with_store(store);
+
+    // The resumed session renders the assistant turn at index 1.
+    fixture.act(|window, cx| {
+        window.click("quote-1", cx);
+    });
+    let value = fixture.cx.update(|cx| {
+        fixture
+            .view
+            .upgrade()
+            .expect("view alive")
+            .read(cx)
+            .composer_value_for_test(cx)
+    });
+    assert!(
+        value.starts_with("> Widgets are small.\n> Second line.\n"),
+        "the quote leads the composer as a blockquote, got: {value:?}"
+    );
+    assert!(
+        value.ends_with("\n\n"),
+        "an empty draft leaves typing room under the quote"
+    );
+}
+
+/// A long response quotes bounded — enough to pin the referent, never
+/// the whole answer forced back into the prompt.
+#[test]
+fn a_long_assistant_turn_quotes_truncated() {
+    let store = Arc::new(SessionStore::open(Path::new(":memory:")).expect("memory store"));
+    let session = store.create_session("long answer").expect("session");
+    store
+        .append_message(
+            session,
+            None,
+            gertie_core::Role::Assistant,
+            &"word ".repeat(2_000),
+        )
+        .expect("assistant row");
+    let mut fixture = fixture_with_store(store);
+
+    fixture.act(|window, cx| {
+        window.click("quote-0", cx);
+    });
+    let value = fixture.cx.update(|cx| {
+        fixture
+            .view
+            .upgrade()
+            .expect("view alive")
+            .read(cx)
+            .composer_value_for_test(cx)
+    });
+    assert!(
+        value.contains("… [truncated]"),
+        "a long response is capped, got {} chars",
+        value.len()
+    );
+    assert!(value.len() < 1_100, "the cap is small by design");
+}
