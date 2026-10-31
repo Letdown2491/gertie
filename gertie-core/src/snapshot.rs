@@ -277,6 +277,28 @@ impl SnapshotStore {
         }
     }
 
+    /// A session's minted turn windows, oldest first — the rewind's
+    /// file question iterates them.
+    pub fn turns_for_session(
+        &self,
+        session_id: crate::SessionId,
+    ) -> Result<Vec<TurnBounds>, rusqlite::Error> {
+        let connection = self.connection.lock().unwrap();
+        let mut statement = connection.prepare(
+            "SELECT id, user_message_id, before_checkpoint FROM turns
+             WHERE session_id = ?1 ORDER BY id",
+        )?;
+        let rows = statement.query_map([session_id.0 as i64], |row| {
+            Ok(TurnBounds {
+                id: TurnId(row.get(0)?),
+                session_id,
+                user_message_id: crate::MessageId(row.get::<_, i64>(1)? as u64),
+                before: CheckpointId(row.get::<_, i64>(2)? as u64),
+            })
+        })?;
+        rows.collect()
+    }
+
     /// What the turn changed: one entry per path the turn's checkpoints
     /// recorded, oldest state first. "Before" is the turn's first
     /// checkpoint object for the path; "after" is the path's next

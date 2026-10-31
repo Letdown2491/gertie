@@ -400,9 +400,11 @@ fn markdown_and_tool_rows_draw_clean() {
     let session_id = store
         .create_session("markdown transcript")
         .expect("session");
-    let db = store
-        .append_message(session_id, None, gertie_core::Role::User, "hello")
-        .expect("user row");
+    let mut parent = Some(
+        store
+            .append_message(session_id, None, gertie_core::Role::User, "hello")
+            .expect("user row"),
+    );
     for text in [
         "# Heading\n\nprose with **bold**, *em*, `code`, and a [link](https://x.y)\n",
         "- item one\n- [x] done\n- [ ] open\n  1. nested\n",
@@ -410,14 +412,16 @@ fn markdown_and_tool_rows_draw_clean() {
         "> quoted **prose**\n\n---\n\n```rust\nfn main() {}\n```",
         "closed **span and *nested* inside** end — écrit en français — 🦀 emoji",
     ] {
-        store
-            .append_message(session_id, Some(db), gertie_core::Role::Assistant, text)
-            .expect("assistant row");
+        parent = Some(
+            store
+                .append_message(session_id, parent, gertie_core::Role::Assistant, text)
+                .expect("assistant row"),
+        );
     }
     store
         .append_tool_result(
             session_id,
-            Some(db),
+            parent,
             "call-1",
             "read_file",
             r#"{"path": "src/main.rs"}"#,

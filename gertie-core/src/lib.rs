@@ -301,6 +301,11 @@ impl SessionStore {
             ("workspace_root", "TEXT"),
             ("limited_at", "TEXT"),
             ("mode", "TEXT NOT NULL DEFAULT 'supervised'"),
+            // The session's current tip row: which message the next
+            // append parents to. Read paths walk parents back from
+            // here — a rewind's abandoned branch (rows are never
+            // deleted) drops off the walk instead of interleaving.
+            ("tip_id", "INTEGER"),
         ] {
             if !session_columns.contains(&column.to_string()) {
                 connection.execute(
@@ -682,7 +687,13 @@ impl SessionStore {
              WHERE id = ?1",
             [session_id.0 as i64],
         )?;
-        Ok(MessageId(connection.last_insert_rowid() as u64))
+        let id = MessageId(connection.last_insert_rowid() as u64);
+        // The new row is the tip: reads walk parents back from here.
+        connection.execute(
+            "UPDATE sessions SET tip_id = ?1 WHERE id = ?2",
+            rusqlite::params![id.0 as i64, session_id.0 as i64],
+        )?;
+        Ok(id)
     }
 
     /// Appends a tool result — the row that answers one tool call.
@@ -716,7 +727,12 @@ impl SessionStore {
              WHERE id = ?1",
             [session_id.0 as i64],
         )?;
-        Ok(MessageId(connection.last_insert_rowid() as u64))
+        let id = MessageId(connection.last_insert_rowid() as u64);
+        connection.execute(
+            "UPDATE sessions SET tip_id = ?1 WHERE id = ?2",
+            rusqlite::params![id.0 as i64, session_id.0 as i64],
+        )?;
+        Ok(id)
     }
 
     /// Rewrites a message's content in place — this is how streaming turns
@@ -828,41 +844,159 @@ impl SessionStore {
         Ok(gone > 0)
     }
 
-    /// Loads a session's messages oldest-first. Unbounded by design:
-    /// the wire history, export, and fork need every row — the UI
-    /// transcript uses the bounded `load_recent_messages` instead.
+    /// Loads a session's messages oldest-first along the canonical
+    /// path. Unbounded by design: the wire history, export, and fork
+    /// need every row — the UI transcript uses the bounded
+    /// `load_recent_messages` instead.
     pub fn load_messages(&self, session_id: SessionId) -> Result<Vec<Message>, rusqlite::Error> {
+        let rows = self.load_rows_flat(session_id)?;
+        let connection = self.connection.lock().unwrap();
+        let order = Self::canonical_ids(&rows, &connection, session_id)?;
+        let mut by_id: std::collections::HashMap<i64, Message> =
+            rows.into_iter().map(|row| (row.id.0 as i64, row)).collect();
+        Ok(order
+            .into_iter()
+            .map(|id| {
+                by_id
+                    .remove(&id)
+                    .expect("canonical id comes from these rows")
+            })
+            .collect())
+    }
+
+    /// Every row of a session by id — no path, no order beyond id. The
+    /// raw table: what `load_messages` reorders, and what fork reads
+    /// (a fork may start from an off-path sibling).
+    fn load_rows_flat(&self, session_id: SessionId) -> Result<Vec<Message>, rusqlite::Error> {
         let connection = self.connection.lock().unwrap();
         let mut statement = connection.prepare(
             "SELECT id, parent_id, role, content, tool_call_id, tool_name, tool_arguments
-             FROM messages WHERE session_id = ?1 ORDER BY id",
+             FROM messages WHERE session_id = ?1",
         )?;
         let rows = statement.query_map([session_id.0 as i64], Self::message_from_row)?;
         rows.collect()
     }
 
+    /// The session's message ids along the canonical path, oldest
+    /// first. The path walks parents back from the session's tip (the
+    /// recorded `tip_id`, else its newest row) — so after a rewind,
+    /// the abandoned branch stays in the table (an append-only audit)
+    /// while dropping off every read. A tool result hangs off the
+    /// assistant row it answers (the conversation continues from the
+    /// assistant), so each on-path assistant carries its own tool rows
+    /// with it. A walk that can't be trusted — legacy stores written
+    /// before parents were tracked (every row a root), a corrupted
+    /// chain — falls back to flat id order, which is what those rows
+    /// mean.
+    fn canonical_ids(
+        rows: &[Message],
+        connection: &Connection,
+        session_id: SessionId,
+    ) -> Result<Vec<i64>, rusqlite::Error> {
+        if rows.is_empty() {
+            return Ok(Vec::new());
+        }
+        let tip: Option<i64> = connection
+            .query_row(
+                "SELECT tip_id FROM sessions WHERE id = ?1",
+                [session_id.0 as i64],
+                |row| row.get(0),
+            )
+            .ok()
+            .flatten()
+            .filter(|tip| *tip > 0)
+            .or_else(|| rows.iter().map(|row| row.id.0 as i64).max());
+        let parents: std::collections::HashMap<i64, Option<i64>> = rows
+            .iter()
+            .map(|row| (row.id.0 as i64, row.parent_id.map(|parent| parent.0 as i64)))
+            .collect();
+        // Tool children by their answering assistant, in id order.
+        let mut tool_children: std::collections::HashMap<i64, Vec<i64>> =
+            std::collections::HashMap::new();
+        for row in rows {
+            if row.role == Role::Tool {
+                if let Some(parent) = row.parent_id {
+                    tool_children
+                        .entry(parent.0 as i64)
+                        .or_default()
+                        .push(row.id.0 as i64);
+                }
+            }
+        }
+        // The ancestor chain, tip → root.
+        let mut chain = Vec::with_capacity(rows.len());
+        let mut cursor = tip;
+        let mut broken = false;
+        while let Some(id) = cursor {
+            chain.push(id);
+            match parents.get(&id) {
+                // Cycle insurance: a corrupted loop can't outgrow the
+                // table.
+                Some(parent) if chain.len() <= rows.len() => cursor = *parent,
+                _ => {
+                    broken = true;
+                    break;
+                }
+            }
+        }
+        // One root means one tree: the walk that ended there is the
+        // canonical path, abandoned branches and all. Any other shape
+        // — legacy linear rows (all roots), a corrupted chain — reads
+        // flat id order, which is what those rows mean.
+        let roots = rows.iter().filter(|row| row.parent_id.is_none()).count();
+        if broken || roots != 1 {
+            let mut flat: Vec<i64> = rows.iter().map(|row| row.id.0 as i64).collect();
+            flat.sort_unstable();
+            return Ok(flat);
+        }
+        // Root → tip, with each assistant's tool rows riding after it —
+        // the sequence the wire pairing reads.
+        chain.reverse();
+        let placed: std::collections::HashSet<i64> = chain.iter().copied().collect();
+        let mut path = Vec::with_capacity(rows.len());
+        for id in chain {
+            path.push(id);
+            if let Some(children) = tool_children.get(&id) {
+                for child in children {
+                    // A tool row the chain itself runs through (a turn
+                    // that continued from the tool result) is placed by
+                    // the chain; the rest ride with their assistant.
+                    if !placed.contains(child) {
+                        path.push(*child);
+                    }
+                }
+            }
+        }
+        Ok(path)
+    }
+
     /// Loads the most recent `limit` messages of a session, oldest-first —
     /// the bounded window a transcript renders. Opening a chat touches
-    /// one page of rows, not the whole archive.
+    /// one page of the canonical path, not the whole archive: the
+    /// parent links (two integer columns) walk the path, then only the
+    /// window's rows come back with their content.
     pub fn load_recent_messages(
         &self,
         session_id: SessionId,
         limit: usize,
     ) -> Result<Vec<Message>, rusqlite::Error> {
         let connection = self.connection.lock().unwrap();
-        let mut statement = connection.prepare(
-            "SELECT id, parent_id, role, content, tool_call_id, tool_name, tool_arguments
-             FROM messages WHERE session_id = ?1 ORDER BY id DESC LIMIT ?2",
+        let path = Self::canonical_ids(
+            &self.light_rows(&connection, session_id)?,
+            &connection,
+            session_id,
         )?;
-        let mut rows = statement
-            .query_map([session_id.0 as i64, limit as i64], Self::message_from_row)?
-            .collect::<Result<Vec<_>, _>>()?;
-        rows.reverse();
-        Ok(rows)
+        // The window is the path's tail — oldest first, as loaded.
+        let skip = path.len().saturating_sub(limit);
+        let window: Vec<i64> = path[skip..].to_vec();
+        Self::rows_for_ids(&connection, session_id, &window)
     }
 
-    /// Loads up to `limit` messages strictly older than `before_id`,
-    /// oldest-first — one page of "load earlier" in the transcript.
+    /// Loads up to `limit` messages strictly older than `before_id`
+    /// along the canonical path, oldest-first — one page of "load
+    /// earlier" in the transcript. A `before_id` no longer on the path
+    /// (its branch was rewound away) pages nothing: the caller retires
+    /// the stale control.
     pub fn load_messages_before(
         &self,
         session_id: SessionId,
@@ -870,18 +1004,72 @@ impl SessionStore {
         limit: usize,
     ) -> Result<Vec<Message>, rusqlite::Error> {
         let connection = self.connection.lock().unwrap();
-        let mut statement = connection.prepare(
-            "SELECT id, parent_id, role, content, tool_call_id, tool_name, tool_arguments
-             FROM messages WHERE session_id = ?1 AND id < ?2 ORDER BY id DESC LIMIT ?3",
+        let path = Self::canonical_ids(
+            &self.light_rows(&connection, session_id)?,
+            &connection,
+            session_id,
         )?;
-        let mut rows = statement
-            .query_map(
-                [session_id.0 as i64, before_id.0 as i64, limit as i64],
-                Self::message_from_row,
-            )?
-            .collect::<Result<Vec<_>, _>>()?;
-        rows.reverse();
-        Ok(rows)
+        let cut = match path.iter().position(|id| *id == before_id.0 as i64) {
+            Some(cut) => cut,
+            None => return Ok(Vec::new()),
+        };
+        let start = cut.saturating_sub(limit);
+        let window: Vec<i64> = path[start..cut].to_vec();
+        Self::rows_for_ids(&connection, session_id, &window)
+    }
+
+    /// A session's rows, light of their content — only the two columns
+    /// the parent walk needs.
+    fn light_rows(
+        &self,
+        connection: &Connection,
+        session_id: SessionId,
+    ) -> Result<Vec<Message>, rusqlite::Error> {
+        let mut statement =
+            connection.prepare("SELECT id, parent_id FROM messages WHERE session_id = ?1")?;
+        let rows = statement.query_map([session_id.0 as i64], |row| {
+            Ok(Message {
+                id: MessageId(row.get::<_, i64>(0)? as u64),
+                parent_id: row
+                    .get::<_, Option<i64>>(1)?
+                    .map(|parent| MessageId(parent as u64)),
+                role: Role::System,
+                content: String::new(),
+                tool_call_id: None,
+                tool_name: None,
+                tool_arguments: None,
+            })
+        })?;
+        rows.collect()
+    }
+
+    /// Full rows for a window of ids, returned along the window's
+    /// order.
+    fn rows_for_ids(
+        connection: &Connection,
+        session_id: SessionId,
+        ids: &[i64],
+    ) -> Result<Vec<Message>, rusqlite::Error> {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let list = ids.iter().map(|_| "?").collect::<Vec<_>>().join(", ");
+        let mut statement = connection.prepare(&format!(
+            "SELECT id, parent_id, role, content, tool_call_id, tool_name, tool_arguments
+             FROM messages WHERE session_id = ? AND id IN ({list})"
+        ))?;
+        let rows = statement.query_map(
+            rusqlite::params_from_iter(
+                std::iter::once(session_id.0 as i64).chain(ids.iter().copied()),
+            ),
+            Self::message_from_row,
+        )?;
+        let mut by_id: std::collections::HashMap<i64, Message> = rows
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .map(|row| (row.id.0 as i64, row))
+            .collect();
+        Ok(ids.iter().filter_map(|id| by_id.remove(id)).collect())
     }
 
     fn message_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Message> {
@@ -903,8 +1091,16 @@ impl SessionStore {
         &self,
         session_id: SessionId,
     ) -> Result<Vec<crate::request::WireMessage>, rusqlite::Error> {
-        use crate::request::{ToolCall, WireMessage};
         let messages = self.load_messages(session_id)?;
+        Ok(Self::wire_history_from_rows(&messages))
+    }
+
+    /// The wire history for already-loaded rows — the reconstruction
+    /// `load_wire_history` runs over the canonical path, and what a
+    /// rewind uses to rebuild its kept prefix (rows at or before the
+    /// keep point are identical on every branch).
+    pub fn wire_history_from_rows(messages: &[Message]) -> Vec<crate::request::WireMessage> {
+        use crate::request::{ToolCall, WireMessage};
         let mut wire = Vec::new();
         let mut index = 0;
         while index < messages.len() {
@@ -972,7 +1168,7 @@ impl SessionStore {
                 Role::Tool => index += 1, // orphan row: skip, don't guess
             }
         }
-        Ok(wire)
+        wire
     }
 
     /// Forks the conversation at `upto`: a new session whose messages
@@ -989,7 +1185,7 @@ impl SessionStore {
         title: &str,
     ) -> Result<(SessionId, MessageId), String> {
         let messages = self
-            .load_messages(source)
+            .load_rows_flat(source)
             .map_err(|error| error.to_string())?;
         if !messages.iter().any(|message| message.id == upto) {
             return Err(format!("message {} is not in session {}", upto.0, source.0));
@@ -1039,6 +1235,16 @@ impl SessionStore {
             };
             remap.insert(message.id, copied);
             fork_point = copied;
+        }
+        // The fork's tip is its last copied row.
+        {
+            let connection = self.connection.lock().unwrap();
+            connection
+                .execute(
+                    "UPDATE sessions SET tip_id = ?1 WHERE id = ?2",
+                    rusqlite::params![fork_point.0 as i64, new_session.0 as i64],
+                )
+                .map_err(|error| error.to_string())?;
         }
         Ok((new_session, fork_point))
     }
@@ -1133,6 +1339,133 @@ mod tests {
 
     fn memory_store() -> SessionStore {
         SessionStore::open(Path::new(":memory:")).expect("open in-memory store")
+    }
+
+    /// After a rewind, the abandoned branch (rows are never deleted —
+    /// an append-only audit) drops off every read: the canonical path
+    /// walks parents back from the tip, and the tip advanced onto the
+    /// new branch the moment the re-sent message landed.
+    #[test]
+    fn rewound_history_reads_the_new_branch_and_keeps_the_old_rows() {
+        let store = memory_store();
+        let session = store.create_session("rewind").unwrap();
+        let q1 = store
+            .append_message(session, None, Role::User, "q1")
+            .unwrap();
+        let a1 = store
+            .append_message(session, Some(q1), Role::Assistant, "a1")
+            .unwrap();
+        let q2 = store
+            .append_message(session, Some(a1), Role::User, "q2")
+            .unwrap();
+        store
+            .append_message(session, Some(q2), Role::Assistant, "a2")
+            .unwrap();
+
+        // Edit from here on q2: the keep point is q2's parent (a1); the
+        // next send parents there and the tip advances onto the new
+        // branch.
+        let q2_fixed = store
+            .append_message(session, Some(a1), Role::User, "q2 fixed")
+            .unwrap();
+        store
+            .append_message(session, Some(q2_fixed), Role::Assistant, "a3")
+            .unwrap();
+
+        let path = store.load_messages(session).unwrap();
+        let contents: Vec<&str> = path.iter().map(|row| row.content.as_str()).collect();
+        assert_eq!(contents, vec!["q1", "a1", "q2 fixed", "a3"]);
+
+        // The wire history a resumed session re-sends — no stale q2.
+        let wire = store.load_wire_history(session).unwrap();
+        let wire_texts: Vec<String> = wire
+            .iter()
+            .filter_map(|message| message.content.clone())
+            .collect();
+        assert_eq!(wire_texts, vec!["q1", "a1", "q2 fixed", "a3"]);
+
+        // The bounded page and "load earlier" both follow the path.
+        let recent = store.load_recent_messages(session, 3).unwrap();
+        let recent_texts: Vec<&str> = recent.iter().map(|row| row.content.as_str()).collect();
+        assert_eq!(recent_texts, vec!["a1", "q2 fixed", "a3"]);
+        let earlier = store
+            .load_messages_before(session, q2_fixed, 10)
+            .unwrap()
+            .into_iter()
+            .map(|row| row.content)
+            .collect::<Vec<_>>();
+        assert_eq!(earlier, vec!["q1", "a1"]);
+        // A before-id off the path (the abandoned branch) pages nothing.
+        assert!(
+            store
+                .load_messages_before(session, MessageId(q2.0 + 1), 10)
+                .unwrap()
+                .is_empty()
+        );
+
+        // The audit: nothing was deleted.
+        let total: i64 = store
+            .connection
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT COUNT(*) FROM messages WHERE session_id = ?1",
+                [session.0 as i64],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(total, 6);
+    }
+
+    /// Stores written before parents were tracked hold linear history
+    /// with NULL parents: the walk can't cover them, so flat id order
+    /// — what those rows mean — is the fallback.
+    #[test]
+    fn legacy_rows_without_parents_read_flat() {
+        let store = memory_store();
+        let session = store.create_session("legacy").unwrap();
+        // Simulate the old store: rows landed, then parents were wiped.
+        let first = store
+            .append_message(session, None, Role::User, "one")
+            .unwrap();
+        store
+            .append_message(session, Some(first), Role::Assistant, "two")
+            .unwrap();
+        store
+            .connection
+            .lock()
+            .unwrap()
+            .execute("UPDATE messages SET parent_id = NULL", [])
+            .unwrap();
+
+        let rows = store.load_messages(session).unwrap();
+        let contents: Vec<&str> = rows.iter().map(|row| row.content.as_str()).collect();
+        assert_eq!(contents, vec!["one", "two"]);
+    }
+
+    /// A fork's copy ends with the fork point as its tip, so the new
+    /// session's own canonical walk reproduces what was copied.
+    #[test]
+    fn a_fork_walks_its_own_path() {
+        let store = memory_store();
+        let session = store.create_session("source").unwrap();
+        let q1 = store
+            .append_message(session, None, Role::User, "q1")
+            .unwrap();
+        let a1 = store
+            .append_message(session, Some(q1), Role::Assistant, "a1")
+            .unwrap();
+        store
+            .append_message(session, Some(a1), Role::User, "q2")
+            .unwrap();
+
+        let (forked, point) = store.fork_session(session, a1, "fork").unwrap();
+        // The returned fork point is the COPY of a1 — a new row in the
+        // new session, not the source's row.
+        assert_ne!(point, a1);
+        let rows = store.load_messages(forked).unwrap();
+        let contents: Vec<&str> = rows.iter().map(|row| row.content.as_str()).collect();
+        assert_eq!(contents, vec!["q1", "a1"]);
     }
 
     #[test]
@@ -1511,10 +1844,15 @@ mod tests {
             .append_message(session, Some(root), Role::Assistant, "b")
             .unwrap();
 
-        let messages = store.load_messages(session).unwrap();
-        assert_eq!(messages.len(), 3);
+        // The reads follow the tip's branch; the sibling stays in the
+        // table — an append-only audit, never an overwrite.
+        let canonical = store.load_messages(session).unwrap();
+        assert_eq!(canonical.len(), 2);
+        assert_eq!(canonical[1].content, "b");
+        let flat = store.load_rows_flat(session).unwrap();
+        assert_eq!(flat.len(), 3);
         assert_ne!(a, b);
-        assert_eq!(messages[1].parent_id, messages[2].parent_id);
+        assert_eq!(flat[1].parent_id, flat[2].parent_id);
     }
 
     #[test]
