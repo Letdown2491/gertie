@@ -42,9 +42,9 @@ pub struct QueuedId(pub u64);
 pub struct SessionId(pub u64);
 
 /// The front's current session, shared with machinery that runs outside
-/// any session's knowledge — subagent dispatch — so worker runs can
+/// any session's knowledge (subagent dispatch) so worker runs can
 /// record their lineage. One atomic cell: the front sets it whenever the
-/// open session changes; dispatch reads it once. `None` means unknown —
+/// open session changes; dispatch reads it once. `None` means unknown:
 /// worker runs still persist, just unlinked.
 #[derive(Default)]
 pub struct SessionScope(std::sync::Arc<std::sync::atomic::AtomicI64>);
@@ -75,8 +75,8 @@ impl Clone for SessionScope {
 
 /// Characters a human can paste but never see: bidirectional controls
 /// that reorder displayed text, zero-width spaces and joiners that
-/// glue tokens together, and Unicode tag characters — an invisible
-/// alphabet that smuggles text past the eye. Stripped from user text
+/// glue tokens together, and Unicode tag characters (an invisible
+/// alphabet that smuggles text past the eye). Stripped from user text
 /// at the system's entrance, so the database, the transcript, and the
 /// prompt all hold the same words. Invisible characters that carry
 /// meaning survive: emoji ZWJ sequences, soft hyphens, and variation
@@ -150,7 +150,7 @@ pub struct Message {
 }
 
 /// A follow-up parked while a session's turn runs. Persisted rows, so
-/// a queue survives a stop, a crash, or a restart — the transcript
+/// a queue survives a stop, a crash, or a restart: the transcript
 /// renders them as editable drafts, and a drain fires them in order.
 #[derive(Clone, Debug)]
 pub struct QueuedFollowup {
@@ -167,7 +167,7 @@ pub struct SessionSummary {
     /// session shows what it spent before, not just since reopen.
     pub input_tokens: u64,
     pub output_tokens: u64,
-    /// The last request's context size (prompt + completion) — the live
+    /// The last request's context size (prompt + completion), the live
     /// number the compaction threshold watches. Persisted so a resumed
     /// session shows its distance to the window immediately.
     pub context_tokens: u64,
@@ -175,15 +175,15 @@ pub struct SessionSummary {
     /// never out of the record; opening it un-settles.
     pub settled: bool,
     /// The turn ended on the provider's rate limit: a manual Resume is
-    /// the way back in. Survives restarts — the crash-restart affordance
+    /// the way back in. Survives restarts: the crash-restart affordance
     /// falls out of it. Cleared by resuming or by any new send.
     pub limited: bool,
     /// The session's permission mode, chosen in the composer and kept
-    /// here — reopening a chat reopens its posture.
+    /// here (reopening a chat reopens its posture).
     pub mode: PermissionMode,
     /// The folder this session's tools run in, recorded at first send
     /// (None: never sent, or a row older than the column). Launch
-    /// resume matches on it — the store is one global memory, but a
+    /// resume matches on it. The store is one global memory, but a
     /// chat opened in a folder is that folder's chat.
     pub workspace_root: Option<String>,
 }
@@ -201,7 +201,7 @@ pub struct HistoryHit {
 
 /// SQLite-backed session persistence. Synchronous on purpose: writes are
 /// small, rare, and local; callers decide which thread to block. The
-/// connection is mutex-guarded so the store is `Sync` — persistence can
+/// connection is mutex-guarded so the store is `Sync`: persistence can
 /// then move to any thread (background writes arrive in M3).
 pub struct SessionStore {
     connection: std::sync::Mutex<Connection>,
@@ -252,7 +252,7 @@ impl SessionStore {
         )?;
         // Full-text index over message content (FTS5, bundled SQLite).
         // External-content-free on purpose: messages are append-only
-        // and the index mirrors them via trigger — dead simple.
+        // and the index mirrors them via trigger. Dead simple.
         connection.execute_batch(
             "CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts
                  USING fts5(content, session_id UNINDEXED);
@@ -295,8 +295,8 @@ impl SessionStore {
             }
         }
         // Sessions gain lineage (subagent runs are child sessions) and a
-        // kind: chats appear in the sidebar, worker runs in the agents
-        // panel. Existing rows are chats; the column defaults to that.
+        // kind: chats appear in the sidebar, worker runs stay queryable
+        // children. Existing rows are chats; the column defaults to that.
         let session_columns: Vec<String> = {
             let mut statement = connection.prepare("PRAGMA table_info(sessions)")?;
             let rows = statement.query_map([], |row| row.get::<_, String>(1))?;
@@ -315,8 +315,8 @@ impl SessionStore {
             ("mode", "TEXT NOT NULL DEFAULT 'supervised'"),
             // The session's current tip row: which message the next
             // append parents to. Read paths walk parents back from
-            // here — a rewind's abandoned branch (rows are never
-            // deleted) drops off the walk instead of interleaving.
+            // here (a rewind's abandoned branch, rows never deleted,
+            // drops off the walk instead of interleaving).
             ("tip_id", "INTEGER"),
         ] {
             if !session_columns.contains(&column.to_string()) {
@@ -327,16 +327,16 @@ impl SessionStore {
             }
         }
         // Existing sessions predate the activity clock: "now" is the
-        // honest backfill — they were active when this column arrived.
+        // honest backfill, they were active when this column arrived.
         connection.execute(
             "UPDATE sessions SET last_activity_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
              WHERE last_activity_at IS NULL",
             [],
         )?;
         // Indexes over the migrated session columns (they must exist
-        // before these can be built). The agents panel lists a
+        // before these can be built). `sessions_by_parent` reads a
         // dispatch's runs by parent; the settle sweep looks for old,
-        // unsettled chats — both scanned the whole table per open
+        // unsettled chats. Both scanned the whole table per open
         // (and the sweep, on every settle check) before this. The
         // partial index matches the sweep's own WHERE: it holds only
         // the rows the sweep can ever pick.
@@ -363,7 +363,7 @@ impl SessionStore {
 
     /// Creates a worker-run session: kind `worker`, linked to the
     /// dispatching chat when the front's scope knows it. Worker runs do
-    /// not appear in the sidebar; the agents panel lists them.
+    /// not appear in the sidebar; `list_child_sessions` reads them back.
     pub fn create_worker_run(
         &self,
         parent: Option<SessionId>,
@@ -379,8 +379,7 @@ impl SessionStore {
         Ok(SessionId(connection.last_insert_rowid() as u64))
     }
 
-    /// A chat session's worker runs, oldest first — the agents panel's
-    /// rows.
+    /// A chat session's worker runs, oldest first.
     pub fn list_child_sessions(
         &self,
         parent: SessionId,
@@ -396,9 +395,9 @@ impl SessionStore {
                     input_tokens: row.get::<_, i64>(2)?.max(0) as u64,
                     output_tokens: row.get::<_, i64>(3)?.max(0) as u64,
                     context_tokens: row.get::<_, i64>(4)?.max(0) as u64,
-                    // Child sessions live in the agents panel, never
-                    // the sidebar's lifecycle machine — but the
-                    // limited state is panel signal: a stopped run
+                    // Child sessions stay out of the sidebar's
+                    // lifecycle machine (settled/open lists); the
+                    // limited flag stays queryable: a stopped run
                     // waits for the human.
                     settled: false,
                     limited: row.get::<_, i64>(6)? != 0,
@@ -415,7 +414,7 @@ impl SessionStore {
     }
 
     /// Whether a worker run has its report yet: any assistant row means
-    /// the run finished (or failed loudly) — the panel's status.
+    /// the run finished (or failed loudly): the panel's status.
     pub fn worker_run_reported(&self, session_id: SessionId) -> bool {
         let connection = self.connection.lock().unwrap();
         connection
@@ -425,8 +424,8 @@ impl SessionStore {
     }
 
     /// Adds a request's usage to the session's running totals, and
-    /// remembers the request's context size (prompt + completion — what
-    /// the next request carries). One call per Usage event — a single
+    /// remembers the request's context size (prompt + completion, what
+    /// the next request carries). One call per Usage event, a single
     /// UPDATE, not a per-token write.
     pub fn add_usage(
         &self,
@@ -449,7 +448,7 @@ impl SessionStore {
         Ok(())
     }
 
-    /// Token totals across every session — chats and worker runs. The
+    /// Token totals across every session (chats and worker runs). The
     /// settings panel's bottom line: what gertie has cost, in tokens.
     pub fn total_usage(&self) -> (u64, u64) {
         let connection = self.connection.lock().unwrap();
@@ -469,7 +468,7 @@ impl SessionStore {
     }
 
     /// The sidebar as an inbox: the session whose record moved most
-    /// recently first — "ordered by when each thread last came back to
+    /// recently first, "ordered by when each thread last came back to
     /// you" (t3code's threads list).
     /// Message ids are monotonic across all sessions, so MAX(messages.id)
     /// orders by last activity; sessions with no messages yet sink
@@ -507,7 +506,7 @@ impl SessionStore {
     }
 
     /// Settles or un-settles a session: the human put the work down
-    /// (or picked it back up). A timestamp, not a bool — when auto-settle
+    /// (or picked it back up). A timestamp, not a bool: when auto-settle
     /// arrives it needs to know how long the session has been resting.
     pub fn set_session_settled(
         &self,
@@ -543,7 +542,7 @@ impl SessionStore {
     }
 
     /// Persists a session's permission mode. Applies from the next
-    /// turn on — a running turn keeps the mode it was built with.
+    /// turn on (a running turn keeps the mode it was built with).
     pub fn set_session_mode(
         &self,
         session_id: SessionId,
@@ -557,7 +556,7 @@ impl SessionStore {
         Ok(())
     }
 
-    /// Records the folder this session's tools run in — the chat sets
+    /// Records the folder this session's tools run in: the chat sets
     /// it at the first send and re-roots it on any send after a
     /// footer workspace switch. The settle hook reads it back to run
     /// a reclaim command in the right checkout.
@@ -570,7 +569,7 @@ impl SessionStore {
     }
 
     /// The folder recorded for a session, if any. Sessions older than
-    /// the column return None — there is no root to reclaim in.
+    /// the column return None: there is no root to reclaim in.
     pub fn session_workspace(&self, session_id: SessionId) -> Option<String> {
         let connection = self.connection.lock().unwrap();
         connection
@@ -584,13 +583,13 @@ impl SessionStore {
     }
 
     /// Auto-settle: lays every chat idle for at least `idle_days` down
-    /// as settled — the sweep on startup, before any view loads. Only
+    /// as settled: the sweep on startup, before any view loads. Only
     /// state changes here: a `settle_command` runs on manual settle,
     /// where a human pressed the button, never from this sweep.
     /// Returns how many sessions settled.
     pub fn settle_idle_sessions(&self, idle_days: u64) -> Result<u64, rusqlite::Error> {
         let connection = self.connection.lock().unwrap();
-        // ISO timestamps compare lexicographically — the cutoff is the
+        // ISO timestamps compare lexicographically: the cutoff is the
         // same format, computed server-side (SQLite) from the same
         // clock the writes use.
         let settled = connection.execute(
@@ -604,7 +603,7 @@ impl SessionStore {
         Ok(settled as u64)
     }
 
-    /// Full-text search over every message ever recorded — the model's
+    /// Full-text search over every message ever recorded: the model's
     /// memory of past sessions. `query` is a plain phrase: it is quoted
     /// for FTS5, so model-written punctuation can't inject syntax.
     pub fn search(&self, query: &str, limit: usize) -> Result<Vec<HistoryHit>, rusqlite::Error> {
@@ -632,7 +631,7 @@ impl SessionStore {
     }
 
     /// Remembers a palette confirm: this query led to this session.
-    /// The MRU table behind the palette's ranking — the thread you
+    /// The MRU table behind the palette's ranking: the thread you
     /// last picked for a query ranks higher when you type that query
     /// again. An upsert: repeat picks bump recency and the count.
     pub fn record_palette_pick(&self, query: &str, session_id: SessionId) {
@@ -646,7 +645,7 @@ impl SessionStore {
     }
 
     /// Sessions previously picked for this exact query, most-recently
-    /// picked first — the palette's boost order. Empty for a query
+    /// picked first: the palette's boost order. Empty for a query
     /// that never led anywhere.
     pub fn palette_boosts(&self, query: &str) -> Vec<SessionId> {
         self.connection
@@ -664,7 +663,7 @@ impl SessionStore {
             .unwrap_or_default()
     }
 
-    /// The session's own record as full-text hits, oldest first — what
+    /// The session's own record as full-text hits, oldest first: what
     /// a compaction's selection points the model back to. A query
     /// scopes to full-text matches inside this session (quoted for
     /// FTS5, same as `search`); without one, the last `limit` messages
@@ -735,7 +734,7 @@ impl SessionStore {
     ) -> Result<MessageId, rusqlite::Error> {
         let mut connection = self.connection.lock().unwrap();
         // One transaction: a row whose tip and activity stamps land
-        // separately is a half-written turn — a reader that walks
+        // separately is a half-written turn. A reader that walks
         // parents from the tip between the commits sees a different
         // conversation than the next one.
         let transaction = connection.transaction()?;
@@ -765,7 +764,7 @@ impl SessionStore {
         Ok(id)
     }
 
-    /// Appends a tool result — the row that answers one tool call.
+    /// Appends a tool result: the row that answers one tool call.
     pub fn append_tool_result(
         &self,
         session_id: SessionId,
@@ -792,7 +791,7 @@ impl SessionStore {
                 tool_name,
                 arguments,
             ])?;
-        // Tool results are activity too — the turn's work, not just
+        // Tool results are activity too: the turn's work, not just
         // its words.
         transaction.execute(
             "UPDATE sessions SET last_activity_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
@@ -808,7 +807,7 @@ impl SessionStore {
         Ok(id)
     }
 
-    /// Rewrites a message's content in place — this is how streaming turns
+    /// Rewrites a message's content in place. This is how streaming turns
     /// land without inserting a row per token.
     pub fn update_message(
         &self,
@@ -835,7 +834,7 @@ impl SessionStore {
         Ok(())
     }
 
-    /// Deletes a session, its messages, and their full-text rows — the
+    /// Deletes a session, its messages, and their full-text rows: the
     /// FTS index mirrors messages via an insert-only trigger, so its
     /// rows must go by hand or search would keep finding ghosts.
     pub fn delete_session(&self, session_id: SessionId) -> Result<(), rusqlite::Error> {
@@ -859,7 +858,7 @@ impl SessionStore {
 
     /// Parks a follow-up for a session that is mid-turn: a full user
     /// message that runs as its own turn when the current one ends.
-    /// Rows, not UI state — a crash keeps the words.
+    /// Rows, not UI state: a crash keeps the words.
     pub fn enqueue_followup(
         &self,
         session_id: SessionId,
@@ -891,8 +890,8 @@ impl SessionStore {
         rows.collect()
     }
 
-    /// Pulls one followup out of the queue — sent by the drain or by a
-    /// force-send — returning its text. Unknown id: none.
+    /// Pulls one followup out of the queue, sent by the drain or by a
+    /// force-send, returning its text. Unknown id: none.
     pub fn take_followup(&self, id: QueuedId) -> Result<Option<String>, rusqlite::Error> {
         let connection = self.connection.lock().unwrap();
         let content = connection
@@ -917,7 +916,7 @@ impl SessionStore {
         Ok(gone > 0)
     }
 
-    /// A message row's parent — the keep-point an "edit from here"
+    /// A message row's parent: the keep-point an "edit from here"
     /// rewind restores the conversation to. `None` for a session's
     /// first row.
     pub fn message_parent(
@@ -937,7 +936,7 @@ impl SessionStore {
 
     /// Loads a session's messages oldest-first along the canonical
     /// path. Unbounded by design: the wire history, export, and fork
-    /// need every row — the UI transcript uses the bounded
+    /// need every row: the UI transcript uses the bounded
     /// `load_recent_messages` instead.
     pub fn load_messages(&self, session_id: SessionId) -> Result<Vec<Message>, rusqlite::Error> {
         let rows = self.load_rows_flat(session_id)?;
@@ -955,7 +954,7 @@ impl SessionStore {
             .collect())
     }
 
-    /// Every row of a session by id — no path, no order beyond id. The
+    /// Every row of a session by id, no path, no order beyond id. The
     /// raw table: what `load_messages` reorders, and what fork reads
     /// (a fork may start from an off-path sibling).
     fn load_rows_flat(&self, session_id: SessionId) -> Result<Vec<Message>, rusqlite::Error> {
@@ -970,14 +969,14 @@ impl SessionStore {
 
     /// The session's message ids along the canonical path, oldest
     /// first. The path walks parents back from the session's tip (the
-    /// recorded `tip_id`, else its newest row) — so after a rewind,
+    /// recorded `tip_id`, else its newest row), so after a rewind,
     /// the abandoned branch stays in the table (an append-only audit)
     /// while dropping off every read. A tool result hangs off the
     /// assistant row it answers (the conversation continues from the
     /// assistant), so each on-path assistant carries its own tool rows
-    /// with it. A walk that can't be trusted — legacy stores written
-    /// before parents were tracked (every row a root), a corrupted
-    /// chain — falls back to flat id order, which is what those rows
+    /// with it. A walk that can't be trusted (legacy stores written
+    /// before parents were tracked, every row a root, or a corrupted
+    /// chain) falls back to flat id order, which is what those rows
     /// mean.
     fn canonical_ids(
         rows: &[Message],
@@ -1031,10 +1030,10 @@ impl SessionStore {
             }
         }
         // One tree, one truth: if the walk from the tip reaches a root
-        // through resolvable parents, that walk is the canonical path —
-        // abandoned branches and all (a rewind-to-start even grows a
-        // second root; the tip says which branch is live). A store too
-        // old to have parents — no row links to anything — or a
+        // through resolvable parents, that walk is the canonical path
+        // (abandoned branches and all; a rewind-to-start even grows a
+        // second root, and the tip says which branch is live). A store
+        // too old to have parents (no row links to anything) or a
         // corrupted chain reads flat id order, which is what those
         // rows mean.
         let linked = rows.iter().any(|row| row.parent_id.is_some());
@@ -1043,7 +1042,7 @@ impl SessionStore {
             flat.sort_unstable();
             return Ok(flat);
         }
-        // Root → tip, with each assistant's tool rows riding after it —
+        // Root → tip, with each assistant's tool rows riding after it:
         // the sequence the wire pairing reads.
         chain.reverse();
         let placed: std::collections::HashSet<i64> = chain.iter().copied().collect();
@@ -1064,7 +1063,7 @@ impl SessionStore {
         Ok(path)
     }
 
-    /// Loads the most recent `limit` messages of a session, oldest-first —
+    /// Loads the most recent `limit` messages of a session, oldest-first:
     /// the bounded window a transcript renders. Opening a chat touches
     /// one page of the canonical path, not the whole archive: the
     /// parent links (two integer columns) walk the path, then only the
@@ -1080,14 +1079,14 @@ impl SessionStore {
             &connection,
             session_id,
         )?;
-        // The window is the path's tail — oldest first, as loaded.
+        // The window is the path's tail, oldest first, as loaded.
         let skip = path.len().saturating_sub(limit);
         let window: Vec<i64> = path[skip..].to_vec();
         Self::rows_for_ids(&connection, session_id, &window)
     }
 
     /// Loads up to `limit` messages strictly older than `before_id`
-    /// along the canonical path, oldest-first — one page of "load
+    /// along the canonical path, oldest-first: one page of "load
     /// earlier" in the transcript. A `before_id` no longer on the path
     /// (its branch was rewound away) pages nothing: the caller retires
     /// the stale control.
@@ -1112,7 +1111,7 @@ impl SessionStore {
         Self::rows_for_ids(&connection, session_id, &window)
     }
 
-    /// A session's rows, light of their content — only the two columns
+    /// A session's rows, light of their content: only the two columns
     /// the parent walk needs.
     fn light_rows(
         &self,
@@ -1189,7 +1188,7 @@ impl SessionStore {
         Ok(Self::wire_history_from_rows(&messages))
     }
 
-    /// The wire history for already-loaded rows — the reconstruction
+    /// The wire history for already-loaded rows: the reconstruction
     /// `load_wire_history` runs over the canonical path, and what a
     /// rewind uses to rebuild its kept prefix (rows at or before the
     /// keep point are identical on every branch).
@@ -1201,7 +1200,7 @@ impl SessionStore {
             let message = &messages[index];
             // Image markers ride inside stored content; expand them back
             // into wire images so a resumed session re-sends what the
-            // model saw. A missing file degrades to a text note — the
+            // model saw. A missing file degrades to a text note: the
             // conversation keeps working without the bytes.
             let (content, images) = {
                 let (text, paths) = crate::request::extract_image_markers(&message.content);
@@ -1268,7 +1267,7 @@ impl SessionStore {
     /// Forks the conversation at `upto`: a new session whose messages
     /// are the canonical path root → `upto`, copied verbatim (tool
     /// fields ride along; parents are remapped to the new ids). The
-    /// parent_id column planned for this all along — a fork is a
+    /// parent_id column planned for this all along: a fork is a
     /// sibling branch, and the source session is untouched. Returns
     /// the new session id and the copy of `upto` (the fork point, which
     /// becomes the view's last message).
@@ -1300,7 +1299,7 @@ impl SessionStore {
         }
         chain.reverse();
 
-        // One transaction: the fork exists whole or not at all — a
+        // One transaction: the fork exists whole or not at all. A
         // half-copied fork (a session with some ancestors) is neither
         // a transcript nor a lie a reader could spot. This is also the
         // fork's speedup: the copies share one lock and one commit
@@ -1349,7 +1348,7 @@ impl SessionStore {
         Ok((new_session, fork_point))
     }
 
-    /// Exports a session's messages as JSONL — one object per row,
+    /// Exports a session's messages as JSONL, one object per row,
     /// oldest first. The shape mirrors what the model saw (role,
     /// content, tool fields), which makes the file both a shareable
     /// transcript and a training-shaped trace. Returns the row count.
@@ -1428,7 +1427,7 @@ pub enum Event {
     Error { message: String },
     /// The provider's usage/rate limit answered every retry. Not an
     /// error to report and forget: the turn ends *limited*, the state
-    /// is persisted, and the UI offers a manual Resume — the ask is
+    /// is persisted, and the UI offers a manual Resume: the ask is
     /// "wait, then continue", not "something broke".
     Limited { message: String },
 }
@@ -1458,7 +1457,7 @@ mod tests {
         assert_eq!(store.palette_boosts("fix"), vec![one, two]);
     }
 
-    /// After a rewind, the abandoned branch (rows are never deleted —
+    /// After a rewind, the abandoned branch (rows are never deleted,
     /// an append-only audit) drops off every read: the canonical path
     /// walks parents back from the tip, and the tip advanced onto the
     /// new branch the moment the re-sent message landed.
@@ -1493,7 +1492,7 @@ mod tests {
         let contents: Vec<&str> = path.iter().map(|row| row.content.as_str()).collect();
         assert_eq!(contents, vec!["q1", "a1", "q2 fixed", "a3"]);
 
-        // The wire history a resumed session re-sends — no stale q2.
+        // The wire history a resumed session re-sends (no stale q2).
         let wire = store.load_wire_history(session).unwrap();
         let wire_texts: Vec<String> = wire
             .iter()
@@ -1536,7 +1535,7 @@ mod tests {
 
     /// Stores written before parents were tracked hold linear history
     /// with NULL parents: the walk can't cover them, so flat id order
-    /// — what those rows mean — is the fallback.
+    /// (what those rows mean) is the fallback.
     #[test]
     fn legacy_rows_without_parents_read_flat() {
         let store = memory_store();
@@ -1560,7 +1559,7 @@ mod tests {
         assert_eq!(contents, vec!["one", "two"]);
     }
 
-    /// A rewind to the very start parents the next send to nothing —
+    /// A rewind to the very start parents the next send to nothing:
     /// a second root. The tip still says which branch is live: the
     /// walk reads the new conversation; the old rows stay as audit.
     #[test]
@@ -1604,8 +1603,8 @@ mod tests {
             .unwrap();
 
         let (forked, point) = store.fork_session(session, a1, "fork").unwrap();
-        // The returned fork point is the COPY of a1 — a new row in the
-        // new session, not the source's row.
+        // The returned fork point is the COPY of a1 (a new row in the
+        // new session, not the source's row).
         assert_ne!(point, a1);
         let rows = store.load_messages(forked).unwrap();
         let contents: Vec<&str> = rows.iter().map(|row| row.content.as_str()).collect();
@@ -1627,7 +1626,7 @@ mod tests {
     #[test]
     fn strip_invisible_leaves_meaningful_invisible_text_alone() {
         // Emoji ZWJ sequences, soft hyphens, and variation selectors
-        // carry meaning — stripping would corrupt the words they shape.
+        // carry meaning. Stripping would corrupt the words they shape.
         let alive = "\u{1F468}\u{200D}\u{1F4BB} cau\u{00AD}tion\u{FE0F}";
         assert_eq!(strip_invisible(alive), alive);
         assert_eq!(strip_invisible(""), "");
@@ -1652,7 +1651,7 @@ mod tests {
             PermissionMode::AcceptEdits
         );
 
-        // A hand-edited row can't name a real mode — it reads as the
+        // A hand-edited row can't name a real mode: it reads as the
         // default rather than inventing a posture.
         let raw = rusqlite::Connection::open(tmp.path().join("store.db")).unwrap();
         raw.execute("UPDATE sessions SET mode = 'weird'", [])
@@ -1679,7 +1678,7 @@ mod tests {
         // The last request's size is the live context gauge: prompt +
         // completion of the most recent usage event, not a sum.
         assert_eq!(chat_row.context_tokens, 40 + 5);
-        // The all-sessions total includes worker runs too — that's the
+        // The all-sessions total includes worker runs too: that's the
         // real cost.
         assert_eq!(store.total_usage(), (340, 45));
     }
@@ -1780,7 +1779,7 @@ mod tests {
         store.set_session_settled(session, true).unwrap();
         assert!(store.list_sessions().unwrap()[0].settled);
 
-        // Reopen — a fresh process reads the same state.
+        // Reopen: a fresh process reads the same state.
         drop(store);
         let store = SessionStore::open(&path).unwrap();
         assert!(store.list_sessions().unwrap()[0].settled);
@@ -1800,7 +1799,7 @@ mod tests {
         store.append_message(old, None, Role::User, "x").unwrap();
         store.append_message(fresh, None, Role::User, "y").unwrap();
 
-        // Age one session's clock by hand — the store file is plain
+        // Age one session's clock by hand: the store file is plain
         // SQLite; the test opens it beside the store.
         let raw = rusqlite::Connection::open(&path).unwrap();
         raw.execute(
@@ -1880,7 +1879,7 @@ mod tests {
         assert_eq!(older[0].content, "u4");
         assert_eq!(older[5].content, "a6");
 
-        // And again — three pages cover eighteen rows.
+        // And again: three pages cover eighteen rows.
         let head = store.load_messages_before(session, older[0].id, 6).unwrap();
         assert_eq!(head.len(), 6);
         assert_eq!(head[0].content, "u1");
@@ -1959,7 +1958,7 @@ mod tests {
 
         let wire = store.load_wire_history(session).unwrap();
         assert_eq!(wire.len(), 1);
-        // Clean text on the wire — the marker never reaches the model.
+        // Clean text on the wire: the marker never reaches the model.
         assert_eq!(wire[0].content.as_deref(), Some("look"));
         assert_eq!(wire[0].attachments.len(), 1);
         let (media_type, payload) =
@@ -1989,7 +1988,7 @@ mod tests {
             .unwrap();
 
         // The reads follow the tip's branch; the sibling stays in the
-        // table — an append-only audit, never an overwrite.
+        // table: an append-only audit, never an overwrite.
         let canonical = store.load_messages(session).unwrap();
         assert_eq!(canonical.len(), 2);
         assert_eq!(canonical[1].content, "b");
@@ -2033,7 +2032,7 @@ mod tests {
         assert_eq!(tool_rows[2].role, Role::Tool);
         assert_eq!(tool_rows[2].tool_call_id.as_deref(), Some("call-1"));
         assert_eq!(tool_rows[2].tool_name.as_deref(), Some("peek"));
-        // The source session is untouched — a fork adds, never rewrites.
+        // The source session is untouched: a fork adds, never rewrites.
         assert_eq!(store.load_messages(session).unwrap().len(), 4);
         assert_eq!(store.list_sessions().unwrap().len(), 3);
         // A fork point outside the session is an error, not a panic.
@@ -2100,7 +2099,7 @@ mod tests {
                 .all(|summary| summary.id != session)
         );
         assert!(store.load_messages(session).unwrap().is_empty());
-        // The FTS index has no delete trigger — it must not report the
+        // The FTS index has no delete trigger: it must not report the
         // dead session's words.
         assert!(store.search("ghost words", 10).unwrap().is_empty());
         assert_eq!(store.search("kept words", 10).unwrap().len(), 1);

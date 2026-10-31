@@ -1,4 +1,4 @@
-//! Subagents: a tool that runs a whole other harness loop — the
+//! Subagents: a tool that runs a whole other harness loop, the
 //! leader/worker pattern, depth 1.
 //!
 //! The mechanism is "subagents as tools": an agent type from config
@@ -13,8 +13,8 @@
 //! matter what its brief says.
 //!
 //! Dispatch is by **brief file** (a path under the workspace root): the
-//! leader writes a self-contained brief — task, constraints, acceptance
-//! criteria — and dispatches the path. Workers never see leader history;
+//! leader writes a self-contained brief, task, constraints, acceptance
+//! criteria, and dispatches the path. Workers never see leader history;
 //! the brief is the whole world.
 
 use crate::SessionId;
@@ -37,12 +37,12 @@ pub struct AgentType {
     /// Slug; the tool is `agent_{name}`.
     pub name: String,
     /// Triggers only ("Use when…"), never a workflow summary. Context
-    /// load paid on every leader turn — kept short.
+    /// load paid on every leader turn, kept short.
     pub description: String,
     /// The worker's system prompt.
     pub system_prompt: String,
     /// Tool names the worker may use; None inherits everything (minus
-    /// agent tools — always).
+    /// agent tools, always).
     pub tools: Option<Vec<String>>,
 }
 
@@ -50,7 +50,7 @@ pub struct AgentType {
 /// servers, or skills never carry control characters, invisible
 /// direction or zero-width tricks, or unbounded length into the
 /// model-visible surface. The invisible-char set is the same one the
-/// composer and the tool seam use — one predicate, everywhere.
+/// composer and the tool seam use, one predicate, everywhere.
 pub fn sanitize_untrusted(raw: &str, cap: usize) -> String {
     let stripped = crate::strip_invisible(raw);
     let filtered: String = stripped
@@ -61,7 +61,7 @@ pub fn sanitize_untrusted(raw: &str, cap: usize) -> String {
 }
 
 /// A whole line of three or more hyphens inside brief or guidance
-/// text would read as the brief envelope's own delimiter —
+/// text would read as the brief envelope's own delimiter,
 /// model-authored text could close the envelope early and forge the
 /// instructions that follow it. Embedded text has every such line
 /// backslash-escaped, so the only bare `---` lines in a worker's
@@ -88,11 +88,11 @@ pub fn builtin_agent_types() -> Vec<AgentType> {
     vec![
         AgentType {
             name: "explore".into(),
-            description: "Use when a question needs broad reading — where is X, how does Y \
+            description: "Use when a question needs broad reading, where is X, how does Y \
                           work, what calls Z. Read-only; returns findings with file paths."
                 .into(),
             system_prompt: "You are an exploration agent. Answer the brief by reading the \
-                            codebase — never by guessing. Cite file paths for every claim. \
+                            codebase, never by guessing. Cite file paths for every claim. \
                             Say plainly what you could not find."
                 .into(),
             tools: Some(
@@ -110,7 +110,7 @@ pub fn builtin_agent_types() -> Vec<AgentType> {
                 .into(),
             system_prompt: "You are a planning agent. Read enough of the codebase to ground \
                             the plan in reality, then return ordered steps: what, where \
-                            (file), why, and what could go wrong. You never touch code — \
+                            (file), why, and what could go wrong. You never touch code, \
                             your only output is the plan."
                 .into(),
             tools: Some(READ.iter().copied().map(String::from).collect()),
@@ -121,7 +121,7 @@ pub fn builtin_agent_types() -> Vec<AgentType> {
                           the brief exactly, run the relevant checks, report what changed."
                 .into(),
             system_prompt: "You are an implementation agent. Do exactly what the brief asks \
-                            — no scope creep. Match surrounding code style. Verify with the \
+                           , no scope creep. Match surrounding code style. Verify with the \
                             project's own checks where possible. Report what changed and \
                             how you verified it."
                 .into(),
@@ -132,7 +132,7 @@ pub fn builtin_agent_types() -> Vec<AgentType> {
             description: "Use to run test suites, reproduce failures, and verify behavior. \
                           Reports findings; does not fix code."
                 .into(),
-            system_prompt: "You are a testing agent. Reproduce, run, and observe — you do \
+            system_prompt: "You are a testing agent. Reproduce, run, and observe, you do \
                             not fix code. Report exact commands, exact output, and your \
                             verdict on whether the behavior matches the brief."
                 .into(),
@@ -151,7 +151,7 @@ pub fn builtin_agent_types() -> Vec<AgentType> {
                 .into(),
             system_prompt: "You are a review agent. Judge correctness first, then security, \
                             then clarity. Every finding cites a file and line. Verify claims \
-                            by reading, never by assuming. Say what is good, too — briefly."
+                            by reading, never by assuming. Say what is good, too, briefly."
                 .into(),
             tools: Some(READ.iter().copied().map(String::from).collect()),
         },
@@ -162,7 +162,7 @@ pub fn builtin_agent_types() -> Vec<AgentType> {
                 .into(),
             system_prompt: "You are a diagnosis agent. Reproduce the failure, gather \
                             evidence, narrow the cause. You may run commands to observe, but \
-                            your deliverable is a diagnosis with evidence — not a patch."
+                            your deliverable is a diagnosis with evidence, not a patch."
                 .into(),
             tools: Some(
                 ["bash", "read_file", "glob", "grep", "search_history"]
@@ -191,7 +191,7 @@ pub fn builtin_agent_types() -> Vec<AgentType> {
         },
         AgentType {
             name: "librarian".into(),
-            description: "Use to mine past gertie sessions — what we did before, what was \
+            description: "Use to mine past gertie sessions, what we did before, what was \
                           decided, what broke last time. Returns hits with session titles."
                 .into(),
             system_prompt: "You are a memory agent. Search past sessions with search_history \
@@ -209,7 +209,7 @@ pub fn builtin_agent_types() -> Vec<AgentType> {
     ]
 }
 
-/// The worker's registry: allowlist applied, agent tools stripped —
+/// The worker's registry: allowlist applied, agent tools stripped,
 /// depth-1 enforced by what the map contains, not by prompt discipline.
 pub fn worker_registry(all: &ToolRegistry, allowlist: Option<&[String]>) -> ToolRegistry {
     let filtered = all
@@ -245,7 +245,7 @@ pub struct AgentTool {
     /// The front's active permission mode, read at dispatch so the
     /// worker's turn inherits the posture its leader ran under.
     mode_scope: ModeScope,
-    /// Whether bash runs inside the Landlock sandbox — mirrored into
+    /// Whether bash runs inside the Landlock sandbox, mirrored into
     /// the worker's turn, whose Auto mode keys off the same fact.
     sandbox_bash: bool,
 }
@@ -294,7 +294,7 @@ impl AgentTool {
         }
     }
 
-    /// Reads the brief under the workspace root — the same escape rule
+    /// Reads the brief under the workspace root, the same escape rule
     /// as every other path tool.
     fn read_brief(&self, brief_path: &str) -> Result<String, String> {
         let target = self.workspace_root.join(brief_path);
@@ -360,9 +360,8 @@ impl Tool for AgentTool {
             let guidance = args.guidance.unwrap_or_default();
 
             // The run persists as a child session of the dispatching
-            // chat — inspectable in the agents panel, searchable like
-            // any message. A persistence failure never blocks the run;
-            // it just stays unrecorded.
+            // chat, searchable like any message. A persistence failure
+            // never blocks the run; it just stays unrecorded.
             let run: Option<SessionId> = self.store.as_ref().and_then(|store| {
                 let brief_name = std::path::Path::new(&args.brief_path)
                     .file_name()
@@ -400,7 +399,7 @@ impl Tool for AgentTool {
                 provider: self.provider.clone(),
                 tools: self.worker_tools.clone(),
                 history: history.clone(),
-                // Workers don't take steering — the brief is the job.
+                // Workers don't take steering, the brief is the job.
                 steer: None,
                 user_attachments: Vec::new(),
                 // Brief and guidance are model-authored; their
@@ -424,7 +423,7 @@ impl Tool for AgentTool {
                 context_window: self.context_window,
                 permission_broker: Some(self.broker.clone()),
                 // The worker runs under the posture its leader's turn
-                // was built with — read once at dispatch, never again.
+                // was built with, read once at dispatch, never again.
                 permission_mode: self.mode_scope.get(),
                 sandbox_bash: self.sandbox_bash,
                 prompt_source: PromptSource::Worker,
@@ -440,6 +439,14 @@ impl Tool for AgentTool {
                 match event {
                     LoopEvent::Error { message } => {
                         failure = Some(message);
+                        break;
+                    }
+                    // The budget pause ends the worker's turn the way a
+                    // rate limit would: stop, report what landed. The
+                    // leader's tool result carries the story; a worker
+                    // has no human to resume it directly.
+                    LoopEvent::Budgeted { message } => {
+                        failure = Some(format!("worker paused on the round budget: {message}"));
                         break;
                     }
                     LoopEvent::Done => break,
@@ -497,7 +504,7 @@ mod tests {
             sanitize_untrusted("pa\u{200B}y\u{202E}tox\u{1B} abc\u{E0041}", 100),
             "paytox abc"
         );
-        // Whitespace controls stay — newlines are not an attack.
+        // Whitespace controls stay, newlines are not an attack.
         assert_eq!(sanitize_untrusted("a\nb\tc", 100), "a\nb\tc");
         // The cap still applies, by character not byte.
         assert_eq!(sanitize_untrusted("abcdef", 3), "abc");
@@ -544,7 +551,7 @@ mod tests {
             false,
         );
 
-        // Poll to completion — no runtime needed for these futures.
+        // Poll to completion, no runtime needed for these futures.
         let future = tool.run(r#"{"brief_path": "brief.md"}"#);
         let waker = Waker::noop();
         let mut cx = TaskContext::from_waker(waker);
@@ -626,7 +633,7 @@ mod tests {
         assert!(messages[0].content.contains("Do the thing."));
         assert_eq!(messages[1].role, crate::Role::Assistant);
         assert!(messages[1].content.contains("STATUS: done"));
-        // The sidebar is chats only — worker runs live in the panel.
+        // The sidebar is chats only, worker runs live in the panel.
         assert_eq!(store.list_sessions().unwrap().len(), 1);
     }
 
@@ -691,7 +698,7 @@ mod tests {
         result.expect("worker report");
 
         // The record matches the prompt: the only bare `---` lines are
-        // the envelope's own two — the brief's and the guidance's were
+        // the envelope's own two, the brief's and the guidance's were
         // escaped.
         let children = store.list_child_sessions(parent).unwrap();
         let messages = store.load_messages(children[0].id).unwrap();
@@ -790,7 +797,7 @@ mod tests {
         assert!(unique, "duplicate built-in names: {names:?}");
         for t in &builtins {
             // "implement" is the only full-toolset type; everything else
-            // is allowlisted, and no allowlist may reach agent_* tools —
+            // is allowlisted, and no allowlist may reach agent_* tools,
             // though depth-1 stripping makes that unreachable anyway.
             if let Some(allow) = &t.tools {
                 assert!(
@@ -803,7 +810,7 @@ mod tests {
             }
             assert!(
                 !t.description.trim().is_empty(),
-                "{}: no description — the leader chooses by description",
+                "{}: no description, the leader chooses by description",
                 t.name
             );
             assert!(
@@ -843,7 +850,7 @@ mod tests {
             ModeScope::new(),
             false,
         );
-        // Path outside the root: canonicalize keeps it outside — rejected.
+        // Path outside the root: canonicalize keeps it outside, rejected.
         assert!(tool.read_brief("../../etc/passwd").is_err());
     }
 }

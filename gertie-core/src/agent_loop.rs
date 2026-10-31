@@ -1,5 +1,5 @@
 //! The agent loop: request the model, execute its tool calls under the
-//! permission policy, feed results back, repeat — bounded.
+//! permission policy, feed results back, repeat, bounded.
 
 use crate::Role;
 use crate::permissions::PermissionMode;
@@ -11,8 +11,14 @@ use futures_util::StreamExt;
 use std::sync::Arc;
 
 /// Safety valve: a turn that loops this many tool rounds without finishing
-/// is cut off — runaway loops are how token bills happen.
+/// gets the wrap-up nudge, a grace window to land it, then the turn
+/// pauses resumable rather than dies. Runaway loops are how token bills
+/// happen; the pause keeps the human in the loop instead of burning a
+/// session's history on an error.
 const MAX_TOOL_ROUNDS: usize = 25;
+/// The grace window after the nudge: a model that ignores the wrap-up
+/// ask this many rounds in a row pauses the turn.
+const GRACE_ROUNDS: usize = 5;
 
 /// What the UI (or any embedder) observes while a turn runs.
 pub enum LoopEvent {
@@ -21,14 +27,14 @@ pub enum LoopEvent {
         delta: String,
     },
     /// A mutating tool wants to run. The ask is registered with the
-    /// broker under `id` — answer through `PermissionBroker::respond`;
+    /// broker under `id`, answer through `PermissionBroker::respond`;
     /// the loop waits until answered (a dropped answer counts as a deny
-    /// — if the UI went away, doing nothing is the safe move).
+    ///, if the UI went away, doing nothing is the safe move).
     ToolCallRequested {
         id: u64,
         call: ToolCall,
     },
-    /// A tool finished (approved, denied, or auto-run) — this is what gets
+    /// A tool finished (approved, denied, or auto-run), this is what gets
     /// persisted and shown as the card's outcome.
     ToolResult {
         call_id: String,
@@ -37,7 +43,7 @@ pub enum LoopEvent {
     },
     /// A read-only tool started executing (mutating calls surface through
     /// `ToolCallRequested` instead). Exists so the UI can show activity
-    /// for the tools that never prompt — silent reads read as a hang.
+    /// for the tools that never prompt, silent reads read as a hang.
     ToolCallStarted {
         call: ToolCall,
     },
@@ -46,14 +52,14 @@ pub enum LoopEvent {
         output_tokens: u64,
     },
     /// History was compacted in place: `kept` of `total` messages remain
-    /// (a summary plus a safe tail). DB rows are not rewritten — the
+    /// (a summary plus a safe tail). DB rows are not rewritten, the
     /// compaction is the in-memory view.
     Compacted {
         kept: usize,
         total: usize,
     },
     /// A steered user message joined the history at a round boundary.
-    /// The receiver persists it like any user turn — the loop only
+    /// The receiver persists it like any user turn, the loop only
     /// owns the in-memory history.
     Steered {
         text: String,
@@ -62,10 +68,21 @@ pub enum LoopEvent {
         message: String,
     },
     /// The provider's rate limit answered every retry: the turn ends
-    /// limited. The UI persists the state and offers a manual Resume —
+    /// limited. The UI persists the state and offers a manual Resume,
     /// a fresh turn that continues from history without a new user
     /// message.
     Limited {
+        message: String,
+    },
+    /// The round budget crossed: the wrap-up nudge just entered
+    /// history in band. Informational, the loop itself continues
+    /// through the grace window; a receiver may surface it as a note.
+    Nudged,
+    /// The round budget's grace window closed: the turn pauses like a
+    /// limited one. History ends with the last grace round's tool
+    /// results, the nudge sits above them, so a resume turn re-reads
+    /// the wrap-up ask with the results in hand.
+    Budgeted {
         message: String,
     },
     Done,
@@ -74,7 +91,7 @@ pub enum LoopEvent {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PermissionDecision {
     Approve,
-    /// The human refused. `feedback` is what they typed back — a bare
+    /// The human refused. `feedback` is what they typed back, a bare
     /// deny is None. The loop folds feedback into the tool result, so
     /// a "no, and here's why" reaches the model and can become a
     /// correction instead of a dead end.
@@ -110,27 +127,27 @@ pub struct TurnSpec {
     pub provider: Arc<dyn crate::provider::Provider>,
     pub tools: ToolRegistry,
     pub history: SharedHistory,
-    /// The message opening the turn — None means *resume*: continue
+    /// The message opening the turn, None means *resume*: continue
     /// from history as it stands (it already ends with the user's
     /// message, or a tool result from the round that got rate-limited).
     pub user_message: Option<String>,
     pub snapshots: Option<Arc<SnapshotStore>>,
     /// Checkpoint attribution: rows recorded for this turn's mutating
     /// tools carry this session, so the ledger's turn windows can find
-    /// them. None leaves rows unattributed — they show in no turn diff.
+    /// them. None leaves rows unattributed, they show in no turn diff.
     pub checkpoint_session: Option<crate::SessionId>,
     /// Where tool-relative paths resolve: the same root the tool
     /// registry was built with. The checkpoint hook needs it to
-    /// snapshot the file the tool will actually touch — a relative
+    /// snapshot the file the tool will actually touch, a relative
     /// argument means workspace-relative, not CWD-relative.
     pub workspace_root: Option<std::path::PathBuf>,
     pub context_window: Option<u64>,
-    /// Shared approval registry. When set, every ask — this loop's or a
-    /// sub-loop's — registers here so one UI can answer them all. None
+    /// Shared approval registry. When set, every ask, this loop's or a
+    /// sub-loop's, registers here so one UI can answer them all. None
     /// means nobody can approve: mutations are denied, doing nothing is
     /// the safe move.
     pub permission_broker: Option<Arc<crate::PermissionBroker>>,
-    /// How this turn's mutating-tool asks resolve — supervised, or a
+    /// How this turn's mutating-tool asks resolve, supervised, or a
     /// mode that pre-approves a class of asks outright. Fixed for the
     /// turn's life: a flip mid-turn applies to the next turn.
     pub permission_mode: PermissionMode,
@@ -146,8 +163,8 @@ pub struct TurnSpec {
     /// DB stays canonical; the next turn may have a different index).
     pub system_prompt: Option<String>,
     /// Mid-run steering: user messages typed while the turn is already
-    /// running. Drained at round boundaries — each becomes a user push
-    /// plus a `LoopEvent::Steered` — and a steer landing on what would
+    /// running. Drained at round boundaries, each becomes a user push
+    /// plus a `LoopEvent::Steered`, and a steer landing on what would
     /// be the final round buys another one, so it is always answered.
     /// None = the turn cannot be steered.
     pub steer: Option<tokio::sync::mpsc::UnboundedReceiver<String>>,
@@ -166,12 +183,12 @@ pub struct TurnSpec {
 /// turn starts from an exact canonical record.
 ///
 /// When `snapshots` is set, every mutating tool whose arguments name a
-/// `path` gets a checkpoint of the file's prior content first —
+/// `path` gets a checkpoint of the file's prior content first,
 /// record-before-write, uniformly, including tools added later.
 ///
 /// When `context_window` is set, the loop compacts: once a round's
 /// observed prompt size crosses 80% of the window, history is replaced
-/// by a budgeted selection (verbatim prefixes — no summarizer model)
+/// by a budgeted selection (verbatim prefixes, no summarizer model)
 /// plus a safe tail before the next request.
 pub fn run_turn(spec: TurnSpec) -> BoxStream<'static, LoopEvent> {
     let TurnSpec {
@@ -207,9 +224,9 @@ pub fn run_turn(spec: TurnSpec) -> BoxStream<'static, LoopEvent> {
         // the provider reported any; the chars/4 estimate covers the rest.
         let mut last_input_tokens: Option<u64> = None;
 
-        for round in 1..=MAX_TOOL_ROUNDS {
+        for round in 1..=(MAX_TOOL_ROUNDS + GRACE_ROUNDS) {
             // Compaction check happens at round start, before the
-            // request is built — the point is to shrink what we're
+            // request is built, the point is to shrink what we're
             // about to send.
             {
                 let prompt_tokens = match last_input_tokens {
@@ -221,7 +238,7 @@ pub fn run_turn(spec: TurnSpec) -> BoxStream<'static, LoopEvent> {
                     && prompt_tokens > threshold
                 {
                     // Selection, not summarization: no model call, so
-                    // there is no provider to fail — the only way this
+                    // there is no provider to fail, the only way this
                     // "fails" is nothing to select, which changes
                     // nothing.
                     if let Some((kept, total)) =
@@ -235,7 +252,7 @@ pub fn run_turn(spec: TurnSpec) -> BoxStream<'static, LoopEvent> {
                 }
             }
             // Steering: messages the user typed mid-run join the
-            // conversation here — the model reads them with the next
+            // conversation here, the model reads them with the next
             // request, after the tool results it was working on.
             if let Some(steer) = steer.as_mut() {
                 while let Ok(text) = steer.try_recv() {
@@ -243,11 +260,11 @@ pub fn run_turn(spec: TurnSpec) -> BoxStream<'static, LoopEvent> {
                     yield LoopEvent::Steered { text };
                 }
             }
-            // The request is rebuilt per round — history grows, and
+            // The request is rebuilt per round, history grows, and
             // the wire must see all of it. Owned into the provider:
             // the old draft moved the request in and cloned it back
             // out every round, a full deep copy of every message twice
-            // over. A fresh shell costs only the tool specs' clone —
+            // over. A fresh shell costs only the tool specs' clone,
             // descriptions are framing, not payload.
             let mut request = Request {
                 tools: specs.clone(),
@@ -305,7 +322,7 @@ pub fn run_turn(spec: TurnSpec) -> BoxStream<'static, LoopEvent> {
                 // A steer landing on what would be the final round buys
                 // another one: the message joins the history and the
                 // loop turns back to answer it. The round budget still
-                // bounds this — steering is not an infinite ladder.
+                // bounds this, steering is not an infinite ladder.
                 let mut steered = Vec::new();
                 if let Some(steer) = steer.as_mut() {
                     while let Ok(text) = steer.try_recv() {
@@ -336,14 +353,14 @@ pub fn run_turn(spec: TurnSpec) -> BoxStream<'static, LoopEvent> {
                     None => Err(format!("unknown tool: {}", call.name)),
                     Some(tool) => {
                         // Hard policy first: a vet failure never reaches
-                        // the prompt — there is nothing to approve.
+                        // the prompt, there is nothing to approve.
                         if let Err(blocked) = tool.vet(&call.arguments) {
                             Err(format!("blocked by policy: {blocked}"))
                         }
                         // Mutating tools: the turn's mode pre-approves
-                        // a class of asks outright — an edit the
+                        // a class of asks outright, an edit the
                         // checkpoint will snapshot is reversible, a
-                        // sandboxed command is contained — and the
+                        // sandboxed command is contained, and the
                         // rest face the permission prompt: the ask
                         // registers with the broker (so the UI can
                         // answer it) and the loop awaits the answer.
@@ -375,7 +392,7 @@ pub fn run_turn(spec: TurnSpec) -> BoxStream<'static, LoopEvent> {
                                         .map_err(|_| "denied by user".to_string())
                                 }
                                 (None, false) => {
-                                    Err("no permission channel available — denied".to_string())
+                                    Err("no permission channel available, denied".to_string())
                                 }
                             };
                             // The pre-approved path and the human's
@@ -408,14 +425,14 @@ pub fn run_turn(spec: TurnSpec) -> BoxStream<'static, LoopEvent> {
                                     }
                                     tool.run(&call.arguments).await
                                 }
-                                // The human said no — and possibly
+                                // The human said no, and possibly
                                 // why. Their reply rides in the tool
                                 // result, so the next round can act
                                 // on it instead of repeating itself.
                                 Ok(PermissionDecision::Deny { feedback }) => Err(
                                     match feedback {
                                         Some(text) if !text.trim().is_empty() => {
-                                            format!("denied by user — their reply: {text}")
+                                            format!("denied by user, their reply: {text}")
                                         }
                                         _ => "denied by user".to_string(),
                                     },
@@ -433,9 +450,9 @@ pub fn run_turn(spec: TurnSpec) -> BoxStream<'static, LoopEvent> {
                     Err(text) => format!("error: {}", crate::strip_invisible(&text)),
                 };
 
-                // The strip above is the prompt boundary: tool output —
+                // The strip above is the prompt boundary: tool output,
                 // a web page, an MCP payload, anything the world sent
-                // back — enters the model's context and the transcript
+                // back, enters the model's context and the transcript
                 // here, and enters it without bidirectional controls,
                 // zero-width marks, or tag characters that could make
                 // either reader see something other than what is there.
@@ -450,11 +467,50 @@ pub fn run_turn(spec: TurnSpec) -> BoxStream<'static, LoopEvent> {
                 };
             }
 
-            if round == MAX_TOOL_ROUNDS {
-                yield LoopEvent::Error {
-                    message: format!("stopped after {MAX_TOOL_ROUNDS} tool rounds"),
-                };
-                return;
+            if round >= MAX_TOOL_ROUNDS {
+                // A steer never dies at the budget boundary: drained
+                // here first, each one buys the next round (same rule
+                // as the plain-done path above, so the budget bounds
+                // the model, not the human's interruption).
+                let mut steered = Vec::new();
+                if let Some(steer) = steer.as_mut() {
+                    while let Ok(text) = steer.try_recv() {
+                        steered.push(text);
+                    }
+                }
+                if !steered.is_empty() {
+                    for text in steered {
+                        history.lock().await.push(WireMessage::user(&text));
+                        yield LoopEvent::Steered { text };
+                    }
+                    continue;
+                }
+                if round == MAX_TOOL_ROUNDS {
+                    // First over-budget round: tell the model, in band,
+                    // to land the turn. History ends with the tool
+                    // results plus this nudge, so a resume turn
+                    // continues from the wrap-up ask.
+                    history.lock().await.push(WireMessage::user(
+                        "You have reached the tool-round budget for this turn. \
+                         Stop starting new work: finish or safely set down what is \
+                         in flight, and give your final answer now.",
+                    ));
+                    yield LoopEvent::Nudged;
+                    continue;
+                }
+                if round >= MAX_TOOL_ROUNDS + GRACE_ROUNDS {
+                    // The model ignored the wrap-up ask through the
+                    // whole grace window: stop spending. Pause like a
+                    // rate limit, history intact, the human resumes
+                    // when ready.
+                    yield LoopEvent::Budgeted {
+                        message: format!(
+                            "paused after {MAX_TOOL_ROUNDS} tool rounds plus \
+                             {GRACE_ROUNDS} grace rounds without wrapping up"
+                        ),
+                    };
+                    return;
+                }
             }
         }
     })
@@ -465,13 +521,13 @@ pub fn run_turn(spec: TurnSpec) -> BoxStream<'static, LoopEvent> {
 /// `/compact` reads this as its minimum-size gate.
 pub const KEEP_TAIL: usize = 8;
 
-/// An item of the compaction digest keeps a 240-char prefix — enough
+/// An item of the compaction digest keeps a 240-char prefix, enough
 /// to know what happened, not enough to fill a window. (t3code's
 /// handoff rule: a budgeted selection, not an agent-written summary.)
 const ITEM_PREFIX: usize = 240;
 
 /// The original request keeps a bigger allowance than the digest's
-/// other lines — it anchors everything that follows.
+/// other lines, it anchors everything that follows.
 const REQUEST_PREFIX: usize = 2_000;
 
 /// Tokens held back for instructions, tools, and the work that follows
@@ -481,17 +537,17 @@ fn reserve_tokens(window: u64) -> u64 {
     (window / 4).max(16_000)
 }
 
-/// Selection never shrinks below this, even on tiny windows — a digest
+/// Selection never shrinks below this, even on tiny windows, a digest
 /// that keeps nothing is worse than one that overshoots.
 const MIN_SELECTION_TOKENS: u64 = 4_000;
 
 /// When no context window is configured (compaction never auto-fires),
-/// `/compact` budgets against this assumption — t3code's stand-in for
+/// `/compact` budgets against this assumption, t3code's stand-in for
 /// unknown capacity.
 const ASSUMED_WINDOW_TOKENS: u64 = 128_000;
 
 /// The character budget for a compaction's selection: the window minus
-/// the reserve, in chars at the bytes/4 estimate — floored so a tiny
+/// the reserve, in chars at the bytes/4 estimate, floored so a tiny
 /// window still keeps *something*.
 pub fn selection_budget(context_window: Option<u64>) -> usize {
     let window = context_window.unwrap_or(ASSUMED_WINDOW_TOKENS);
@@ -502,10 +558,10 @@ pub fn selection_budget(context_window: Option<u64>) -> usize {
 }
 
 /// Compacts the history in place: everything before the kept tail
-/// becomes a budgeted SELECTION, not a summary — the original request,
+/// becomes a budgeted SELECTION, not a summary, the original request,
 /// then verbatim prefixes of the omitted turns, newest first, inside
 /// one system message. No model is called; every line cites the record
-/// verbatim. Returns `(kept, total)` — None when the kept tail already
+/// verbatim. Returns `(kept, total)`, None when the kept tail already
 /// covers the whole history (a compaction that shrinks nothing is not
 /// one), leaving the history untouched. Fail-open by construction:
 /// there is no provider call to fail.
@@ -517,7 +573,7 @@ pub async fn compact_history(
     compact_in_place(&mut current, budget_chars)
 }
 
-/// The synchronous core of `compact_history` — the lock is the only
+/// The synchronous core of `compact_history`, the lock is the only
 /// thing that awaits, so the logic is directly unit-testable.
 fn compact_in_place(current: &mut Vec<WireMessage>, budget_chars: usize) -> Option<(usize, usize)> {
     let total = current.len();
@@ -550,8 +606,8 @@ fn estimate_tokens(history: &[WireMessage]) -> u64 {
 }
 
 /// Flattens the pre-tail history into the digest's lines: the original
-/// request on its own line, then one line per omitted item — verbatim
-/// prefix, role cited — newest first until the character budget is
+/// request on its own line, then one line per omitted item, verbatim
+/// prefix, role cited, newest first until the character budget is
 /// spent, restored to chronological order. This is a table of contents
 /// of the conversation's own past, not a retelling of it.
 fn select_digest(head: &[WireMessage], budget_chars: usize) -> String {
@@ -566,7 +622,7 @@ fn select_digest(head: &[WireMessage], budget_chars: usize) -> String {
         let text = first.trim();
         if !text.is_empty() {
             lines.push(format!(
-                "[user — the original request] {}",
+                "[user, the original request] {}",
                 prefix(text, REQUEST_PREFIX)
             ));
         }
@@ -574,7 +630,7 @@ fn select_digest(head: &[WireMessage], budget_chars: usize) -> String {
     // The rest of the digest: walk newest → oldest (the turns nearest
     // the kept tail matter most), stop when the budget is spent, then
     // put the survivors back in the order they happened. The anchor
-    // message is skipped — it already has its line.
+    // message is skipped, it already has its line.
     let first_user = head.iter().position(|message| message.role == Role::User);
     let mut spent: usize = lines.iter().map(String::len).sum();
     let mut items: Vec<String> = Vec::new();
@@ -635,17 +691,17 @@ fn prefix(text: &str, max: usize) -> &str {
 }
 
 /// The digest rides in the same system-message shape the old summary
-/// used — legal on every wire — and later compactions treat it like
+/// used, legal on every wire, and later compactions treat it like
 /// any other message.
 fn selection_message(digest: &str) -> WireMessage {
     WireMessage {
         role: Role::System,
         content: Some(format!(
-            "### Earlier history — selected from the record, not summarized\n\n\
+            "### Earlier history, selected from the record, not summarized\n\n\
              {digest}\n\n\
              Context was compacted to fit the window. The lines above are\n\
              verbatim prefixes, not a retelling; the full text of every\n\
-             omitted message is still in the session record — the\n\
+             omitted message is still in the session record, the\n\
              read_session tool retrieves it."
         )),
         ..WireMessage::default()
@@ -655,7 +711,7 @@ fn selection_message(digest: &str) -> WireMessage {
 /// Where a verbatim tail of `keep` messages may start without tearing a
 /// tool round: tool results must follow the assistant call that produced
 /// them. Orphan results (their call would be summarized away) are skipped
-/// forward — a slice that opens on a tool result is not a legal request.
+/// forward, a slice that opens on a tool result is not a legal request.
 fn safe_tail_start(history: &[WireMessage], keep: usize) -> usize {
     let mut start = history.len().saturating_sub(keep);
     while start < history.len() && history[start].role == Role::Tool {
@@ -677,12 +733,12 @@ fn argument_path(arguments: &str) -> Option<std::path::PathBuf> {
 }
 
 /// The path the checkpoint hook snapshots: the tool's argument, with a
-/// relative name resolved against the workspace root — the same
+/// relative name resolved against the workspace root, the same
 /// resolution every path-naming tool applies. The result is always
 /// *contained*: lexical `..` walks plus a canonicalize check on the
 /// nearest existing ancestor, the same rules the file tools' resolve()
 /// applies. A path that escapes (or an absolute one outside the
-/// workspace) is None — the ask is not pre-approvable, because the
+/// workspace) is None, the ask is not pre-approvable, because the
 /// checkpoint's reversibility argument does not reach past the
 /// workspace. Absolute paths inside the workspace are contained and
 /// snapshot-able; absolute paths outside are None.
@@ -697,7 +753,7 @@ fn checkpoint_path(arguments: &str, root: Option<&std::path::Path>) -> Option<st
 }
 
 /// Containment for a checkpoint target: the nearest existing ancestor
-/// must canonicalize back inside the workspace root — a symlink inside
+/// must canonicalize back inside the workspace root, a symlink inside
 /// the workspace pointing out of it turns a pre-approved write into
 /// filesystem access the permission gate never saw. An unresolvable
 /// path (broken chain, permission error) is None: fail closed.
@@ -774,7 +830,7 @@ mod tests {
         );
 
         let refused = |args: &str| checkpoint_path(args, Some(root.as_path())).is_none();
-        // Absolute paths outside the workspace — the model's home
+        // Absolute paths outside the workspace, the model's home
         // directory is not the workspace's business.
         assert!(refused(r#"{"path": "/etc/passwd"}"#));
         assert!(refused(r#"{"file_path": "/home/someone/.bashrc"}"#));
@@ -799,7 +855,7 @@ mod tests {
     use std::task::{Context as TaskContext, Poll, Waker};
     use std::time::Duration;
 
-    /// Pops one scripted event list per stream() call — turn one emits a
+    /// Pops one scripted event list per stream() call, turn one emits a
     /// tool call, turn two the final text.
     struct ScriptedProvider {
         scripts: std::sync::Mutex<Vec<Vec<Event>>>,
@@ -937,7 +993,7 @@ mod tests {
             .unwrap_or_else(|| panic!("no ToolResult for {name}"))
     }
 
-    /// A limited turn is terminal and reaches the UI as its own event —
+    /// A limited turn is terminal and reaches the UI as its own event,
     /// the resume affordance hangs on telling it apart from an error.
     #[test]
     fn a_rate_limited_turn_ends_in_loop_event_limited() {
@@ -961,7 +1017,7 @@ mod tests {
             "the limit relays as LoopEvent::Limited"
         );
         // Nothing after it: the turn is over. And the user message that
-        // opened the turn is in history — what a resume continues from.
+        // opened the turn is in history, what a resume continues from.
         assert!(
             !events
                 .iter()
@@ -973,8 +1029,169 @@ mod tests {
         );
     }
 
+    /// One scripted peek per round: `count` rounds of a tool call,
+    /// then a bare wrap-up (or another tool call) for the last round.
+    fn round_scripts(count: usize, last: Event) -> Vec<Vec<Event>> {
+        let mut scripts = Vec::new();
+        for i in 0..count {
+            let _ = i;
+            scripts.push(vec![
+                Event::ToolCall {
+                    id: format!("c{i}"),
+                    name: "peek".into(),
+                    arguments: "{}".into(),
+                },
+                Event::Done,
+            ]);
+        }
+        scripts.push(vec![last, Event::Done]);
+        scripts
+    }
+
+    fn peek_registry() -> (Arc<ScriptedProvider>, ToolRegistry) {
+        let peek: Arc<dyn Tool> = Arc::new(StubTool::new("peek", false, "peeked"));
+        (
+            Arc::new(ScriptedProvider {
+                seen: std::sync::Mutex::new(Vec::new()),
+                scripts: std::sync::Mutex::new(Vec::new()),
+            }),
+            registry(&[peek]),
+        )
+    }
+
+    /// The round budget is a soft edge: at MAX_TOOL_ROUNDS the loop
+    /// nudges the model to wrap up (in band, a history row) and keeps
+    /// going, so ordinary work that merely runs long is never cut off.
+    #[test]
+    fn the_round_budget_nudges_and_keeps_going() {
+        let (mut provider, tools) = peek_registry();
+        provider.scripts.lock().unwrap().extend(round_scripts(
+            MAX_TOOL_ROUNDS,
+            Event::Token {
+                delta: "wrapped up".into(),
+            },
+        ));
+        let history: SharedHistory = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let (spec, broker) = turn(provider, tools, history.clone(), "go");
+        let events = drain(run_turn(spec), &broker, |_| {
+            panic!("read-only tools must not prompt")
+        });
+
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, LoopEvent::Nudged)),
+            "the wrap-up nudge fired at the budget"
+        );
+        assert!(
+            events.iter().any(|event| matches!(event, LoopEvent::Done)),
+            "the turn finished in the grace window, not paused"
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, LoopEvent::Budgeted { .. })),
+            "no pause while the model wrapped up"
+        );
+        // The nudge is in band: a history user row the model reads.
+        let history = history.blocking_lock();
+        assert!(
+            history.iter().any(|message| message.role == Role::User
+                && message
+                    .content
+                    .as_deref()
+                    .is_some_and(|text| text.contains("tool-round budget"))),
+            "the nudge rides history as a user row"
+        );
+    }
+
+    /// A model that ignores the wrap-up nudge through the whole grace
+    /// window pauses the turn like a rate limit: Budgeted, history
+    /// intact, resumable. Not an error, the work is not lost.
+    #[test]
+    fn ignoring_the_wrap_up_nudge_pauses_the_turn_resumable() {
+        let (mut provider, tools) = peek_registry();
+        provider.scripts.lock().unwrap().extend(round_scripts(
+            MAX_TOOL_ROUNDS + GRACE_ROUNDS,
+            Event::ToolCall {
+                id: "still-going".into(),
+                name: "peek".into(),
+                arguments: "{}".into(),
+            },
+        ));
+        let history: SharedHistory = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let (spec, broker) = turn(provider, tools, history.clone(), "go");
+        let events = drain(run_turn(spec), &broker, |_| {
+            panic!("read-only tools must not prompt")
+        });
+
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, LoopEvent::Nudged)),
+            "the nudge fired once at the budget"
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(event, LoopEvent::Budgeted { .. }))
+                .count(),
+            1,
+            "exactly one pause, then the stream ends"
+        );
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, LoopEvent::Done | LoopEvent::Error { .. })),
+            "a grace-window blowout pauses, it neither finishes nor errors"
+        );
+        // The nudge is in history right above the last tool rows: what
+        // a resume turn continues from, the wrap-up ask with the
+        // results in hand.
+        let history = history.blocking_lock();
+        assert!(
+            history.iter().any(|message| message.role == Role::User
+                && message
+                    .content
+                    .as_deref()
+                    .is_some_and(|text| text.contains("tool-round budget"))),
+            "the nudge rides history as a user row"
+        );
+    }
+
+    /// A steer landing on the budget boundary never dies there: it is
+    /// drained and buys the next round, the budget bounds the model,
+    /// not the human's interruption.
+    #[test]
+    fn a_steer_at_the_budget_boundary_buys_its_round() {
+        let (mut provider, tools) = peek_registry();
+        provider.scripts.lock().unwrap().extend(round_scripts(
+            MAX_TOOL_ROUNDS,
+            Event::Token {
+                delta: "answering the steer".into(),
+            },
+        ));
+        let history: SharedHistory = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let (mut spec, broker) = turn(provider, tools, history.clone(), "go");
+        let (steer_tx, steer_rx) = tokio::sync::mpsc::unbounded_channel();
+        steer_tx
+            .send("wait, check the other file".to_string())
+            .unwrap();
+        spec.steer = Some(steer_rx);
+        let events = drain(run_turn(spec), &broker, |_| {
+            panic!("read-only tools must not prompt")
+        });
+
+        assert!(
+            events.iter().any(|event| matches!(event,
+                    LoopEvent::Steered { text } if text == "wait, check the other file")),
+            "the steer landed at the boundary instead of dying"
+        );
+        assert!(events.iter().any(|event| matches!(event, LoopEvent::Done)));
+    }
+
     /// A resume turn pushes nothing: it continues from history as it
-    /// stands — the rate-limited round's rows are still there.
+    /// stands, the rate-limited round's rows are still there.
     #[test]
     fn a_resume_turn_continues_from_history_without_a_new_user_message() {
         let call = ToolCall {
@@ -1010,7 +1227,7 @@ mod tests {
     #[test]
     fn steering_drains_at_the_round_boundary() {
         // Steers queued before the turn: both land at the first
-        // boundary, before request one — the model reads them with it.
+        // boundary, before request one, the model reads them with it.
         let provider = Arc::new(ScriptedProvider {
             seen: std::sync::Mutex::new(Vec::new()),
             scripts: std::sync::Mutex::new(vec![vec![
@@ -1047,7 +1264,7 @@ mod tests {
     }
 
     /// A provider that injects a steer the moment its script hits
-    /// Done — the user typed while the model was finishing, the
+    /// Done, the user typed while the model was finishing, the
     /// classic rescue shape. Once.
     struct SteerOnDone {
         inner: Arc<ScriptedProvider>,
@@ -1077,7 +1294,7 @@ mod tests {
 
     #[test]
     fn a_steer_rescues_the_final_round() {
-        // The model finishes — but the steer landed first, so the loop
+        // The model finishes, but the steer landed first, so the loop
         // turns back and answers it instead of calling it done.
         let (steer_tx, steer_rx) = tokio::sync::mpsc::unbounded_channel();
         let provider = Arc::new(SteerOnDone {
@@ -1178,7 +1395,7 @@ mod tests {
         });
 
         assert_eq!(tool_result(&events, "peek"), "peeked");
-        // The read's start is announced before its result — silent reads
+        // The read's start is announced before its result, silent reads
         // would read as a hang in the UI.
         let started = events
             .iter()
@@ -1198,7 +1415,7 @@ mod tests {
     #[test]
     fn nothing_follows_done_turn_end_is_not_settlement() {
         // The heaviest path (a tool round) must still end the instant
-        // Done is yielded: the loop does no settlement work — no
+        // Done is yielded: the loop does no settlement work, no
         // trailing persistence, no summary, nothing after the turn's
         // last event. If anything ever follows Done, this fails and
         // the doctrine needs a deliberate rewrite, not a silent slip.
@@ -1235,7 +1452,7 @@ mod tests {
         assert_eq!(
             done,
             events.len() - 1,
-            "nothing may follow Done — turn end is not settlement"
+            "nothing may follow Done, turn end is not settlement"
         );
     }
 
@@ -1249,9 +1466,9 @@ mod tests {
             ),
             (
                 PermissionDecision::Deny {
-                    feedback: Some("no — use the staging dir".into()),
+                    feedback: Some("no, use the staging dir".into()),
                 },
-                "error: denied by user — their reply: no — use the staging dir",
+                "error: denied by user, their reply: no, use the staging dir",
             ),
         ] {
             let provider = Arc::new(ScriptedProvider {
@@ -1290,7 +1507,7 @@ mod tests {
     fn approved_mutations_checkpoint_the_target_file() {
         let tmp = tempfile::tempdir().unwrap();
         let snapshots = Arc::new(SnapshotStore::open(&tmp.path().join("snaps")).unwrap());
-        // The tool's argument is workspace-relative — the checkpoint
+        // The tool's argument is workspace-relative, the checkpoint
         // hook must resolve it the way tools do, or it would snapshot
         // the wrong file (an empty read against the process CWD).
         let workspace = tempfile::tempdir().unwrap();
@@ -1323,7 +1540,7 @@ mod tests {
         let events = drain(run_turn(spec), &broker, |_| PermissionDecision::Approve);
 
         assert_eq!(tool_result(&events, "edit_file"), "edited");
-        // Exactly one object, and it holds the file's real prior bytes —
+        // Exactly one object, and it holds the file's real prior bytes,
         // not an empty read from the process CWD.
         let objects: Vec<_> = std::fs::read_dir(tmp.path().join("snaps/objects"))
             .unwrap()
@@ -1372,7 +1589,7 @@ mod tests {
         spec.permission_mode = PermissionMode::AcceptEdits;
 
         let events = drain(run_turn(spec), &broker, |call| {
-            // The edit is checkpointed and reversible — it ran unasked.
+            // The edit is checkpointed and reversible, it ran unasked.
             // Bash touches the world outside a single file: it asks.
             assert_eq!(call.name, "bash", "only the non-checkpointed call asks");
             PermissionDecision::Approve
@@ -1393,7 +1610,7 @@ mod tests {
     #[test]
     fn the_auto_mode_keys_bash_off_the_sandbox() {
         // Sandbox on: contained bash runs unasked. Sandbox off: the
-        // same ask prompts — the mode never pretends a kernel that
+        // same ask prompts, the mode never pretends a kernel that
         // isn't enforcing is enforcing.
         for (sandboxed, expected_asks) in [(true, 0), (false, 1)] {
             let provider = Arc::new(ScriptedProvider {
@@ -1460,7 +1677,7 @@ mod tests {
         );
         spec.permission_mode = PermissionMode::FullAccess;
         let events = drain(run_turn(spec), &broker, |_| {
-            panic!("full access must not ask — the human is the only thing removed")
+            panic!("full access must not ask, the human is the only thing removed")
         });
         assert_eq!(tool_result(&events, "bash"), "shelled");
     }
@@ -1511,7 +1728,7 @@ mod tests {
             "go",
         );
         let events = drain(run_turn(spec), &broker, |_| {
-            panic!("a vet failure must not prompt — there is nothing to approve")
+            panic!("a vet failure must not prompt, there is nothing to approve")
         });
 
         assert!(tool_result(&events, "bash").contains("blocked by policy"));
@@ -1520,7 +1737,7 @@ mod tests {
     #[test]
     fn history_compacts_when_usage_crosses_the_window() {
         // A prior conversation sits in history; round 1 observes 90% of
-        // a 100k window — the loop must replace the old turns with a
+        // a 100k window, the loop must replace the old turns with a
         // budgeted selection before the next request. No summarizer
         // round exists: two scripts drive the whole turn.
         let provider = Arc::new(ScriptedProvider {
@@ -1549,15 +1766,13 @@ mod tests {
         let peek: Arc<dyn Tool> = Arc::new(StubTool::new("peek", false, "peeked"));
         let history: SharedHistory = Arc::new(tokio::sync::Mutex::new(Vec::new()));
         // The prior conversation: an original request and ten settled
-        // turns — enough head for the selection to have something to
+        // turns, enough head for the selection to have something to
         // select.
         {
             let mut current = history.blocking_lock();
             current.push(WireMessage::user("the original request"));
             for i in 0..10 {
-                current.push(WireMessage::assistant(format!(
-                    "old turn {i} — did a thing"
-                )));
+                current.push(WireMessage::assistant(format!("old turn {i}, did a thing")));
                 current.push(WireMessage::user(format!("older reply {i}")));
             }
         }
@@ -1584,7 +1799,7 @@ mod tests {
             "the marker says what happened"
         );
         assert!(
-            selection.contains("[user — the original request] the original request"),
+            selection.contains("[user, the original request] the original request"),
             "the original request survives verbatim"
         );
         assert!(
@@ -1647,7 +1862,7 @@ mod tests {
             panic!("no ask should be outstanding")
         });
 
-        // The model sees the denial — no silent no-op.
+        // The model sees the denial, no silent no-op.
         assert!(tool_result(&events, "write_file").contains("no permission channel"));
     }
 
@@ -1710,7 +1925,7 @@ mod tests {
         let lines: Vec<&str> = digest.lines().collect();
         assert_eq!(
             lines[0],
-            "[user — the original request] goal: refactor the thing"
+            "[user, the original request] goal: refactor the thing"
         );
         assert_eq!(lines[1], "[assistant] working on it");
         assert_eq!(lines[2], "[user] use the staging dir for outputs");
@@ -1734,7 +1949,7 @@ mod tests {
         let mut head = vec![WireMessage::user("the original request")];
         for i in 0..400 {
             head.push(WireMessage::assistant(format!(
-                "ancient turn {i} — {}",
+                "ancient turn {i}, {}",
                 "x".repeat(ITEM_PREFIX)
             )));
         }
@@ -1800,7 +2015,7 @@ mod tests {
 
     #[test]
     fn prefixes_never_tear_a_multibyte_character() {
-        let text = "héllo wörld — ünïcode ✓";
+        let text = "héllo wörld, ünïcode ✓";
         // A byte slice would panic or corrupt at these cut points; a
         // char slice returns a valid prefix every time.
         for n in 0..=text.chars().count() {
