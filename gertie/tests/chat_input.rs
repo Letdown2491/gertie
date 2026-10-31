@@ -110,7 +110,7 @@ fn fixture_built(
                     store.clone(),
                     provider,
                     snapshots.clone(),
-                    merge_tools(extra_tools),
+                    merge_tools(extra_tools, workspace.as_deref().unwrap_or(Path::new("."))),
                     "no endpoint configured".into(),
                     None,
                     Vec::new(),
@@ -118,6 +118,9 @@ fn fixture_built(
                     settle_command,
                     broker.unwrap_or_else(|| Arc::new(gertie_core::PermissionBroker::new())),
                     gertie_core::SessionScope::new(),
+                    gertie_core::ModeScope::new(),
+                    false,
+                    gertie_core::PermissionMode::Supervised,
                     panel,
                     true,
                     window,
@@ -151,8 +154,10 @@ impl Fixture {
 
 /// Builtins plus whatever test doubles the fixture asked for. The
 /// registry is a plain map, so merging is one insert per extra tool.
-fn merge_tools(extra: Vec<Arc<dyn gertie_core::Tool>>) -> gertie_core::ToolRegistry {
-    let mut map = (*gertie_tools::builtin_tools(Path::new("."))).clone();
+/// Rooted at the fixture's workspace, the way a real session's is —
+/// a tool that writes relative paths writes there, not at the CWD.
+fn merge_tools(extra: Vec<Arc<dyn gertie_core::Tool>>, root: &Path) -> gertie_core::ToolRegistry {
+    let mut map = (*gertie_tools::builtin_tools(root)).clone();
     for tool in extra {
         map.insert(tool.name().to_string(), tool);
     }
@@ -232,6 +237,126 @@ fn invisible_characters_are_stripped_when_a_message_is_sent() {
         notices
             .iter()
             .any(|text| text.contains("Invisible characters"))
+    );
+}
+
+#[test]
+fn the_composer_chip_cycles_the_permission_mode_and_persists_it() {
+    let mut fixture = fixture();
+
+    // A session is born with the chip's posture — supervised until the
+    // chip moves.
+    fixture.act(|window, cx| {
+        window.input("go", cx);
+        window.press("enter", cx);
+    });
+    let session_id = fixture
+        .cx
+        .update(|cx| {
+            fixture
+                .view
+                .upgrade()
+                .expect("view alive")
+                .read(cx)
+                .session_id()
+        })
+        .expect("session created lazily");
+    let store_mode = |fixture: &Fixture| {
+        fixture
+            .store
+            .list_sessions()
+            .unwrap()
+            .iter()
+            .find(|summary| summary.id == session_id)
+            .expect("summary")
+            .mode
+    };
+    assert_eq!(
+        store_mode(&fixture),
+        gertie_core::PermissionMode::Supervised
+    );
+
+    // One click per ring position; the store records each stop, and
+    // the ring wraps back to supervised.
+    for expected in [
+        gertie_core::PermissionMode::AcceptEdits,
+        gertie_core::PermissionMode::Auto,
+        gertie_core::PermissionMode::FullAccess,
+        gertie_core::PermissionMode::Supervised,
+    ] {
+        fixture.act(|window, cx| {
+            window.click("mode-chip", cx);
+        });
+        assert_eq!(store_mode(&fixture), expected, "chip click persists");
+    }
+}
+
+#[test]
+fn accept_edits_runs_the_checkpointed_edit_without_asking() {
+    // A scripted turn that writes a file: the write_file call carries
+    // a path, so the checkpoint hook covers it — exactly the class
+    // accept_edits runs unasked. Empty step texts keep replay pacing
+    // deterministic.
+    let scenarios = tempfile::tempdir().expect("scenario dir");
+    std::fs::write(
+        scenarios.path().join("edits.toml"),
+        "[[steps]]\ntext = ''\n\n\
+         [[steps.tool_calls]]\nname = \"write_file\"\n\
+         arguments = '{\"path\": \"scratch.txt\", \"content\": \"auto\"}'\n\n\
+         [[steps]]\ntext = ''\n",
+    )
+    .expect("scenario file");
+    let workspace = tempfile::tempdir().expect("workspace dir");
+    let snapshots_dir = tempfile::tempdir().expect("snapshots dir");
+    let snapshots =
+        Arc::new(gertie_core::SnapshotStore::open(snapshots_dir.path()).expect("snapshot store"));
+    let endpoint = gertie_providers::Endpoint {
+        name: "replay".into(),
+        base_url: scenarios.path().to_string_lossy().into_owned(),
+        model: "edits".into(),
+        api_key: None,
+        context_window: None,
+        wire: gertie_providers::Wire::Replay,
+    };
+    let provider = Arc::new(
+        gertie_providers::AnyProvider::with_endpoints(vec![endpoint]).expect("replay provider"),
+    );
+    let store = Arc::new(SessionStore::open(Path::new(":memory:")).expect("memory store"));
+    let workspace_path = workspace.path().to_path_buf();
+    let snapshots_path = snapshots_dir.path().to_path_buf();
+    let mut fixture = fixture_built(
+        store,
+        Some(snapshots),
+        Some(workspace.path().to_path_buf()),
+        None,
+        Some(provider),
+        None,
+        Vec::new(),
+    );
+    fixture.hold = vec![scenarios, workspace, snapshots_dir];
+
+    // Flip to accept edits before the first send — the session is
+    // born with the chip's posture.
+    fixture.act(|window, cx| {
+        window.click("mode-chip", cx);
+    });
+    fixture.act(|window, cx| {
+        window.input("go", cx);
+        window.press("enter", cx);
+    });
+    pump(&mut fixture, 30);
+
+    // The write ran with no permission card in between: the file is
+    // on disk with the scripted content, and the ledger holds its
+    // prior state like any approved edit.
+    let written = std::fs::read(workspace_path.join("scratch.txt")).expect("write ran unasked");
+    assert_eq!(written, b"auto");
+    assert_eq!(
+        std::fs::read_dir(snapshots_path.join("objects"))
+            .expect("ledger")
+            .count(),
+        1,
+        "the auto-approved edit is checkpointed"
     );
 }
 
@@ -334,6 +459,9 @@ fn markdown_and_tool_rows_draw_clean() {
                     None,
                     Arc::new(gertie_core::PermissionBroker::new()),
                     gertie_core::SessionScope::new(),
+                    gertie_core::ModeScope::new(),
+                    false,
+                    gertie_core::PermissionMode::Supervised,
                     panel,
                     true,
                     window,

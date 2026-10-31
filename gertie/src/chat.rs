@@ -5,8 +5,9 @@ use crate::bootstrap::Reloaded;
 use crate::settings_edit::{SettingsEvent, SettingsPanelView};
 use futures_util::StreamExt as _;
 use gertie_core::{
-    AfterState, LoopEvent, MessageId, PermissionBroker, PermissionDecision, Role, SessionId,
-    SessionStore, SharedHistory, SnapshotStore, ToolCall, ToolRegistry, TurnSpec, run_turn,
+    AfterState, LoopEvent, MessageId, PermissionBroker, PermissionDecision, PermissionMode, Role,
+    SessionId, SessionStore, SharedHistory, SnapshotStore, ToolCall, ToolRegistry, TurnSpec,
+    run_turn,
 };
 use gertie_providers::AnyProvider;
 use gpui_kit::component::button::{Button, ButtonCustomVariant, ButtonVariants as _};
@@ -220,6 +221,18 @@ pub struct ChatView {
     /// The front's current session, read by subagent dispatch to link
     /// worker runs to the chat that dispatched them.
     session_scope: gertie_core::SessionScope,
+    /// Worker dispatch reads the turn's posture here; the chat sets it
+    /// at every turn start, never mid-turn.
+    mode_scope: gertie_core::ModeScope,
+    /// Whether bash runs inside the Landlock sandbox (config) — the
+    /// auto mode's bash approval keys off it.
+    sandbox_bash: bool,
+    /// This session's permission mode — the chip's state and the next
+    /// turn's posture. Follows the open session; a fresh chat starts
+    /// at the configured default.
+    mode: PermissionMode,
+    /// The mode new sessions open in ([permissions] default_mode).
+    default_mode: PermissionMode,
     input: Entity<TextareaState>,
     /// Session-rename flow: which sidebar row is being renamed, and the
     /// field editing its title (Enter commits; clicking away cancels).
@@ -289,6 +302,14 @@ impl ChatView {
         settle_command: Option<String>,
         broker: Arc<PermissionBroker>,
         session_scope: gertie_core::SessionScope,
+        // Worker dispatch reads this turn's posture; the chat sets it
+        // at every turn start.
+        mode_scope: gertie_core::ModeScope,
+        // Whether bash runs inside the Landlock sandbox (config) —
+        // the auto mode's bash approval keys off it.
+        sandbox_bash: bool,
+        // The mode new sessions open in ([permissions] default_mode).
+        default_mode: gertie_core::PermissionMode,
         // The settings editor over the live config.
         settings_panel: Entity<SettingsPanelView>,
         // Resume the newest stored session (window open), or start
@@ -363,6 +384,13 @@ impl ChatView {
             None
         };
         session_scope.set(session_id);
+        // The chip follows the session: a resumed conversation comes
+        // back with the posture it ran under; a blank composer starts
+        // at the configured default.
+        let mode = session_id
+            .and_then(|id| sessions.iter().find(|summary| summary.id == id))
+            .map(|summary| summary.mode)
+            .unwrap_or(default_mode);
 
         let (session_usage, context_used) = session_id
             .and_then(|id| sessions.iter().find(|summary| summary.id == id))
@@ -406,6 +434,10 @@ impl ChatView {
             context_window,
             broker,
             session_scope,
+            mode_scope,
+            sandbox_bash,
+            mode,
+            default_mode,
             input,
             renaming: None,
             rename_input,
@@ -656,6 +688,33 @@ impl ChatView {
         self.streaming && self.thinking && !pending
     }
 
+    /// The composer chip's click: the mode advances around the ring —
+    /// supervised → accept edits → auto → full access — and persists
+    /// with the session. It applies from the next turn on; a running
+    /// turn keeps the posture it was built with, and the notice says
+    /// so when it matters.
+    fn cycle_mode(&mut self, cx: &mut Context<Self>) {
+        let next = match self.mode {
+            PermissionMode::Supervised => PermissionMode::AcceptEdits,
+            PermissionMode::AcceptEdits => PermissionMode::Auto,
+            PermissionMode::Auto => PermissionMode::FullAccess,
+            PermissionMode::FullAccess => PermissionMode::Supervised,
+        };
+        self.set_mode(next, cx);
+    }
+
+    fn set_mode(&mut self, mode: PermissionMode, cx: &mut Context<Self>) {
+        self.mode = mode;
+        if let Some(session_id) = self.session_id {
+            let _ = self.store.set_session_mode(session_id, mode);
+            self.sessions = self.store.list_sessions().unwrap_or_default();
+        }
+        if self.streaming {
+            self.push_notice("Permission mode applies when this turn ends.", cx);
+        }
+        cx.notify();
+    }
+
     fn new_session(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.streaming {
             return;
@@ -664,6 +723,8 @@ impl ChatView {
         // blanks the transcript until then.
         self.session_id = None;
         self.session_scope.set(None);
+        // A fresh chat starts at the configured posture again.
+        self.mode = self.default_mode;
         self.usage = (0, 0);
         self.context_used = 0;
         self.refresh_agent_runs(cx);
@@ -715,6 +776,12 @@ impl ChatView {
             .as_ref()
             .map(|summary| (summary.input_tokens, summary.output_tokens))
             .unwrap_or((0, 0));
+        // The chip follows the session: its stored posture comes back
+        // with the rest of it.
+        self.mode = summary
+            .as_ref()
+            .map(|summary| summary.mode)
+            .unwrap_or(self.default_mode);
         self.context_used = summary.map(|summary| summary.context_tokens).unwrap_or(0);
         self.refresh_agent_runs(cx);
         self.reload_session(cx);
@@ -1733,6 +1800,9 @@ impl ChatView {
                 // settles it later.
                 self.store
                     .set_session_workspace(session_id, &self.workspace_root);
+                // The chip's posture at birth is the session's record —
+                // config default unless the chip moved first.
+                let _ = self.store.set_session_mode(session_id, self.mode);
                 self.session_id = Some(session_id);
                 self.sessions = self.store.list_sessions().unwrap_or_default();
                 session_id
@@ -1884,6 +1954,9 @@ impl ChatView {
         let provider: Arc<dyn gertie_core::Provider> = provider;
         // Subagent dispatch reads this to link its runs to this chat.
         self.session_scope.set(self.session_id);
+        // Worker dispatch reads the posture the same way: set once per
+        // turn, read at their spawn — never mutated mid-turn.
+        self.mode_scope.set(self.mode);
         // Steering: the channel lives exactly as long as the turn —
         // Enter while streaming lands here; at the turn's end the
         // sender drops and Enter queues instead.
@@ -1900,10 +1973,8 @@ impl ChatView {
             context_window,
             steer: Some(steer_rx),
             permission_broker: Some(self.broker.clone()),
-            // The composer's mode selector lands next; until then the
-            // front runs supervised.
-            permission_mode: gertie_core::PermissionMode::Supervised,
-            sandbox_bash: false,
+            permission_mode: self.mode,
+            sandbox_bash: self.sandbox_bash,
             prompt_source: gertie_core::PromptSource::Leader,
             system_prompt: self.system_prompt.clone(),
         });
@@ -3844,6 +3915,19 @@ impl Render for ChatView {
                                             .py_3()
                                             .gap_2()
                                             .child(
+                                                Button::new("mode-chip")
+                                                    .label(format!("mode: {}", mode_label(self.mode)))
+                                                    .small()
+                                                    .ghost()
+                                                    .tooltip(concat!(
+                                                        "Permission mode — click to change. ",
+                                                        "Applies from the next turn on."
+                                                    ))
+                                                    .on_click(cx.listener(|this, _, _, cx| {
+                                                        this.cycle_mode(cx);
+                                                    })),
+                                            )
+                                            .child(
                                                 Button::new("attach-file")
                                                     // A word, not a glyph: the
                                                     // emoji-only label rasterized
@@ -3927,6 +4011,17 @@ fn turn_from_row(row: &gertie_core::Message) -> Turn {
             text: display_text(&row.content),
             db_id: Some(row.id),
         },
+    }
+}
+
+/// The composer chip's word for a mode — the enum's snake_case config
+/// spelling, spoken the way the UI speaks.
+fn mode_label(mode: PermissionMode) -> &'static str {
+    match mode {
+        PermissionMode::Supervised => "supervised",
+        PermissionMode::AcceptEdits => "accept edits",
+        PermissionMode::Auto => "auto",
+        PermissionMode::FullAccess => "full access",
     }
 }
 
