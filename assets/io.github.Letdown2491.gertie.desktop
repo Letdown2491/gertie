@@ -6,4 +6,5 @@ Exec=gertie
 Terminal=false
 Categories=Development;
 Keywords=ai;agent;coding;llm;
+Icon=io.github.Letdown2491.gertie
 StartupWMClass=io.github.Letdown2491.gertie

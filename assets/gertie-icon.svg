@@ -1,0 +1,34 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512" role="img" aria-label="Gertie LLM harness" xmlns:c2pa="http://c2pa.org/manifest">
+  <title>Gertie LLM harness</title>
+  <defs>
+    <linearGradient id="head" gradientUnits="userSpaceOnUse" x1="64" y1="120" x2="448" y2="452">
+      <stop offset="0" stop-color="#2dd4bf"/>
+      <stop offset="1" stop-color="#5b5bf5"/>
+    </linearGradient>
+  </defs>
+
+  <g transform="translate(0 14)">
+    <!-- antenna -->
+    <path d="M256 124 V82" stroke="#8fa0ff" stroke-width="16" stroke-linecap="round"/>
+    <circle cx="256" cy="56" r="26" fill="#7cf5e0"/>
+
+    <!-- ear pieces -->
+    <rect x="30" y="250" width="44" height="112" rx="20" fill="#4b4fd8"/>
+    <rect x="438" y="250" width="44" height="112" rx="20" fill="#4b4fd8"/>
+
+    <!-- head -->
+    <rect x="64" y="120" width="384" height="332" rx="96" fill="url(#head)"/>
+
+    <!-- face plate -->
+    <rect x="104" y="170" width="304" height="232" rx="64" fill="#11163f"/>
+
+    <!-- eyes -->
+    <rect x="176" y="234" width="52" height="84" rx="26" fill="#7cf5e0"/>
+    <rect x="284" y="234" width="52" height="84" rx="26" fill="#7cf5e0"/>
+    <circle cx="192" cy="256" r="9" fill="#ffffff" fill-opacity="0.85"/>
+    <circle cx="300" cy="256" r="9" fill="#ffffff" fill-opacity="0.85"/>
+
+    <!-- smile -->
+    <path d="M222 358 Q256 384 290 358" fill="none" stroke="#7cf5e0" stroke-width="14" stroke-linecap="round"/>
+  </g>
+</svg>
