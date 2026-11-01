@@ -546,6 +546,15 @@ impl Bootstrap {
         );
         root_independent.push("search_memory".into());
 
+        // The structured question: the loop intercepts `ask_user`
+        // before any tool's run (the answer rides the permission
+        // broker, not a tool result), so this stub exists only so the
+        // call resolves in the registry and its schema reaches the
+        // model. The description is the discipline: the ask is for
+        // genuine decision points, not an escape hatch from thinking.
+        map.insert("ask_user".into(), Arc::new(gertie_tools::AskUser));
+        root_independent.push("ask_user".into());
+
         // MCP servers connect at startup; a server that won't start is a
         // status-line warning, never a failed launch, gertie's local
         // tools carry the session alone if needed.

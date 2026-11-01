@@ -430,6 +430,46 @@ pub fn run_turn(spec: TurnSpec) -> BoxStream<'static, LoopEvent> {
             for call in calls {
                 let result = match tools.get(&call.name) {
                     None => Err(format!("unknown tool: {}", call.name)),
+                    Some(_) if call.name == "ask_user" => {
+                        // The structured question: the model asks the
+                        // human a concrete question with clickable
+                        // options, the answer rides back as the tool
+                        // result. It always surfaces as a card, in
+                        // every mode: in full access there is no other
+                        // moment the human sees the ask at all. The
+                        // question and options are the model's words,
+                        // so the parse sanitizes them before anything
+                        // renders. Same contract as a mutating ask:
+                        // the event renders the card, the await blocks
+                        // the round, a dropped responder counts as no
+                        // answer.
+                        match parse_ask(&call.arguments) {
+                            Err(error) => Err(error),
+                            Ok(ask) => match &permission_broker {
+                                None => Err("no permission channel available, cannot ask".into()),
+                                Some(broker) => {
+                                    let (request_id, answer) =
+                                        broker.request(ask.call.clone(), prompt_source);
+                                    yield LoopEvent::ToolCallRequested {
+                                        id: request_id,
+                                        call: ask.call.clone(),
+                                    };
+                                    Ok(match answer.await {
+                                        Err(_) => "the ask went unanswered".to_string(),
+                                        Ok(PermissionDecision::Approve) => {
+                                            "the user dismissed the question".to_string()
+                                        }
+                                        Ok(PermissionDecision::Deny { feedback }) => match
+                                            feedback
+                                        {
+                                            Some(text) if !text.trim().is_empty() => text,
+                                            _ => "the user did not answer".to_string(),
+                                        },
+                                    })
+                                }
+                            },
+                        }
+                    }
                     Some(tool) => {
                         // Hard policy first: a vet failure never reaches
                         // the prompt, there is nothing to approve.
@@ -752,6 +792,60 @@ fn select_digest(head: &[WireMessage], budget_chars: usize) -> String {
     lines.join("\n")
 }
 
+/// The structured question, parsed and sanitized: the flat schema
+/// (question, two to four options, optional free-text allowance)
+/// becomes a synthetic `ask_user` call whose arguments carry the
+/// cleaned shape for the card to render. Every string is the model's
+/// output, so nothing reaches the UI unsanitized.
+fn parse_ask(arguments: &str) -> Result<AskUserQuestion, String> {
+    #[derive(serde::Deserialize)]
+    struct AskArgs {
+        question: String,
+        #[serde(default)]
+        options: Vec<String>,
+        #[serde(default)]
+        allow_custom: bool,
+    }
+    let args: AskArgs = serde_json::from_str(arguments)
+        .map_err(|error| format!("ask_user: bad arguments ({error})"))?;
+    let question = crate::sanitize_untrusted(&args.question, 512);
+    if question.trim().is_empty() {
+        return Err("ask_user: the question was empty".into());
+    }
+    if args.options.len() > 4 {
+        return Err(format!(
+            "ask_user: {} options is too many; ask with four or fewer",
+            args.options.len()
+        ));
+    }
+    let options: Vec<String> = args
+        .options
+        .iter()
+        .map(|option| crate::sanitize_untrusted(option, 256))
+        .collect();
+    if options.len() < 2 {
+        return Err(
+            "ask_user: needs at least two options; for open questions, just ask in prose".into(),
+        );
+    }
+    Ok(AskUserQuestion {
+        call: ToolCall {
+            id: "ask-user".into(),
+            name: "ask_user".into(),
+            arguments: serde_json::json!({
+                "question": question,
+                "options": options,
+                "allow_custom": args.allow_custom,
+            })
+            .to_string(),
+        },
+    })
+}
+
+struct AskUserQuestion {
+    call: ToolCall,
+}
+
 fn role_name(role: &Role) -> &'static str {
     match role {
         Role::System => "system",
@@ -998,6 +1092,7 @@ mod tests {
         broker: &Arc<PermissionBroker>,
         decide: impl Fn(&ToolCall) -> PermissionDecision,
     ) -> Vec<LoopEvent> {
+        let started = std::time::Instant::now();
         let mut stream = stream;
         let waker = Waker::noop();
         let mut cx = TaskContext::from_waker(waker);
@@ -1014,9 +1109,104 @@ mod tests {
                     }
                 }
                 Poll::Ready(None) => return events,
-                Poll::Pending => std::thread::sleep(Duration::from_millis(10)),
+                Poll::Pending => {
+                    // The hang guard: a helper this layer cannot time
+                    // out must fail fast and by name, never spin
+                    // politely forever.
+                    if started.elapsed() > Duration::from_secs(10) {
+                        panic!("the stream stayed Pending for 10s, an await never resolved");
+                    }
+                    std::thread::sleep(Duration::from_millis(10));
+                }
             }
         }
+    }
+
+    /// The model asks, the human clicks an option, the option's text
+    /// becomes the tool result the model sees. The ask surfaces as a
+    /// ToolCallRequested (the card) even though ask_user mutates
+    /// nothing: the card is the ask.
+    #[test]
+    fn the_answered_ask_rides_back_as_the_tool_result() {
+        let provider = Arc::new(ScriptedProvider {
+            seen: std::sync::Mutex::new(Vec::new()),
+            scripts: std::sync::Mutex::new(vec![
+                vec![
+                    Event::ToolCall {
+                        id: "a1".into(),
+                        name: "ask_user".into(),
+                        arguments: serde_json::json!({
+                            "question": "Which database?",
+                            "options": ["postgres", "sqlite"],
+                            "allow_custom": true
+                        })
+                        .to_string(),
+                    },
+                    Event::Done,
+                ],
+                // The second round ends the turn; without it the
+                // provider would re-ask every round until the budget.
+                vec![Event::Token { delta: "ok".into() }, Event::Done],
+            ]),
+        });
+        let ask = StubTool::new("ask_user", false, "unreachable");
+        // The broker must be the spec's own: answering a different
+        // broker's ask leaves the loop's await pending forever, the
+        // exact wedge the drain guard below exists to name.
+        let (spec, broker) = turn(
+            provider,
+            registry(&[Arc::new(ask)]),
+            Arc::new(tokio::sync::Mutex::new(Vec::new())),
+            "go",
+        );
+        let events = drain(run_turn(spec), &broker, |_call| {
+            // The UI's option click arrives as deny-with-feedback:
+            // the same path a typed reply takes.
+            PermissionDecision::Deny {
+                feedback: Some("sqlite".into()),
+            }
+        });
+
+        let result = tool_result(&events, "ask_user");
+        assert_eq!(result, "sqlite", "the clicked option reached the model");
+    }
+
+    /// A malformed ask is the model's mistake: it reaches the model as
+    /// an error, never a hang.
+    #[test]
+    fn a_malformed_ask_is_an_error_result() {
+        struct BadAskProvider;
+        impl crate::provider::Provider for BadAskProvider {
+            fn stream(&self, _request: crate::Request) -> BoxStream<'static, crate::Event> {
+                Box::pin(futures_util::stream::iter(vec![
+                    crate::Event::ToolCall {
+                        id: "a1".into(),
+                        name: "ask_user".into(),
+                        arguments: serde_json::json!({
+                            "question": "Which?",
+                            "options": ["only one"]
+                        })
+                        .to_string(),
+                    },
+                    crate::Event::Done,
+                ]))
+            }
+        }
+
+        let ask = StubTool::new("ask_user", false, "unreachable");
+        let (spec, broker) = turn(
+            Arc::new(BadAskProvider),
+            registry(&[Arc::new(ask)]),
+            Arc::new(tokio::sync::Mutex::new(Vec::new())),
+            "go",
+        );
+        let events = drain(run_turn(spec), &broker, |_| PermissionDecision::Approve);
+
+        let result = tool_result(&events, "ask_user");
+        assert!(
+            result.contains("error:"),
+            "one option is a model mistake, told so: {result}"
+        );
     }
 
     fn registry(tools: &[Arc<dyn Tool>]) -> ToolRegistry {
@@ -1147,7 +1337,7 @@ mod tests {
     /// going, so ordinary work that merely runs long is never cut off.
     #[test]
     fn the_round_budget_nudges_and_keeps_going() {
-        let (mut provider, tools) = peek_registry();
+        let (provider, tools) = peek_registry();
         provider.scripts.lock().unwrap().extend(round_scripts(
             DEFAULT_MAX_TOOL_ROUNDS,
             Event::Token {
@@ -1193,7 +1383,7 @@ mod tests {
     /// numbers.
     #[test]
     fn the_budgets_are_the_specs() {
-        let (mut provider, tools) = peek_registry();
+        let (provider, tools) = peek_registry();
         // Two tool rounds, then the nudge round, then a round that
         // ignores the nudge, then the pause.
         provider.scripts.lock().unwrap().extend(round_scripts(
@@ -1233,7 +1423,7 @@ mod tests {
     /// intact, resumable. Not an error, the work is not lost.
     #[test]
     fn ignoring_the_wrap_up_nudge_pauses_the_turn_resumable() {
-        let (mut provider, tools) = peek_registry();
+        let (provider, tools) = peek_registry();
         provider.scripts.lock().unwrap().extend(round_scripts(
             DEFAULT_MAX_TOOL_ROUNDS + DEFAULT_GRACE_ROUNDS,
             Event::ToolCall {
@@ -1287,7 +1477,7 @@ mod tests {
     /// not the human's interruption.
     #[test]
     fn a_steer_at_the_budget_boundary_buys_its_round() {
-        let (mut provider, tools) = peek_registry();
+        let (provider, tools) = peek_registry();
         provider.scripts.lock().unwrap().extend(round_scripts(
             DEFAULT_MAX_TOOL_ROUNDS,
             Event::Token {

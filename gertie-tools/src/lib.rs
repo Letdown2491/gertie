@@ -183,6 +183,55 @@ impl Bash {
     }
 }
 
+/// The structured question's registry entry. The agent loop
+/// intercepts `ask_user` calls before any tool's `run` (the answer
+/// rides the permission broker as deny-with-feedback, not a tool
+/// result), so this type exists for the schema and the registry:
+/// `run` never executes.
+pub struct AskUser;
+
+impl Tool for AskUser {
+    fn name(&self) -> &'static str {
+        "ask_user"
+    }
+
+    fn description(&self) -> String {
+        "Ask the user a concrete question with clickable options when \
+         the answer changes what you do next and you genuinely cannot \
+         decide from context. Two to four short, distinct options; \
+         allow_custom lets them type their own answer. Never use this \
+         to escape thinking, to ask permission (the permission cards \
+         do that), or to outsource a choice the context already \
+         answers. For open-ended questions, ask in prose instead."
+            .into()
+    }
+
+    fn parameters(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "question": {"type": "string", "description": "the question, one sentence"},
+                "options": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "two to four concrete answers"
+                },
+                "allow_custom": {"type": "boolean", "description": "let the user type their own answer"}
+            },
+            "required": ["question", "options"]
+        })
+    }
+
+    fn run<'a>(
+        &'a self,
+        _arguments: &'a str,
+    ) -> std::pin::Pin<Box<dyn Future<Output = ToolResult> + Send + 'a>> {
+        // Unreachable: the loop answers the ask before dispatch
+        // reaches the registry.
+        Box::pin(async { Err("ask_user is answered by the UI, never run".into()) })
+    }
+}
+
 pub struct ReadFile {
     root: PathBuf,
 }

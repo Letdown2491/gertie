@@ -4354,7 +4354,13 @@ impl ChatView {
     /// stating what happened in the cards' own counts, failures on
     /// the line, never rounded away. Clicking expands to the full
     /// cards.
-    fn render_tool_run(&self, index: usize, count: usize, cx: &mut Context<Self>) -> AnyElement {
+    fn render_tool_run(
+        &self,
+        index: usize,
+        count: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let mut names = Vec::with_capacity(count);
         let mut failed = 0;
         for turn in &self.turns[index..index + count] {
@@ -4398,8 +4404,15 @@ impl ChatView {
                     ..
                 } = &self.turns[at]
                 {
-                    col =
-                        col.child(self.render_tool(at, call, status, *auto_approved, *worker, cx));
+                    col = col.child(self.render_tool(
+                        at,
+                        call,
+                        status,
+                        *auto_approved,
+                        *worker,
+                        window,
+                        cx,
+                    ));
                 }
             }
         }
@@ -4861,7 +4874,7 @@ impl ChatView {
             return div().w_full().into_any_element();
         }
         if run > 1 {
-            return self.render_tool_run(index, run, cx);
+            return self.render_tool_run(index, run, window, cx);
         }
         // The reply input for a pending permission card must exist
         // before the turn is borrowed below: creating it takes &mut
@@ -4884,7 +4897,7 @@ impl ChatView {
                 auto_approved,
                 worker,
                 ..
-            } => self.render_tool(index, call, status, *auto_approved, *worker, cx),
+            } => self.render_tool(index, call, status, *auto_approved, *worker, window, cx),
             Turn::LoadEarlier => {
                 // The pagination row: one quiet button, centered,
                 // clearly furniture, not a turn. The handler gates on
@@ -5454,13 +5467,6 @@ impl ChatView {
             }
             Role::Assistant => {
                 let is_error = text.contains("[error]");
-                // The measure cap: prose at full window width runs
-                // ~150 characters a line, well past comfortable
-                // reading measure. The cap keeps every line scannable;
-                // wide
-                // tables and code blocks still need the room, so the
-                // cap applies to the text element and the inner
-                // padding gives long lines their margin back.
                 div()
                     .w_full()
                     .max_w(px(720.))
@@ -5491,6 +5497,7 @@ impl ChatView {
     /// (not the wire name), the diff for file changes, a one-line
     /// outcome when finished, and approve/deny while pending. The raw
     /// tool output is one click away; it's the exception, not the face.
+    #[allow(clippy::too_many_arguments)]
     fn render_tool(
         &self,
         index: usize,
@@ -5498,6 +5505,7 @@ impl ChatView {
         status: &ToolStatus,
         auto_approved: bool,
         worker: bool,
+        _window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let running = matches!(status, ToolStatus::Running);
@@ -5575,6 +5583,73 @@ impl ChatView {
                     )
                 }),
         );
+
+        // The structured question: the face is the question text, the
+        // pending actions are the options themselves (clicking one
+        // answers the ask; Deny dismisses; the reply field is the
+        // free-text path when the options miss). The options are the
+        // model's words, sanitized at the loop's parse, before the
+        // card ever sees them.
+        if call.name == "ask_user"
+            && let Some(ask) = ask_face(call)
+        {
+            inner =
+                inner
+                    .child(
+                        div()
+                            .text_size(px(13.))
+                            .child(SharedString::from(ask.question)),
+                    )
+                    .children(ask.options.iter().cloned().enumerate().map(
+                        |(option_index, option)| {
+                            Button::new(SharedString::from(format!("ask-{index}-{option_index}")))
+                                .label(option.clone())
+                                .small()
+                                .outline()
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    this.decide_tool(
+                                        index,
+                                        PermissionDecision::Deny {
+                                            feedback: Some(option.clone()),
+                                        },
+                                        cx,
+                                    )
+                                }))
+                        },
+                    ));
+            if ask.allow_custom {
+                // The input exists only if the user focused the
+                // field once; an ask answered by its buttons never
+                // needs it. The render pass creates it on the
+                // next frame after focus via the same map the
+                // mutating cards use (see approval_reply_for).
+                let reply = self.approval_replies.get(&index);
+                inner = inner.children(reply.map(|reply| {
+                    h_flex()
+                        .gap_2()
+                        .child(Input::new(reply).small().flex_1())
+                        .child(
+                            Button::new(SharedString::from(format!("ask-send-{index}")))
+                                .label("Send")
+                                .small()
+                                .primary()
+                                .on_click(
+                                    cx.listener(move |this, _, _, cx| this.reply_tool(index, cx)),
+                                ),
+                        )
+                }));
+            }
+            inner = inner.child(
+                Button::new(SharedString::from(format!("deny-{index}")))
+                    .label("Dismiss")
+                    .small()
+                    .ghost()
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.decide_tool(index, PermissionDecision::Approve, cx)
+                    })),
+            );
+            return inner.into_any_element();
+        }
 
         match status {
             ToolStatus::Pending(_) => {
@@ -5798,6 +5873,39 @@ fn resolve_tool_path(root: &std::path::Path, path: &std::path::Path) -> std::pat
     } else {
         root.join(path)
     }
+}
+
+/// The structured question's card data, unpacked from the synthetic
+/// call the loop built. The loop already sanitized every string; this
+/// only unpacks. Pure: the card cache holds it, elements rebuild per
+/// frame.
+fn ask_face(call: &ToolCall) -> Option<AskFace> {
+    let value: serde_json::Value = serde_json::from_str(&call.arguments).ok()?;
+    let question = value.get("question")?.as_str()?.to_string();
+    let options = value
+        .get("options")
+        .and_then(|options| options.as_array())
+        .map(|options| {
+            options
+                .iter()
+                .filter_map(|option| option.as_str().map(str::to_string))
+                .collect::<Vec<String>>()
+        })
+        .unwrap_or_default();
+    Some(AskFace {
+        question,
+        options,
+        allow_custom: value
+            .get("allow_custom")
+            .and_then(|flag| flag.as_bool())
+            .unwrap_or(false),
+    })
+}
+
+struct AskFace {
+    question: String,
+    options: Vec<String>,
+    allow_custom: bool,
 }
 
 /// The diff's data, (added, removed) lines, capped, parsed from the
