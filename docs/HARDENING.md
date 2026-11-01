@@ -155,3 +155,27 @@ at boot (config.rs:1157), which is stronger than refusing.
 Lessons for the next pass: verify the fixture is listening before grading a probe;
 read the error path before claiming the message lies. A probe result grades the probe
 until the code behind it is read.
+
+## Results (class 6: UI and long-run abuse, 2026-11-01)
+
+Run headless where honest, against an isolated XDG state dir (the ephemeral lesson,
+applied). Measured, not vibed:
+
+- 500-turn transcript (750 messages, 1500 FTS rows seeded): FTS search via a live
+  `search_history` round-trip completed in 90 ms wall total. Doctor on the same store:
+  instant. The `messages_by_session` index and the FTS5 external-content design hold.
+- Forced compaction (context_window 800, multi-round search): completed, answer
+  delivered, no error, no runaway.
+- Six concurrent headless runs on one store: 6/6 produced correct answers, no lock
+  errors, no interleaving (busy_timeout + WAL).
+- kill -9 mid-stream, six times (stream held open server-side): store integrity "ok"
+  after every kill; doctor green after the batch. The WAL survives abrupt death.
+
+Grades: 6.1 A (measured) · 6.2 A (compaction under a tiny window) · 6.3 A (concurrency)
+· 6.4 A (mid-stream kills). The remaining feel-only items (scroll smoothness on a giant
+transcript, resize extremes) stay open for a live-eyes session; they are perception,
+not correctness, and the measured proxies above cover the machinery they ride on.
+
+Hardening pass status: classes 1-6 graded. Zero C. Zero open B. One A-with-caveat
+(the 2048-char instruction cap keeps the first lines; documented). Feel items: named,
+owned by a future live-eyes pass.
