@@ -8,7 +8,8 @@ fn main() {
             prompt,
             yes,
             config,
-        }) => std::process::exit(gertie::headless::run(prompt, yes, config)),
+            ephemeral,
+        }) => std::process::exit(gertie::headless::run(prompt, yes, config, ephemeral)),
         Ok(gertie::cli::Command::Doctor {
             config,
             clean_worktrees,

@@ -14,8 +14,13 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::task::{Context as TaskContext, Poll, Waker};
 
-pub fn run(prompt: Option<String>, yes: bool, config_path: Option<PathBuf>) -> i32 {
-    let boot = crate::bootstrap::Bootstrap::load(config_path.as_deref());
+pub fn run(
+    prompt: Option<String>,
+    yes: bool,
+    config_path: Option<PathBuf>,
+    ephemeral: bool,
+) -> i32 {
+    let boot = crate::bootstrap::Bootstrap::load(config_path.as_deref(), ephemeral);
     if let Some(error) = boot.config_error {
         eprintln!("error: {error}");
         return 1;

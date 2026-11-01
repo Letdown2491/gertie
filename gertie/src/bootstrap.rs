@@ -54,6 +54,10 @@ pub struct Bootstrap {
     /// status label (a GUI user never sees stderr); headless treats it
     /// as fatal.
     pub config_error: Option<String>,
+    /// The session store. An ephemeral run (`gertie run --ephemeral`)
+    /// opens it in-memory: everything downstream (sessions, messages,
+    /// FTS, the memory sidecar) works unchanged against a throwaway
+    /// store that evaporates when the process exits.
     pub store: Arc<gertie_core::SessionStore>,
     /// Live-reloadable state (provider, agent endpoint, label,
     /// settings), swapped after a settings save.
@@ -300,7 +304,7 @@ impl Bootstrap {
     /// Builds everything both fronts share. Never exits on its own
     /// except for the one non-negotiable (no session store): callers
     /// decide what their surface does with warnings.
-    pub fn load(config_path: Option<&Path>) -> Self {
+    pub fn load(config_path: Option<&Path>, ephemeral: bool) -> Self {
         // First run with the default path: no config file yet means
         // gertie writes a starter of comments and pointers (no endpoint
         // is built in) and says so. An explicit --config override never
@@ -373,6 +377,17 @@ impl Bootstrap {
                 }
             }
             None => None,
+        };
+        // An ephemeral run swaps the real store for an in-memory one:
+        // the boot's shape never changes, and the throwaway evaporates
+        // at exit. Nothing downstream knows or cares.
+        let store = if ephemeral {
+            gertie_core::SessionStore::open(std::path::Path::new(":memory:"))
+                .map(Arc::new)
+                .map_err(|error| eprintln!("warning: ephemeral store: {error}"))
+                .ok()
+        } else {
+            store
         };
         let Some(store) = store else {
             eprintln!("error: no session store; refusing to run without persistence");

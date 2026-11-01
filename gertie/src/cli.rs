@@ -13,6 +13,8 @@ USAGE:
     gertie run [OPTIONS] [PROMPT]    run one turn headlessly; the answer
                                      goes to stdout, activity to stderr,
                                      and the session is saved
+    gertie run --ephemeral [PROMPT]  like run, but nothing persists: no
+                                     session, no memory writes
     gertie doctor                    check the setup: config, endpoint,
                                      key resolution, MCP, sessions
     gertie doctor --check-updates    also ask GitHub for the newest release
@@ -34,10 +36,13 @@ pub enum Command {
     /// Launch the desktop app, optionally with a config override.
     Gui { config: Option<PathBuf> },
     /// One headless turn. `prompt` None means: read it from stdin.
+    /// `ephemeral`: nothing persists (no session, no messages, no
+    /// memory writes); scripted and batch runs stay out of the sidebar.
     Run {
         prompt: Option<String>,
         yes: bool,
         config: Option<PathBuf>,
+        ephemeral: bool,
     },
     /// The setup diagnostic. `clean_worktrees` applies the worktree
     /// cleanup policy (otherwise the same sweep is report-only).
@@ -62,6 +67,7 @@ pub struct UsageError(pub String);
 pub fn parse(arguments: &[String]) -> Result<Command, UsageError> {
     let mut config: Option<PathBuf> = None;
     let mut yes = false;
+    let mut ephemeral = false;
     let mut positional: Vec<String> = Vec::new();
     let mut run = false;
     let mut doctor = false;
@@ -75,6 +81,7 @@ pub fn parse(arguments: &[String]) -> Result<Command, UsageError> {
             "-h" | "--help" => return Ok(Command::Help),
             "-V" | "--version" => return Ok(Command::Version),
             "-y" | "--yes" => yes = true,
+            "--ephemeral" if run => ephemeral = true,
             "--clean-worktrees" if !run => clean_worktrees = true,
             "--check-updates" if !run => check_updates = true,
             "doctor" if positional.is_empty() && !run && !doctor => doctor = true,
@@ -142,6 +149,7 @@ pub fn parse(arguments: &[String]) -> Result<Command, UsageError> {
         prompt,
         yes,
         config,
+        ephemeral,
     })
 }
 
@@ -172,6 +180,7 @@ mod tests {
                 prompt: Some("fix the tests".into()),
                 yes: true,
                 config: None,
+                ephemeral: false,
             }
         );
     }
@@ -187,6 +196,21 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn ephemeral_parses_everywhere_and_is_run_only() {
+        let command = parse_arguments(&["run", "--ephemeral", "-y", "hi"]).unwrap();
+        assert!(matches!(
+            command,
+            Command::Run {
+                ephemeral: true,
+                ..
+            }
+        ));
+        // Everywhere else it's a usage error, the flag belongs to run.
+        assert!(parse_arguments(&["--ephemeral"]).is_err());
+        assert!(parse_arguments(&["doctor", "--ephemeral"]).is_err());
     }
 
     #[test]

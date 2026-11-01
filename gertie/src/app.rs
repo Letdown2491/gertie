@@ -17,7 +17,10 @@ pub fn run() {
 pub fn run_with(config_path: Option<std::path::PathBuf>) {
     // The bootstrap carries config errors in its label; a GUI user
     // never sees stderr, so the window reports them.
-    let boot = Arc::new(crate::bootstrap::Bootstrap::load(config_path.as_deref()));
+    let boot = Arc::new(crate::bootstrap::Bootstrap::load(
+        config_path.as_deref(),
+        false,
+    ));
 
     let app = application().with_assets(gpui_kit::assets::Assets);
     app.run(move |cx: &mut App| {
