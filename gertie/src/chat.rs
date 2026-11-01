@@ -6422,6 +6422,14 @@ impl Render for ChatView {
 
         h_flex()
             .size_full()
+            // The view is a flex item of the workspace's tab column:
+            // without this, its minimum height is the sidebar's
+            // content height, and a store with enough sessions grew
+            // the whole view past the window, clipping the bottom
+            // chrome (the footer, the sidebar's Settings) off-screen.
+            // Zero lets the view shrink to its slot; the sidebar's
+            // scroll area absorbs the pressure instead.
+            .min_h_0()
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
             // The turnRunning `when` context, present only while a

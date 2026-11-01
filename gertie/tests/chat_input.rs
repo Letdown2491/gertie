@@ -8,7 +8,7 @@ use gpui_kit::component::Root;
 use gpui_kit::test::TestWindowExt as _;
 use gpui_kit::{
     AnyWindowHandle, AppContext, HeadlessAppContext, NoopTextSystem, SharedString, WeakEntity,
-    WindowHandle, px, size,
+    WindowHandle, component::v_flex, div, prelude::*, px, size,
 };
 use std::path::Path;
 use std::sync::Arc;
@@ -2280,6 +2280,142 @@ fn a_label_truncates_to_a_single_ellipsis() {
     assert!(
         labeled.ends_with("garbage`…"),
         "dots stripped, exactly one ellipsis, outside the chip: {labeled}"
+    );
+}
+
+/// The tab shell: the WorkspaceView shape, the tab bar above, the
+/// chat view as the column's flex item. A stand-in keeps the test on
+/// the real structural seam, a fixed-height sibling above a view that
+/// must shrink, without pulling a whole Bootstrap in.
+struct TabbedShell(gpui_kit::Entity<ChatView>);
+
+impl gpui_kit::Render for TabbedShell {
+    fn render(
+        &mut self,
+        _: &mut gpui_kit::Window,
+        _: &mut gpui_kit::Context<Self>,
+    ) -> impl gpui_kit::IntoElement {
+        v_flex()
+            .size_full()
+            .child(div().h(px(40.)).flex_shrink_0().child("tabs"))
+            .child(self.0.clone())
+    }
+}
+
+/// The window's chrome must stay inside the window: the footer's
+/// ledger line under the composer, and the sidebar's Settings button
+/// at the sidebar's foot. The sidebar lists every session in the
+/// store, and when a run of them piled up (an agent's own probe
+/// sessions: the user's window held ~35), the view's minimum height
+/// grew past the window and the bottom chrome clipped away. The
+/// footer read as "completely gone", with nothing removed at all.
+#[test]
+fn the_footer_and_the_sidebar_foot_stay_inside_the_window() {
+    let store = Arc::new(SessionStore::open(Path::new(":memory:")).expect("memory store"));
+    for i in 0..40 {
+        let id = store
+            .create_session(&format!("probe session {i}"))
+            .expect("session");
+        store
+            .append_message(id, None, gertie_core::Role::User, "hello")
+            .expect("user row");
+        store
+            .append_message(id, None, gertie_core::Role::Assistant, "hi")
+            .expect("assistant row");
+        store.set_session_workspace(id, Path::new("."));
+    }
+
+    let mut cx = HeadlessAppContext::with_asset_source(
+        Arc::new(NoopTextSystem),
+        Arc::new(gpui_kit::assets::Assets),
+    );
+    cx.update(|cx| {
+        gpui_kit::init(cx);
+        gpui_kit::component::Theme::change(gpui_kit::component::ThemeMode::Dark, None, cx);
+    });
+    let guard: gertie::chat::LiveElsewhere = Arc::new(|_, _, _| Ok(()));
+    let window = cx
+        .open_window(size(px(900.), px(640.)), |window, cx| {
+            let view = cx.new(|cx| {
+                let panel = cx.new(|_| {
+                    gertie::settings_edit::SettingsPanelView::new(
+                        &gertie::config::Config::default(),
+                        gertie::settings::SettingsSummary::from_config(
+                            &gertie::config::Config::default(),
+                        ),
+                    )
+                });
+                ChatView::new(
+                    store.clone(),
+                    None,
+                    None,
+                    gertie_tools::builtin_tools(Path::new(".")),
+                    "no endpoint configured".into(),
+                    None,
+                    None,
+                    None,
+                    false,
+                    None,
+                    None,
+                    None,
+                    None,
+                    Vec::new(),
+                    Path::new(".").to_path_buf(),
+                    None,
+                    Arc::new(gertie_core::PermissionBroker::new()),
+                    gertie_core::SessionScope::new(),
+                    gertie_core::ModeScope::new(),
+                    false,
+                    gertie_core::PermissionMode::Supervised,
+                    panel,
+                    true,
+                    None,
+                    guard.clone(),
+                    Arc::new(|root: &Path| {
+                        Ok(gertie::bootstrap::Switched {
+                            tools: gertie_tools::builtin_tools(root),
+                            system_prompt: None,
+                            instructions: None,
+                            memory_index: None,
+                            memory: None,
+                            memory_extract_provider: None,
+                            workspace_root: root.to_path_buf(),
+                            templates: Vec::new(),
+                            sandbox_bash: false,
+                            warnings: Vec::new(),
+                        })
+                    }),
+                    window,
+                    cx,
+                )
+            });
+            let shell = cx.new(|_| TabbedShell(view));
+            cx.new(|cx| Root::new(shell, window, cx))
+        })
+        .expect("chat window");
+    let handle: AnyWindowHandle = window.into();
+    settle(&mut cx, handle);
+
+    let read_bounds = |cx: &mut HeadlessAppContext, id: &'static str| {
+        cx.update_window(handle, |_, window, _| {
+            window.try_find(id).map(|s| s.bounds())
+        })
+        .expect("window")
+    };
+    let chip = read_bounds(&mut cx, "mode-chip");
+    let settings = read_bounds(&mut cx, "toggle-settings");
+    let height = px(640.);
+    let chip = chip.unwrap_or_else(|| panic!("the footer's mode chip never painted"));
+    assert!(
+        chip.bottom() <= height,
+        "the footer stays inside the window: bottom {} of {height}",
+        chip.bottom()
+    );
+    let settings = settings.unwrap_or_else(|| panic!("the sidebar's Settings never painted"));
+    assert!(
+        settings.bottom() <= height,
+        "the sidebar's Settings stays inside the window: bottom {} of {height}",
+        settings.bottom()
     );
 }
 
