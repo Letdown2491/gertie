@@ -1,0 +1,4 @@
+# Orchard repository proof: this file is read by Orchard clients to
+# verify that the publisher key of a listing naming this repository
+# controls this repo. One key per line (npub or hex).
+npub1m2jphmdkskgnvwl5gplksl9e0zwv2sldqf9mwlpz6tyymz84g9fsqr3wgu
