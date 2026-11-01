@@ -1420,48 +1420,10 @@ impl ChatView {
         self.turns.len() + usize::from(self.show_activity_row())
     }
 
-    /// The between-rounds status, derived from the agent's own words:
-    /// the model narrates before each tool call ("Let me check the CI
-    /// config"), so the status line quotes the latest narration line
-    /// instead of the empty "Thinking…". Most truthful label possible:
-    /// it is literally the agent's stated intent, and it updates as the
-    /// agent updates. The last assistant turn only: narration is
-    /// *current* intent, an older turn's is history. None when the
-    /// model narrated nothing this round; the caller picks the
-    /// fallback, because the honest fallback differs by moment.
-    fn narrated_intent(&self) -> Option<String> {
-        let narrated = self
-            .turns
-            .iter()
-            .rev()
-            .find_map(|turn| match turn {
-                Turn::Message {
-                    role: Role::Assistant,
-                    text,
-                    ..
-                } if !text.trim().is_empty() => Some(text),
-                _ => None,
-            })
-            .filter(|text| !text.contains("[error]"))
-            .and_then(|text| {
-                text.lines()
-                    .map(str::trim)
-                    .find(|line| !line.is_empty())
-                    .map(str::to_string)
-            });
-        narrated.map(|line| {
-            let mut short: String = line.chars().take(64).collect();
-            if line.chars().count() > 64 {
-                short.push('…');
-            }
-            format!("{}…", short.trim_end_matches(['.', '…']))
-        })
-    }
-
-    /// The status line's text, with its clocks: every change restarts
-    /// the elapsed count (the number answers "how long has *this* been
-    /// going on") and the quiet gauge with it. The run clock keeps
-    /// accumulating: it is the work's total, not the phase's.
+    /// The status line's text: the label itself is the news. Setting
+    /// it marks the loop event (the quiet gauge reads off this) and
+    /// resets the spinner's step; the run clock, if a run is live,
+    /// keeps accumulating untouched. It lives in the footer now.
     fn set_activity(&mut self, label: impl Into<String>) {
         self.activity = label.into();
         self.activity_at = Instant::now();
@@ -1480,7 +1442,7 @@ impl ChatView {
                 .unwrap_or_default()
     }
 
-    /// The run is over: the number leaves the status line (the next
+    /// The run is over: the number leaves the footer ledger (the next
     /// set_activity starts a fresh run). Human stops and rewinds force
     /// this too: a stopped run's clock does not carry into new work.
     fn end_run(&mut self) {
@@ -3607,7 +3569,7 @@ impl ChatView {
         // Turn start: fresh narration is not yet available (the model
         // has not spoken this round), so the plain label until its
         // first words stream or a tool runs.
-        self.set_activity("Working…");
+        self.set_activity("Thinking…");
         self.thinking = true;
         self.steer_tx = Some(steer_tx);
         // The composer's ghost text names the steer/queue verbs while
@@ -3945,11 +3907,12 @@ impl ChatView {
     /// The tool finished; show the outcome and persist the row so reloads
     /// and the next request see the same thing the model did.
     fn on_tool_result(&mut self, call_id: &str, name: &str, result: &str, cx: &mut Context<Self>) {
-        // The tool is done, so the model is chewing on the result:
-        // the status quotes the agent's own latest narration (it may
-        // have stated what comes next), and names the finished tool
-        // when nothing was narrated, the timer alone is a poor answer
-        // to "what is it doing now".
+        // The tool is done: the status says what was done, in the
+        // card's own words. The model chewing on the result is the
+        // thinking row's job; the model's narration, when it comes,
+        // lives in the transcript where prose belongs. The timer
+        // alone was a poor answer to "what is it doing now"; the
+        // model's monologue was a worse one.
         let arguments = self
             .turns
             .iter()
@@ -3958,12 +3921,7 @@ impl ChatView {
                 _ => None,
             })
             .unwrap_or_default();
-        self.set_activity(self.narrated_intent().unwrap_or_else(|| {
-            format!(
-                "{}, reading the result…",
-                crate::tools_ui::action_label(name, &arguments, false)
-            )
-        }));
+        self.set_activity(crate::tools_ui::action_label(name, &arguments, false));
         self.thinking = true;
         // The card's clock retires with the card.
         self.tool_starts.remove(call_id);
@@ -4428,7 +4386,7 @@ impl ChatView {
             }
         }
         let expanded = self.expanded_runs.contains(&index);
-        let mut col = v_flex().gap_2().child(
+        let mut col = v_flex().gap_2().items_start().child(
             Button::new(SharedString::from(format!("tool-run-{index}")))
                 .label(crate::tools_ui::tool_run_summary(&names, failed))
                 .xsmall()
@@ -5140,19 +5098,16 @@ impl ChatView {
         div().w_full().px_4().mt_2().child(inner).into_any_element()
     }
 
-    /// The status line's words, spinner aside: the activity, its
-    /// elapsed clock, and, past [`QUIET_AFTER`] of no loop events,
-    /// the quiet gauge. Quiet stays silent while an approval card
-    /// waits on the human: that silence is the human's, and the ask's
-    /// own clock tells it.
+    /// The status line's words, spinner aside: the action, and that
+    /// is all. The clocks taught the wrong lesson (a label plus two
+    /// timers reads as a stall even when the work is moving); the
+    /// thinking row owns "now", the footer owns the run's total. One
+    /// gauge survives here, diagnostic only: past [`QUIET_AFTER`] of
+    /// no loop events the line says so. Quiet stays silent while an
+    /// approval card waits on the human: that silence is the
+    /// human's, and the ask's own clock tells it.
     fn activity_line(&self) -> String {
-        let mut line = format!("{} · {}", self.activity, clock(self.activity_at.elapsed()));
-        // The run clock rides every status line while a run is live:
-        // "how long has this piece of work taken me" (pauses included,
-        // the wait is part of the work), next to the phase's own clock.
-        if self.run_started.is_some() {
-            line.push_str(&format!(" · run {}", clock(self.run_elapsed_total())));
-        }
+        let mut line = self.activity.clone();
         let quiet = self.last_event_at.elapsed();
         if quiet >= QUIET_AFTER && !self.waiting_on_human() {
             line.push_str(&format!(" · quiet {}", clock(quiet)));
@@ -5160,14 +5115,6 @@ impl ChatView {
         line
     }
 
-    /// The quiet-state row: what's happening, for how long, and whether
-    /// anything has landed lately. The spinner is the no-animation
-    /// doctrine's one carve-out, time-derived so it needs no state of
-    /// its own: it steps at 2 fps on the working tick (which only runs
-    /// while a turn does, nothing animates at rest), because "is it
-    /// stuck or just slow" is a question the words alone answer too
-    /// late. The clock sits beside it, and past [`QUIET_AFTER`] of
-    /// silence the line says that too.
     /// The empty transcript's center. Three honest variants, quiet
     /// to loud: a configured endpoint gets the two-line "Ready." state;
     /// a fresh install (no chats ever, this is the sidebar's test)
@@ -5222,6 +5169,12 @@ impl ChatView {
             .into_any_element()
     }
 
+    /// The quiet-state row: what's happening now, the spinner the
+    /// no-animation doctrine's one carve-out, time-derived so it
+    /// needs no state of its own: it steps at 2 fps on the working
+    /// tick (which only runs while a turn does, nothing animates at
+    /// rest), because "is it stuck or just slow" is a question the
+    /// words alone answer too late.
     fn render_activity_row(&self, cx: &Context<Self>) -> AnyElement {
         let frame = SPINNER_FRAMES
             [(self.activity_at.elapsed().as_millis() as usize / 500) % SPINNER_FRAMES.len()];
@@ -5247,12 +5200,13 @@ impl ChatView {
             .into_any_element()
     }
 
-    /// The footer line under the composer. Left: this session's spend
-    /// and the live context gauge, `12.3k (23%)`, so the distance to
-    /// the compaction threshold is visible before it happens. Right:
-    /// what you're talking to, `gertie · ppq · glm-5.3-flash`, or,
-    /// when the chat is blocked on you, that fact in warning color.
-    /// Quiet until there is something to say.
+    /// The footer line under the composer. Left: this session's spend,
+    /// the run's total while a run is live, and the live context
+    /// gauge, `12.3k (23%)`, so the distance to the compaction
+    /// threshold is visible before it happens. Right: what you're
+    /// talking to, `gertie · ppq · glm-5.3-flash`, or, when the chat
+    /// is blocked on you, that fact in warning color. Quiet until
+    /// there is something to say.
     fn render_token_footer(&self, status: Option<&str>, cx: &Context<Self>) -> AnyElement {
         let parts = self.footer_parts();
         let near_compaction = self
@@ -5318,6 +5272,18 @@ impl ChatView {
         let mut ledger = h_flex().gap_2().child(mode);
         if let Some(memory) = memory {
             ledger = ledger.child(memory);
+        }
+        // The run's total, the one clock that answers "how long has
+        // this piece of work taken me" (pauses included, the wait is
+        // part of the work): it lives here, where the counts live,
+        // not taped to a status line that changes every few seconds.
+        if self.run_started.is_some() {
+            ledger = ledger.child(
+                div()
+                    .text_size(px(11.))
+                    .text_color(cx.theme().muted_foreground)
+                    .child(format!("run {}", clock(self.run_elapsed_total()))),
+            );
         }
         if !parts.is_empty() {
             // The ledger line in two groups with a real gap: what the
@@ -5502,11 +5468,10 @@ impl ChatView {
                 )
                 .into_any_element(),
             Role::System => {
-                // Loop notices (compaction), centered, quiet, not a chat
-                // message from anyone.
-                h_flex()
-                    .w_full()
-                    .justify_center()
+                // Loop notices (compaction): quiet, left on the same
+                // margin as everything else, not a chat message from
+                // anyone and not a billboard either.
+                div()
                     .pb_2()
                     .child(
                         div()
@@ -5547,7 +5512,7 @@ impl ChatView {
         }
     }
 
-    /// The tool card: a friendly statement of what the model is doing
+    /// One tool row: a friendly statement of what the model is doing
     /// (not the wire name), the diff for file changes, a one-line
     /// outcome when finished, and approve/deny while pending. The raw
     /// tool output is one click away; it's the exception, not the face.
@@ -5557,7 +5522,7 @@ impl ChatView {
         index: usize,
         call: &ToolCall,
         status: &ToolStatus,
-        auto_approved: bool,
+        _auto_approved: bool,
         worker: bool,
         _window: &mut Window,
         cx: &mut Context<Self>,
@@ -5718,10 +5683,15 @@ impl ChatView {
                         this.decide_tool(index, PermissionDecision::Approve, cx)
                     })),
             );
-            return inner.into_any_element();
+            return v_flex()
+                .w_full()
+                .pr_8()
+                .pb_2()
+                .child(ask_group(inner, cx))
+                .into_any_element();
         }
 
-        match status {
+        let face = match status {
             ToolStatus::Pending(_) => {
                 let reply = self.approval_replies.get(&index);
                 inner = inner
@@ -5769,6 +5739,7 @@ impl ChatView {
                     // file" becomes a correction, not a dead end.
                     .children(reply.map(|reply| {
                         h_flex()
+                            .w_full()
                             .gap_2()
                             .child(Input::new(reply).small().flex_1())
                             .child(
@@ -5782,18 +5753,14 @@ impl ChatView {
                                     })),
                             )
                     }));
+                ask_group(inner, cx)
             }
             ToolStatus::Running => {
-                // The header already carries the spinner and the label;
-                // a second "running…" line says nothing new.
-                inner = inner.when(auto_approved, |row| {
-                    row.child(
-                        div()
-                            .text_size(px(12.))
-                            .text_color(cx.theme().muted_foreground)
-                            .child("read-only, so it runs without asking"),
-                    )
-                });
+                // The label and the spinner say it all; a second
+                // "running" line says nothing new, and the old
+                // "read-only, so it runs without asking" was worse
+                // than noise, it lied for an auto-approved write.
+                inner.into_any_element()
             }
             ToolStatus::Done(result) => {
                 let failed = result.starts_with("error:")
@@ -5822,20 +5789,24 @@ impl ChatView {
                         })
                         .child(summary),
                 );
+                if expanded && line_count > 1 {
+                    inner = inner.child(
+                        div()
+                            .rounded_md()
+                            .border_1()
+                            .border_color(cx.theme().border)
+                            .p_2()
+                            .font_family(cx.theme().mono_font_family.clone())
+                            .text_size(cx.theme().mono_font_size)
+                            .text_color(cx.theme().muted_foreground)
+                            .child(result.to_string()),
+                    );
+                }
+                // The affordances share one quiet row: both are
+                // furniture, not content, and a centered pill per
+                // link made the card read as chrome.
+                let mut affordances = h_flex().gap_2();
                 if line_count > 1 {
-                    if expanded {
-                        inner = inner.child(
-                            div()
-                                .rounded_md()
-                                .border_1()
-                                .border_color(cx.theme().border)
-                                .p_2()
-                                .font_family(cx.theme().mono_font_family.clone())
-                                .text_size(cx.theme().mono_font_size)
-                                .text_color(cx.theme().muted_foreground)
-                                .child(result.to_string()),
-                        );
-                    }
                     let (label, tooltip) = if expanded {
                         (
                             "hide raw output".to_string(),
@@ -5847,7 +5818,7 @@ impl ChatView {
                             "What the model actually received".to_string(),
                         )
                     };
-                    inner = inner.child(
+                    affordances = affordances.child(
                         Button::new(SharedString::from(format!("tool-toggle-{index}")))
                             .label(label)
                             .xsmall()
@@ -5865,7 +5836,7 @@ impl ChatView {
                 // the ledger answers "what did the tools do", the
                 // agent's work, not git's.
                 if self.snapshots.is_some() {
-                    inner = inner.child(
+                    affordances = affordances.child(
                         Button::new(SharedString::from(format!("turn-diff-{index}")))
                             .label("turn diff")
                             .xsmall()
@@ -5876,21 +5847,16 @@ impl ChatView {
                             })),
                     );
                 }
+                inner = inner.child(affordances);
+                inner.into_any_element()
             }
-        }
+        };
 
         v_flex()
             .w_full()
             .pr_8()
             .pb_2()
-            .child(
-                v_flex()
-                    .border_1()
-                    .border_color(cx.theme().border)
-                    .rounded_lg()
-                    .p_3()
-                    .child(inner),
-            )
+            .child(face)
             .into_any_element()
     }
 }
@@ -5929,6 +5895,21 @@ impl ChatView {
         });
         cx.notify();
     }
+}
+
+/// The waiting-on-you group's face: a left accent edge, not a box.
+/// An approval is the transcript's landmark while it waits, and the
+/// mark should say "this needs you", not "here is a panel". The
+/// content stays uncrated: the row, the diff, the buttons.
+fn ask_group(inner: impl IntoElement, cx: &App) -> AnyElement {
+    v_flex()
+        .gap_2()
+        .mt_1()
+        .pl_3()
+        .border_l_2()
+        .border_color(cx.theme().warning)
+        .child(inner)
+        .into_any_element()
 }
 
 /// Where a stored tool path lives on disk: absolute as-is, relative
@@ -6080,19 +6061,15 @@ fn diff_data(call: &ToolCall, before: Option<&str>) -> Option<crate::diff::Patch
 /// The card's diff face, reading exactly like the turn-diff modal's
 /// rows (same marks, same colors, mono): the counts lead, the hunks
 /// follow with context trimmed around the changes, and a tail note
-/// names what the display cap dropped.
+/// names what the display cap dropped. No box: the diff hangs under
+/// its row, indented, the way a diff belongs to the line that
+/// caused it.
 fn diff_element(patch: &crate::diff::Patch, cx: &App) -> AnyElement {
-    let mut container = v_flex()
-        .rounded_md()
-        .border_1()
-        .border_color(cx.theme().border)
-        .py_1()
-        .overflow_hidden();
+    let mut container = v_flex().pl_3().py_1().overflow_hidden();
 
     // The counts lead: what changed, before any line of it.
     container = container.child(
         h_flex()
-            .px_2()
             .gap_2()
             .text_size(px(11.))
             .child(
@@ -6111,7 +6088,6 @@ fn diff_element(patch: &crate::diff::Patch, cx: &App) -> AnyElement {
         return container
             .child(
                 div()
-                    .px_2()
                     .text_size(px(11.))
                     .text_color(cx.theme().muted_foreground)
                     .child("unchanged"),
@@ -6122,7 +6098,6 @@ fn diff_element(patch: &crate::diff::Patch, cx: &App) -> AnyElement {
     for row in hunk_rows(&patch.lines) {
         let element = match row {
             DiffRow::Elided => div()
-                .px_2()
                 .font_family(cx.theme().mono_font_family.clone())
                 .text_size(px(11.))
                 .text_color(cx.theme().muted_foreground)
@@ -6139,7 +6114,6 @@ fn diff_element(patch: &crate::diff::Patch, cx: &App) -> AnyElement {
                     }
                 };
                 div()
-                    .px_2()
                     .font_family(cx.theme().mono_font_family.clone())
                     .text_size(px(11.))
                     .text_color(color)
@@ -6153,7 +6127,6 @@ fn diff_element(patch: &crate::diff::Patch, cx: &App) -> AnyElement {
     if patch.omitted > 0 {
         container = container.child(
             div()
-                .px_2()
                 .text_size(px(11.))
                 .text_color(cx.theme().muted_foreground)
                 .child(format!("\u{2026} {} more lines", patch.omitted)),

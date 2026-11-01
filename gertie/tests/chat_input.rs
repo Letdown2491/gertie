@@ -3477,8 +3477,8 @@ fn a_pending_mutation_names_what_it_waits_on() {
         "the pending card names the ask: {pending_line}"
     );
 
-    // Approved and settled: the model narrated nothing, so the status
-    // names the finished tool instead of a bare "Working".
+    // Approved and settled: the status is the done label alone, the
+    // model chewing on the result is the thinking row's business.
     fixture.act(|window, cx| window.click("approve-2", cx));
     pump(&mut fixture, 40);
     let settled_line = fixture.cx.update(|cx| {
@@ -3490,8 +3490,70 @@ fn a_pending_mutation_names_what_it_waits_on() {
             .activity_line_for_test()
     });
     assert!(
-        settled_line.starts_with("Wrote `out.txt`, reading the result"),
-        "the fallback names the finished tool: {settled_line}"
+        settled_line.starts_with("Wrote `out.txt`"),
+        "the done label alone: {settled_line}"
+    );
+}
+
+/// Narration never becomes the status: the model may say "Let me
+/// check the config first." before a call, but once the result lands
+/// the line is the done label alone. The old behavior quoted the
+/// model's prose (truncated at 64 chars); a monologue in a status
+/// line is the model's words wearing the harness's voice.
+#[test]
+fn narration_stays_out_of_the_status_line() {
+    let scenarios = tempfile::tempdir().expect("scenario dir");
+    std::fs::write(
+        scenarios.path().join("narrated.toml"),
+        "[[steps]]\ntext = 'Let me check the config first.'\n\n\
+         [[steps.tool_calls]]\nname = \"read_file\"\n\
+         arguments = '{\"path\": \"scratch.txt\"}'\n\n\
+         [[steps]]\ntext = ''\n",
+    )
+    .expect("scenario file");
+    let workspace = tempfile::tempdir().expect("workspace dir");
+    std::fs::write(workspace.path().join("scratch.txt"), "x").expect("scratch file");
+    let endpoint = gertie_providers::Endpoint {
+        name: "replay".into(),
+        base_url: scenarios.path().to_string_lossy().into_owned(),
+        model: "narrated".into(),
+        api_key: None,
+        context_window: None,
+        wire: gertie_providers::Wire::Replay,
+    };
+    let provider = Arc::new(
+        gertie_providers::AnyProvider::with_endpoints(vec![endpoint]).expect("replay provider"),
+    );
+    let store = Arc::new(SessionStore::open(Path::new(":memory:")).expect("memory store"));
+    let mut fixture = fixture_built(
+        store,
+        None,
+        Some(workspace.path().to_path_buf()),
+        None,
+        Some(provider),
+        None,
+        Vec::new(),
+        None,
+        None,
+    );
+    fixture.hold = vec![scenarios, workspace];
+
+    fixture.act(|window, cx| {
+        window.input("go", cx);
+        window.press("enter", cx);
+    });
+    pump(&mut fixture, 60);
+    let line = fixture.cx.update(|cx| {
+        fixture
+            .view
+            .upgrade()
+            .expect("view alive")
+            .read(cx)
+            .activity_line_for_test()
+    });
+    assert_eq!(
+        line, "Read `scratch.txt`",
+        "the done label, exactly: no narration quote, no clocks"
     );
 }
 
