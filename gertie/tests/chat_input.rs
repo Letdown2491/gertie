@@ -176,6 +176,7 @@ fn fixture_full(
                             warnings: Vec::new(),
                         })
                     }),
+                    None,
                     window,
                     cx,
                 )
@@ -1261,6 +1262,7 @@ fn markdown_and_tool_rows_draw_clean() {
                             warnings: Vec::new(),
                         })
                     }),
+                    None,
                     window,
                     cx,
                 )
@@ -1490,9 +1492,10 @@ fn launch_resume_matches_the_workspace() {
         "another folder's chat must not resume here"
     );
 
-    // The conversation is not gone: the sidebar keeps it, and opening
-    // it says which folder it started in before the paths surprise
-    // anyone.
+    // Clicking it routes the pristine launch tab to the session's
+    // folder (rule 3): the view re-roots, the session loads, and the
+    // notice says where the tab now runs. (Test fixtures carry no
+    // router, so this exercises the local auto-follow path.)
     fixture.act(|window, cx| {
         window.click("session-1", cx);
     });
@@ -1507,8 +1510,21 @@ fn launch_resume_matches_the_workspace() {
     assert!(
         notices
             .iter()
-            .any(|notice| notice.contains("started in /tmp/gertie-elsewhere")),
-        "the cross-folder switch must say so, got: {notices:?}"
+            .any(|notice| notice.contains("Resumed in /tmp/gertie-elsewhere")),
+        "the resumed session re-roots the tab and says so, got: {notices:?}"
+    );
+    let root_after = fixture.cx.update(|cx| {
+        fixture
+            .view
+            .upgrade()
+            .expect("view alive")
+            .read(cx)
+            .workspace_root()
+            .to_path_buf()
+    });
+    assert!(
+        root_after.starts_with(Path::new("/tmp/gertie-elsewhere")),
+        "the tab follows the session's workspace, got {root_after:?}"
     );
 }
 
@@ -2408,6 +2424,7 @@ fn the_footer_and_the_sidebar_foot_stay_inside_the_window() {
                             warnings: Vec::new(),
                         })
                     }),
+                    None,
                     window,
                     cx,
                 )

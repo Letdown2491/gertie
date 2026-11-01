@@ -143,6 +143,14 @@ impl WorkspaceView {
         let panel = cx.new(|_| boot.settings_panel());
         let guard = live_elsewhere(cx);
         let switch = switch_to_root(&boot);
+        let shell = cx.entity().downgrade();
+        let this_router: crate::chat::SessionRouter =
+            Arc::new(move |session_id, session_root, window, cx| {
+                let Some(shell) = shell.upgrade() else { return };
+                shell.update(cx, |shell, cx| {
+                    shell.route_session(session_id, session_root, window, cx)
+                });
+            });
         let first = cx.new(|cx| {
             ChatView::new(
                 boot.store.clone(),
@@ -173,6 +181,7 @@ impl WorkspaceView {
                 None,
                 guard,
                 switch,
+                Some(this_router.clone()),
                 window,
                 cx,
             )
@@ -278,6 +287,15 @@ impl WorkspaceView {
         let panel = cx.new(|_| self.boot.settings_panel());
         let guard = live_elsewhere(cx);
         let switch = switch_to_root(&self.boot);
+        // The sidebar's routing hook: weak self, strong at click time.
+        let shell = cx.entity().downgrade();
+        let this_router: crate::chat::SessionRouter =
+            Arc::new(move |session_id, session_root, window, cx| {
+                let Some(shell) = shell.upgrade() else { return };
+                shell.update(cx, |shell, cx| {
+                    shell.route_session(session_id, session_root, window, cx)
+                });
+            });
         let view = cx.new(|cx| {
             ChatView::new(
                 self.boot.store.clone(),
@@ -306,6 +324,7 @@ impl WorkspaceView {
                 naming,
                 guard,
                 switch,
+                Some(this_router.clone()),
                 window,
                 cx,
             )
@@ -411,6 +430,127 @@ impl WorkspaceView {
         }
         self.tabs.remove(index);
         self.active = self.active.min(self.tabs.len() - 1);
+        cx.notify();
+    }
+}
+
+impl WorkspaceView {
+    /// Routes a sidebar click to the tab where the session belongs
+    /// (the full routing model, four rules):
+    /// 1. the session's root matches this tab's → load here;
+    /// 2. another open tab already holds the root → activate it and
+    ///    load there (a project's sessions belong to its project tab);
+    /// 3. no tab holds it and this tab is pristine → this tab adopts
+    ///    the root and loads it (a launch-tab is free real estate);
+    /// 4. no tab holds it and this tab is busy → a new tab opens,
+    ///    rooted at the session's workspace. A working conversation is
+    ///    never dragged somewhere else.
+    ///
+    /// Streaming tabs are skipped by rule 2's load, not the routing:
+    /// loading into a streaming view is refused by the view itself.
+    pub fn route_session(
+        &mut self,
+        session_id: gertie_core::SessionId,
+        session_root: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let active_view = self.tabs[self.active].view.clone();
+        let active_root = active_view.read(cx).workspace_root().to_path_buf();
+        let session_root = session_root
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| active_root.clone());
+        let same_root =
+            |a: &std::path::Path, b: &std::path::Path| match (a.canonicalize(), b.canonicalize()) {
+                (Ok(a), Ok(b)) => a == b,
+                _ => false,
+            };
+        // Rule 1: this tab's root matches (or the session predates the
+        // root column: its home is wherever it's opened).
+        let session_matches_active =
+            session_root == active_root || same_root(&session_root, &active_root);
+        if session_matches_active {
+            active_view.update(cx, |view, cx| {
+                view.switch_to_session(session_id, window, cx)
+            });
+            return;
+        }
+        // Rule 2: a tab that already lives at the session's root.
+        let holder = self.tabs.iter().enumerate().find(|(_, tab)| {
+            let view_root = tab.view.read(cx).workspace_root().to_path_buf();
+            view_root == session_root || same_root(&view_root, &session_root)
+        });
+        if let Some((index, tab)) = holder {
+            let view = tab.view.clone();
+            self.active = index;
+            self.tabs[index].done_unseen = false;
+            view.update(cx, |view, cx| {
+                view.switch_to_session(session_id, window, cx)
+            });
+            cx.notify();
+            return;
+        }
+        // Rule 3: this tab is pristine (no session, no turns) — it
+        // adopts the root.
+        let pristine = active_view.read(cx).is_pristine_for_test();
+        if pristine {
+            let switched = match self.boot.workspace_for_root(&session_root) {
+                Ok(switched) => switched,
+                Err(error) => {
+                    active_view.update(cx, |view, cx| {
+                        view.push_notice_string(
+                            format!("This conversation started in a folder that refuses the switch ({error}); open it from that folder's tab."),
+                            cx,
+                        )
+                    });
+                    return;
+                }
+            };
+            active_view.update(cx, |view, cx| {
+                view.adopt_switch(switched, cx);
+                view.switch_to_session(session_id, window, cx);
+            });
+            cx.notify();
+            return;
+        }
+        // Rule 4: open a new tab at the session's root and load there.
+        let switched = match self.boot.workspace_for_root(&session_root) {
+            Ok(switched) => switched,
+            Err(error) => {
+                active_view.update(cx, |view, cx| {
+                    view.push_notice_string(
+                        format!("This conversation's folder refuses the switch ({error}); open it from that folder's tab."),
+                        cx,
+                    )
+                });
+                return;
+            }
+        };
+        let view = self.make_view(
+            switched.tools.clone(),
+            switched.system_prompt.clone(),
+            switched.instructions.clone(),
+            switched.memory_index.clone(),
+            self.boot.memory_enabled(),
+            switched.memory.clone(),
+            switched.memory_extract_provider.clone(),
+            None,
+            window,
+            cx,
+        );
+        view.update(cx, |view, cx| {
+            view.adopt_switch(switched, cx);
+            view.switch_to_session(session_id, window, cx);
+        });
+        self.tabs.push(TabState {
+            view,
+            worktree: None,
+            prev_streaming: false,
+            done_unseen: false,
+        });
+        let index = self.tabs.len() - 1;
+        self.active = index;
+        self.subscribe_config_saved(index, window, cx);
         cx.notify();
     }
 }

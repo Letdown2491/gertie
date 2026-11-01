@@ -208,6 +208,12 @@ pub type LiveElsewhere =
 /// which owns the bootstrap; the chat never sees it. The switch is a
 /// human gesture only: nothing on the model's side of the glass can
 /// call it.
+/// The sidebar's routing hook: the workspace shell decides which tab
+/// a session's click belongs in (same root, a tab that holds it, a
+/// pristine adopter, or a new tab).
+pub type SessionRouter =
+    Arc<dyn Fn(gertie_core::SessionId, Option<String>, &mut Window, &mut Context<ChatView>)>;
+
 pub type SwitchWorkspace =
     Arc<dyn Fn(&std::path::Path) -> Result<crate::bootstrap::Switched, String> + 'static>;
 
@@ -457,6 +463,10 @@ pub struct ChatView {
     /// turn's posture. Follows the open session; a fresh chat starts
     /// at the configured default.
     mode: PermissionMode,
+    /// The sidebar's routing hook: set by the workspace shell (tabs.rs)
+    /// so a cross-workspace click lands in the right tab. None in
+    /// tests and headless, where the local switch is the whole story.
+    session_router: Option<SessionRouter>,
     /// The mode menu's open state (the chip's click opens it; picking
     /// a row applies, full access opens the confirm card first).
     mode_menu: bool,
@@ -601,6 +611,10 @@ impl ChatView {
         // The workspace switch, built by the workspace (see the type):
         // the footer's word asks it, the chat applies the answer.
         switch: SwitchWorkspace,
+        // The sidebar's routing hook (tabs.rs): a cross-workspace
+        // session click lands in the tab that owns that workspace.
+        // None = local switch only (tests, headless).
+        session_router: Option<SessionRouter>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -763,6 +777,7 @@ impl ChatView {
         let context_window = provider.as_ref().and_then(|p| p.context_window());
 
         let mut view = Self {
+            session_router,
             store,
             provider,
             snapshots,
@@ -1662,7 +1677,9 @@ impl ChatView {
         });
     }
 
-    fn switch_to_session(
+    /// Loads a session into this view. The routing layer (tabs.rs)
+    /// calls it after deciding this tab is where the session belongs.
+    pub fn switch_to_session(
         &mut self,
         session_id: SessionId,
         window: &mut Window,
@@ -1721,21 +1738,51 @@ impl ChatView {
             .unwrap_or(self.default_mode);
         self.context_used = summary.map(|summary| summary.context_tokens).unwrap_or(0);
         self.reload_session(cx);
-        // A conversation that started in another folder: the
-        // transcript's paths are about to say so, better the tab says
-        // it first. The tools stay rooted here; /new is the fresh
-        // chat. After the reload on purpose: the notice is a transcript
+        // A conversation that started in another folder re-roots the
+        // tab automatically: the session remembers its workspace, and
+        // resuming it *is* the intent to work there. Three stops: a
+        // streaming turn keeps its root (the spec cloned it at send;
+        // a swap mid-flight is the chaos the old notice guarded), a
+        // worktree tab never moves (its root IS its checkout), and a
+        // missing root (pre-dating the column) notices instead.
+        // After the reload on purpose: the notice is a transcript
         // row, and the reload just rebuilt the transcript.
         if let Some(stored) = foreign_root {
-            self.push_notice(
-                format!(
-                    "This conversation started in {}, this tab's tools run in {}. \
-                     /new starts a fresh chat.",
-                    tildify(std::path::Path::new(&stored)),
-                    tildify(&self.workspace_root)
-                ),
-                cx,
-            );
+            let stored_path = std::path::PathBuf::from(&stored);
+            let moveable = !self.is_streaming() && self.branch_naming.is_none();
+            if moveable {
+                match (self.switch)(&stored_path) {
+                    Ok(switched) => {
+                        self.apply_switch(switched, cx);
+                        self.push_notice(
+                            format!(
+                                "Resumed in {}, this tab's tools run there. \
+                                 /new starts a fresh chat here.",
+                                tildify(std::path::Path::new(&stored))
+                            ),
+                            cx,
+                        );
+                    }
+                    Err(error) => self.push_notice(
+                        format!(
+                            "This conversation started in {}, the tab stays in {} ({error}).",
+                            tildify(std::path::Path::new(&stored)),
+                            tildify(&self.workspace_root)
+                        ),
+                        cx,
+                    ),
+                }
+            } else {
+                self.push_notice(
+                    format!(
+                        "This conversation started in {}, this tab's tools run in {}. \
+                         /new starts a fresh chat.",
+                        tildify(std::path::Path::new(&stored)),
+                        tildify(&self.workspace_root)
+                    ),
+                    cx,
+                );
+            }
         }
     }
 
@@ -3635,6 +3682,26 @@ impl ChatView {
             self.memory_index = (!rendered.is_empty()).then_some(rendered);
             cx.notify();
         }
+    }
+
+    /// The routing layer's notice path (tabs.rs lands a refusal here
+    /// when a workspace_for_root call fails on its side).
+    pub fn push_notice_string(&mut self, text: String, cx: &mut Context<Self>) {
+        self.push_notice(text, cx);
+    }
+
+    /// Whether this view is a launch-state tab: no session, no turns,
+    /// no streaming. The routing's rule 3 lets such a tab adopt a
+    /// foreign session's workspace for free.
+    pub fn is_pristine_for_test(&self) -> bool {
+        self.session_id.is_none() && self.turns.is_empty() && !self.streaming
+    }
+
+    /// Takes a `Switched` without a user pick (the routing layer's
+    /// rules 3 and 4 adopt a session's workspace): the same field
+    /// assignments apply_switch does, minus the portal flow.
+    pub fn adopt_switch(&mut self, switched: crate::bootstrap::Switched, cx: &mut Context<Self>) {
+        self.apply_switch(switched, cx);
     }
 
     fn push_notice(&mut self, text: impl Into<String>, cx: &mut Context<Self>) {
@@ -6441,9 +6508,13 @@ impl ChatView {
                         )
                     })
                     .tooltip(summary.title.clone())
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        this.switch_to_session(session_id, window, cx);
-                    })),
+                    .on_click({
+                        let stored_root = summary.workspace_root.clone();
+                        cx.listener(move |this, _, window, cx| match &this.session_router {
+                            Some(router) => router(session_id, stored_root.clone(), window, cx),
+                            None => this.switch_to_session(session_id, window, cx),
+                        })
+                    }),
             )
             // The limited chip: the session's last turn died on the
             // provider's rate limit. Static text, warning tint, the
