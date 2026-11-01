@@ -24,6 +24,10 @@ sha2 = "0.10"
 serde_json = "1"
 tokio = { version = "1", features = ["sync", "macros"] }
 toml = "0.9"
+# The doctor's opt-in update check: same gpui-pre-reqwest fork as the
+# tools (one TLS stack in the binary), blocking because doctor is a
+# one-shot command.
+reqwest = { package = "gpui-pre-reqwest", version = "0.12.15", default-features = false, features = ["rustls-tls", "json", "blocking"] }
 # Format-preserving TOML editing: the settings panel writes the user's
 # config.toml without destroying their comments or unknown keys.
 toml_edit = "0.25"

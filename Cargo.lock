@@ -2155,6 +2155,7 @@ dependencies = [
  "gertie-providers",
  "gertie-tools",
  "gpui-kit",
+ "gpui-pre-reqwest",
  "serde",
  "serde_json",
  "sha2 0.10.9",

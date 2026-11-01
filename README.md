@@ -84,7 +84,8 @@ explains the whole system, including the weekly cleanup pass ("dreaming").
 `config.example.toml` documents everything else: wire selection (`openai` |
 `anthropic`), fallback endpoints, MCP servers, custom agents, search backends,
 sandboxing. `gertie run` prompts for approval of mutating tool calls; pipe-safe mode
-denies them unless `--yes` is given.
+denies them unless `--yes` is given. [docs/TOUR.md](docs/TOUR.md) is the guided
+version of this whole list.
 
 ## Security posture
 
@@ -102,7 +103,8 @@ denies them unless `--yes` is given.
 ## Status
 
 Feature-complete against [DESIGN.md](DESIGN.md) (see "The original 'Deferred' row" for
-every decision and its rationale).
+every decision and its rationale). New to the tool? [The tour](docs/TOUR.md) walks the
+whole surface in ten minutes.
 
 ## License
 

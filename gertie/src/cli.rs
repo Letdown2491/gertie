@@ -15,6 +15,8 @@ USAGE:
                                      and the session is saved
     gertie doctor                    check the setup: config, endpoint,
                                      key resolution, MCP, sessions
+    gertie doctor --check-updates    also ask GitHub for the newest release
+                                     (the one opt-in network call)
 
 OPTIONS:
     --config <PATH>    config file (default: the standard config dir)
@@ -39,9 +41,13 @@ pub enum Command {
     },
     /// The setup diagnostic. `clean_worktrees` applies the worktree
     /// cleanup policy (otherwise the same sweep is report-only).
+    /// `check_updates` asks GitHub's releases API for the newest tag
+    /// (opt-in: the only network call gertie makes outside your
+    /// endpoints, and only when you ask for it).
     Doctor {
         config: Option<PathBuf>,
         clean_worktrees: bool,
+        check_updates: bool,
     },
     /// Print usage and exit 0.
     Help,
@@ -60,6 +66,7 @@ pub fn parse(arguments: &[String]) -> Result<Command, UsageError> {
     let mut run = false;
     let mut doctor = false;
     let mut clean_worktrees = false;
+    let mut check_updates = false;
 
     let mut index = 0;
     while index < arguments.len() {
@@ -69,6 +76,7 @@ pub fn parse(arguments: &[String]) -> Result<Command, UsageError> {
             "-V" | "--version" => return Ok(Command::Version),
             "-y" | "--yes" => yes = true,
             "--clean-worktrees" if !run => clean_worktrees = true,
+            "--check-updates" if !run => check_updates = true,
             "doctor" if positional.is_empty() && !run && !doctor => doctor = true,
             "--config" => {
                 index += 1;
@@ -103,6 +111,7 @@ pub fn parse(arguments: &[String]) -> Result<Command, UsageError> {
         return Ok(Command::Doctor {
             config,
             clean_worktrees,
+            check_updates,
         });
     }
 
@@ -216,7 +225,8 @@ mod tests {
             command,
             Command::Doctor {
                 config: None,
-                clean_worktrees: false
+                clean_worktrees: false,
+                check_updates: false
             }
         );
         let command = parse_arguments(&["doctor", "--config", "/tmp/x.toml"]).unwrap();
@@ -224,7 +234,8 @@ mod tests {
             command,
             Command::Doctor {
                 config: Some("/tmp/x.toml".into()),
-                clean_worktrees: false
+                clean_worktrees: false,
+                check_updates: false
             }
         );
         let command = parse_arguments(&["doctor", "--clean-worktrees"]).unwrap();
@@ -232,7 +243,8 @@ mod tests {
             command,
             Command::Doctor {
                 config: None,
-                clean_worktrees: true
+                clean_worktrees: true,
+                check_updates: false
             }
         );
     }

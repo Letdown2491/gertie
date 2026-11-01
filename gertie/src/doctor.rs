@@ -1,10 +1,68 @@
 //! `gertie doctor`, the first-run diagnostic. Prints what gertie
 //! sees: where the config is, which endpoint and key resolved (and
 //! from where), MCP servers, the session ledger. Exit 0 means ready.
+//! With `--check-updates`, one opt-in call to GitHub's releases API
+//! names the newest tag; that is the only network traffic gertie
+//! makes outside the endpoints you configured, and only because you
+//! asked.
 
 use std::path::{Path, PathBuf};
 
-pub fn run(config_override: Option<PathBuf>, clean_worktrees: bool) -> i32 {
+/// The newest release tag on GitHub, or the reason there is no
+/// answer. Opt-in by construction: only `doctor --check-updates`
+/// calls this. A short timeout (three seconds: a check that hangs is
+/// worse than no check) and every failure degrades to the reason
+/// string, because an update check must never become a doctor
+/// failure; the rest of the report stands on its own.
+fn latest_release() -> Result<String, String> {
+    let response = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(3))
+        .build()
+        .map_err(|error| error.to_string())?
+        .get("https://api.github.com/repos/Letdown2491/gertie/releases/latest")
+        .header("User-Agent", "gertie-doctor")
+        .send()
+        .map_err(|error| error.to_string())?;
+    if !response.status().is_success() {
+        return Err(format!("HTTP {}", response.status()));
+    }
+    let value: serde_json::Value = response.json().map_err(|error| error.to_string())?;
+    value["tag_name"]
+        .as_str()
+        .map(str::to_string)
+        .ok_or_else(|| "no tag_name in the response".into())
+}
+
+/// Semver-aware comparison for tags shaped `v1.2.3` (or bare
+/// `1.2.3`): newer than `current`? Non-numeric components compare as
+/// equal (pre-release tags like `v1.0.0-rc1` read as not-newer, the
+/// conservative answer for a doctor line).
+fn is_newer(tag: &str, current: &str) -> bool {
+    fn strip(t: &str) -> &str {
+        t.trim_start_matches('v')
+    }
+    let (tag, current) = (strip(tag), strip(current));
+    let parse = |t: &str| -> Vec<u64> {
+        t.split('.')
+            .map(|part| part.parse::<u64>().unwrap_or(0))
+            .collect()
+    };
+    let (tag, current) = (parse(tag), parse(current));
+    for index in 0..3 {
+        let a = tag.get(index).copied().unwrap_or(0);
+        let b = current.get(index).copied().unwrap_or(0);
+        if a != b {
+            return a > b;
+        }
+    }
+    false
+}
+
+pub fn run(
+    config_override: Option<PathBuf>,
+    clean_worktrees: bool,
+    check_updates: bool,
+) -> i32 {
     println!("gertie {}", crate::cli::VERSION);
     println!();
 
@@ -270,6 +328,24 @@ pub fn run(config_override: Option<PathBuf>, clean_worktrees: bool) -> i32 {
         Err(error) => {
             println!("worktrees   (not evaluated: {error})");
         }
+    }
+
+    // The update check: opt-in (`--check-updates`), the only network
+    // call gertie makes outside your endpoints. Failure is a line,
+    // never a doctor failure: the rest of the report stands alone.
+    if check_updates {
+        match latest_release() {
+            Ok(tag) if is_newer(&tag, crate::cli::VERSION) => {
+                println!(
+                    "update      ✗ {} is newer than the installed {} (rebuild or reinstall)",
+                    tag,
+                    crate::cli::VERSION
+                );
+            }
+            Ok(tag) => println!("update      ✓ {tag} is the latest, this build is current"),
+            Err(reason) => println!("update      (no answer: {reason})"),
+        }
+        println!();
     }
 
     println!();

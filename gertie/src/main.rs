@@ -12,7 +12,8 @@ fn main() {
         Ok(gertie::cli::Command::Doctor {
             config,
             clean_worktrees,
-        }) => std::process::exit(gertie::doctor::run(config, clean_worktrees)),
+            check_updates,
+        }) => std::process::exit(gertie::doctor::run(config, clean_worktrees, check_updates)),
         Err(error) => {
             eprintln!("error: {}\n\n{}", error.0, gertie::cli::usage());
             std::process::exit(2);
