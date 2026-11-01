@@ -2126,6 +2126,120 @@ fn the_quiet_gauge_holds_its_tongue_while_an_approval_waits() {
     );
 }
 
+/// The activity row holds through the run itself. The old condition
+/// gated it on a thinking flag that any running tool cleared, so the
+/// row went dark exactly while a tool or worker executed, and a
+/// worker's steps rendered nowhere. Now the row yields only to the
+/// human's turn: up while a tool runs (the run's total riding the
+/// line), retired when the turn ends.
+#[test]
+fn the_activity_row_holds_while_a_tool_runs() {
+    let scenarios = tempfile::tempdir().expect("scenario dir");
+    std::fs::write(
+        scenarios.path().join("park.toml"),
+        "[[steps]]\ntext = ''\n\
+         [[steps.tool_calls]]\nname = 'park'\narguments = '{}'\n\
+         [[steps]]\ntext = ''\n",
+    )
+    .expect("scenario file");
+    let endpoint = gertie_providers::Endpoint {
+        name: "replay".into(),
+        base_url: scenarios.path().to_string_lossy().into_owned(),
+        model: "park".into(),
+        api_key: None,
+        context_window: None,
+        wire: gertie_providers::Wire::Replay,
+    };
+    let provider = Arc::new(
+        gertie_providers::AnyProvider::with_endpoints(vec![endpoint]).expect("replay provider"),
+    );
+    let store = Arc::new(SessionStore::open(Path::new(":memory:")).expect("memory store"));
+    let (release, park) = tokio::sync::oneshot::channel::<()>();
+    let mut fixture = fixture_built(
+        store,
+        None,
+        None,
+        None,
+        Some(provider),
+        None,
+        vec![Arc::new(ParkTool {
+            park: std::sync::Mutex::new(Some(park)),
+        })],
+        None,
+        None,
+    );
+    fixture.hold = vec![scenarios];
+
+    fixture.act(|window, cx| {
+        window.input("go", cx);
+        window.press("enter", cx);
+    });
+    pump(&mut fixture, 30);
+
+    // The tool is parked mid-run: no ask is pending, so the row must
+    // be up, and the line carries the run's total.
+    let view = fixture.view.clone();
+    let (row, line) = fixture.cx.update(|cx| {
+        let view = view.upgrade().expect("view alive").read(cx);
+        (
+            view.show_activity_row_for_test(),
+            view.activity_line_for_test(),
+        )
+    });
+    assert!(row, "the row holds while the tool runs");
+    assert!(
+        line.contains(" · run "),
+        "the run total rides the line: {line}"
+    );
+
+    // Released, the run ends, the row retires with the turn.
+    drop(release);
+    pump(&mut fixture, 30);
+    let row = fixture.cx.update(|cx| {
+        fixture
+            .view
+            .upgrade()
+            .expect("view alive")
+            .read(cx)
+            .show_activity_row_for_test()
+    });
+    assert!(!row, "the row retires when the run is over");
+}
+
+/// A read-only tool that parks until the test releases it: the rig
+/// for "a tool is executing right now" with no pending ask.
+struct ParkTool {
+    park: std::sync::Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
+}
+
+impl gertie_core::Tool for ParkTool {
+    fn name(&self) -> &'static str {
+        "park"
+    }
+
+    fn description(&self) -> String {
+        "test double: parks until the test releases it".into()
+    }
+
+    fn parameters(&self) -> serde_json::Value {
+        serde_json::json!({"type": "object", "properties": {}})
+    }
+
+    fn run<'a>(
+        &'a self,
+        _arguments: &'a str,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = gertie_core::ToolResult> + Send + 'a>>
+    {
+        let park = self.park.lock().expect("park").take();
+        Box::pin(async move {
+            if let Some(park) = park {
+                let _ = park.await;
+            }
+            Ok("released".into())
+        })
+    }
+}
+
 /// The §2.4 pin: ✕ deletes without a "sure?" step, the row leaves
 /// every list at once and the undo toast is the speed bump. The store
 /// row survives the five-second window; when it closes, the purge task

@@ -386,11 +386,6 @@ pub struct ChatView {
     /// placeholder swaps from windowless async contexts (turn start
     /// and end both live inside the turn driver's spawn).
     window_handle: AnyWindowHandle,
-    /// True while the turn is alive but nothing visible is happening,
-    /// the request is in flight or the model is chewing on tool results.
-    /// Drives the in-transcript "Thinking…" row: the header status alone
-    /// was too easy to miss, and a quiet transcript reads as a hang.
-    thinking: bool,
     /// Session token totals from the provider's usage events, persisted
     /// per session, so a resumed chat shows what it spent before too.
     usage: (u64, u64, u64),
@@ -793,7 +788,6 @@ impl ChatView {
             active_worker_call: None,
             before_contents: std::collections::HashMap::new(),
             window_handle: window.window_handle(),
-            thinking: false,
             usage: session_usage,
             total_usage,
             context_used,
@@ -1116,6 +1110,13 @@ impl ChatView {
         self.activity_line()
     }
 
+    /// Whether the activity row renders right now, for tests: the pin
+    /// is that it holds through the run itself, a tool executing, a
+    /// worker's steps, and yields only when the human's turn.
+    pub fn show_activity_row_for_test(&self) -> bool {
+        self.show_activity_row()
+    }
+
     /// A tool card's cached diff counts, for tests: the (adds, removes)
     /// the face computed for the card at turn `index`. What a reloaded
     /// write card's diff is *of* is only visible here.
@@ -1337,7 +1338,6 @@ impl ChatView {
         self.pending_rewind = None;
         self.recall = None;
         self.streaming = false;
-        self.thinking = false;
         self.streaming_assistant = None;
         self.expanded_tools.clear();
         self.expanded_runs.clear();
@@ -1426,7 +1426,7 @@ impl ChatView {
     }
 
     /// The transcript's item count: one row per turn, plus the activity
-    /// row while the model is chewing and nothing else is on screen.
+    /// row while the run is live and nothing else is on screen.
     fn item_count(&self) -> usize {
         self.turns.len() + usize::from(self.show_activity_row())
     }
@@ -1477,11 +1477,16 @@ impl ChatView {
         })
     }
 
-    /// Whether the "Thinking…" row belongs at the bottom right now: the
-    /// turn is alive, but no card, prompt, or streaming text is telling
-    /// the story, the exact gaps that used to read as a hang.
+    /// Whether the activity row belongs at the bottom right now: the
+    /// run is live, and no ask is waiting on the human (the ask card
+    /// and its "Waiting on you" line tell that story). The row renders
+    /// for the whole run, "Thinking…", a tool's running label, a
+    /// worker's steps, the done label: exactly the gaps that used to
+    /// read as a hang. Gating it on a thinking flag instead hid it
+    /// during every tool run, the run's most informative stretch;
+    /// the row now only yields when the human's turn to speak.
     fn show_activity_row(&self) -> bool {
-        self.streaming && self.thinking && !self.waiting_on_human()
+        self.streaming && !self.waiting_on_human()
     }
 
     /// The composer chip's click: the mode advances around the ring,
@@ -3583,7 +3588,6 @@ impl ChatView {
         // has not spoken this round), so the plain label until its
         // first words stream or a tool runs.
         self.set_activity("Thinking…");
-        self.thinking = true;
         self.steer_tx = Some(steer_tx);
         // The composer's ghost text names the steer/queue verbs while
         // the turn runs.
@@ -3737,7 +3741,6 @@ impl ChatView {
             let _ = this.update(cx, |this, cx| {
                 this.flush_stream(cx);
                 this.streaming = false;
-                this.thinking = false;
                 this.streaming_assistant = None;
                 // The run's clock closes here. A queued follow-up
                 // reopens it (accumulated); a plain completion leaves
@@ -3780,7 +3783,6 @@ impl ChatView {
     /// (and database row) on the first delta.
     fn on_delta(&mut self, delta: &str, cx: &mut Context<Self>) {
         self.set_activity("Writing a reply…");
-        self.thinking = false;
         let index = match self.streaming_assistant {
             Some(index) => index,
             None => {
@@ -3878,7 +3880,6 @@ impl ChatView {
             // progress handle and speaks them on the line.
             self.active_worker_call = Some(call.id.clone());
         }
-        self.thinking = false;
         self.flush_stream(cx);
         self.streaming_assistant = None;
         self.turns.push(Turn::Tool {
@@ -3916,7 +3917,6 @@ impl ChatView {
         {
             self.before_contents.insert(call.id.clone(), content);
         }
-        self.thinking = false;
         self.flush_stream(cx);
         self.streaming_assistant = None;
         self.turns.push(Turn::Tool {
@@ -3939,7 +3939,6 @@ impl ChatView {
         {
             self.before_contents.insert(call.id.clone(), content);
         }
-        self.thinking = false;
         self.flush_stream(cx);
         self.streaming_assistant = None;
         self.turns.push(Turn::Tool {
@@ -3966,9 +3965,9 @@ impl ChatView {
         // card's own words. The arguments ride the event (the loop
         // owns the call when it emits), so the label is always
         // specific, never the bare verb a transcript scrape degrades
-        // to when it misses. The model chewing on the result is the
-        // thinking row's job; the model's narration, when it comes,
-        // lives in the transcript where prose belongs.
+        // to when it misses. The row holds the done label while the
+        // model chews on the result; the model's narration, when it
+        // comes, lives in the transcript where prose belongs.
         self.set_activity(crate::tools_ui::action_label(name, arguments, false));
         if name.starts_with("agent_") {
             // The worker's run is over: its steps leave the progress
@@ -3976,7 +3975,6 @@ impl ChatView {
             self.active_worker_call = None;
             self.worker_progress.clear(call_id);
         }
-        self.thinking = true;
         // The card's clock retires with the card.
         self.tool_starts.remove(call_id);
         self.before_contents.remove(call_id);
@@ -4074,7 +4072,6 @@ impl ChatView {
     fn on_error(&mut self, message: &str, cx: &mut Context<Self>) {
         self.flush_stream(cx);
         self.set_activity("Something went wrong");
-        self.thinking = false;
         self.persist_stream_note(format!("[error] {message}"));
         self.list_state.reset(self.item_count());
         self.list_state.scroll_to_end();
@@ -4088,7 +4085,6 @@ impl ChatView {
     fn on_limited(&mut self, message: &str, cx: &mut Context<Self>) {
         self.flush_stream(cx);
         self.set_activity("Rate limited, pick it up when you're ready");
-        self.thinking = false;
         // A fresh limit is a fresh decision: no stale snooze from the
         // round before survives it.
         self.snoozed = None;
@@ -4110,7 +4106,6 @@ impl ChatView {
     fn on_budgeted(&mut self, message: &str, cx: &mut Context<Self>) {
         self.flush_stream(cx);
         self.set_activity("Round budget reached, pick it up when you're ready");
-        self.thinking = false;
         self.snoozed = None;
         self.persist_stream_note(format!("[paused] {message}"));
         if let Some(session_id) = self.session_id {
@@ -5153,16 +5148,22 @@ impl ChatView {
     }
 
     /// The status line's words, spinner aside: the action, the step's
-    /// own elapsed clock, and, past [`QUIET_AFTER`] of no loop events,
-    /// the quiet gauge. The clock is the step's, not the run's: it
-    /// starts over when the activity changes, so the number answers
-    /// "how long has THIS been going on", "is it stuck or just slow",
-    /// the question the words alone answer too late. The run's total
-    /// lives in the footer. Quiet stays silent while an approval card
+    /// own elapsed clock, the run's total while a run is live, and,
+    /// past [`QUIET_AFTER`] of no loop events, the quiet gauge. The
+    /// step clock starts over when the activity changes, so its number
+    /// answers "how long has THIS been going on", "is it stuck or just
+    /// slow", the question the words alone answer too late. The run
+    /// total accumulates across the whole run (pauses included, the
+    /// wait is part of the work) and rides the same line, so the
+    /// conversation carries the whole run's time where the user is
+    /// actually looking. Quiet stays silent while an approval card
     /// waits on the human: that silence is the human's, and the ask's
     /// own clock tells it.
     fn activity_line(&self) -> String {
         let mut line = format!("{} · {}", self.activity, clock(self.activity_at.elapsed()));
+        if self.run_started.is_some() {
+            line.push_str(&format!(" · run {}", clock(self.run_elapsed_total())));
+        }
         let quiet = self.last_event_at.elapsed();
         if quiet >= QUIET_AFTER && !self.waiting_on_human() {
             line.push_str(&format!(" · quiet {}", clock(quiet)));
@@ -5255,14 +5256,15 @@ impl ChatView {
             .into_any_element()
     }
 
-    /// The footer line under the composer. Left: this session's spend,
-    /// the run's total while a run is live, and the live context
-    /// gauge, `12.3k (23%)`, so the distance to the compaction
-    /// threshold is visible before it happens. Right: what you're
-    /// talking to, `gertie · ppq · glm-5.3-flash`, or, when the chat
-    /// is blocked on you, that fact in warning color. Quiet until
-    /// there is something to say.
-    fn render_token_footer(&self, status: Option<&str>, cx: &Context<Self>) -> AnyElement {
+    /// The footer line under the composer. Left: this session's spend
+    /// and the live context gauge, `12.3k (23%)`, so the distance to
+    /// the compaction threshold is visible before it happens. Right:
+    /// what you're talking to, `gertie · ppq · glm-5.3-flash`. At
+    /// rest, the identity line leads with the folder the agent's
+    /// tools run in. Quiet until there is something to say; the run's
+    /// clocks (step and total) live in the conversation's activity
+    /// row, the ledger's slow counts live here.
+    fn render_token_footer(&self, cx: &Context<Self>) -> AnyElement {
         let parts = self.footer_parts();
         let near_compaction = self
             .context_window
@@ -5328,18 +5330,6 @@ impl ChatView {
         if let Some(memory) = memory {
             ledger = ledger.child(memory);
         }
-        // The run's total, the one clock that answers "how long has
-        // this piece of work taken me" (pauses included, the wait is
-        // part of the work): it lives here, where the counts live,
-        // not taped to a status line that changes every few seconds.
-        if self.run_started.is_some() {
-            ledger = ledger.child(
-                div()
-                    .text_size(px(11.))
-                    .text_color(cx.theme().muted_foreground)
-                    .child(format!("run {}", clock(self.run_elapsed_total()))),
-            );
-        }
         if !parts.is_empty() {
             // The ledger line in two groups with a real gap: what the
             // work costs (spend, cache share) reads separately from
@@ -5378,51 +5368,39 @@ impl ChatView {
         let ident = div()
             .text_size(px(11.))
             .truncate()
-            .text_color(match status {
-                Some(_) => cx.theme().warning_foreground,
-                None => cx.theme().muted_foreground,
-            })
-            .child(match status {
-                // The one status that earns a place outside the
-                // transcript: the chat is blocked on you. Everything
-                // else, thinking, writing, tool work, lives in the
-                // transcript, where the user is looking anyway. At
-                // rest, the identity line leads with the folder the
+            .text_color(cx.theme().muted_foreground)
+            .child({
+                // At rest, the identity line leads with the folder the
                 // agent's tools run in, "which project am I talking
-                // about" is answered without opening anything.
-                Some(status) => div().child(status.to_string()),
-                None => {
-                    // The word is the switch: click it, pick a folder,
-                    // the agent moves. A worktree tab's word stays
-                    // text, its root is the checkout it was opened
-                    // for, and the move would break the tab's
-                    // branch-rename promise.
-                    let word: AnyElement = if self.branch_naming.is_none() {
-                        div()
-                            .id("workspace-word")
-                            .cursor_pointer()
-                            .hover(|style| style.text_color(cx.theme().foreground))
-                            .tooltip(|window, cx| {
-                                Tooltip::new("Workspace, click to move the agent to another folder")
-                                    .build(window, cx)
-                            })
-                            .on_click(cx.listener(|this, _, _, cx| this.switch_workspace(cx)))
-                            .child(tildify(&self.workspace_root))
-                            .test_support()
-                            .into_any_element()
-                    } else {
-                        div()
-                            .child(tildify(&self.workspace_root))
-                            .into_any_element()
-                    };
-                    h_flex()
-                        .min_w_0()
-                        .gap_2()
-                        .justify_end()
-                        .child(word)
-                        .child("·")
-                        .child(div().truncate().child(self.endpoint_label.clone()))
-                }
+                // about" is answered without opening anything. Nothing
+                // else lives here: the run's clocks are in the
+                // conversation's activity row, an ask's card is in the
+                // transcript where the approve button is.
+                let word: AnyElement = if self.branch_naming.is_none() {
+                    div()
+                        .id("workspace-word")
+                        .cursor_pointer()
+                        .hover(|style| style.text_color(cx.theme().foreground))
+                        .tooltip(|window, cx| {
+                            Tooltip::new("Workspace, click to move the agent to another folder")
+                                .build(window, cx)
+                        })
+                        .on_click(cx.listener(|this, _, _, cx| this.switch_workspace(cx)))
+                        .child(tildify(&self.workspace_root))
+                        .test_support()
+                        .into_any_element()
+                } else {
+                    div()
+                        .child(tildify(&self.workspace_root))
+                        .into_any_element()
+                };
+                h_flex()
+                    .min_w_0()
+                    .gap_2()
+                    .justify_end()
+                    .child(word)
+                    .child("·")
+                    .child(div().truncate().child(self.endpoint_label.clone()))
             });
         h_flex()
             .justify_between()
@@ -6371,20 +6349,6 @@ impl Render for ChatView {
         // The sidebar's session snapshot, same contract: one clone
         // feeds the rows, the fold's guard, and its count.
         let visible = self.visible_sessions();
-        let pending = self.turns.iter().any(|turn| {
-            matches!(
-                turn,
-                Turn::Tool {
-                    status: ToolStatus::Pending(_),
-                    ..
-                }
-            )
-        });
-        let status = if pending {
-            Some("approval needed")
-        } else {
-            None
-        };
 
         h_flex()
             .size_full()
@@ -7280,7 +7244,7 @@ impl Render for ChatView {
                                                 }),
                                             )),
                                     )
-                                    .child(self.render_token_footer(status, cx)),
+                                    .child(self.render_token_footer(cx)),
                             ),
                     )
                     .when(self.panel == Panel::Settings, |row| {
