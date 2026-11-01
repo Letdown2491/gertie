@@ -37,7 +37,7 @@ assets = [
 conflicts = "io.github.Letdown2491.gertie"
 provides = "io.github.Letdown2491.gertie"
 
-[package.metadata.cargo-generate-rpm]
+[package.metadata.generate-rpm]
 maintainer = "martin <github.penknife946@passmail.net>"
 license = "MIT"
 summary = "A fast, native coding-agent harness"

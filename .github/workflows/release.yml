@@ -117,16 +117,16 @@ jobs:
         # installation, so the Platform and Sdk install from flathub
         # first (the runner has none).
         run: |
-          flatpak remote-add --if-not-exists flathub \
+          flatpak remote-add --user --if-not-exists flathub \
             https://flathub.org/repo/flathub.flatpakrepo
-          flatpak install -y --no-deps flathub \
+          flatpak install --user -y --no-deps flathub \
             org.freedesktop.Platform/${{ matrix.arch == 'linux-x86_64' && 'x86_64' || 'aarch64' }}/25.08 \
             org.freedesktop.Sdk/${{ matrix.arch == 'linux-x86_64' && 'x86_64' || 'aarch64' }}/25.08
           mkdir -p bundles repo
-          flatpak build-init repo io.github.Letdown2491.gertie \
+          flatpak build-init --user repo io.github.Letdown2491.gertie \
             org.freedesktop.Sdk org.freedesktop.Platform 25.08
-          flatpak build-export --update-rofiles-fallback repo self/tree
-          flatpak build-bundle --runtime repo \
+          flatpak build-export --user --update-rofiles-fallback repo self/tree
+          flatpak build-bundle --user --runtime repo \
             "bundles/gertie-${GITHUB_REF_NAME#v}-linux-${{ matrix.arch }}.flatpak" \
             io.github.Letdown2491.gertie stable
 
