@@ -889,11 +889,13 @@ impl ChatView {
             let percent = self.usage.2 * 100 / self.usage.0;
             parts.push(format!("cached {percent}%"));
         }
+        // The context gauge names itself: "119k (11%)" answered
+        // "11% of what?" for nobody. With the label it reads whole.
         let near_compaction = self
             .context_window
             .is_some_and(|window| self.context_used * 100 >= window.max(1) * 75);
         if self.context_used > 0 {
-            let mut gauge = human_tokens(self.context_used);
+            let mut gauge = format!("ctx {}", human_tokens(self.context_used));
             if let Some(window) = self.context_window {
                 let percent = self.context_used.min(window) * 100 / window.max(1);
                 gauge = format!("{gauge} ({percent}%)");
@@ -5198,11 +5200,18 @@ impl ChatView {
         // plus a confirm card (M7 PR 1). The tooltip names the
         // current mode's meaning, read before the div builds.
         let mode_text = mode_tooltip(self.mode);
+        // The posture's color is its weight: quiet gray for the modes
+        // where gertie asks, warning for the mode that removes every
+        // guardrail. The loudest state must not render like the rest.
+        let mode_color = match self.mode {
+            PermissionMode::FullAccess => cx.theme().warning,
+            _ => cx.theme().muted_foreground,
+        };
         let mode = div()
             .id("mode-chip")
             .cursor_pointer()
             .text_size(px(11.))
-            .text_color(cx.theme().muted_foreground)
+            .text_color(mode_color)
             .hover(|style| style.text_color(cx.theme().foreground))
             .tooltip(move |window, cx| Tooltip::new(mode_text).build(window, cx))
             .on_click(cx.listener(|this, _, _, cx| this.cycle_mode(cx)))
@@ -6181,7 +6190,7 @@ impl Render for ChatView {
                             })
                             .child(
                                 Button::new("search-history")
-                                    .label("search")
+                                    .label("Search (Ctrl+K)")
                                     .small()
                                     .ghost()
                                     .w_full()
@@ -6192,7 +6201,7 @@ impl Render for ChatView {
                             )
                             .child(
                                 Button::new("toggle-settings")
-                                    .label("settings")
+                                    .label("Settings")
                                     .small()
                                     .ghost()
                                     .w_full()
@@ -7243,7 +7252,9 @@ fn slash_matches(input: &str, templates: &[gertie_tools::templates::Template]) -
 /// `1234` → "1.2k", token counts stay scannable: one decimal below
 /// 100k (`12.3k`), whole k above (`123k`).
 fn human_tokens(count: u64) -> String {
-    if count >= 100_000 {
+    if count >= 1_000_000 {
+        format!("{:.1}M", count as f64 / 1_000_000.)
+    } else if count >= 100_000 {
         format!("{:.0}k", count as f64 / 1000.)
     } else if count >= 1_000 {
         format!("{:.1}k", count as f64 / 1000.)
