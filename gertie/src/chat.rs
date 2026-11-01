@@ -368,6 +368,11 @@ pub struct ChatView {
     /// outlive several silent minutes; its card's "running · 2m 05s"
     /// is its own time, not the turn's.
     tool_starts: std::collections::HashMap<String, Instant>,
+    /// A write card's before-content, keyed by wire call id: what the
+    /// file held when the call arrived, captured before anything can
+    /// run. The diff face diffs the arguments against it, exact at
+    /// whatever moment the card renders this session.
+    before_contents: std::collections::HashMap<String, String>,
     /// This chat's window, captured at construction, the composer's
     /// placeholder swaps from windowless async contexts (turn start
     /// and end both live inside the turn driver's spawn).
@@ -775,6 +780,7 @@ impl ChatView {
             run_elapsed: std::time::Duration::ZERO,
             run_started: None,
             tool_starts: std::collections::HashMap::new(),
+            before_contents: std::collections::HashMap::new(),
             window_handle: window.window_handle(),
             thinking: false,
             usage: session_usage,
@@ -1408,10 +1414,11 @@ impl ChatView {
     /// config"), so the status line quotes the latest narration line
     /// instead of the empty "Thinking…". Most truthful label possible:
     /// it is literally the agent's stated intent, and it updates as the
-    /// agent updates. Falls back to a plain "Working…" when the model
-    /// narrated nothing this round. The last assistant turn only:
-    /// narration is *current* intent, an older turn's is history.
-    fn narration_status(&self) -> String {
+    /// agent updates. The last assistant turn only: narration is
+    /// *current* intent, an older turn's is history. None when the
+    /// model narrated nothing this round; the caller picks the
+    /// fallback, because the honest fallback differs by moment.
+    fn narrated_intent(&self) -> Option<String> {
         let narrated = self
             .turns
             .iter()
@@ -1431,16 +1438,13 @@ impl ChatView {
                     .find(|line| !line.is_empty())
                     .map(str::to_string)
             });
-        match narrated {
-            Some(line) => {
-                let mut short: String = line.chars().take(64).collect();
-                if line.chars().count() > 64 {
-                    short.push('…');
-                }
-                format!("{}…", short.trim_end_matches(['.', '…']))
+        narrated.map(|line| {
+            let mut short: String = line.chars().take(64).collect();
+            if line.chars().count() > 64 {
+                short.push('…');
             }
-            None => "Working…".into(),
-        }
+            format!("{}…", short.trim_end_matches(['.', '…']))
+        })
     }
 
     /// The status line's text, with its clocks: every change restarts
@@ -3848,6 +3852,14 @@ impl ChatView {
             &call.arguments,
             true,
         ));
+        // The write's before-content: captured here, before the tool
+        // can run, so the card's diff is the real change however many
+        // frames later it renders.
+        if call.name == "write_file"
+            && let Some(content) = self.current_file_content(&call)
+        {
+            self.before_contents.insert(call.id.clone(), content);
+        }
         // The card's clock starts here: read-only tools never prompt,
         // so their whole visible life is this card.
         self.tool_starts.insert(call.id.clone(), Instant::now());
@@ -3865,9 +3877,24 @@ impl ChatView {
     }
 
     /// A mutating tool wants to run: park the request id on the card
-    /// until the human answers through the broker.
+    /// until the human answers through the broker. The status names
+    /// what it waits on (a pending card must never read as a stall),
+    /// and the write's before-content is captured now, the file
+    /// untouched, so the review diff is the real change.
     fn on_tool_requested(&mut self, id: u64, call: ToolCall, cx: &mut Context<Self>) {
-        self.set_activity("Waiting for your approval…");
+        let label = crate::tools_ui::action_label(&call.name, &call.arguments, true);
+        if call.name == "ask_user" {
+            // The ask's card is the question itself; "waiting on you"
+            // on top would read "waiting on you: asking you".
+            self.set_activity(label);
+        } else {
+            self.set_activity(format!("Waiting on you: {label}"));
+        }
+        if call.name == "write_file"
+            && let Some(content) = self.current_file_content(&call)
+        {
+            self.before_contents.insert(call.id.clone(), content);
+        }
         self.thinking = false;
         self.flush_stream(cx);
         self.streaming_assistant = None;
@@ -3884,7 +3911,13 @@ impl ChatView {
     /// A subagent's ask, arriving via the broker subscription, same
     /// card, labeled.
     fn on_worker_ask(&mut self, id: u64, call: ToolCall, cx: &mut Context<Self>) {
-        self.set_activity("A worker needs your approval…");
+        let label = crate::tools_ui::action_label(&call.name, &call.arguments, true);
+        self.set_activity(format!("A worker needs you: {label}"));
+        if call.name == "write_file"
+            && let Some(content) = self.current_file_content(&call)
+        {
+            self.before_contents.insert(call.id.clone(), content);
+        }
         self.thinking = false;
         self.flush_stream(cx);
         self.streaming_assistant = None;
@@ -3903,13 +3936,9 @@ impl ChatView {
     fn on_tool_result(&mut self, call_id: &str, name: &str, result: &str, cx: &mut Context<Self>) {
         // The tool is done, so the model is chewing on the result:
         // the status quotes the agent's own latest narration (it may
-        // have stated what comes next) instead of an empty "Thinking".
-        self.set_activity(self.narration_status());
-        self.thinking = true;
-        // The card's clock retires with the card.
-        self.tool_starts.remove(call_id);
-        self.streaming_assistant = None;
-
+        // have stated what comes next), and names the finished tool
+        // when nothing was narrated, the timer alone is a poor answer
+        // to "what is it doing now".
         let arguments = self
             .turns
             .iter()
@@ -3918,6 +3947,17 @@ impl ChatView {
                 _ => None,
             })
             .unwrap_or_default();
+        self.set_activity(self.narrated_intent().unwrap_or_else(|| {
+            format!(
+                "{}, reading the result…",
+                crate::tools_ui::action_label(name, &arguments, false)
+            )
+        }));
+        self.thinking = true;
+        // The card's clock retires with the card.
+        self.tool_starts.remove(call_id);
+        self.before_contents.remove(call_id);
+        self.streaming_assistant = None;
 
         // Mark the card done, remembering which one it is, the
         // persisted row's id lands on it below, so a palette hit on
@@ -5513,10 +5553,20 @@ impl ChatView {
         // elements rebuild per frame from the memoized data.
         let (label, diff) = {
             let mut cache = self.tool_face.borrow_mut();
-            let face = cache.entry(index).or_insert_with(|| ToolFace {
-                label_running: crate::tools_ui::action_label(&call.name, &call.arguments, true),
-                label_done: crate::tools_ui::action_label(&call.name, &call.arguments, false),
-                diff: diff_data(call),
+            let face = cache.entry(index).or_insert_with(|| {
+                // The write's before-content: the pre-run capture when
+                // the session saw the request land, else the file as
+                // it sits now (a reloaded card's best effort).
+                let before = self
+                    .before_contents
+                    .get(&call.id)
+                    .cloned()
+                    .or_else(|| self.current_file_content(call));
+                ToolFace {
+                    label_running: crate::tools_ui::action_label(&call.name, &call.arguments, true),
+                    label_done: crate::tools_ui::action_label(&call.name, &call.arguments, false),
+                    diff: diff_data(call, before.as_deref()),
+                }
             });
             (
                 if running {
@@ -5861,9 +5911,6 @@ impl ChatView {
     }
 }
 
-/// For file-mutating calls, renders the change as +/- lines: edit shows
-/// old in red and new in green; write shows the content as additions.
-/// Returns None for tools without a natural diff.
 /// Where a stored tool path lives on disk: absolute as-is, relative
 /// against the workspace root, the same rule the loop's checkpoint
 /// hook applies before snapshotting.
@@ -5872,6 +5919,23 @@ fn resolve_tool_path(root: &std::path::Path, path: &std::path::Path) -> std::pat
         path.to_path_buf()
     } else {
         root.join(path)
+    }
+}
+
+impl ChatView {
+    /// What the workspace file holds right now, for a write card's
+    /// before-content. The exact source is the capture taken when the
+    /// call arrived (`before_contents`); this is the fallback for a
+    /// card rebuilt after a reload, where the file has usually moved
+    /// on and the diff degrades honestly to nothing.
+    fn current_file_content(&self, call: &ToolCall) -> Option<String> {
+        if call.name != "write_file" {
+            return None;
+        }
+        let value: serde_json::Value = serde_json::from_str(&call.arguments).ok()?;
+        let path = value.get("path")?.as_str()?;
+        let resolved = resolve_tool_path(&self.workspace_root, std::path::Path::new(path));
+        std::fs::read_to_string(resolved).ok()
     }
 }
 
@@ -5908,58 +5972,156 @@ struct AskFace {
     allow_custom: bool,
 }
 
-/// The diff's data, (added, removed) lines, capped, parsed from the
-/// call's arguments. Pure: the card cache holds this; element
-/// construction (`diff_lines`) rebuilds per frame from it.
-fn diff_data(call: &ToolCall) -> Option<(Vec<String>, Vec<String>)> {
+/// Context lines a card's diff keeps on each side of a change when it
+/// trims long stretches of unchanged lines.
+const HUNK_CONTEXT: usize = 3;
+
+/// One display row of a card's diff: a line, or an elision where a run
+/// of unchanged lines was trimmed.
+#[derive(Debug)]
+enum DiffRow<'a> {
+    Line(&'a crate::diff::Line),
+    Elided,
+}
+
+/// Trims runs of unchanged lines to [`HUNK_CONTEXT`] beside each
+/// change. Every added or removed line stays; only context collapses,
+/// and the counts above the diff were whole before this ran, so the
+/// trim costs nothing honest.
+fn hunk_rows(lines: &[crate::diff::Line]) -> Vec<DiffRow<'_>> {
+    let kept: Vec<bool> = lines
+        .iter()
+        .enumerate()
+        .map(|(index, line)| {
+            if !matches!(line, crate::diff::Line::Same(_)) {
+                return true;
+            }
+            let window = &lines
+                [index.saturating_sub(HUNK_CONTEXT)..(index + HUNK_CONTEXT + 1).min(lines.len())];
+            window
+                .iter()
+                .any(|neighbor| !matches!(neighbor, crate::diff::Line::Same(_)))
+        })
+        .collect();
+    let mut rows = Vec::new();
+    let mut eliding = false;
+    for (index, line) in lines.iter().enumerate() {
+        if kept[index] {
+            eliding = false;
+            rows.push(DiffRow::Line(line));
+        } else if !eliding {
+            eliding = true;
+            rows.push(DiffRow::Elided);
+        }
+    }
+    rows
+}
+
+/// The diff's data, a real line patch: longest-common-subsequence
+/// with context, capped, the counts whole regardless of the cap.
+/// `before` is the file's pre-write content for write cards (edit
+/// cards carry both sides in their arguments). Pure: the card cache
+/// holds this; element construction (`diff_element`) rebuilds per
+/// frame from it.
+fn diff_data(call: &ToolCall, before: Option<&str>) -> Option<crate::diff::Patch> {
     let value: serde_json::Value = serde_json::from_str(&call.arguments).ok()?;
-    let (add, remove): (Vec<String>, Vec<String>) = match call.name.as_str() {
+    match call.name.as_str() {
         "edit_file" => {
             let old = value.get("old_text")?.as_str()?;
             let new = value
                 .get("new_text")
                 .and_then(|text| text.as_str())
                 .unwrap_or("");
-            (
-                new.lines().take(24).map(str::to_string).collect(),
-                old.lines().take(24).map(str::to_string).collect(),
-            )
+            Some(crate::diff::lines(old, new))
         }
-        "write_file" => {
-            let content = value.get("content")?.as_str()?;
-            (
-                content.lines().take(24).map(str::to_string).collect(),
-                Vec::new(),
-            )
-        }
-        _ => return None,
-    };
-    Some((add, remove))
+        "write_file" => Some(crate::diff::lines(
+            before.unwrap_or(""),
+            value.get("content")?.as_str()?,
+        )),
+        _ => None,
+    }
 }
 
-fn diff_element(diff: &(Vec<String>, Vec<String>), cx: &App) -> AnyElement {
-    let (add, remove) = (&diff.0, &diff.1);
+/// The card's diff face, reading exactly like the turn-diff modal's
+/// rows (same marks, same colors, mono): the counts lead, the hunks
+/// follow with context trimmed around the changes, and a tail note
+/// names what the display cap dropped.
+fn diff_element(patch: &crate::diff::Patch, cx: &App) -> AnyElement {
     let mut container = v_flex()
         .rounded_md()
         .border_1()
         .border_color(cx.theme().border)
-        .text_size(px(12.))
+        .py_1()
         .overflow_hidden();
 
-    for line in remove {
-        container = container.child(
-            div()
-                .px_2()
-                .text_color(cx.theme().danger)
-                .child(format!("− {line}")),
-        );
+    // The counts lead: what changed, before any line of it.
+    container = container.child(
+        h_flex()
+            .px_2()
+            .gap_2()
+            .text_size(px(11.))
+            .child(
+                div()
+                    .text_color(cx.theme().success)
+                    .child(format!("+{}", patch.adds)),
+            )
+            .child(
+                div()
+                    .text_color(cx.theme().danger)
+                    .child(format!("\u{2212}{}", patch.removes)),
+            ),
+    );
+
+    if patch.adds + patch.removes == 0 {
+        return container
+            .child(
+                div()
+                    .px_2()
+                    .text_size(px(11.))
+                    .text_color(cx.theme().muted_foreground)
+                    .child("unchanged"),
+            )
+            .into_any_element();
     }
-    for line in add {
+
+    for row in hunk_rows(&patch.lines) {
+        let element = match row {
+            DiffRow::Elided => div()
+                .px_2()
+                .font_family(cx.theme().mono_font_family.clone())
+                .text_size(px(11.))
+                .text_color(cx.theme().muted_foreground)
+                .child("\u{22ef}")
+                .into_any_element(),
+            DiffRow::Line(line) => {
+                let (text, color) = match line {
+                    crate::diff::Line::Same(text) => {
+                        (format!("  {text}"), cx.theme().muted_foreground)
+                    }
+                    crate::diff::Line::Add(text) => (format!("+ {text}"), cx.theme().success),
+                    crate::diff::Line::Remove(text) => {
+                        (format!("\u{2212} {text}"), cx.theme().danger)
+                    }
+                };
+                div()
+                    .px_2()
+                    .font_family(cx.theme().mono_font_family.clone())
+                    .text_size(px(11.))
+                    .text_color(color)
+                    .child(text)
+                    .into_any_element()
+            }
+        };
+        container = container.child(element);
+    }
+
+    if patch.omitted > 0 {
         container = container.child(
             div()
                 .px_2()
-                .text_color(cx.theme().success)
-                .child(format!("+ {line}")),
+                .text_size(px(11.))
+                .text_color(cx.theme().muted_foreground)
+                .child(format!("\u{2026} {} more lines", patch.omitted)),
         );
     }
     container.into_any_element()
@@ -7341,7 +7503,7 @@ fn mention_matches(input: &str, root: &std::path::Path) -> Vec<MentionMatch> {
 struct ToolFace {
     label_running: String,
     label_done: String,
-    diff: Option<(Vec<String>, Vec<String>)>,
+    diff: Option<crate::diff::Patch>,
 }
 
 /// What the current composer text would complete to, for the popup and
@@ -7404,5 +7566,122 @@ fn human_tokens(count: u64) -> String {
         format!("{:.1}k", count as f64 / 1000.)
     } else {
         format!("{count}")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! The diff face's pure layer: what the arguments (and a captured
+    //! before-content) produce for a card to render. The rendering
+    //! itself is exercised by the fixture tests in chat_input.rs.
+
+    use super::*;
+    use crate::diff::Line;
+
+    fn kinds(patch: &crate::diff::Patch) -> Vec<&'static str> {
+        patch
+            .lines
+            .iter()
+            .map(|line| match line {
+                Line::Same(_) => " ",
+                Line::Add(_) => "+",
+                Line::Remove(_) => "-",
+            })
+            .collect()
+    }
+
+    #[test]
+    fn an_edit_face_diffs_old_against_new_with_context() {
+        let call = ToolCall {
+            id: "c1".into(),
+            name: "edit_file".into(),
+            arguments: r#"{"path": "f.txt", "old_text": "a\nb\nc\n", "new_text": "a\nx\nc\n"}"#
+                .into(),
+        };
+        let patch = diff_data(&call, None).expect("edit face");
+        assert_eq!(kinds(&patch), vec![" ", "-", "+", " "]);
+        assert_eq!((patch.adds, patch.removes), (1, 1));
+        assert_eq!(patch.omitted, 0);
+    }
+
+    #[test]
+    fn a_write_face_diffs_against_the_captured_before() {
+        let call = ToolCall {
+            id: "c2".into(),
+            name: "write_file".into(),
+            arguments: r#"{"path": "out.txt", "content": "one\ntwo\n"}"#.into(),
+        };
+        // The file held one line: the second is the whole change, told
+        // as a real diff, not a dump of the new content.
+        let patch = diff_data(&call, Some("one\n")).expect("write face");
+        assert_eq!(kinds(&patch), vec![" ", "+"]);
+        assert_eq!((patch.adds, patch.removes), (1, 0));
+        // No capture (a reloaded card): the honest fallback is all
+        // additions, the file may as well be new.
+        let patch = diff_data(&call, None).expect("write face");
+        assert_eq!(kinds(&patch), vec!["+", "+"]);
+        assert_eq!((patch.adds, patch.removes), (2, 0));
+    }
+
+    #[test]
+    fn tools_without_a_natural_diff_have_no_face() {
+        let call = ToolCall {
+            id: "c3".into(),
+            name: "bash".into(),
+            arguments: r#"{"command": "cargo test"}"#.into(),
+        };
+        assert!(diff_data(&call, None).is_none());
+    }
+
+    #[test]
+    fn hunk_trims_keep_context_beside_changes_and_elide_the_rest() {
+        // Nine unchanged lines, one change, nine unchanged: the trim
+        // keeps three lines of context on each side of the change and
+        // a single elision row for the rest.
+        let mut text = String::new();
+        text.push_str(&(1..=9).map(|i| format!("top {i}\n")).collect::<String>());
+        text.push_str("changed\n");
+        text.push_str(&(1..=9).map(|i| format!("end {i}\n")).collect::<String>());
+        let before = text.replace("changed\n", "old\n");
+        let call = ToolCall {
+            id: "c4".into(),
+            name: "write_file".into(),
+            arguments: serde_json::json!({"path": "f.txt", "content": text}).to_string(),
+        };
+        let patch = diff_data(&call, Some(&before)).expect("write face");
+        assert_eq!(
+            (patch.adds, patch.removes),
+            (1, 1),
+            "counts ignore the trim"
+        );
+        let rows = hunk_rows(&patch.lines);
+        let elided = rows
+            .iter()
+            .filter(|row| matches!(row, DiffRow::Elided))
+            .count();
+        assert_eq!(elided, 2, "one elision per side: {rows:?}");
+        let kept = rows
+            .iter()
+            .filter(|row| matches!(row, DiffRow::Line(_)))
+            .count();
+        assert_eq!(kept, 3 + 2 + 3, "context, the change's two rows, context");
+        // Every change survives the trim.
+        assert!(rows.iter().any(|row| matches!(
+            row,
+            DiffRow::Line(crate::diff::Line::Add(text)) if text == "changed"
+        )));
+    }
+
+    #[test]
+    fn an_unchanged_write_says_unchanged_not_a_file_dump() {
+        // Same content before and after: adds and removes are zero and
+        // the face has nothing to show, the render says "unchanged".
+        let call = ToolCall {
+            id: "c5".into(),
+            name: "write_file".into(),
+            arguments: r#"{"path": "f.txt", "content": "same\n"}"#.into(),
+        };
+        let patch = diff_data(&call, Some("same\n")).expect("write face");
+        assert_eq!((patch.adds, patch.removes), (0, 0));
     }
 }

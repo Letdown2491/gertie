@@ -99,6 +99,15 @@ pub fn action_label(name: &str, arguments: &str, running: bool) -> String {
                     format!("Loaded the `{skill}` skill"),
                 )
             }
+            "ask_user" => {
+                // The question is prose, the model's words sanitized at
+                // the loop's parse, so quotes not backticks.
+                let question = short(&field("question"), 60);
+                tense(
+                    format!("Asking you \u{201c}{question}\u{201d}"),
+                    format!("Asked you \u{201c}{question}\u{201d}"),
+                )
+            }
             other => {
                 let humanized = humanize_name(other);
                 tense(format!("Running {humanized}"), format!("Ran {humanized}"))
@@ -290,6 +299,25 @@ mod tests {
             action_label("web_search", r#"{"query": ""}"#, true),
             "Running web search…"
         );
+    }
+
+    #[test]
+    fn the_ask_label_carries_the_question() {
+        let args = r#"{"question": "Which database?", "options": ["postgres", "sqlite"]}"#;
+        assert_eq!(
+            action_label("ask_user", args, true),
+            "Asking you \u{201c}Which database?\u{201d}\u{2026}"
+        );
+        assert_eq!(
+            action_label("ask_user", args, false),
+            "Asked you \u{201c}Which database?\u{201d}"
+        );
+        // A long question whittles to one line like a command does.
+        let long =
+            r#"{"question": "pick one: aa bb cc dd ee ff gg hh ii jj kk ll mm nn oo pp qq rr ss"}"#;
+        let label = action_label("ask_user", long, true);
+        assert!(label.starts_with("Asking you \u{201c}pick one:"));
+        assert!(label.chars().count() < 90, "{label}");
     }
 
     #[test]

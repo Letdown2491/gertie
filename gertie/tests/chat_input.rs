@@ -3342,6 +3342,164 @@ fn finished_tool_runs_collapse_into_one_summary() {
     });
 }
 
+/// The status line names what a pending mutation waits on, the timer
+/// next to "waiting on you" is honest in the opposite direction from a
+/// timer next to "running". A silent scenario (no narration) falls
+/// back to naming the finished tool once the call settles.
+#[test]
+fn a_pending_mutation_names_what_it_waits_on() {
+    let scenarios = tempfile::tempdir().expect("scenario dir");
+    std::fs::write(
+        scenarios.path().join("edits.toml"),
+        "[[steps]]\ntext = ''\n\n\
+         [[steps.tool_calls]]\nname = \"read_file\"\n\
+         arguments = '{\"path\": \"scratch.txt\"}'\n\n\
+         [[steps]]\ntext = ''\n\n\
+         [[steps.tool_calls]]\nname = \"write_file\"\n\
+         arguments = '{\"path\": \"out.txt\", \"content\": \"x\"}'\n\n\
+         [[steps]]\ntext = ''\n",
+    )
+    .expect("scenario file");
+    let workspace = tempfile::tempdir().expect("workspace dir");
+    let endpoint = gertie_providers::Endpoint {
+        name: "replay".into(),
+        base_url: scenarios.path().to_string_lossy().into_owned(),
+        model: "edits".into(),
+        api_key: None,
+        context_window: None,
+        wire: gertie_providers::Wire::Replay,
+    };
+    let provider = Arc::new(
+        gertie_providers::AnyProvider::with_endpoints(vec![endpoint]).expect("replay provider"),
+    );
+    let store = Arc::new(SessionStore::open(Path::new(":memory:")).expect("memory store"));
+    let mut fixture = fixture_built(
+        store,
+        None,
+        Some(workspace.path().to_path_buf()),
+        None,
+        Some(provider),
+        None,
+        Vec::new(),
+        None,
+        None,
+    );
+    fixture.hold = vec![scenarios, workspace];
+
+    fixture.act(|window, cx| {
+        window.input("go", cx);
+        window.press("enter", cx);
+    });
+    pump(&mut fixture, 30);
+    let pending_line = fixture.cx.update(|cx| {
+        fixture
+            .view
+            .upgrade()
+            .expect("view alive")
+            .read(cx)
+            .activity_line_for_test()
+    });
+    assert!(
+        pending_line.starts_with("Waiting on you: Writing `out.txt`"),
+        "the pending card names the ask: {pending_line}"
+    );
+
+    // Approved and settled: the model narrated nothing, so the status
+    // names the finished tool instead of a bare "Working".
+    fixture.act(|window, cx| window.click("approve-2", cx));
+    pump(&mut fixture, 40);
+    let settled_line = fixture.cx.update(|cx| {
+        fixture
+            .view
+            .upgrade()
+            .expect("view alive")
+            .read(cx)
+            .activity_line_for_test()
+    });
+    assert!(
+        settled_line.starts_with("Wrote `out.txt`, reading the result"),
+        "the fallback names the finished tool: {settled_line}"
+    );
+}
+
+/// An ask card's status is the question itself: the card is the ask,
+/// and the ask_user tool's label carries the model's question.
+#[test]
+fn the_ask_card_names_the_question_in_the_status() {
+    let scenarios = tempfile::tempdir().expect("scenario dir");
+    std::fs::write(
+        scenarios.path().join("asks.toml"),
+        "[[steps]]\ntext = ''\n\n\
+         [[steps.tool_calls]]\nname = \"ask_user\"\n\
+         arguments = '{\"question\": \"Which database?\", \"options\": \
+                      [\"postgres\", \"sqlite\"], \"allow_custom\": false}'\n\n\
+         [[steps]]\ntext = ''\n",
+    )
+    .expect("scenario file");
+    let endpoint = gertie_providers::Endpoint {
+        name: "replay".into(),
+        base_url: scenarios.path().to_string_lossy().into_owned(),
+        model: "asks".into(),
+        api_key: None,
+        context_window: None,
+        wire: gertie_providers::Wire::Replay,
+    };
+    let provider = Arc::new(
+        gertie_providers::AnyProvider::with_endpoints(vec![endpoint]).expect("replay provider"),
+    );
+    let store = Arc::new(SessionStore::open(Path::new(":memory:")).expect("memory store"));
+    let mut fixture = fixture_built(
+        store,
+        None,
+        None,
+        None,
+        Some(provider),
+        None,
+        vec![Arc::new(gertie_tools::AskUser)],
+        None,
+        None,
+    );
+    fixture.hold = vec![scenarios];
+
+    fixture.act(|window, cx| {
+        window.input("go", cx);
+        window.press("enter", cx);
+    });
+    pump(&mut fixture, 30);
+    let ask_line = fixture.cx.update(|cx| {
+        fixture
+            .view
+            .upgrade()
+            .expect("view alive")
+            .read(cx)
+            .activity_line_for_test()
+    });
+    assert!(
+        ask_line.starts_with("Asking you \u{201c}Which database?"),
+        "the status is the question: {ask_line}"
+    );
+    fixture.act(|window, _cx| {
+        // The ask's own card stands in view, its option buttons with it.
+        assert!(window.try_find("ask-1-0").is_some(), "options in view");
+    });
+
+    // The human clicks an option: the ask settles and the turn ends.
+    fixture.act(|window, cx| window.click("ask-1-0", cx));
+    pump(&mut fixture, 40);
+    let answered_line = fixture.cx.update(|cx| {
+        fixture
+            .view
+            .upgrade()
+            .expect("view alive")
+            .read(cx)
+            .activity_line_for_test()
+    });
+    assert!(
+        answered_line.starts_with("Asked you \u{201c}Which database?"),
+        "the settled ask names itself: {answered_line}"
+    );
+}
+
 /// A pending card breaks a run: finished reads before it stay
 /// stand-alone (an approval hiding inside a collapsed summary would be
 /// a trap); approving it lets the run close over both.
