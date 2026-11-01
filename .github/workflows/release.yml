@@ -20,6 +20,9 @@ on:
   push:
     tags: ["v*"]
 
+env:
+  REGISTRY: ghcr.io/letdown2491/gertie-flatpak
+
 permissions:
   contents: write
 
@@ -142,6 +145,17 @@ jobs:
           files: bundles/*.flatpak
           generate_release_notes: true
 
+      - name: Save the staged tree for the publish job
+        # orchard-publish packs the app tree (files/, export/,
+        # metadata), not the bundle. One tar per leg; the publish job
+        # prepares both trees and signs the listing once.
+        run: tar -C self/tree -czf app-tree.tar.gz export files metadata
+      - uses: actions/upload-artifact@v4
+        with:
+          name: app-tree-${{ matrix.arch }}
+          path: app-tree.tar.gz
+          retention-days: 1
+
   orchard:
     needs: flatpak
     runs-on: ubuntu-24.04
@@ -151,7 +165,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Clone orchard-publish, pinned by tag and commit
+      - name: Version from the tag
+        id: ver
+        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Build orchard-publish from Orchard's pinned tag
         run: |
           git clone --quiet --depth 1 --branch v0.3.0 \
             https://github.com/Letdown2491/orchard /tmp/orchard
@@ -161,12 +179,49 @@ jobs:
           # not a directory"); --locked pins its Cargo.lock
           cargo install --locked --path crates/orchard-publish
 
-      - name: Publish to Orchard (requires the ORCHARD_NSEC secret)
+      - name: Download the staged trees
+        uses: actions/download-artifact@v4
+        with:
+          pattern: app-tree-*
+          path: trees
+
+      - name: Prepare both trees (no key, no network)
+        # one prepare per arch, from that arch's staged tree; --arch
+        # also overrides the manifest's arch, which the prepared asset
+        # records. ORCHARD_PUBLISH_VERSION must match the signing
+        # run's, or the coverage check sees two different versions.
+        env:
+          ORCHARD_PUBLISH_VERSION: ${{ steps.ver.outputs.version }}
+        run: |
+          mkdir -p prepared
+          for dir in trees/app-tree-*; do
+            arch=${dir##*/app-tree-}
+            rm -rf self/tree
+            mkdir -p self/tree
+            tar -xzf "$dir/app-tree.tar.gz" -C self/tree
+            orchard-publish self/gertie.publish.toml \
+              --arch "$arch" --prepare --out "prepared/$arch"
+          done
+          find prepared -type f | sort
+
+      - name: Push to the registry and sign the listing (requires the ORCHARD_NSEC secret)
+        # One signing run for both arches: this pin of orchard-publish
+        # refuses a listing whose assets do not cover every declared
+        # platform, so signing per arch leg (riddim's shape under its
+        # older pin) is not available here. --tag stays at the
+        # manifest's "latest": the publisher appends the platform
+        # itself (latest-linux-x86_64, latest-linux-aarch64). --prove
+        # writes orchard.txt to this repo (public, contents:write) so
+        # the listing's repository link verifies in clients.
         if: ${{ vars.ORCHARD_NSEC_SET == 'true' }}
         env:
+          ORCHARD_PUBLISH_VERSION: ${{ steps.ver.outputs.version }}
           ORCHARD_NSEC: ${{ secrets.ORCHARD_NSEC }}
           ORCHARD_REGISTRY_USER: ${{ github.actor }}
           ORCHARD_REGISTRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          ./self/assemble.sh
-          orchard-publish self/gertie.publish.toml
+          orchard-publish self/gertie.publish.toml \
+            --asset "prepared/linux-x86_64/io.github.Letdown2491.gertie-linux-x86_64.asset.json" \
+            --asset "prepared/linux-aarch64/io.github.Letdown2491.gertie-linux-aarch64.asset.json" \
+            --registry "$REGISTRY" --prove

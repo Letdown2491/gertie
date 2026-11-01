@@ -1,8 +1,11 @@
-# Gertie's Orchard publish manifest, mirroring riddim's release shape:
-# CI prepares one tree per architecture and publishes one combined
-# release. Local preparation is safe:
+# Orchard (https://github.com/Letdown2491/orchard) listing for the Flatpak.
+#
+# Read by `orchard-publish`. The CI release workflow (.github/workflows/
+# release.yml) runs it on tags: one prepare per architecture, then a
+# single signing run with both prepared assets. Local preparation is
+# safe (no key, no network):
 #   orchard-publish self/gertie.publish.toml --prepare
-# Publication uses the required relay plus the two public relays.
+# ORCHARD_PUBLISH_VERSION (set from the tag) overrides [release] version.
 
 [app]
 id = "io.github.Letdown2491.gertie"
@@ -17,13 +20,22 @@ your toolchains (rust, node, go, python) work as they do outside the
 sandbox; every action is gated by the permission mode you choose, and
 full access costs a confirmation card."""
 categories = ["Development"]
+license = "MIT"
 repository = "https://github.com/Letdown2491/gertie"
+homepage = "https://github.com/Letdown2491/gertie"
+# Must be a PNG: Orchard caches icons without extensions, and an SVG then
+# fails to render. Absolute URL: the store fetches it over HTTP, it cannot
+# read the publisher's disk.
 icon = "https://raw.githubusercontent.com/Letdown2491/gertie/main/assets/gertie-512.png"
 
 [release]
+# Placeholder. The workflow sets ORCHARD_PUBLISH_VERSION from the tag.
 version = "1.0.1"
+channel = "stable"
 arch = "linux-x86_64"
-# Every declared platform must be present in the combined release.
+# The listing declares coverage for both arches; the CI prepare legs
+# pass --arch for their own build, and the single signing run publishes
+# one listing with both prepared assets.
 platforms = ["linux-x86_64", "linux-aarch64"]
 notes = "The first flatpak: the same binary the release page carries, packaged for the desktop."
 
