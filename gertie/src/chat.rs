@@ -5518,9 +5518,12 @@ impl ChatView {
             }
             Role::Assistant => {
                 let is_error = text.contains("[error]");
+                // Full-width prose: the reading cap shipped once and
+                // didn't survive contact with the workbench (the
+                // article measure cramped wide windows); a prior
+                // "reverted" claim was never actually shipped.
                 div()
                     .w_full()
-                    .max_w(px(720.))
                     .pr_8()
                     .pb_2()
                     .text_color(if is_error {
