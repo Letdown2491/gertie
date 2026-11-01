@@ -157,7 +157,9 @@ jobs:
             https://github.com/Letdown2491/orchard /tmp/orchard
           test "$(git -C /tmp/orchard rev-parse HEAD)" = f2e4635cb44722f104c4fd28d86616f114baf157
           cd /tmp/orchard
-          cargo install --locked --path orchard-publish
+          # the crate moved under crates/ (the old path dies with "is
+          # not a directory"); --locked pins its Cargo.lock
+          cargo install --locked --path crates/orchard-publish
 
       - name: Publish to Orchard (requires the ORCHARD_NSEC secret)
         if: ${{ vars.ORCHARD_NSEC_SET == 'true' }}
