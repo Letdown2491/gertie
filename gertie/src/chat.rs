@@ -208,11 +208,52 @@ pub type LiveElsewhere =
 /// which owns the bootstrap; the chat never sees it. The switch is a
 /// human gesture only: nothing on the model's side of the glass can
 /// call it.
+/// What the clicked view tells the shell before the shell decides:
+/// the click holds the view's lease, so the shell may neither read
+/// nor update it (a re-entrant access is the gpui crash). These two
+/// facts are everything the four routing rules need to know about the
+/// view a click came from.
+pub struct ClickOrigin {
+    /// The clicked tab's workspace root.
+    pub root: std::path::PathBuf,
+    /// The clicked view holds no session, no turns, no stream: rule 3
+    /// may re-root it for free.
+    pub pristine: bool,
+}
+
+/// What the shell decided, phrased as work for the clicked view to do
+/// on itself. Every arm that lands the session in the clicked view is
+/// an instruction, not a shell-side write: the click holds that
+/// view's lease, and a re-entrant read or update under a listener is
+/// the crash this shape exists to prevent.
+pub enum SessionRouting {
+    /// Rule 1: the clicked tab's root matches the session's; the view
+    /// loads the session itself.
+    Here,
+    /// Rule 3: the clicked tab is pristine and adopts the session's
+    /// workspace, then loads the session.
+    Adopt(crate::bootstrap::Switched),
+    /// Rules 3 and 4: the session's workspace refused the switch; the
+    /// view says so.
+    Refused(String),
+    /// Rules 2 and 4: the session loaded in the tab that holds its
+    /// workspace, or in a new one; the clicked view has nothing to do.
+    Elsewhere,
+}
+
 /// The sidebar's routing hook: the workspace shell decides which tab
 /// a session's click belongs in (same root, a tab that holds it, a
-/// pristine adopter, or a new tab).
-pub type SessionRouter =
-    Arc<dyn Fn(gertie_core::SessionId, Option<String>, &mut Window, &mut Context<ChatView>)>;
+/// pristine adopter, or a new tab) and answers with the clicked
+/// view's share of the work, if any.
+pub type SessionRouter = Arc<
+    dyn Fn(
+        gertie_core::SessionId,
+        Option<String>,
+        ClickOrigin,
+        &mut Window,
+        &mut Context<ChatView>,
+    ) -> SessionRouting,
+>;
 
 pub type SwitchWorkspace =
     Arc<dyn Fn(&std::path::Path) -> Result<crate::bootstrap::Switched, String> + 'static>;
@@ -3684,17 +3725,35 @@ impl ChatView {
         }
     }
 
-    /// The routing layer's notice path (tabs.rs lands a refusal here
-    /// when a workspace_for_root call fails on its side).
-    pub fn push_notice_string(&mut self, text: String, cx: &mut Context<Self>) {
-        self.push_notice(text, cx);
-    }
-
     /// Whether this view is a launch-state tab: no session, no turns,
     /// no streaming. The routing's rule 3 lets such a tab adopt a
-    /// foreign session's workspace for free.
-    pub fn is_pristine_for_test(&self) -> bool {
+    /// foreign session's workspace for free. The clicked view answers
+    /// this for the shell (ClickOrigin), the shell may not ask the
+    /// view itself under a click.
+    pub fn is_pristine(&self) -> bool {
         self.session_id.is_none() && self.turns.is_empty() && !self.streaming
+    }
+
+    /// Applies the shell's instruction to this view: the clicked
+    /// view's share of the routing work. The click listener calls it
+    /// right after the router answers; a direct `route_session` call
+    /// owes the same follow-through (the tests play that role).
+    pub fn apply_routing(
+        &mut self,
+        session_id: SessionId,
+        routing: SessionRouting,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match routing {
+            SessionRouting::Here => self.switch_to_session(session_id, window, cx),
+            SessionRouting::Adopt(switched) => {
+                self.adopt_switch(switched, cx);
+                self.switch_to_session(session_id, window, cx);
+            }
+            SessionRouting::Refused(notice) => self.push_notice(notice, cx),
+            SessionRouting::Elsewhere => {}
+        }
     }
 
     /// Takes a `Switched` without a user pick (the routing layer's
@@ -6511,7 +6570,19 @@ impl ChatView {
                     .on_click({
                         let stored_root = summary.workspace_root.clone();
                         cx.listener(move |this, _, window, cx| match &this.session_router {
-                            Some(router) => router(session_id, stored_root.clone(), window, cx),
+                            Some(router) => {
+                                // The shell decides, but never touches
+                                // this view: the click holds its lease,
+                                // so this view's share of the work
+                                // comes back as an instruction.
+                                let origin = ClickOrigin {
+                                    root: this.workspace_root.clone(),
+                                    pristine: this.is_pristine(),
+                                };
+                                let routing =
+                                    router(session_id, stored_root.clone(), origin, window, cx);
+                                this.apply_routing(session_id, routing, window, cx);
+                            }
                             None => this.switch_to_session(session_id, window, cx),
                         })
                     }),

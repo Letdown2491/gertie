@@ -4449,10 +4449,29 @@ fn routing_sends_a_session_to_the_tab_that_owns_its_workspace() {
         // tab 2's sidebar: rule 2 must land it in tab 1.
         cx.update_window(window.into(), |_, window, cx| {
             let shell_entity = shell.upgrade().expect("shell");
+            // The direct call stands in for the listener: the shell
+            // decides, then the clicked view applies its instruction.
             shell_entity.update(cx, |shell, cx| {
                 // Tab 1 is pristine: clicking the kuma session adopts
                 // the kuma root into tab 1 (rule 3).
-                shell.route_session(s_kuma, Some("/tmp/routing-kuma".to_string()), window, cx);
+                let decision = shell.route_session(
+                    s_kuma,
+                    Some("/tmp/routing-kuma".to_string()),
+                    gertie::chat::ClickOrigin {
+                        root: boot.workspace_root.clone(),
+                        pristine: true,
+                    },
+                    window,
+                    cx,
+                );
+                assert!(
+                    matches!(decision, gertie::chat::SessionRouting::Adopt(_)),
+                    "rule 3 hands the clicked view the adoption"
+                );
+                let (_, view, _) = shell.tab_probe(cx);
+                view.update(cx, |view, cx| {
+                    view.apply_routing(s_kuma, decision, window, cx)
+                });
             });
         })
         .expect("route kuma");
@@ -4479,12 +4498,26 @@ fn routing_sends_a_session_to_the_tab_that_owns_its_workspace() {
         cx.update_window(window.into(), |_, window, cx| {
             let shell_entity = shell.upgrade().expect("shell");
             shell_entity.update(cx, |shell, cx| {
-                shell.route_session(
+                let decision = shell.route_session(
                     s_gertie,
                     Some("/tmp/routing-gertie".to_string()),
+                    // Tab 1 holds the kuma session now: busy, not
+                    // pristine, and its root is the kuma one.
+                    gertie::chat::ClickOrigin {
+                        root: Path::new("/tmp/routing-kuma").to_path_buf(),
+                        pristine: false,
+                    },
                     window,
                     cx,
                 );
+                assert!(
+                    matches!(decision, gertie::chat::SessionRouting::Elsewhere),
+                    "rule 4 loads the session in the new tab"
+                );
+                let (_, view, _) = shell.tab_probe(cx);
+                view.update(cx, |view, cx| {
+                    view.apply_routing(s_gertie, decision, window, cx)
+                });
             });
         })
         .expect("route gertie");
@@ -4509,7 +4542,27 @@ fn routing_sends_a_session_to_the_tab_that_owns_its_workspace() {
         cx.update_window(window.into(), |_, window, cx| {
             let shell_entity = shell.upgrade().expect("shell");
             shell_entity.update(cx, |shell, cx| {
-                shell.route_session(s_kuma, Some("/tmp/routing-kuma".to_string()), window, cx);
+                // The active tab is the gertie-rooted one (rule 4
+                // activated it): busy, and its root differs from the
+                // kuma session's.
+                let decision = shell.route_session(
+                    s_kuma,
+                    Some("/tmp/routing-kuma".to_string()),
+                    gertie::chat::ClickOrigin {
+                        root: Path::new("/tmp/routing-gertie").to_path_buf(),
+                        pristine: false,
+                    },
+                    window,
+                    cx,
+                );
+                assert!(
+                    matches!(decision, gertie::chat::SessionRouting::Elsewhere),
+                    "rule 2 loads the session in the holder"
+                );
+                let (_, view, _) = shell.tab_probe(cx);
+                view.update(cx, |view, cx| {
+                    view.apply_routing(s_kuma, decision, window, cx)
+                });
             });
         })
         .expect("route kuma again");
@@ -4525,4 +4578,79 @@ fn routing_sends_a_session_to_the_tab_that_owns_its_workspace() {
             "the holder tab is active after the click"
         );
     }
+}
+
+/// The routing tests above call `route_session` straight from the test,
+/// the shell leased alone. A real click is not that: the click leases
+/// the clicked ChatView first, and only then does the router reach the
+/// shell, which routes straight back into that same view (rules 1 and
+/// 3 both load into the active tab). A re-entrant lease is a gpui
+/// panic, and a panic under a click listener takes the app down. This
+/// test clicks for real: a same-root session (rule 1, the everyday
+/// sidebar click) must load into the active tab and the window must
+/// survive it.
+#[test]
+fn a_real_sidebar_click_loads_a_same_root_session() {
+    let config_dir = tempfile::tempdir().expect("config dir");
+    let config_path = config_dir.path().join("config.toml");
+    std::fs::write(&config_path, "").expect("empty config");
+    let boot = Arc::new(gertie::bootstrap::Bootstrap::load(
+        Some(&config_path),
+        false,
+    ));
+
+    // One session, rooted at the boot's own workspace: the click is
+    // rule 1, load here. This is the click every single-project user
+    // makes on every session they own.
+    let session = boot.store.create_session("same root").expect("session");
+    boot.store
+        .append_message(session, None, gertie_core::Role::User, "hello")
+        .expect("row");
+    boot.store
+        .set_session_workspace(session, &boot.workspace_root);
+
+    let mut cx = HeadlessAppContext::with_asset_source(
+        Arc::new(NoopTextSystem),
+        Arc::new(gpui_kit::assets::Assets),
+    );
+    cx.update(|cx| {
+        gpui_kit::init(cx);
+        gertie::chat::bind_chat_keys(cx);
+        gpui_kit::component::Theme::change(gpui_kit::component::ThemeMode::Dark, None, cx);
+    });
+    let shell: std::sync::Mutex<Option<gpui_kit::WeakEntity<gertie::tabs::WorkspaceView>>> =
+        std::sync::Mutex::new(None);
+    let window = cx
+        .open_window(size(px(1200.), px(800.)), |window, cx| {
+            let view = cx.new(|cx| gertie::tabs::WorkspaceView::new(boot.clone(), window, cx));
+            *shell.lock().unwrap() = Some(view.downgrade());
+            cx.new(|cx| Root::new(view, window, cx))
+        })
+        .expect("window");
+    cx.update_window(window.into(), |_, window, cx| {
+        window.draw(cx).clear(cx);
+    })
+    .expect("draw");
+
+    // The click itself, the production path: dispatch leases the
+    // clicked view, the listener hands the shell the route, the shell
+    // routes back. Before the fix this panics under the click.
+    let shell = shell.lock().unwrap().clone().expect("shell");
+    cx.update_window(window.into(), |_, window, cx| {
+        let button = SharedString::from(format!("session-{}", session.0));
+        window.click(button, cx);
+    })
+    .expect("the click must not panic");
+    cx.run_until_parked();
+    cx.update_window(window.into(), |_, window, cx| {
+        window.draw(cx).clear(cx);
+    })
+    .expect("draw after the click");
+
+    // Green-capable signal: the session actually loaded here, one tab.
+    let shell = shell.upgrade().expect("shell alive");
+    let (tabs, view, _root) = cx.update(|cx| shell.read(cx).tab_probe(cx));
+    let loaded = cx.update(|cx| view.read(cx).session_id());
+    assert_eq!(loaded, Some(session), "the clicked session loads");
+    assert_eq!(tabs, 1, "rule 1: the same-root click never opens a tab");
 }

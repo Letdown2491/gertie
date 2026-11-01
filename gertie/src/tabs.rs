@@ -145,11 +145,13 @@ impl WorkspaceView {
         let switch = switch_to_root(&boot);
         let shell = cx.entity().downgrade();
         let this_router: crate::chat::SessionRouter =
-            Arc::new(move |session_id, session_root, window, cx| {
-                let Some(shell) = shell.upgrade() else { return };
+            Arc::new(move |session_id, session_root, origin, window, cx| {
+                let Some(shell) = shell.upgrade() else {
+                    return crate::chat::SessionRouting::Elsewhere;
+                };
                 shell.update(cx, |shell, cx| {
-                    shell.route_session(session_id, session_root, window, cx)
-                });
+                    shell.route_session(session_id, session_root, origin, window, cx)
+                })
             });
         let first = cx.new(|cx| {
             ChatView::new(
@@ -290,11 +292,13 @@ impl WorkspaceView {
         // The sidebar's routing hook: weak self, strong at click time.
         let shell = cx.entity().downgrade();
         let this_router: crate::chat::SessionRouter =
-            Arc::new(move |session_id, session_root, window, cx| {
-                let Some(shell) = shell.upgrade() else { return };
+            Arc::new(move |session_id, session_root, origin, window, cx| {
+                let Some(shell) = shell.upgrade() else {
+                    return crate::chat::SessionRouting::Elsewhere;
+                };
                 shell.update(cx, |shell, cx| {
-                    shell.route_session(session_id, session_root, window, cx)
-                });
+                    shell.route_session(session_id, session_root, origin, window, cx)
+                })
             });
         let view = cx.new(|cx| {
             ChatView::new(
@@ -437,14 +441,22 @@ impl WorkspaceView {
 impl WorkspaceView {
     /// Routes a sidebar click to the tab where the session belongs
     /// (the full routing model, four rules):
-    /// 1. the session's root matches this tab's → load here;
+    /// 1. the session's root matches the clicked tab's → load there;
     /// 2. another open tab already holds the root → activate it and
     ///    load there (a project's sessions belong to its project tab);
-    /// 3. no tab holds it and this tab is pristine → this tab adopts
-    ///    the root and loads it (a launch-tab is free real estate);
-    /// 4. no tab holds it and this tab is busy → a new tab opens,
-    ///    rooted at the session's workspace. A working conversation is
-    ///    never dragged somewhere else.
+    /// 3. no tab holds it and the clicked tab is pristine → that tab
+    ///    adopts the root and loads it (a launch-tab is free real
+    ///    estate);
+    /// 4. no tab holds it and the clicked tab is busy → a new tab
+    ///    opens, rooted at the session's workspace. A working
+    ///    conversation is never dragged somewhere else.
+    ///
+    /// The clicked view is leased by its own click, so this method
+    /// never reads or updates it: its state arrives in `origin`, and
+    /// its share of the work (rule 1's load, rule 3's adoption, the
+    /// refusals) leaves as the returned instruction. Whatever the
+    /// shell does itself (rule 2's holder, rule 4's new tab) touches
+    /// only idle views.
     ///
     /// Streaming tabs are skipped by rule 2's load, not the routing:
     /// loading into a streaming view is refused by the view itself.
@@ -466,11 +478,15 @@ impl WorkspaceView {
         &mut self,
         session_id: gertie_core::SessionId,
         session_root: Option<String>,
+        origin: crate::chat::ClickOrigin,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) {
-        let active_view = self.tabs[self.active].view.clone();
-        let active_root = active_view.read(cx).workspace_root().to_path_buf();
+    ) -> crate::chat::SessionRouting {
+        // The clicked view is leased by its own click: this method may
+        // not read or update it (a re-entrant access is the gpui
+        // crash). Its state arrives in `origin`, and its share of the
+        // work leaves as the return value.
+        let active_root = origin.root;
         let session_root = session_root
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|| active_root.clone());
@@ -480,20 +496,25 @@ impl WorkspaceView {
                 _ => false,
             };
         // Rule 1: this tab's root matches (or the session predates the
-        // root column: its home is wherever it's opened).
+        // root column: its home is wherever it's opened). The clicked
+        // view loads it; the instruction is the answer.
         let session_matches_active =
             session_root == active_root || same_root(&session_root, &active_root);
         if session_matches_active {
-            active_view.update(cx, |view, cx| {
-                view.switch_to_session(session_id, window, cx)
-            });
-            return;
+            return crate::chat::SessionRouting::Here;
         }
-        // Rule 2: a tab that already lives at the session's root.
-        let holder = self.tabs.iter().enumerate().find(|(_, tab)| {
-            let view_root = tab.view.read(cx).workspace_root().to_path_buf();
-            view_root == session_root || same_root(&view_root, &session_root)
-        });
+        // Rule 2: a tab that already lives at the session's root. The
+        // active tab is skipped (rule 1 just proved its root differs),
+        // and every remaining tab is idle: reading them is safe here.
+        let holder = self
+            .tabs
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| *index != self.active)
+            .find(|(_, tab)| {
+                let view_root = tab.view.read(cx).workspace_root().to_path_buf();
+                view_root == session_root || same_root(&view_root, &session_root)
+            });
         if let Some((index, tab)) = holder {
             let view = tab.view.clone();
             self.active = index;
@@ -502,42 +523,28 @@ impl WorkspaceView {
                 view.switch_to_session(session_id, window, cx)
             });
             cx.notify();
-            return;
+            return crate::chat::SessionRouting::Elsewhere;
         }
-        // Rule 3: this tab is pristine (no session, no turns) — it
-        // adopts the root.
-        let pristine = active_view.read(cx).is_pristine_for_test();
-        if pristine {
-            let switched = match self.boot.workspace_for_root(&session_root) {
-                Ok(switched) => switched,
-                Err(error) => {
-                    active_view.update(cx, |view, cx| {
-                        view.push_notice_string(
-                            format!("This conversation started in a folder that refuses the switch ({error}); open it from that folder's tab."),
-                            cx,
-                        )
-                    });
-                    return;
-                }
+        // Rule 3: this tab is pristine (no session, no turns): it
+        // adopts the root. The adoption is the clicked view's work:
+        // the Switched rides back to it.
+        if origin.pristine {
+            return match self.boot.workspace_for_root(&session_root) {
+                Ok(switched) => crate::chat::SessionRouting::Adopt(switched),
+                Err(error) => crate::chat::SessionRouting::Refused(format!(
+                    "This conversation started in a folder that refuses the switch ({error}); open it from that folder's tab."
+                )),
             };
-            active_view.update(cx, |view, cx| {
-                view.adopt_switch(switched, cx);
-                view.switch_to_session(session_id, window, cx);
-            });
-            cx.notify();
-            return;
         }
         // Rule 4: open a new tab at the session's root and load there.
         let switched = match self.boot.workspace_for_root(&session_root) {
             Ok(switched) => switched,
             Err(error) => {
-                active_view.update(cx, |view, cx| {
-                    view.push_notice_string(
-                        format!("This conversation's folder refuses the switch ({error}); open it from that folder's tab."),
-                        cx,
-                    )
-                });
-                return;
+                // The refusal rides back to the clicked view, which
+                // shows it; the shell builds nothing.
+                return crate::chat::SessionRouting::Refused(format!(
+                    "This conversation's folder refuses the switch ({error}); open it from that folder's tab."
+                ));
             }
         };
         let view = self.make_view(
@@ -566,6 +573,7 @@ impl WorkspaceView {
         self.active = index;
         self.subscribe_config_saved(index, window, cx);
         cx.notify();
+        crate::chat::SessionRouting::Elsewhere
     }
 }
 
