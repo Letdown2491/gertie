@@ -5256,16 +5256,39 @@ impl ChatView {
             ledger = ledger.child(memory);
         }
         if !parts.is_empty() {
-            ledger = ledger.child(
-                div()
-                    .text_size(px(11.))
-                    .text_color(if near_compaction {
-                        cx.theme().warning
-                    } else {
-                        cx.theme().muted_foreground
-                    })
-                    .child(parts.join("  ·  ")),
-            );
+            // The ledger line in two groups with a real gap: what the
+            // work costs (spend, cache share) reads separately from
+            // where the context stands (the gauge). One joined string
+            // made three kinds of information read as one.
+            let mut gauge = parts.into_iter();
+            let spend: Vec<String> = gauge
+                .by_ref()
+                .take_while(|part| !part.starts_with("ctx "))
+                .collect();
+            ledger = ledger
+                .child(
+                    div()
+                        .text_size(px(11.))
+                        .text_color(cx.theme().muted_foreground)
+                        .child(spend.join("  ·  ")),
+                )
+                .child(
+                    div()
+                        .text_size(px(11.))
+                        .text_color(cx.theme().muted_foreground)
+                        .opacity(0.6)
+                        .child("│"),
+                )
+                .child(
+                    div()
+                        .text_size(px(11.))
+                        .text_color(if near_compaction {
+                            cx.theme().warning
+                        } else {
+                            cx.theme().muted_foreground
+                        })
+                        .child(gauge.collect::<Vec<_>>().join("  ·  ")),
+                );
         }
         let ident = div()
             .text_size(px(11.))
@@ -5531,11 +5554,24 @@ impl ChatView {
                     )
                 })
                 .when(worker, |row| {
+                    // A worker run's own elapsed time, next to the
+                    // badge: the run clock answers "how long has the
+                    // worker's work taken", distinct from the leader's
+                    // turn clock and the tool's own card clock.
+                    let worker_clock = self
+                        .tool_starts
+                        .get(&call.id)
+                        .map(|started| clock(started.elapsed()))
+                        .unwrap_or_default();
                     row.child(
                         div()
                             .text_size(px(11.))
                             .text_color(cx.theme().muted_foreground)
-                            .child("worker"),
+                            .child(if worker_clock.is_empty() {
+                                "worker".to_string()
+                            } else {
+                                format!("worker · {worker_clock}")
+                            }),
                     )
                 }),
         );
