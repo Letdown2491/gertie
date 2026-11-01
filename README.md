@@ -1,4 +1,4 @@
-# gertie
+# Gertie
 
 A fast, native coding-agent harness. GPU-rendered UI, a headless core that is a plain
 library, and everything local: sessions in SQLite, zero telemetry, no accounts.
@@ -12,7 +12,7 @@ gertie            the desktop app (gpui) + `gertie run` headless shell
 
 ## Why
 
-Most agent harnesses are either Electron apps or CLI wrappers glued to a cloud. gertie is
+Most agent harnesses are either Electron apps or CLI wrappers glued to a cloud. Gertie is
 a native Linux desktop app with the same engine available headlessly: one core, two
 fronts, nothing shared over the network.
 
@@ -75,7 +75,7 @@ api_key_env = "MY_API_KEY"
 Keys resolve from the environment first (`MY_API_KEY` above); a local server needs
 no key at all.
 
-**Memory and instructions**: gertie remembers across sessions. Facts it proposes at
+**Memory and instructions**: Gertie remembers across sessions. Facts it proposes at
 session end land as review cards you approve or deny; rules that must always apply go
 in `AGENTS.md` at the repo root (or `~/.config/gertie/AGENTS.md` for global ones).
 Both are plain markdown you can edit by hand. [docs/memory.md](docs/memory.md)

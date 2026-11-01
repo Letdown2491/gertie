@@ -45,7 +45,7 @@ fn open_chat_window(boot: Arc<crate::bootstrap::Bootstrap>, cx: &mut App) {
             window_min_size: Some(size(px(720.), px(480.))),
             app_id: Some(APP_IDENTITY.into()),
             titlebar: Some(TitlebarOptions {
-                title: Some("gertie".into()),
+                title: Some("Gertie".into()),
                 ..Default::default()
             }),
             ..Default::default()

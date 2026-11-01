@@ -1093,7 +1093,7 @@ impl Config {
         if path.exists() {
             return None;
         }
-        let skeleton = r#"# gertie's config. Nothing here is pre-configured: endpoints, models,
+        let skeleton = r#"# Gertie's config. Nothing here is pre-configured: endpoints, models,
 # and keys are all yours to name. The easiest path is in the app,
 # type /settings in the composer (the settings panel owns endpoints
 # and keys). Or add one by hand, any OpenAI-compatible server:

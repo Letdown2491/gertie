@@ -1,11 +1,11 @@
-# gertie: memory
+# Memory
 
-gertie remembers across sessions so you stop re-explaining your project every time
+Gertie remembers across sessions so you stop re-explaining your project every time
 you open a new chat.
 
 ## What you'll see
 
-- A **`memory N`** word in the footer when gertie holds facts about this project. Click
+- A **`memory N`** word in the footer when Gertie holds facts about this project. Click
   it (or run "memory" from the palette) to see everything it remembers and vote on each
   entry: ▲ when a memory helped, ▼ when it misled. Your votes decide what gets kept.
 - A **proposal card** when you settle a session (✓): the same approve/deny card tool

@@ -1298,7 +1298,7 @@ const VOICE_SECTION: &str = "## Voice\n\n\
 /// rule, every line is context paid on every turn.
 fn system_prompt_for(root: &Path, skill_index: &str, instructions: Option<&str>) -> Option<String> {
     let mut prompt = format!(
-        "You are gertie, a coding agent working in {}.\n\
+        "You are Gertie, a coding agent working in {}.\n\
          Read-only tools run without asking; anything that changes the \
          world shows the user a card and waits. Write code, run the \
          tests, report plainly.",

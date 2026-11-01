@@ -5001,7 +5001,7 @@ impl ChatView {
             "Ready."
         };
         let subline: &str = if no_endpoint {
-            "gertie runs local and API models; add one endpoint and it works."
+            "Gertie runs local and API models; add one endpoint and it works."
         } else {
             "Ask, paste, or point me at a file."
         };
