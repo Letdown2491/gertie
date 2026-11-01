@@ -443,7 +443,7 @@ pub fn run_turn(spec: TurnSpec) -> BoxStream<'static, LoopEvent> {
                         // the event renders the card, the await blocks
                         // the round, a dropped responder counts as no
                         // answer.
-                        match parse_ask(&call.arguments) {
+                        match parse_ask(&call.arguments, &call.id) {
                             Err(error) => Err(error),
                             Ok(ask) => match &permission_broker {
                                 None => Err("no permission channel available, cannot ask".into()),
@@ -797,7 +797,7 @@ fn select_digest(head: &[WireMessage], budget_chars: usize) -> String {
 /// becomes a synthetic `ask_user` call whose arguments carry the
 /// cleaned shape for the card to render. Every string is the model's
 /// output, so nothing reaches the UI unsanitized.
-fn parse_ask(arguments: &str) -> Result<AskUserQuestion, String> {
+fn parse_ask(arguments: &str, call_id: &str) -> Result<AskUserQuestion, String> {
     #[derive(serde::Deserialize)]
     struct AskArgs {
         question: String,
@@ -830,7 +830,10 @@ fn parse_ask(arguments: &str) -> Result<AskUserQuestion, String> {
     }
     Ok(AskUserQuestion {
         call: ToolCall {
-            id: "ask-user".into(),
+            // The card's call keeps the model's own id: the UI pairs
+            // cards with their results by it, a synthetic id here
+            // would leave the ask card pending forever.
+            id: call_id.to_string(),
             name: "ask_user".into(),
             arguments: serde_json::json!({
                 "question": question,
@@ -1207,6 +1210,16 @@ mod tests {
             result.contains("error:"),
             "one option is a model mistake, told so: {result}"
         );
+    }
+
+    /// The card's call keeps the model's own id: the UI pairs cards
+    /// with their results by it (a synthetic id left every answered
+    /// ask card pending in the transcript forever).
+    #[test]
+    fn the_ask_card_keeps_the_models_call_id() {
+        let ask = parse_ask(r#"{"question": "Which?", "options": ["a", "b"]}"#, "a1").expect("ask");
+        assert_eq!(ask.call.id, "a1");
+        assert_eq!(ask.call.name, "ask_user");
     }
 
     fn registry(tools: &[Arc<dyn Tool>]) -> ToolRegistry {
