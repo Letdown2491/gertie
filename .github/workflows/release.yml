@@ -96,7 +96,11 @@ jobs:
       - name: Install the toolchain and libraries
         run: |
           sudo apt-get update
-          sudo apt-get install -y flatpak podman file
+          # librsvg2-common: the gdk-pixbuf SVG loader. build-export
+          # validates the exported icons through gdk-pixbuf, and with
+          # the loader missing the scalable SVG dies with "Format not
+          # recognized" even though the file is fine.
+          sudo apt-get install -y flatpak podman file librsvg2-common
           sudo apt-get install -y pkg-config libfontconfig-dev libfreetype-dev \
             libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libxcb1-dev \
             libvulkan-dev
