@@ -21,7 +21,7 @@ repository = "https://github.com/Letdown2491/gertie"
 icon = "https://raw.githubusercontent.com/Letdown2491/gertie/main/assets/gertie-512.png"
 
 [release]
-version = "1.0.0"
+version = "1.0.1"
 arch = "linux-x86_64"
 # Every declared platform must be present in the combined release.
 platforms = ["linux-x86_64", "linux-aarch64"]
