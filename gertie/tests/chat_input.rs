@@ -1261,6 +1261,79 @@ fn markdown_and_tool_rows_draw_clean() {
     assert!(turns >= 7, "expected the stored rows to load, got {turns}");
 }
 
+/// A reloaded write card diffs against its checkpoint: the loop froze
+/// the file's before-content at approval time, keyed by the call's
+/// own id, and the reloaded face asks the ledger by it. The disk
+/// fallback would read the file as it sits now and tell a wrong
+/// story; the ledger cannot.
+#[test]
+fn a_reloaded_write_card_diffs_against_its_checkpoint() {
+    // The session's record: a write to a file that held one line.
+    let store = Arc::new(SessionStore::open(Path::new(":memory:")).expect("memory store"));
+    let session_id = store.create_session("wrote a file").expect("session");
+    let parent = store
+        .append_message(session_id, None, gertie_core::Role::User, "write it")
+        .expect("user row");
+    store
+        .append_tool_result(
+            session_id,
+            Some(parent),
+            "call-9",
+            "write_file",
+            r#"{"path": "out.txt", "content": "two\n"}"#,
+            "overwrote out.txt (4 bytes)",
+        )
+        .expect("tool row");
+
+    // The ledger holds the file's before-content, frozen at approval.
+    let snapshots_dir = tempfile::tempdir().expect("snapshots dir");
+    let snapshots =
+        Arc::new(gertie_core::SnapshotStore::open(snapshots_dir.path()).expect("snapshot store"));
+    let workspace = tempfile::tempdir().expect("workspace dir");
+    snapshots
+        .record(
+            Some(session_id),
+            &workspace.path().join("out.txt"),
+            b"one\n",
+            Some(workspace.path()),
+            Some("call-9"),
+        )
+        .expect("checkpoint");
+    // The workspace file moved on (what the write left): the disk
+    // fallback would read it and tell "unchanged", the ledger cannot.
+    std::fs::write(workspace.path().join("out.txt"), "two\n").expect("workspace file");
+
+    let mut fixture = fixture_built(
+        store,
+        Some(snapshots),
+        Some(workspace.path().to_path_buf()),
+        None,
+        None,
+        None,
+        Vec::new(),
+        None,
+        None,
+    );
+    fixture.hold = vec![snapshots_dir, workspace];
+
+    // The resumed card's face: one add, one remove, the real change,
+    // not the two additions of a no-source card nor the zero of a
+    // disk read.
+    let counts = fixture.cx.update(|cx| {
+        fixture
+            .view
+            .upgrade()
+            .expect("view alive")
+            .read(cx)
+            .card_diff_counts_for_test(1)
+    });
+    assert_eq!(
+        counts,
+        Some((1, 1)),
+        "the diff is of the checkpoint, not disk"
+    );
+}
+
 /// Seeds a session whose needle word appears once, deep in a long
 /// transcript, plus a newer session (so that's the one a fresh window
 /// resumes) without the needle.

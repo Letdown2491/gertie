@@ -121,6 +121,10 @@ impl SnapshotStore {
         // was opened by us, so the only expected failure here is the
         // column already existing.
         let _ = connection.execute("ALTER TABLE checkpoints ADD COLUMN workspace_root TEXT", []);
+        // The wire call id a checkpoint was recorded for: the UI's
+        // reloaded cards ask by it. Legacy rows answer NULL and fall
+        // back, same story as workspace_root above.
+        let _ = connection.execute("ALTER TABLE checkpoints ADD COLUMN call_id TEXT", []);
         Ok(Self {
             connection: std::sync::Mutex::new(connection),
             objects,
@@ -132,12 +136,16 @@ impl SnapshotStore {
     /// by hash, so re-recording unchanged files costs one hash. The
     /// workspace is the root the calling turn runs in, the restore's
     /// address for this row, however far the chat travels afterwards.
+    /// `call_id` is the wire call the snapshot is for, the exact key a
+    /// reloaded card asks by; legacy callers may pass None, the row
+    /// then serves only the turn-diff paths.
     pub fn record(
         &self,
         session_id: Option<crate::SessionId>,
         path: &Path,
         content_before: &[u8],
         workspace: Option<&Path>,
+        call_id: Option<&str>,
     ) -> Result<CheckpointId, SnapshotError> {
         let hash = format!("{:x}", Sha256::digest(content_before));
         let object = self.objects.join(&hash);
@@ -154,14 +162,15 @@ impl SnapshotStore {
         let connection = self.connection.lock().unwrap();
         connection
             .prepare(
-                "INSERT INTO checkpoints (session_id, path, hash, workspace_root)
-                 VALUES (?1, ?2, ?3, ?4)",
+                "INSERT INTO checkpoints (session_id, path, hash, workspace_root, call_id)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
             )?
             .execute(rusqlite::params![
                 session_id.map(|id| id.0 as i64),
                 path.to_string_lossy(),
                 hash,
                 workspace.map(|root| root.to_string_lossy()),
+                call_id,
             ])?;
         Ok(CheckpointId(connection.last_insert_rowid() as u64))
     }
@@ -190,9 +199,10 @@ impl SnapshotStore {
         session_id: Option<crate::SessionId>,
         path: &Path,
         workspace: Option<&Path>,
+        call_id: Option<&str>,
     ) -> Result<CheckpointId, SnapshotError> {
         let content = std::fs::read(path).unwrap_or_default();
-        self.record(session_id, path, &content, workspace)
+        self.record(session_id, path, &content, workspace, call_id)
     }
 
     /// A session's checkpoints, oldest first.
@@ -436,6 +446,37 @@ impl SnapshotStore {
     pub fn read_object(&self, hash: &str) -> std::io::Result<Vec<u8>> {
         std::fs::read(self.objects.join(hash))
     }
+
+    /// A call's checkpointed before-content, session-scoped: what the
+    /// file held when this wire call was approved and run. The exact
+    /// source for a reloaded card's diff, where the live session's
+    /// capture is long gone and the file has usually moved on. Calls
+    /// that never ran (denied, blocked) never recorded a row and
+    /// answer None; so do legacy rows from before call ids rode along,
+    /// their readers fall back.
+    pub fn before_content_of_call(
+        &self,
+        session_id: crate::SessionId,
+        call_id: &str,
+    ) -> Result<Option<Vec<u8>>, SnapshotError> {
+        let connection = self.connection.lock().unwrap();
+        let hash: Option<String> = connection
+            .query_row(
+                "SELECT hash FROM checkpoints
+                 WHERE session_id = ?1 AND call_id = ?2 ORDER BY id LIMIT 1",
+                rusqlite::params![session_id.0 as i64, call_id],
+                |row| row.get(0),
+            )
+            .map(Some)
+            .or_else(|error| match error {
+                rusqlite::Error::QueryReturnedNoRows => Ok(None),
+                error => Err(error),
+            })?;
+        match hash {
+            Some(hash) => Ok(Some(self.read_object(&hash)?)),
+            None => Ok(None),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -492,7 +533,7 @@ mod tests {
         std::fs::write(&file, "before").unwrap();
 
         let checkpoint = store
-            .record_file(Some(crate::SessionId(1)), &file, None)
+            .record_file(Some(crate::SessionId(1)), &file, None, None)
             .unwrap();
         std::fs::write(&file, "after").unwrap();
         store
@@ -514,7 +555,7 @@ mod tests {
         std::fs::write(&file, "before").unwrap();
 
         let checkpoint = store
-            .record_file(Some(crate::SessionId(1)), &file, Some(origin.path()))
+            .record_file(Some(crate::SessionId(1)), &file, Some(origin.path()), None)
             .unwrap();
         std::fs::write(&file, "after").unwrap();
 
@@ -545,8 +586,8 @@ mod tests {
         let file = tmp.path().join("a.txt");
         std::fs::write(&file, "same").unwrap();
 
-        let first = store.record_file(None, &file, None).unwrap();
-        let second = store.record_file(None, &file, None).unwrap();
+        let first = store.record_file(None, &file, None, None).unwrap();
+        let second = store.record_file(None, &file, None, None).unwrap();
         assert_ne!(first, second);
         let objects: Vec<_> = std::fs::read_dir(tmp.path().join("objects"))
             .unwrap()
@@ -561,10 +602,10 @@ mod tests {
         let file = tmp.path().join("a.txt");
         std::fs::write(&file, "x").unwrap();
         store
-            .record_file(Some(crate::SessionId(1)), &file, None)
+            .record_file(Some(crate::SessionId(1)), &file, None, None)
             .unwrap();
         store
-            .record_file(Some(crate::SessionId(2)), &file, None)
+            .record_file(Some(crate::SessionId(2)), &file, None, None)
             .unwrap();
 
         assert_eq!(store.list(crate::SessionId(1)).unwrap().len(), 1);
@@ -586,14 +627,14 @@ mod tests {
         std::fs::write(&b, "bee").unwrap();
 
         let turn1 = store.begin_turn(session, first).unwrap();
-        let a_before = store.record_file(Some(session), &a, None).unwrap();
-        store.record_file(Some(session), &b, None).unwrap();
+        let a_before = store.record_file(Some(session), &a, None, None).unwrap();
+        store.record_file(Some(session), &b, None, None).unwrap();
         std::fs::write(&a, "two").unwrap();
 
         let turn2 = store
             .begin_turn(session, crate::MessageId(first.0 + 1))
             .unwrap();
-        store.record_file(Some(session), &a, None).unwrap();
+        store.record_file(Some(session), &a, None, None).unwrap();
 
         // Turn 1 touched two paths; a's before is its first checkpoint,
         // and its after lives in turn 2's checkpoint, not disk.
@@ -665,7 +706,7 @@ mod tests {
         // as the tools spelled it (relative), which is exactly what the
         // resolution under test has to handle.
         let checkpoint = store
-            .record(Some(crate::SessionId(1)), relative, b"before", None)
+            .record(Some(crate::SessionId(1)), relative, b"before", None, None)
             .unwrap();
         std::fs::write(&absolute, "after").unwrap();
         store.restore_under(checkpoint, workspace.path()).unwrap();
@@ -673,6 +714,55 @@ mod tests {
             std::fs::read_to_string(&absolute).unwrap(),
             "before",
             "relative paths resolve against the given root"
+        );
+    }
+
+    #[test]
+    fn a_call_reads_its_own_before_content_back() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = store_in(tmp.path());
+        let file = tmp.path().join("out.txt");
+        std::fs::write(&file, "one").unwrap();
+
+        // The hook's record: the file's prior bytes, tied to the wire
+        // call id, session-scoped.
+        store
+            .record_file(Some(crate::SessionId(1)), &file, None, Some("call-9"))
+            .unwrap();
+        std::fs::write(&file, "two").unwrap();
+
+        // The reloaded card asks by its own call id and gets the exact
+        // prior bytes, however far the file has moved on since.
+        assert_eq!(
+            store
+                .before_content_of_call(crate::SessionId(1), "call-9")
+                .unwrap(),
+            Some(b"one".to_vec())
+        );
+        // Another session's call with the same wire id is not this
+        // one's answer; an unknown call answers None.
+        assert_eq!(
+            store
+                .before_content_of_call(crate::SessionId(2), "call-9")
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            store
+                .before_content_of_call(crate::SessionId(1), "call-never")
+                .unwrap(),
+            None
+        );
+        // A legacy row (no call id) answers None too: the caller falls
+        // back, it never mistakes someone else's before for its own.
+        store
+            .record_file(Some(crate::SessionId(3)), &file, None, None)
+            .unwrap();
+        assert_eq!(
+            store
+                .before_content_of_call(crate::SessionId(3), "call-9")
+                .unwrap(),
+            None
         );
     }
 
@@ -692,6 +782,7 @@ mod tests {
                 Some(crate::SessionId(1)),
                 &outside.path().join("victim.txt"),
                 b"attacker content",
+                None,
                 None,
             )
             .unwrap();
@@ -716,6 +807,7 @@ mod tests {
                     Some(crate::SessionId(1)),
                     std::path::Path::new("sneaky/victim.txt"),
                     b"attacker content",
+                    None,
                     None,
                 )
                 .unwrap();

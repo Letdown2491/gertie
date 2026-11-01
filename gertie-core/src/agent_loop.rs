@@ -532,6 +532,10 @@ pub fn run_turn(spec: TurnSpec) -> BoxStream<'static, LoopEvent> {
                                             // row: the restore's address,
                                             // however far the chat moves.
                                             workspace_root.as_deref(),
+                                            // The call's own id rides too:
+                                            // a reloaded card's diff asks
+                                            // the ledger by it.
+                                            Some(&call.id),
                                         )
                                     {
                                         yield LoopEvent::Error {
@@ -1863,6 +1867,7 @@ mod tests {
         );
         spec.snapshots = Some(snapshots.clone());
         spec.workspace_root = Some(workspace.path().to_path_buf());
+        spec.checkpoint_session = Some(crate::SessionId(7));
         let events = drain(run_turn(spec), &broker, |_| PermissionDecision::Approve);
 
         assert_eq!(tool_result(&events, "edit_file"), "edited");
@@ -1874,6 +1879,14 @@ mod tests {
         assert_eq!(objects.len(), 1);
         let object = objects[0].as_ref().unwrap().path();
         assert_eq!(std::fs::read(object).unwrap(), b"before");
+        // The checkpoint answers to the call's own id, the exact key a
+        // reloaded card asks by: its diff can be the real change.
+        assert_eq!(
+            snapshots
+                .before_content_of_call(crate::SessionId(7), "c1")
+                .unwrap(),
+            Some(b"before".to_vec())
+        );
     }
 
     #[test]

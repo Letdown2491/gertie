@@ -1105,6 +1105,17 @@ impl ChatView {
         self.activity_line()
     }
 
+    /// A tool card's cached diff counts, for tests: the (adds, removes)
+    /// the face computed for the card at turn `index`. What a reloaded
+    /// write card's diff is *of* is only visible here.
+    pub fn card_diff_counts_for_test(&self, index: usize) -> Option<(usize, usize)> {
+        self.tool_face
+            .borrow()
+            .get(&index)
+            .and_then(|face| face.diff.as_ref())
+            .map(|patch| (patch.adds, patch.removes))
+    }
+
     /// Ages the status clocks, for tests, quiet's threshold is real
     /// seconds and no test waits them out. Instant arithmetic, not a
     /// mocked clock: both clocks go back together, as a real quiet
@@ -5554,14 +5565,20 @@ impl ChatView {
         let (label, diff) = {
             let mut cache = self.tool_face.borrow_mut();
             let face = cache.entry(index).or_insert_with(|| {
-                // The write's before-content: the pre-run capture when
-                // the session saw the request land, else the file as
-                // it sits now (a reloaded card's best effort).
-                let before = self
-                    .before_contents
-                    .get(&call.id)
-                    .cloned()
-                    .or_else(|| self.current_file_content(call));
+                // The write's before-content, three sources in honesty
+                // order: the pre-run capture when this session saw the
+                // request land, the checkpoint the loop recorded when
+                // the call was approved (a reloaded card's exact
+                // source), else the file as it sits now.
+                let before = if call.name == "write_file" {
+                    self.before_contents
+                        .get(&call.id)
+                        .cloned()
+                        .or_else(|| self.checkpointed_before(call))
+                        .or_else(|| self.current_file_content(call))
+                } else {
+                    None
+                };
                 ToolFace {
                     label_running: crate::tools_ui::action_label(&call.name, &call.arguments, true),
                     label_done: crate::tools_ui::action_label(&call.name, &call.arguments, false),
@@ -5924,10 +5941,11 @@ fn resolve_tool_path(root: &std::path::Path, path: &std::path::Path) -> std::pat
 
 impl ChatView {
     /// What the workspace file holds right now, for a write card's
-    /// before-content. The exact source is the capture taken when the
-    /// call arrived (`before_contents`); this is the fallback for a
-    /// card rebuilt after a reload, where the file has usually moved
-    /// on and the diff degrades honestly to nothing.
+    /// before-content. The exact sources are the pre-run capture taken
+    /// when the call arrived (`before_contents`) and, for a reloaded
+    /// card, the checkpoint the loop recorded for the call; this disk
+    /// read is the last fallback, for a card with neither, and it can
+    /// only guess: the file has usually moved on.
     fn current_file_content(&self, call: &ToolCall) -> Option<String> {
         if call.name != "write_file" {
             return None;
@@ -5936,6 +5954,20 @@ impl ChatView {
         let path = value.get("path")?.as_str()?;
         let resolved = resolve_tool_path(&self.workspace_root, std::path::Path::new(path));
         std::fs::read_to_string(resolved).ok()
+    }
+
+    /// The ledger's before-content for a write card: the checkpoint
+    /// the loop recorded the moment this very call was approved,
+    /// keyed by the call's own id. The exact source for a reloaded
+    /// card, where the live capture is long gone and the file has
+    /// usually moved on. Legacy ledgers (rows older than call ids)
+    /// and calls that never ran answer None, the disk fallback
+    /// follows.
+    fn checkpointed_before(&self, call: &ToolCall) -> Option<String> {
+        let store = self.snapshots.as_ref()?;
+        let session_id = self.session_id?;
+        let bytes = store.before_content_of_call(session_id, &call.id).ok()??;
+        String::from_utf8(bytes).ok()
     }
 }
 
