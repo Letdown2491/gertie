@@ -125,7 +125,7 @@ jobs:
           mkdir -p bundles repo
           flatpak build-init repo io.github.Letdown2491.gertie \
             org.freedesktop.Sdk org.freedesktop.Platform 25.08
-          flatpak build-export --update-rofiles-fallback repo self/tree
+          flatpak build-export repo self/tree
           flatpak build-bundle --runtime repo \
             "bundles/gertie-${GITHUB_REF_NAME#v}-linux-${{ matrix.arch }}.flatpak" \
             io.github.Letdown2491.gertie stable
