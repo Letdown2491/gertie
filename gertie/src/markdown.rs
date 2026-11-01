@@ -789,7 +789,7 @@ fn render_table(header: &[String], rows: &[Vec<String>], cx: &App) -> AnyElement
                     .py_1()
                     .when(header_row, |cell| {
                         cell.font_weight(gpui_kit::FontWeight::SEMIBOLD)
-                            .bg(theme.muted)
+                            .bg(theme.muted.opacity(0.5))
                     })
                     .child(inline_element(&text, cx))
             })
@@ -848,7 +848,7 @@ pub fn inline_element(text: &str, cx: &App) -> AnyElement {
                 // plain foreground, the accent on muted pairs badly in
                 // the light theme (the word vanished into the chip).
                 SpanKind::Code => Some(HighlightStyle {
-                    background_color: Some(theme.muted),
+                    background_color: Some(theme.muted.opacity(0.6)),
                     color: Some(theme.foreground),
                     ..Default::default()
                 }),

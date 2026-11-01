@@ -2553,6 +2553,7 @@ fn quoting_an_assistant_turn_lands_a_blockquote_in_the_composer() {
 
     // The resumed session renders the assistant turn at index 1.
     fixture.act(|window, cx| {
+        window.hover("turn-1", cx);
         window.click("quote-1", cx);
     });
     let value = fixture.cx.update(|cx| {
@@ -2589,6 +2590,9 @@ fn a_long_assistant_turn_quotes_truncated() {
         .expect("assistant row");
     let mut fixture = fixture_with_store(store);
 
+    fixture.act(|window, cx| {
+        window.hover("turn-0", cx);
+    });
     fixture.act(|window, cx| {
         window.click("quote-0", cx);
     });
@@ -2956,7 +2960,8 @@ fn edit_from_here_keeps_changes_and_parents_the_next_send_to_the_keep_point() {
 
     // Asking opens the confirm row, a choice, not a fait accompli.
     // No checkpoint ledger in this fixture, so there is no files
-    // offer to make.
+    // offer to make. Rewind-2 is the latest turn, so its affordance
+    // row is visible without hover (the hover-reveal idiom).
     fixture.act(|window, cx| window.click("rewind-2", cx));
     fixture.act(|window, cx| {
         assert!(

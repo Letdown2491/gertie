@@ -98,7 +98,7 @@ const QUIET_AFTER: std::time::Duration = std::time::Duration::from_secs(20);
 const SPINNER_FRAMES: [&str; 4] = ["◐", "◓", "◑", "◒"];
 
 /// The composer's ghost text at rest.
-const IDLE_PLACEHOLDER: &str = "Message gertie…, / for commands";
+const IDLE_PLACEHOLDER: &str = "Message Gertie…, / for commands";
 
 /// The composer's ghost text while a turn runs: the send key's two
 /// meanings, stated where the keys are. Placeholders only render on
@@ -582,7 +582,7 @@ impl ChatView {
             cx.new(|cx| InputState::new(window, cx).placeholder("find in this transcript…"));
         let input = cx.new(|cx| {
             TextareaState::new(window, cx)
-                .placeholder("Message gertie…, / for commands")
+                .placeholder(IDLE_PLACEHOLDER)
                 .auto_grow(1, 6)
         });
         cx.subscribe_in(&input, window, |this, _, event: &InputEvent, window, cx| {
@@ -4907,8 +4907,15 @@ impl ChatView {
             }
             _ => None,
         };
-        // One affordance row under the bubble: user turns right-align
-        // (fork, rewind), assistant turns left-align (quote).
+        // One affordance row under the bubble. Visibility rule: user
+        // turns show fork/rewind persistently (they mark the
+        // conversation's decision points; hide-behind-hover made an
+        // old turn's rewind undiscoverable), assistant turns
+        // hover-reveal copy/quote (per-reading conveniences, not
+        // landmarks) via the group idiom. Tests click both kinds: a
+        // hover-revealed row stays clickable for the harness
+        // (invisible is not display:none) but an explicit
+        // visibility assertion would need a hover first.
         let user_turn = fork_button.is_some();
         let mut buttons: Vec<AnyElement> = Vec::new();
         if let Some(button) = fork_button {
@@ -4925,12 +4932,30 @@ impl ChatView {
         } else {
             div()
                 .w_full()
+                .id(format!("turn-{index}"))
+                .test_support()
+                .group(format!("turn-{index}"))
                 .flex()
                 .flex_col()
                 .when(user_turn, |col| col.items_end())
                 .when(!user_turn, |col| col.items_start())
                 .child(inner)
-                .child(h_flex().gap_1().children(buttons))
+                .child(
+                    // Assistant rows are ghosted rather than hidden:
+                    // 35% opacity at rest, full on the turn's hover.
+                    // Visibility-hidden made an old turn's affordances
+                    // undiscoverable (you must know to hover) and the
+                    // harness's synthetic hover can't drive gpui's
+                    // group-hover state; ghosting keeps the row
+                    // present (and clickable) while clearly chrome.
+                    h_flex()
+                        .gap_1()
+                        .when(!user_turn, |row| row.opacity(0.35))
+                        .when(!user_turn, |row| {
+                            row.group_hover(format!("turn-{index}"), |style| style.opacity(1.0))
+                        })
+                        .children(buttons),
+                )
                 .into_any_element()
         };
         // Horizontal padding lives on each item, not the list: gpui's
@@ -4961,7 +4986,12 @@ impl ChatView {
         } else {
             inner.into_any_element()
         };
-        div().w_full().px_4().child(inner).into_any_element()
+        // Turn rhythm: the boundary between turns must read stronger
+        // than the paragraph gaps inside a turn, or the transcript
+        // reads as one continuous column (the screenshot showed the
+        // inversion). Markdown paragraphs carry mt_2; a turn carries
+        // the turn's own bottom padding plus this margin.
+        div().w_full().px_4().mt_2().child(inner).into_any_element()
     }
 
     /// The status line's words, spinner aside: the activity, its
@@ -5094,29 +5124,38 @@ impl ChatView {
             // Observed so the test harness can click the word; a
             // no-op outside test-support builds.
             .test_support();
-        // The memory word: how much this workspace remembers, hidden
-        // when the store is empty (a memoryless session pays zero
-        // attention, matching the zero-cost read path). Click opens
-        // the memory panel; the tooltip names both tiers.
-        let memory = self
-            .memory_store
-            .as_ref()
-            .map(|store| store.scan().len())
-            .filter(|count| *count > 0)
-            .map(|count| {
-                let tooltip =
-                    "memory: what gertie recalls in this repo and for you; click to read and vote.";
-                div()
-                    .id("memory-chip")
-                    .cursor_pointer()
-                    .text_size(px(11.))
-                    .text_color(cx.theme().muted_foreground)
-                    .hover(|style| style.text_color(cx.theme().foreground))
-                    .tooltip(move |window, cx| Tooltip::new(tooltip).build(window, cx))
-                    .on_click(cx.listener(|this, _, _, cx| this.toggle_memory(cx)))
-                    .child(format!("memory {count}"))
-                    .test_support()
-            });
+        // The memory word: how much this workspace remembers. Shown
+        // when the store holds *entries*; when it only holds files
+        // (prose notes, not yet indexed entries) the chip still shows,
+        // with the file count: an existing store with a blank chip
+        // reads as "memory does not exist", and the chip is the door
+        // to the panel either way. Truly empty stores hide it (a
+        // memoryless session pays zero attention).
+        let memory = self.memory_store.as_ref().map(|store| {
+            let entries = store.scan().len();
+            let files = store.topic_file_count();
+            if entries > 0 {
+                format!("memory {entries}")
+            } else if files > 0 {
+                format!("memory ({files} files)")
+            } else {
+                String::new()
+            }
+        });
+        let memory = memory.filter(|label| !label.is_empty()).map(|label| {
+            let tooltip =
+                "memory: what gertie recalls in this repo and for you; click to read and vote.";
+            div()
+                .id("memory-chip")
+                .cursor_pointer()
+                .text_size(px(11.))
+                .text_color(cx.theme().muted_foreground)
+                .hover(|style| style.text_color(cx.theme().foreground))
+                .tooltip(move |window, cx| Tooltip::new(tooltip).build(window, cx))
+                .on_click(cx.listener(|this, _, _, cx| this.toggle_memory(cx)))
+                .child(label)
+                .test_support()
+        });
         let mut ledger = h_flex().gap_2().child(mode);
         if let Some(memory) = memory {
             ledger = ledger.child(memory);
@@ -5273,8 +5312,10 @@ impl ChatView {
                         .rounded_lg()
                         .px_3()
                         .py_2()
-                        .bg(cx.theme().primary)
-                        .text_color(cx.theme().primary_foreground)
+                        .bg(cx.theme().secondary)
+                        .border_1()
+                        .border_color(cx.theme().border)
+                        .text_color(cx.theme().foreground)
                         .child(display_text(text)),
                 )
                 .into_any_element(),
@@ -5295,8 +5336,16 @@ impl ChatView {
             }
             Role::Assistant => {
                 let is_error = text.contains("[error]");
+                // The measure cap: prose at full window width runs
+                // ~150 characters a line, well past comfortable
+                // reading measure. The cap keeps every line scannable;
+                // wide
+                // tables and code blocks still need the room, so the
+                // cap applies to the text element and the inner
+                // padding gives long lines their margin back.
                 div()
                     .w_full()
+                    .max_w(px(720.))
                     .pr_8()
                     .pb_2()
                     .text_color(if is_error {

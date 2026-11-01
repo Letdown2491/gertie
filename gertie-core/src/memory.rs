@@ -198,6 +198,13 @@ impl MemoryStore {
 
     /// Every parseable entry across both tiers, file order per tier,
     /// project tier first (it outranks the user's global habits).
+    /// How many topic files exist across both tiers, entries or not.
+    /// The chip's fallback signal: files without entry-grammar lines
+    /// still mean "memory exists here".
+    pub fn topic_file_count(&self) -> usize {
+        topic_files(&self.project_root).len() + topic_files(&self.global_root).len()
+    }
+
     pub fn scan(&self) -> Vec<MemoryEntry> {
         let mut entries = Vec::new();
         for tier in [Tier::Project, Tier::Global] {
