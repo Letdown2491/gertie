@@ -107,10 +107,18 @@ jobs:
       - name: Assemble and prepare the app tree (no publish, no key needed)
         run: ./self/assemble.sh
 
-      - name: Bundle the flatpak
+      - name: Export and bundle the flatpak
+        # build-bundle packages a staged export inside a flatpak
+        # repository, not a raw app tree: build-init makes the repo,
+        # build-export stages the tree's export/ into it, and
+        # build-bundle turns the staged branch into the .flatpak.
+        # (The first v1.0.1 run failed here: the tree is not a repo.)
         run: |
-          mkdir -p bundles
-          flatpak build-bundle --runtime self/tree \
+          mkdir -p bundles repo
+          flatpak build-init repo io.github.Letdown2491.gertie \
+            org.freedesktop.Sdk org.freedesktop.Platform 25.08
+          flatpak build-export --update-rofiles-fallback repo self/tree
+          flatpak build-bundle --runtime repo \
             "bundles/gertie-${GITHUB_REF_NAME#v}-linux-${{ matrix.arch }}.flatpak" \
             io.github.Letdown2491.gertie stable
 
