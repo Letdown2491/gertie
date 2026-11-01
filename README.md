@@ -112,9 +112,9 @@ version of this whole list.
 
 ## Status
 
-Feature-complete against [DESIGN.md](DESIGN.md) (see "The original 'Deferred' row" for
-every decision and its rationale). New to the tool? [The tour](docs/TOUR.md) walks the
-whole surface in ten minutes.
+**1.0.0.** Feature-complete against [DESIGN.md](DESIGN.md) (see "The original 'Deferred'
+row" for every decision and its rationale). New to the tool? [The tour](docs/TOUR.md)
+walks the whole surface in ten minutes.
 
 ## License
 

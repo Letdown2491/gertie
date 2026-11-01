@@ -2146,7 +2146,7 @@ dependencies = [
 
 [[package]]
 name = "gertie"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "base64 0.22.1",
  "directories",
@@ -2167,7 +2167,7 @@ dependencies = [
 
 [[package]]
 name = "gertie-core"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "async-stream",
  "base64 0.22.1",
@@ -2183,7 +2183,7 @@ dependencies = [
 
 [[package]]
 name = "gertie-providers"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "bytes",
  "futures-core",
@@ -2200,7 +2200,7 @@ dependencies = [
 
 [[package]]
 name = "gertie-tools"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "futures-core",
  "gertie-core",
