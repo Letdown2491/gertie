@@ -9,6 +9,12 @@ rust-version = "1.97"
 license = "MIT"
 repository = "https://github.com/Letdown2491/gertie"
 
+# deb/rpm metadata lives beside the gertie crate (Cargo.toml in gertie/):
+# `cargo deb` and `cargo generate-rpm` read the binary crate's manifest.
+# Both packages carry the app id as Provides/Conflicts, so a
+# package-manager install and a flatpak of the same app refuse to
+# coexist by convention.
+
 [workspace.dependencies]
 gertie-core = { path = "gertie-core" }
 gertie-providers = { path = "gertie-providers" }

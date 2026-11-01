@@ -11,6 +11,49 @@ repository.workspace = true
 name = "gertie"
 path = "src/main.rs"
 
+# deb/rpm packaging: `cargo deb` and `cargo generate-rpm` (CI-installed
+# subcommands) read these blocks against the release build. Both packages
+# Provide/Conflict the app id, so a package-manager install and a flatpak
+# of the same app refuse to coexist by convention (the desktop file's
+# comment says which one owns it). The assets land in the package with
+# their paths preserved: bin into /usr/bin, the desktop file and icons
+# into the hicolor/app-id locations the desktop already resolves.
+[package.metadata.cargo-deb]
+maintainer = "martin <github.penknife946@passmail.net>"
+license-file = ["../LICENSE", "0"]
+depends = "$auto"
+extended-description = """\
+A fast, native coding-agent harness with a GPU-rendered UI and a headless
+core. Long-term memory with a review inbox, worktree tabs, subagents,
+skills, MCP, and permission modes that keep every mutating action behind
+a card you approve."""
+section = "devel"
+assets = [
+    ["target/release/gertie", "usr/bin/", "755"],
+    ["assets/io.github.Letdown2491.gertie.desktop", "usr/share/applications/", "644"],
+    ["assets/io.github.Letdown2491.gertie.metainfo.xml", "usr/share/metainfo/", "644"],
+    ["assets/gertie-512.png", "usr/share/icons/hicolor/512x512/apps/io.github.Letdown2491.gertie.png", "644"],
+]
+conflicts = "io.github.Letdown2491.gertie"
+provides = "io.github.Letdown2491.gertie"
+
+[package.metadata.cargo-generate-rpm]
+maintainer = "martin <github.penknife946@passmail.net>"
+license = "MIT"
+summary = "A fast, native coding-agent harness"
+group = "Development/Tools"
+requires = []
+post_install_script = """
+if command -v update-desktop-database >/dev/null 2>&1; then update-desktop-database >/dev/null 2>&1 || true; fi
+"""
+assets = [
+    { source = "target/release/gertie", dest = "/usr/bin/gertie", mode = "755" },
+    { source = "assets/io.github.Letdown2491.gertie.desktop", dest = "/usr/share/applications/io.github.Letdown2491.gertie.desktop", mode = "644" },
+    { source = "assets/io.github.Letdown2491.gertie.metainfo.xml", dest = "/usr/share/metainfo/io.github.Letdown2491.gertie.metainfo.xml", mode = "644" },
+    { source = "assets/gertie-512.png", dest = "/usr/share/icons/hicolor/512x512/apps/io.github.Letdown2491.gertie.png", mode = "644" },
+]
+# (requires: none beyond glibc; gertie links the client libs only on GUI builds)
+
 [dependencies]
 gertie-core = { workspace = true }
 gertie-providers = { workspace = true }

@@ -1,12 +1,18 @@
-# Release: a tag builds the Linux binary and attaches it to the
-# release. Linux-only by decision (the ports are scoped in DESIGN.md);
-# the container spec's library list is what `gertie` links against,
-# spelled out here as apt lines because CI has no containerfile.
+# Release: a tag builds the Linux binary and attaches it, plus the deb,
+# the rpm, the flatpak bundles (one leg per architecture), and the
+# Orchard publish (the flatpak store, github.com/Letdown2491/orchard).
+# Linux-only by decision (the ports are scoped in DESIGN.md); the
+# container spec's library list is what `gertie` links against, spelled
+# out here as apt lines because CI has no containerfile.
 #
 # Trigger: push a tag shaped v1.2.3 (the v prefix matches the doctor's
 # `--check-updates` comparison, which strips it). Everything else
 # (draft text, the version bump itself) is manual, on purpose: a
 # release is a claim, not a side effect.
+#
+# Secrets:
+#   ORCHARD_NSEC  the publisher's Nostr key (set before the Orchard
+#                 publish leg goes live; flatpak bundles attach without it).
 
 name: release
 
@@ -42,13 +48,31 @@ jobs:
       - name: Build the release binary
         run: cargo build --release --locked -p gertie
 
+      - name: Build the deb
+        run: |
+          cargo install cargo-deb --locked
+          cargo deb -p gertie --no-build
+          # Smoke: the deb parses and its payload carries the expected paths.
+          dpkg-deb --info target/debian/*.deb | head -20
+
+      - name: Build the rpm
+        run: |
+          cargo install cargo-generate-rpm --locked
+          cargo generate-rpm -p gertie
+          # Smoke: the rpm reads back (rpmlint is not installed; the
+          # header listing is the check).
+          rpm -q --info target/generate-rpm/*.rpm || rpm2cpio target/generate-rpm/*.rpm | cpio -it | head
+
       - name: Smoke-check the binary
         run: |
           ./target/release/gertie --version
           ./target/release/gertie doctor || true
 
-      - name: Attach the binary to the release
+      - name: Attach the artifacts to the release
         uses: softprops/action-gh-release@v2
         with:
-          files: target/release/gertie
+          files: |
+            target/release/gertie
+            target/debian/*.deb
+            target/generate-rpm/*.rpm
           generate_release_notes: true
