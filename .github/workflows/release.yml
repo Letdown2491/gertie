@@ -108,14 +108,18 @@ jobs:
         run: ./self/assemble.sh
 
       - name: Export and bundle the flatpak
-        # build-bundle packages a staged export inside a flatpak
-        # repository, not a raw app tree: build-init makes the repo,
-        # build-export stages the tree's export/ into it, and
-        # build-bundle turns the staged branch into the .flatpak.
-        # (The first v1.0.1 run failed here: the tree is not a repo.)
-        # build-export validates the runtime ref against the local
-        # installation, so the Platform and Sdk install from flathub
-        # first (the runner has none).
+        # self/tree is already a build directory (files/, export/,
+        # metadata), so there is no build-init: it would create a
+        # second build directory, and build-export pointed at it dies
+        # with "opening repo: opendir(objects)" (the v1.0.1 runs).
+        # build-export makes the ostree repo at repo/ itself, from the
+        # tree; its third argument is the branch, and the default is
+        # master, not stable. build-bundle's --runtime flag means the
+        # bundle IS a runtime, not "include the runtime", so it is
+        # left off; the app branch carries the runtime dependency. The
+        # Platform and Sdk install from flathub so the runtime refs
+        # resolve on the runner, whether or not the local flatpak
+        # validates them.
         run: |
           flatpak remote-add --user --if-not-exists flathub \
             https://flathub.org/repo/flathub.flatpakrepo
@@ -123,11 +127,9 @@ jobs:
             org.freedesktop.Platform/${{ matrix.arch == 'linux-x86_64' && 'x86_64' || 'aarch64' }}/25.08 \
             org.freedesktop.Sdk/${{ matrix.arch == 'linux-x86_64' && 'x86_64' || 'aarch64' }}/25.08
           mkdir -p bundles repo
-          flatpak build-init repo io.github.Letdown2491.gertie \
-            org.freedesktop.Sdk org.freedesktop.Platform 25.08
-          flatpak build-export repo self/tree
-          flatpak build-bundle --runtime repo \
-            "bundles/gertie-${GITHUB_REF_NAME#v}-linux-${{ matrix.arch }}.flatpak" \
+          flatpak build-export repo self/tree stable
+          flatpak build-bundle repo \
+            "bundles/gertie-${GITHUB_REF_NAME#v}-${{ matrix.arch }}.flatpak" \
             io.github.Letdown2491.gertie stable
 
       - name: Attach the flatpak bundles to the release

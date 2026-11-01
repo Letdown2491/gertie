@@ -17,6 +17,15 @@ fi
 mkdir -p self/tree/files/bin
 install -m 0755 "$binary" self/tree/files/bin/gertie
 
+# The metadata's runtime ref carries the arch, and the export's commit
+# ref comes from it (app/<id>/<arch>/stable). The tree is assembled
+# per-host (CI legs: x86_64 and aarch64; flatpak's arch names match
+# uname -m), so stamp the host arch into the runtime ref. On the arch
+# the metadata already pins this is a no-op rewrite.
+arch=$(uname -m)
+sed -i "s|^runtime=org\.freedesktop\.Platform/.*/25\.08$|runtime=org.freedesktop.Platform/$arch/25.08|" \
+    self/tree/metadata
+
 # The desktop tree: entry, AppStream metainfo, icon (the flatpak id is
 # the icon name the desktop entry already references).
 mkdir -p self/tree/export/share/applications
