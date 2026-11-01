@@ -41,7 +41,13 @@ fronts, nothing shared over the network.
 
 ## Install
 
-From source (Rust 1.97+, Linux on Wayland or X11 with GPU rendering):
+**Release binary (Linux x64, Wayland or X11):** grab `gertie` from the
+[latest release](https://github.com/Letdown2491/gertie/releases/latest), put it on
+your PATH, and you need the client libraries it links (on Debian/Ubuntu:
+`libfontconfig-dev libfreetype-dev libxkbcommon-dev libxkbcommon-x11-dev
+libwayland-dev libxcb1-dev libvulkan-dev`).
+
+**From source** (Rust 1.97+, Linux on Wayland or X11 with GPU rendering):
 
 ```sh
 git clone https://github.com/Letdown2491/gertie.git
@@ -51,6 +57,10 @@ cargo install --locked --path gertie   # installs the `gertie` binary
 
 (The maintainers build and test inside a pinned container via `./scripts/build.sh`; a
 plain `cargo build` works too: `gertie` needs the usual Wayland/X11 client libraries.)
+
+Releases are cut by pushing a `v*` tag: CI builds the Linux binary, smoke-checks it,
+and attaches it to the release with generated notes. `gertie doctor --check-updates`
+compares your installed version against the newest tag.
 
 ## Quick start
 

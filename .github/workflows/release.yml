@@ -1,0 +1,54 @@
+# Release: a tag builds the Linux binary and attaches it to the
+# release. Linux-only by decision (the ports are scoped in DESIGN.md);
+# the container spec's library list is what `gertie` links against,
+# spelled out here as apt lines because CI has no containerfile.
+#
+# Trigger: push a tag shaped v1.2.3 (the v prefix matches the doctor's
+# `--check-updates` comparison, which strips it). Everything else
+# (draft text, the version bump itself) is manual, on purpose: a
+# release is a claim, not a side effect.
+
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build-linux:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install the Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install the client libraries gertie links
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            pkg-config \
+            libfontconfig-dev \
+            libfreetype-dev \
+            libxkbcommon-dev \
+            libxkbcommon-x11-dev \
+            libwayland-dev \
+            libxcb1-dev \
+            libvulkan-dev
+
+      - name: Build the release binary
+        run: cargo build --release --locked -p gertie
+
+      - name: Smoke-check the binary
+        run: |
+          ./target/release/gertie --version
+          ./target/release/gertie doctor || true
+
+      - name: Attach the binary to the release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: target/release/gertie
+          generate_release_notes: true
