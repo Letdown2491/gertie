@@ -294,8 +294,6 @@ pub struct ChatView {
     /// The extraction provider, resolved at construction (the named
     /// endpoint, else the session's own). None = extraction disabled.
     memory_extract_provider: Option<Arc<dyn gertie_core::Provider>>,
-    /// Proposals awaiting a card answer, keyed by the broker ask id.
-    memory_proposals: std::collections::HashMap<u64, gertie_core::memory_extract::Proposal>,
     /// Extraction debounce: last extraction trigger per session, the
     /// compaction path can fire several times an hour.
     last_memory_extract: std::collections::HashMap<u64, Instant>,
@@ -768,7 +766,6 @@ impl ChatView {
             memory_extract_provider,
             max_tool_rounds,
             grace_rounds,
-            memory_proposals: std::collections::HashMap::new(),
             last_memory_extract: std::collections::HashMap::new(),
             memory_rows: Vec::new(),
             pending_memory_apply: std::collections::HashMap::new(),
@@ -2596,8 +2593,6 @@ impl ChatView {
         let (id, _answer) = self
             .broker
             .request(call.clone(), gertie_core::PromptSource::Leader);
-        self.memory_proposals.insert(id, proposal.clone());
-        let _ = (&store, session_id);
         self.pending_memory_apply
             .insert(call.id.clone(), (proposal, store, session_id));
         self.turns.push(Turn::Tool {

@@ -20,6 +20,7 @@ use std::io::Read as _;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::OnceLock;
 
 /// Cap on text a tool will return in one result: the model's context is
 /// the real constraint, and a huge blob is never what it needs.
@@ -310,6 +311,29 @@ const DENY_PATTERNS: &[(&str, &str)] = &[
     ),
 ];
 
+/// The deny list, compiled once. The vet runs on every bash call (the
+/// hottest security path in the app), and `Regex::new` is not cheap:
+/// a process-lifetime `OnceLock` buys lock-free reads after the first
+/// call. A malformed pattern here is a compile-time review failure
+/// anyway; the lock panics loudly rather than silently disabling the
+/// guard.
+fn deny_patterns() -> &'static [(regex::Regex, &'static str)] {
+    static PATTERNS: OnceLock<Vec<(regex::Regex, &'static str)>> = OnceLock::new();
+    PATTERNS.get_or_init(|| {
+        DENY_PATTERNS
+            .iter()
+            .map(|(pattern, reason)| {
+                (
+                    regex::Regex::new(pattern).unwrap_or_else(|error| {
+                        panic!("DENY_PATTERNS[{pattern}] is invalid: {error}")
+                    }),
+                    *reason,
+                )
+            })
+            .collect()
+    })
+}
+
 #[derive(Deserialize)]
 struct BashArgs {
     command: String,
@@ -580,11 +604,8 @@ impl Tool for Bash {
                     .map(String::from)
             })
             .unwrap_or_default();
-        for (pattern, reason) in DENY_PATTERNS {
-            if regex::Regex::new(pattern)
-                .map(|re| re.is_match(&command))
-                .unwrap_or(false)
-            {
+        for (re, reason) in deny_patterns() {
+            if re.is_match(&command) {
                 return Err(format!("command matches a hard-blocked pattern ({reason})"));
             }
         }

@@ -740,6 +740,27 @@ mod tests {
     use std::net::TcpListener;
 
     #[test]
+    fn the_debug_of_an_endpoint_never_carries_the_key() {
+        let endpoint = Endpoint {
+            name: "the leak test".into(),
+            base_url: "https://api.example.test".into(),
+            model: "model-x".into(),
+            api_key: Some("sk-super-secret-value-12345".into()),
+            context_window: None,
+            wire: Wire::OpenAI,
+        };
+        let rendered = format!("{endpoint:?}");
+        assert!(
+            !rendered.contains("sk-super-secret-value-12345"),
+            "Debug printed the key: {rendered}"
+        );
+        // The redaction is a presence marker, not an omission: the
+        // rest of the endpoint still reads as an endpoint.
+        assert!(rendered.contains("…"));
+        assert!(rendered.contains("model-x"));
+    }
+
+    #[test]
     fn wire_translation_expresses_the_tool_protocol() {
         let call = ToolCall {
             id: "call_9".into(),
