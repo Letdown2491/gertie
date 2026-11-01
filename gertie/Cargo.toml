@@ -42,7 +42,6 @@ maintainer = "martin <github.penknife946@passmail.net>"
 license = "MIT"
 summary = "A fast, native coding-agent harness"
 group = "Development/Tools"
-requires = []
 post_install_script = """
 if command -v update-desktop-database >/dev/null 2>&1; then update-desktop-database >/dev/null 2>&1 || true; fi
 """

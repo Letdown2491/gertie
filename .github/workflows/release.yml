@@ -123,7 +123,7 @@ jobs:
             org.freedesktop.Platform/${{ matrix.arch == 'linux-x86_64' && 'x86_64' || 'aarch64' }}/25.08 \
             org.freedesktop.Sdk/${{ matrix.arch == 'linux-x86_64' && 'x86_64' || 'aarch64' }}/25.08
           mkdir -p bundles repo
-          flatpak build-init --user repo io.github.Letdown2491.gertie \
+          flatpak build-init repo io.github.Letdown2491.gertie \
             org.freedesktop.Sdk org.freedesktop.Platform 25.08
           flatpak build-export --user --update-rofiles-fallback repo self/tree
           flatpak build-bundle --user --runtime repo \
