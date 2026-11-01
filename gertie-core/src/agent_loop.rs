@@ -37,15 +37,20 @@ pub enum LoopEvent {
         call: ToolCall,
     },
     /// A tool finished (approved, denied, or auto-run), this is what gets
-    /// persisted and shown as the card's outcome.
+    /// persisted and shown as the card's outcome. The arguments ride so
+    /// the UI's status line can label the result ("Ran `cargo test`")
+    /// without scraping its transcript rows for the call.
     ToolResult {
         call_id: String,
         name: String,
+        arguments: String,
         result: String,
     },
-    /// A read-only tool started executing (mutating calls surface through
-    /// `ToolCallRequested` instead). Exists so the UI can show activity
-    /// for the tools that never prompt, silent reads read as a hang.
+    /// A call started executing without ever prompting (read-only
+    /// tools always; mutating calls the mode pre-approved, which is
+    /// why the pre-approved path yields this too). Exists so the UI
+    /// can show activity for the calls that never prompt, silent
+    /// work reads as a hang.
     ToolCallStarted {
         call: ToolCall,
     },
@@ -197,6 +202,12 @@ pub struct TurnSpec {
     /// valve's purpose, stopping runaway loops, is the constant's.
     pub max_tool_rounds: Option<usize>,
     pub grace_rounds: Option<usize>,
+    /// What spawned workers are doing right now, written by the agent
+    /// tools' worker loops and read by the leader's UI on its tick.
+    /// The same handle flows in and back out: the UI holds one end,
+    /// this loop hands the other to the tools that run their own
+    /// loops (via [`Tool::run_with_call`]).
+    pub worker_progress: crate::tool::WorkerProgress,
 }
 
 /// Runs one user turn to completion: request → (text | tool calls)* →
@@ -236,6 +247,7 @@ pub fn run_turn(spec: TurnSpec) -> BoxStream<'static, LoopEvent> {
         user_attachments,
         max_tool_rounds,
         grace_rounds,
+        worker_progress,
     } = spec;
     let max_tool_rounds = max_tool_rounds.unwrap_or(DEFAULT_MAX_TOOL_ROUNDS);
     let grace_rounds = grace_rounds.unwrap_or(DEFAULT_GRACE_ROUNDS);
@@ -495,7 +507,16 @@ pub fn run_turn(spec: TurnSpec) -> BoxStream<'static, LoopEvent> {
                             );
                             let decision = match (&permission_broker, pre_approved) {
                                 // The mode settled it before any ask.
-                                (_, true) => Ok(PermissionDecision::Approve),
+                                // The run still surfaces as a started
+                                // call: a pre-approved mutation is the
+                                // model doing something the human can
+                                // watch, a running card with its own
+                                // clock, not an invisible act whose
+                                // result appears from nowhere.
+                                (_, true) => {
+                                    yield LoopEvent::ToolCallStarted { call: call.clone() };
+                                    Ok(PermissionDecision::Approve)
+                                }
                                 (Some(broker), false) => {
                                     let (request_id, answer) =
                                         broker.request(call.clone(), prompt_source);
@@ -546,7 +567,7 @@ pub fn run_turn(spec: TurnSpec) -> BoxStream<'static, LoopEvent> {
                                         };
                                         return;
                                     }
-                                    tool.run(&call.arguments).await
+                                    tool.run_with_call(&call, &worker_progress).await
                                 }
                                 // The human said no, and possibly
                                 // why. Their reply rides in the tool
@@ -564,7 +585,7 @@ pub fn run_turn(spec: TurnSpec) -> BoxStream<'static, LoopEvent> {
                             }
                         } else {
                             yield LoopEvent::ToolCallStarted { call: call.clone() };
-                            tool.run(&call.arguments).await
+                            tool.run_with_call(&call, &worker_progress).await
                         }
                     }
                 };
@@ -586,6 +607,7 @@ pub fn run_turn(spec: TurnSpec) -> BoxStream<'static, LoopEvent> {
                 yield LoopEvent::ToolResult {
                     call_id: call.id,
                     name: call.name,
+                    arguments: call.arguments,
                     result,
                 };
             }
@@ -1264,6 +1286,7 @@ mod tests {
                 user_attachments: Vec::new(),
                 max_tool_rounds: None,
                 grace_rounds: None,
+                worker_progress: crate::tool::WorkerProgress::default(),
             },
             broker,
         )

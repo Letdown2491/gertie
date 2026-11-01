@@ -351,7 +351,7 @@ pub struct ChatView {
     /// the turn's first event, accumulates across system-imposed pauses
     /// (round budget, rate limit: the wait is part of the work), and
     /// resets when the human acts (a new send, a stop, a rewind) or the
-    /// work completes. The status line's "run 12:30".
+    /// work completes. The footer's "run 12:30".
     run_elapsed: std::time::Duration,
     /// When the current accumulation segment began. None = no run is
     /// live (the clock shows nothing).
@@ -368,6 +368,15 @@ pub struct ChatView {
     /// outlive several silent minutes; its card's "running · 2m 05s"
     /// is its own time, not the turn's.
     tool_starts: std::collections::HashMap<String, Instant>,
+    /// What spawned workers are doing right now, the same handle the
+    /// turn's spec carries: the agent tools' worker loops write their
+    /// steps into it, the working tick reads them into the line (the
+    /// leader's stream parks inside the agent tool, so its own events
+    /// say nothing while the worker runs).
+    worker_progress: gertie_core::WorkerProgress,
+    /// The leader call id of the agent tool currently running, if
+    /// any: the tick's key into the progress map.
+    active_worker_call: Option<String>,
     /// A write card's before-content, keyed by wire call id: what the
     /// file held when the call arrived, captured before anything can
     /// run. The diff face diffs the arguments against it, exact at
@@ -780,6 +789,8 @@ impl ChatView {
             run_elapsed: std::time::Duration::ZERO,
             run_started: None,
             tool_starts: std::collections::HashMap::new(),
+            worker_progress: gertie_core::WorkerProgress::default(),
+            active_worker_call: None,
             before_contents: std::collections::HashMap::new(),
             window_handle: window.window_handle(),
             thinking: false,
@@ -1420,10 +1431,11 @@ impl ChatView {
         self.turns.len() + usize::from(self.show_activity_row())
     }
 
-    /// The status line's text: the label itself is the news. Setting
-    /// it marks the loop event (the quiet gauge reads off this) and
-    /// resets the spinner's step; the run clock, if a run is live,
-    /// keeps accumulating untouched. It lives in the footer now.
+    /// The status line's text: the label itself is the news, and the
+    /// step's clock restarts with it (the activity row renders the
+    /// pair). Setting it marks the loop event (the quiet gauge reads
+    /// off this) and resets the spinner's step; the run clock, if a
+    /// run is live, keeps accumulating untouched in the footer.
     fn set_activity(&mut self, label: impl Into<String>) {
         self.activity = label.into();
         self.activity_at = Instant::now();
@@ -3555,6 +3567,7 @@ impl ChatView {
             permission_broker: Some(self.broker.clone()),
             permission_mode: self.mode,
             sandbox_bash: self.sandbox_bash,
+            worker_progress: self.worker_progress.clone(),
             prompt_source: gertie_core::PromptSource::Leader,
             system_prompt: self.system_prompt.clone(),
             instructions: self.instructions.clone(),
@@ -3589,6 +3602,28 @@ impl ChatView {
                     .update(cx, |this, cx| {
                         if !this.streaming {
                             return false;
+                        }
+                        // A worker's steps surface in the leader's line:
+                        // the leader's stream parks inside the agent
+                        // tool, so nothing else speaks while the worker
+                        // runs. Each new step restarts the step clock
+                        // with it; a pending ask keeps the line it has.
+                        let step = match &this.active_worker_call {
+                            Some(id) if !this.waiting_on_human() => this.worker_progress.get(id),
+                            _ => None,
+                        };
+                        if let Some(step) = step {
+                            let label = format!(
+                                "worker: {}",
+                                crate::tools_ui::action_label(
+                                    &step.name,
+                                    &step.arguments,
+                                    step.running,
+                                )
+                            );
+                            if this.activity != label {
+                                this.set_activity(label);
+                            }
                         }
                         cx.notify();
                         true
@@ -3625,10 +3660,11 @@ impl ChatView {
                     LoopEvent::ToolResult {
                         call_id,
                         name,
+                        arguments,
                         result,
                     } => {
                         let _ = this.update(cx, |this, cx| {
-                            this.on_tool_result(&call_id, &name, &result, cx)
+                            this.on_tool_result(&call_id, &name, &arguments, &result, cx)
                         });
                     }
                     LoopEvent::Usage {
@@ -3836,6 +3872,12 @@ impl ChatView {
         // The card's clock starts here: read-only tools never prompt,
         // so their whole visible life is this card.
         self.tool_starts.insert(call.id.clone(), Instant::now());
+        if call.name.starts_with("agent_") {
+            // The leader's stream parks inside this call while its
+            // worker runs; the tick reads the worker's steps from the
+            // progress handle and speaks them on the line.
+            self.active_worker_call = Some(call.id.clone());
+        }
         self.thinking = false;
         self.flush_stream(cx);
         self.streaming_assistant = None;
@@ -3862,6 +3904,12 @@ impl ChatView {
             self.set_activity(label);
         } else {
             self.set_activity(format!("Waiting on you: {label}"));
+        }
+        if call.name.starts_with("agent_") {
+            // Once approved, the worker's steps surface through the
+            // tick; while the ask pends, waiting_on_human keeps the
+            // ask's own line up.
+            self.active_worker_call = Some(call.id.clone());
         }
         if call.name == "write_file"
             && let Some(content) = self.current_file_content(&call)
@@ -3906,22 +3954,28 @@ impl ChatView {
 
     /// The tool finished; show the outcome and persist the row so reloads
     /// and the next request see the same thing the model did.
-    fn on_tool_result(&mut self, call_id: &str, name: &str, result: &str, cx: &mut Context<Self>) {
+    fn on_tool_result(
+        &mut self,
+        call_id: &str,
+        name: &str,
+        arguments: &str,
+        result: &str,
+        cx: &mut Context<Self>,
+    ) {
         // The tool is done: the status says what was done, in the
-        // card's own words. The model chewing on the result is the
+        // card's own words. The arguments ride the event (the loop
+        // owns the call when it emits), so the label is always
+        // specific, never the bare verb a transcript scrape degrades
+        // to when it misses. The model chewing on the result is the
         // thinking row's job; the model's narration, when it comes,
-        // lives in the transcript where prose belongs. The timer
-        // alone was a poor answer to "what is it doing now"; the
-        // model's monologue was a worse one.
-        let arguments = self
-            .turns
-            .iter()
-            .find_map(|turn| match turn {
-                Turn::Tool { call, .. } if call.id == call_id => Some(call.arguments.clone()),
-                _ => None,
-            })
-            .unwrap_or_default();
-        self.set_activity(crate::tools_ui::action_label(name, &arguments, false));
+        // lives in the transcript where prose belongs.
+        self.set_activity(crate::tools_ui::action_label(name, arguments, false));
+        if name.starts_with("agent_") {
+            // The worker's run is over: its steps leave the progress
+            // map, the line belongs to the leader again.
+            self.active_worker_call = None;
+            self.worker_progress.clear(call_id);
+        }
         self.thinking = true;
         // The card's clock retires with the card.
         self.tool_starts.remove(call_id);
@@ -3947,7 +4001,7 @@ impl ChatView {
                 self.last_db_id,
                 call_id,
                 name,
-                &arguments,
+                arguments,
                 result,
             )
         {
@@ -5098,16 +5152,17 @@ impl ChatView {
         div().w_full().px_4().mt_2().child(inner).into_any_element()
     }
 
-    /// The status line's words, spinner aside: the action, and that
-    /// is all. The clocks taught the wrong lesson (a label plus two
-    /// timers reads as a stall even when the work is moving); the
-    /// thinking row owns "now", the footer owns the run's total. One
-    /// gauge survives here, diagnostic only: past [`QUIET_AFTER`] of
-    /// no loop events the line says so. Quiet stays silent while an
-    /// approval card waits on the human: that silence is the
-    /// human's, and the ask's own clock tells it.
+    /// The status line's words, spinner aside: the action, the step's
+    /// own elapsed clock, and, past [`QUIET_AFTER`] of no loop events,
+    /// the quiet gauge. The clock is the step's, not the run's: it
+    /// starts over when the activity changes, so the number answers
+    /// "how long has THIS been going on", "is it stuck or just slow",
+    /// the question the words alone answer too late. The run's total
+    /// lives in the footer. Quiet stays silent while an approval card
+    /// waits on the human: that silence is the human's, and the ask's
+    /// own clock tells it.
     fn activity_line(&self) -> String {
-        let mut line = self.activity.clone();
+        let mut line = format!("{} · {}", self.activity, clock(self.activity_at.elapsed()));
         let quiet = self.last_event_at.elapsed();
         if quiet >= QUIET_AFTER && !self.waiting_on_human() {
             line.push_str(&format!(" · quiet {}", clock(quiet)));

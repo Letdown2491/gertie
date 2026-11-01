@@ -112,6 +112,7 @@ pub fn run(prompt: Option<String>, yes: bool, config_path: Option<PathBuf>) -> i
         user_attachments: Vec::new(),
         max_tool_rounds: boot.max_tool_rounds(),
         grace_rounds: boot.grace_rounds(),
+        worker_progress: gertie_core::WorkerProgress::default(),
     });
     let worker_asks = boot.broker.subscribe();
 
@@ -263,6 +264,7 @@ pub(crate) fn pump(
                 LoopEvent::ToolResult {
                     call_id,
                     name,
+                    arguments: _,
                     result,
                 } => {
                     let arguments = calls
@@ -523,6 +525,7 @@ mod tests {
             user_attachments: Vec::new(),
             max_tool_rounds: None,
             grace_rounds: None,
+            worker_progress: gertie_core::WorkerProgress::default(),
         });
         let mut approvals = 0;
         let (outcome, text) = pump(
@@ -605,6 +608,7 @@ mod tests {
             user_attachments: Vec::new(),
             max_tool_rounds: None,
             grace_rounds: None,
+            worker_progress: gertie_core::WorkerProgress::default(),
         });
         let mut approvals = 0;
         let (outcome, _) = pump(

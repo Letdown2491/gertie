@@ -24,7 +24,7 @@ use crate::ToolRegistry;
 use crate::agent_loop::{LoopEvent, SharedHistory, TurnSpec, run_turn};
 use crate::permissions::{ModeScope, PermissionBroker, PromptSource};
 use crate::snapshot::SnapshotStore;
-use crate::tool::{Tool, ToolResult};
+use crate::tool::{Tool, ToolResult, WorkerProgress, WorkerStep};
 use futures_util::StreamExt;
 use std::future::Future;
 use std::path::PathBuf;
@@ -367,6 +367,30 @@ impl Tool for AgentTool {
         &'a self,
         arguments: &'a str,
     ) -> Pin<Box<dyn Future<Output = ToolResult> + Send + 'a>> {
+        self.execute(arguments, None, WorkerProgress::default())
+    }
+
+    fn run_with_call<'a>(
+        &'a self,
+        call: &'a crate::request::ToolCall,
+        progress: &'a WorkerProgress,
+    ) -> Pin<Box<dyn Future<Output = ToolResult> + Send + 'a>> {
+        self.execute(&call.arguments, Some(call.id.clone()), progress.clone())
+    }
+}
+
+impl AgentTool {
+    /// The dispatch itself. `call_id` is the leader's tool-call id when
+    /// the loop dispatched through [`Tool::run_with_call`]: the worker's
+    /// steps are reported into `progress` under it, so the leader's
+    /// status line can say what its worker is doing mid-run. A None id
+    /// (a plain [`Tool::run`], tests) skips the reporting.
+    fn execute<'a>(
+        &'a self,
+        arguments: &'a str,
+        call_id: Option<String>,
+        progress: WorkerProgress,
+    ) -> Pin<Box<dyn Future<Output = ToolResult> + Send + 'a>> {
         Box::pin(async move {
             let args: DispatchArgs = serde_json::from_str(arguments)
                 .map_err(|error| format!("bad dispatch arguments: {error}"))?;
@@ -424,6 +448,10 @@ impl Tool for AgentTool {
                 // same defaults as the leader's.
                 max_tool_rounds: None,
                 grace_rounds: None,
+                // Depth one is structural: a worker has no agent tools
+                // (its registry stripped them), so nothing ever writes
+                // this handle; it exists to satisfy the spec.
+                worker_progress: WorkerProgress::default(),
                 // Brief and guidance are model-authored; their
                 // hyphen lines are escaped so neither can forge the
                 // envelope around them.
@@ -484,6 +512,40 @@ impl Tool for AgentTool {
                         break;
                     }
                     LoopEvent::Done => break,
+                    // The worker's steps surface in the leader's line:
+                    // reported under the leader's call id, read on the
+                    // leader's tick. The leader's stream is parked
+                    // inside this tool, so without these the whole
+                    // worker run reads as silence. A pending worker
+                    // ask is not reported here: it surfaces as the
+                    // ask card, and the leader's line says "A worker
+                    // needs you".
+                    LoopEvent::ToolCallStarted { call } => {
+                        if let Some(id) = &call_id {
+                            progress.set(
+                                id,
+                                WorkerStep {
+                                    name: call.name,
+                                    arguments: call.arguments,
+                                    running: true,
+                                },
+                            );
+                        }
+                    }
+                    LoopEvent::ToolResult {
+                        name, arguments, ..
+                    } => {
+                        if let Some(id) = &call_id {
+                            progress.set(
+                                id,
+                                WorkerStep {
+                                    name,
+                                    arguments,
+                                    running: false,
+                                },
+                            );
+                        }
+                    }
                     _ => {}
                 }
             }
@@ -609,6 +671,125 @@ mod tests {
         let report = result.expect("worker report");
         assert!(report.contains("STATUS: done"));
         assert!(report.contains("SUMMARY: fine"));
+    }
+
+    #[test]
+    fn a_worker_reports_its_steps_to_the_leader() {
+        // The worker's provider: round 1 runs a read-only tool, round
+        // 2 reports. Dispatched through run_with_call (the loop's
+        // path), every step lands in the progress handle under the
+        // leader's call id, and the leader's tick renders them; a
+        // plain run (tests) reports nothing.
+        struct StepsProvider(std::sync::atomic::AtomicUsize);
+        impl crate::Provider for StepsProvider {
+            fn stream(&self, _request: crate::Request) -> BoxStream<'static, crate::Event> {
+                let round = self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let events = if round == 0 {
+                    vec![
+                        crate::Event::ToolCall {
+                            id: "w1".into(),
+                            name: "probe".into(),
+                            arguments: r#"{"path": "src/x.rs"}"#.into(),
+                        },
+                        crate::Event::Done,
+                    ]
+                } else {
+                    vec![
+                        crate::Event::Token {
+                            delta: "STATUS: done\nEVIDENCE: probed\nSUMMARY: fine\nCONCERNS: none"
+                                .into(),
+                        },
+                        crate::Event::Done,
+                    ]
+                };
+                Box::pin(futures_util::stream::iter(events))
+            }
+        }
+
+        struct Probe;
+        impl crate::tool::Tool for Probe {
+            fn name(&self) -> &'static str {
+                "probe"
+            }
+            fn description(&self) -> String {
+                "probes".into()
+            }
+            fn parameters(&self) -> serde_json::Value {
+                serde_json::json!({})
+            }
+            fn run<'a>(
+                &'a self,
+                _arguments: &'a str,
+            ) -> Pin<Box<dyn Future<Output = ToolResult> + Send + 'a>> {
+                Box::pin(async { Ok("probed".into()) })
+            }
+        }
+
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("brief.md"), "Do the thing.").unwrap();
+
+        let broker = Arc::new(PermissionBroker::new());
+        let probe: Arc<dyn crate::tool::Tool> = Arc::new(Probe);
+        let worker_tools: ToolRegistry = Arc::new(std::collections::BTreeMap::from([(
+            probe.name().to_string(),
+            probe,
+        )]));
+        let tool = AgentTool::new(
+            AgentType {
+                name: "worker".into(),
+                description: "does the thing".into(),
+                system_prompt: "work hard".into(),
+                tools: None,
+            },
+            Arc::new(StepsProvider(std::sync::atomic::AtomicUsize::new(0))),
+            &worker_tools,
+            None,
+            broker,
+            None,
+            tmp.path().to_path_buf(),
+            None,
+            crate::SessionScope::new(),
+            ModeScope::new(),
+            false,
+        );
+
+        let progress = WorkerProgress::default();
+        let call = crate::request::ToolCall {
+            id: "leader-1".into(),
+            name: "agent_worker".into(),
+            arguments: r#"{"brief_path": "brief.md"}"#.into(),
+        };
+        let future = tool.run_with_call(&call, &progress);
+        let waker = Waker::noop();
+        let mut cx = TaskContext::from_waker(waker);
+        let mut future = Box::pin(future);
+        let started = std::time::Instant::now();
+        let result = loop {
+            match Pin::new(&mut future).poll(&mut cx) {
+                Poll::Ready(result) => break result,
+                Poll::Pending => {
+                    if started.elapsed() > Duration::from_secs(10) {
+                        panic!("the future stayed Pending for 10s, an await never resolved");
+                    }
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+            }
+        };
+
+        let report = result.expect("worker report");
+        assert!(report.contains("SUMMARY: fine"));
+
+        // The steps landed under the leader's call id, the last one
+        // the step's done face; the worker's own call ids never leak
+        // through.
+        let step = progress.get("leader-1").expect("progress recorded");
+        assert_eq!(step.name, "probe");
+        assert_eq!(step.arguments, r#"{"path": "src/x.rs"}"#);
+        assert!(!step.running, "the last step is the done one");
+        assert!(
+            progress.get("w1").is_none(),
+            "the worker's own call id never leaks through"
+        );
     }
 
     #[test]

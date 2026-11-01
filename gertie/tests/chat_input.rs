@@ -3497,9 +3497,9 @@ fn a_pending_mutation_names_what_it_waits_on() {
 
 /// Narration never becomes the status: the model may say "Let me
 /// check the config first." before a call, but once the result lands
-/// the line is the done label alone. The old behavior quoted the
-/// model's prose (truncated at 64 chars); a monologue in a status
-/// line is the model's words wearing the harness's voice.
+/// the line is the done label and its step clock. The old behavior
+/// quoted the model's prose (truncated at 64 chars); a monologue in
+/// a status line is the model's words wearing the harness's voice.
 #[test]
 fn narration_stays_out_of_the_status_line() {
     let scenarios = tempfile::tempdir().expect("scenario dir");
@@ -3551,9 +3551,13 @@ fn narration_stays_out_of_the_status_line() {
             .read(cx)
             .activity_line_for_test()
     });
-    assert_eq!(
-        line, "Read `scratch.txt`",
-        "the done label, exactly: no narration quote, no clocks"
+    assert!(
+        line.starts_with("Read `scratch.txt` · "),
+        "the done label with its step clock: {line}"
+    );
+    assert!(
+        !line.contains("Let me check"),
+        "the narration never rides the line: {line}"
     );
 }
 

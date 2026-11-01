@@ -58,11 +58,7 @@ fn is_newer(tag: &str, current: &str) -> bool {
     false
 }
 
-pub fn run(
-    config_override: Option<PathBuf>,
-    clean_worktrees: bool,
-    check_updates: bool,
-) -> i32 {
+pub fn run(config_override: Option<PathBuf>, clean_worktrees: bool, check_updates: bool) -> i32 {
     println!("gertie {}", crate::cli::VERSION);
     println!();
 
