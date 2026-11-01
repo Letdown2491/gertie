@@ -347,6 +347,15 @@ pub struct ChatView {
     /// What the agent is up to right now, for the status line, the loop
     /// goes quiet between streaming rounds, and silence reads as a hang.
     activity: String,
+    /// The current work run's accumulated wall-clock time. Starts at
+    /// the turn's first event, accumulates across system-imposed pauses
+    /// (round budget, rate limit: the wait is part of the work), and
+    /// resets when the human acts (a new send, a stop, a rewind) or the
+    /// work completes. The status line's "run 12:30".
+    run_elapsed: std::time::Duration,
+    /// When the current accumulation segment began. None = no run is
+    /// live (the clock shows nothing).
+    run_started: Option<Instant>,
     /// When the current activity began. The status line's clock resets
     /// with every change, thinking, a tool, thinking again, so the
     /// number always answers "how long has THIS been going on".
@@ -763,6 +772,8 @@ impl ChatView {
             activity: "starting…".into(),
             activity_at: Instant::now(),
             last_event_at: Instant::now(),
+            run_elapsed: std::time::Duration::ZERO,
+            run_started: None,
             tool_starts: std::collections::HashMap::new(),
             window_handle: window.window_handle(),
             thinking: false,
@@ -1390,13 +1401,74 @@ impl ChatView {
         self.turns.len() + usize::from(self.show_activity_row())
     }
 
+    /// The between-rounds status, derived from the agent's own words:
+    /// the model narrates before each tool call ("Let me check the CI
+    /// config"), so the status line quotes the latest narration line
+    /// instead of the empty "Thinking…". Most truthful label possible:
+    /// it is literally the agent's stated intent, and it updates as the
+    /// agent updates. Falls back to a plain "Working…" when the model
+    /// narrated nothing this round. The last assistant turn only:
+    /// narration is *current* intent, an older turn's is history.
+    fn narration_status(&self) -> String {
+        let narrated = self
+            .turns
+            .iter()
+            .rev()
+            .find_map(|turn| match turn {
+                Turn::Message {
+                    role: Role::Assistant,
+                    text,
+                    ..
+                } if !text.trim().is_empty() => Some(text),
+                _ => None,
+            })
+            .filter(|text| !text.contains("[error]"))
+            .and_then(|text| {
+                text.lines()
+                    .map(str::trim)
+                    .find(|line| !line.is_empty())
+                    .map(str::to_string)
+            });
+        match narrated {
+            Some(line) => {
+                let mut short: String = line.chars().take(64).collect();
+                if line.chars().count() > 64 {
+                    short.push('…');
+                }
+                format!("{}…", short.trim_end_matches(['.', '…']))
+            }
+            None => "Working…".into(),
+        }
+    }
+
     /// The status line's text, with its clocks: every change restarts
     /// the elapsed count (the number answers "how long has *this* been
-    /// going on") and the quiet gauge with it.
+    /// going on") and the quiet gauge with it. The run clock keeps
+    /// accumulating: it is the work's total, not the phase's.
     fn set_activity(&mut self, label: impl Into<String>) {
         self.activity = label.into();
         self.activity_at = Instant::now();
         self.last_event_at = Instant::now();
+        if self.run_started.is_none() {
+            self.run_started = Some(Instant::now());
+        }
+    }
+
+    /// The run clock's read: accumulated time plus the live segment.
+    fn run_elapsed_total(&self) -> std::time::Duration {
+        self.run_elapsed
+            + self
+                .run_started
+                .map(|started| started.elapsed())
+                .unwrap_or_default()
+    }
+
+    /// The run is over: the number leaves the status line (the next
+    /// set_activity starts a fresh run). Human stops and rewinds force
+    /// this too: a stopped run's clock does not carry into new work.
+    fn end_run(&mut self) {
+        self.run_elapsed = self.run_elapsed_total();
+        self.run_started = None;
     }
 
     /// Whether an approval card waits on the human. Quiet's gauge
@@ -3515,7 +3587,10 @@ impl ChatView {
 
         self.streaming = true;
         self.streaming_assistant = None;
-        self.set_activity("Thinking…");
+        // Turn start: fresh narration is not yet available (the model
+        // has not spoken this round), so the plain label until its
+        // first words stream or a tool runs.
+        self.set_activity("Working…");
         self.thinking = true;
         self.steer_tx = Some(steer_tx);
         // The composer's ghost text names the steer/queue verbs while
@@ -3649,6 +3724,10 @@ impl ChatView {
                 this.streaming = false;
                 this.thinking = false;
                 this.streaming_assistant = None;
+                // The run's clock closes here. A queued follow-up
+                // reopens it (accumulated); a plain completion leaves
+                // the total showing until the next send starts fresh.
+                this.end_run();
                 // The turn is over: steering closes, the queue takes
                 // over. A queued follow-up runs as its own turn, right
                 // now, the composer keeps whatever was typed meanwhile.
@@ -3820,9 +3899,10 @@ impl ChatView {
     /// The tool finished; show the outcome and persist the row so reloads
     /// and the next request see the same thing the model did.
     fn on_tool_result(&mut self, call_id: &str, name: &str, result: &str, cx: &mut Context<Self>) {
-        // The tool is done, so the model is chewing on the result before
-        // it writes the next thing, say so in the transcript.
-        self.set_activity("Thinking…");
+        // The tool is done, so the model is chewing on the result:
+        // the status quotes the agent's own latest narration (it may
+        // have stated what comes next) instead of an empty "Thinking".
+        self.set_activity(self.narration_status());
         self.thinking = true;
         // The card's clock retires with the card.
         self.tool_starts.remove(call_id);
@@ -5001,6 +5081,12 @@ impl ChatView {
     /// own clock tells it.
     fn activity_line(&self) -> String {
         let mut line = format!("{} · {}", self.activity, clock(self.activity_at.elapsed()));
+        // The run clock rides every status line while a run is live:
+        // "how long has this piece of work taken me" (pauses included,
+        // the wait is part of the work), next to the phase's own clock.
+        if self.run_started.is_some() {
+            line.push_str(&format!(" · run {}", clock(self.run_elapsed_total())));
+        }
         let quiet = self.last_event_at.elapsed();
         if quiet >= QUIET_AFTER && !self.waiting_on_human() {
             line.push_str(&format!(" · quiet {}", clock(quiet)));
