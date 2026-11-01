@@ -24,14 +24,17 @@ pub fn action_label(name: &str, arguments: &str, running: bool) -> String {
     };
 
     // Whittle a command down for inline display; the full command stays
-    // in the raw output.
+    // in the raw output. Trailing dots, literal or a previous ellipsis,
+    // read as a truncation artifact sitting next to our own `…`: strip
+    // them, then add exactly one.
     let short = |text: &str, cap: usize| {
         let one_line = text
             .lines()
             .find(|line| !line.trim().is_empty())
             .unwrap_or("");
-        let mut short: String = one_line.trim().chars().take(cap).collect();
-        if one_line.trim().chars().count() > cap {
+        let trimmed = one_line.trim().trim_end_matches(['.', '…', ' ']);
+        let mut short: String = trimmed.chars().take(cap).collect();
+        if trimmed.chars().count() > cap {
             short.push('…');
         }
         short
@@ -57,36 +60,36 @@ pub fn action_label(name: &str, arguments: &str, running: bool) -> String {
                 tense(format!("Editing `{path}`"), format!("Edited `{path}`"))
             }
             "bash" => {
-                let command = short(&field("command"), 60);
+                let command = short(&field("command"), 96);
                 tense(format!("Running `{command}`"), format!("Ran `{command}`"))
             }
             "glob" => {
-                let pattern = short(&field("pattern"), 50);
+                let pattern = short(&field("pattern"), 72);
                 tense(
                     format!("Finding files matching `{pattern}`"),
                     format!("Found files matching `{pattern}`"),
                 )
             }
             "grep" => {
-                let pattern = short(&field("pattern"), 50);
+                let pattern = short(&field("pattern"), 72);
                 tense(
                     format!("Searching for `{pattern}`"),
                     format!("Searched for `{pattern}`"),
                 )
             }
             "web_search" => {
-                let query = short(&field("query"), 60);
+                let query = short(&field("query"), 96);
                 tense(
                     format!("Searching the web for \u{201c}{query}\u{201d}"),
                     format!("Searched the web for \u{201c}{query}\u{201d}"),
                 )
             }
             "web_fetch" => {
-                let url = short(&field("url"), 60);
+                let url = short(&field("url"), 96);
                 tense(format!("Fetching {url}"), format!("Fetched {url}"))
             }
             "search_history" => {
-                let query = short(&field("query"), 60);
+                let query = short(&field("query"), 96);
                 tense(
                     format!("Searching past chats for `{query}`"),
                     format!("Searched past chats for `{query}`"),
@@ -102,7 +105,7 @@ pub fn action_label(name: &str, arguments: &str, running: bool) -> String {
             "ask_user" => {
                 // The question is prose, the model's words sanitized at
                 // the loop's parse, so quotes not backticks.
-                let question = short(&field("question"), 60);
+                let question = short(&field("question"), 96);
                 tense(
                     format!("Asking you \u{201c}{question}\u{201d}"),
                     format!("Asked you \u{201c}{question}\u{201d}"),
@@ -125,7 +128,11 @@ pub fn action_label(name: &str, arguments: &str, running: bool) -> String {
         } else {
             label
         };
-    if running {
+    // The running tense's trailing ellipsis: only when the label does
+    // not already wear one. A truncated command's own `…` does the
+    // duty (the spinner and the clock carry "still going"), two in a
+    // row read as a stutter.
+    if running && !label.ends_with('…') {
         format!("{label}…")
     } else {
         label

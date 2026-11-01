@@ -377,6 +377,21 @@ pub struct ChatView {
     /// The leader call id of the agent tool currently running, if
     /// any: the tick's key into the progress map.
     active_worker_call: Option<String>,
+    /// Whether the current activity label is the newest running card's
+    /// own label, set by the paths that start or approve a call. The
+    /// card-is-the-now rule reads it: while the label IS the card's and
+    /// the user is pinned to the bottom, the row would only echo the
+    /// card, so it stays quiet and the run total rides the card
+    /// instead. Every other label (thinking, writing, worker steps,
+    /// done labels) is news the card can't speak, and clears the flag.
+    activity_echoes_card: bool,
+    /// Snapshot of the transcript list's tail-following, taken at the
+    /// top of render: the live value lives behind the list state's
+    /// RefCell, which the list holds mutably borrowed while painting
+    /// its items, so the row (rendered inside that paint) reads this
+    /// copy instead. Scroll events dispatch before the frame's render,
+    /// so the snapshot is current for every read this frame.
+    tail_following: bool,
     /// A write card's before-content, keyed by wire call id: what the
     /// file held when the call arrived, captured before anything can
     /// run. The diff face diffs the arguments against it, exact at
@@ -786,6 +801,8 @@ impl ChatView {
             tool_starts: std::collections::HashMap::new(),
             worker_progress: gertie_core::WorkerProgress::default(),
             active_worker_call: None,
+            activity_echoes_card: false,
+            tail_following: true,
             before_contents: std::collections::HashMap::new(),
             window_handle: window.window_handle(),
             usage: session_usage,
@@ -1117,6 +1134,20 @@ impl ChatView {
         self.show_activity_row()
     }
 
+    /// The newest running card's clock words, for tests: the
+    /// card-is-the-now rule's other half, the run total riding the
+    /// card's clock while the row yields to it.
+    pub fn running_words_for_test(&self) -> Option<String> {
+        self.turns.iter().rev().find_map(|turn| match turn {
+            Turn::Tool {
+                call,
+                status: ToolStatus::Running,
+                ..
+            } => Some(self.running_clock_words(&call.id)),
+            _ => None,
+        })
+    }
+
     /// A tool card's cached diff counts, for tests: the (adds, removes)
     /// the face computed for the card at turn `index`. What a reloaded
     /// write card's diff is *of* is only visible here.
@@ -1426,7 +1457,8 @@ impl ChatView {
     }
 
     /// The transcript's item count: one row per turn, plus the activity
-    /// row while the run is live and nothing else is on screen.
+    /// row while the run is live and the row isn't yielding to the
+    /// newest running card (the card-is-the-now rule).
     fn item_count(&self) -> usize {
         self.turns.len() + usize::from(self.show_activity_row())
     }
@@ -1434,9 +1466,13 @@ impl ChatView {
     /// The status line's text: the label itself is the news, and the
     /// step's clock restarts with it (the activity row renders the
     /// pair). Setting it marks the loop event (the quiet gauge reads
-    /// off this) and resets the spinner's step; the run clock, if a
-    /// run is live, keeps accumulating untouched in the footer.
+    /// off this) and resets the spinner's step; the run's total clock,
+    /// if a run is live, keeps accumulating untouched. The label is
+    /// assumed to be news no card is already speaking: the two start
+    /// paths that DO echo a card (a call started, a call approved)
+    /// flip the echo flag back on themselves.
     fn set_activity(&mut self, label: impl Into<String>) {
+        self.activity_echoes_card = false;
         self.activity = label.into();
         self.activity_at = Instant::now();
         self.last_event_at = Instant::now();
@@ -1478,15 +1514,20 @@ impl ChatView {
     }
 
     /// Whether the activity row belongs at the bottom right now: the
-    /// run is live, and no ask is waiting on the human (the ask card
-    /// and its "Waiting on you" line tell that story). The row renders
-    /// for the whole run, "Thinking…", a tool's running label, a
-    /// worker's steps, the done label: exactly the gaps that used to
-    /// read as a hang. Gating it on a thinking flag instead hid it
-    /// during every tool run, the run's most informative stretch;
-    /// the row now only yields when the human's turn to speak.
+    /// run is live, no ask is waiting on the human (the ask card and
+    /// its "Waiting on you" line tell that story), and the label is
+    /// not the newest running card's own, the card-is-the-now rule.
+    /// That rule: while the user is pinned to the bottom, a running
+    /// card is on screen saying the same sentence; the row would only
+    /// echo it, twin spinners and all. So the row yields to the card,
+    /// and the run total rides the card's clock line. Scrolled up, the
+    /// card is off-screen and the row is the now again: full label,
+    /// both clocks. The row's own news, thinking, writing, worker
+    /// steps, done labels, never yields at all.
     fn show_activity_row(&self) -> bool {
-        self.streaming && !self.waiting_on_human()
+        self.streaming
+            && !self.waiting_on_human()
+            && !(self.activity_echoes_card && self.tail_following)
     }
 
     /// The composer chip's click: the mode advances around the ring,
@@ -3880,6 +3921,10 @@ impl ChatView {
             // progress handle and speaks them on the line.
             self.active_worker_call = Some(call.id.clone());
         }
+        // The label just set is this new card's own: the echo flag
+        // makes the row yield to the card (while the user is pinned
+        // to the bottom), until a worker step or a delta speaks.
+        self.activity_echoes_card = true;
         self.flush_stream(cx);
         self.streaming_assistant = None;
         self.turns.push(Turn::Tool {
@@ -4283,10 +4328,13 @@ impl ChatView {
                         // line stops saying "waiting" and its clock
                         // hands over to the call, otherwise a long
                         // wait would surface, un-reset, as instant
-                        // quiet against a stale label.
+                        // quiet against a stale label. The label is
+                        // the now-running card's own: the row yields
+                        // to the card while the user is at the bottom.
                         let label =
                             crate::tools_ui::action_label(&call.name, &call.arguments, true);
                         self.set_activity(label);
+                        self.activity_echoes_card = true;
                     } else {
                         // Unknown id (already answered): put nothing
                         // back; the card was settled elsewhere.
@@ -5171,6 +5219,25 @@ impl ChatView {
         line
     }
 
+    /// A running tool card's clock words: the card's own elapsed time,
+    /// plus the run's total when this card is the now. The card and the
+    /// activity row trade the total between them: the card carries it
+    /// while the row yields to it (echo label, user at the bottom), the
+    /// row carries it otherwise. Never both on screen at once.
+    fn running_clock_words(&self, call_id: &str) -> String {
+        match self.tool_starts.get(call_id) {
+            Some(started) => {
+                let words = format!("running · {}", clock(started.elapsed()));
+                if self.activity_echoes_card && self.tail_following && self.run_started.is_some() {
+                    format!("{words} · run {}", clock(self.run_elapsed_total()))
+                } else {
+                    words
+                }
+            }
+            None => "running".to_string(),
+        }
+    }
+
     /// The empty transcript's center. Three honest variants, quiet
     /// to loud: a configured endpoint gets the two-line "Ready." state;
     /// a fresh install (no chats ever, this is the sidebar's test)
@@ -5614,19 +5681,17 @@ impl ChatView {
                 // call's own clock, a two-minute test run says how
                 // long it has been saying nothing.
                 .when(running, |row| {
-                    let started = self.tool_starts.get(&call.id);
-                    let step = started
+                    let step = self
+                        .tool_starts
+                        .get(&call.id)
                         .map(|clock_at| clock_at.elapsed().as_millis() as usize / 500)
                         .unwrap_or(0);
                     let frame = SPINNER_FRAMES[step % SPINNER_FRAMES.len()];
-                    let words = started
-                        .map(|clock_at| format!("running · {}", clock(clock_at.elapsed())))
-                        .unwrap_or_else(|| "running".to_string());
                     row.child(
                         div()
                             .text_size(px(11.))
                             .text_color(cx.theme().muted_foreground)
-                            .child(format!("{frame} {words}")),
+                            .child(format!("{frame} {}", self.running_clock_words(&call.id))),
                     )
                 })
                 .when(worker, |row| {
@@ -6335,6 +6400,11 @@ impl ChatView {
 
 impl Render for ChatView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // The tail-follow snapshot: taken here, outside the list's
+        // paint (which holds the state's borrow and would panic on a
+        // read), after this frame's scroll events have landed. The
+        // row and the cards read the copy.
+        self.tail_following = self.list_state.is_following_tail();
         let view = cx.entity().downgrade();
         // The composer's slash and mention matches, computed once per
         // frame: the popups' guards and rows share the one computation.

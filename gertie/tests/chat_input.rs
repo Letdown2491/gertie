@@ -2126,14 +2126,40 @@ fn the_quiet_gauge_holds_its_tongue_while_an_approval_waits() {
     );
 }
 
-/// The activity row holds through the run itself. The old condition
-/// gated it on a thinking flag that any running tool cleared, so the
-/// row went dark exactly while a tool or worker executed, and a
-/// worker's steps rendered nowhere. Now the row yields only to the
-/// human's turn: up while a tool runs (the run's total riding the
-/// line), retired when the turn ends.
+/// The card is the now, and the row is the now when the card is not
+/// on screen. While a plain tool runs and the user is pinned to the
+/// bottom, the row would only echo the card's own label, twin
+/// spinners saying one sentence twice: it yields, and the run total
+/// rides the card's clock line. Scrolled up, the card is off-screen
+/// and the row speaks again, full label and both clocks. When the
+/// run ends, the row retires with the turn.
 #[test]
-fn the_activity_row_holds_while_a_tool_runs() {
+fn the_card_is_the_now_and_the_row_yields_to_it() {
+    // A transcript tall enough to overflow the 900x640 window: the
+    // scroll-up below needs a real "not at the bottom" to hold
+    // against, the kit re-engages following whenever the viewport
+    // still sits on the tail.
+    let store = Arc::new(SessionStore::open(Path::new(":memory:")).expect("memory store"));
+    let seeded = store.create_session("the park").expect("session");
+    let filler = "a measured paragraph of transcript filler. ".repeat(12);
+    let mut parent = Some(
+        store
+            .append_message(seeded, None, gertie_core::Role::User, "seed the run")
+            .expect("user row"),
+    );
+    for _ in 0..7 {
+        parent = Some(
+            store
+                .append_message(seeded, parent, gertie_core::Role::Assistant, &filler)
+                .expect("assistant row"),
+        );
+        parent = Some(
+            store
+                .append_message(seeded, parent, gertie_core::Role::User, "go on")
+                .expect("user row"),
+        );
+    }
+
     let scenarios = tempfile::tempdir().expect("scenario dir");
     std::fs::write(
         scenarios.path().join("park.toml"),
@@ -2153,7 +2179,6 @@ fn the_activity_row_holds_while_a_tool_runs() {
     let provider = Arc::new(
         gertie_providers::AnyProvider::with_endpoints(vec![endpoint]).expect("replay provider"),
     );
-    let store = Arc::new(SessionStore::open(Path::new(":memory:")).expect("memory store"));
     let (release, park) = tokio::sync::oneshot::channel::<()>();
     let mut fixture = fixture_built(
         store,
@@ -2176,33 +2201,57 @@ fn the_activity_row_holds_while_a_tool_runs() {
     });
     pump(&mut fixture, 30);
 
-    // The tool is parked mid-run: no ask is pending, so the row must
-    // be up, and the line carries the run's total.
     let view = fixture.view.clone();
-    let (row, line) = fixture.cx.update(|cx| {
-        let view = view.upgrade().expect("view alive").read(cx);
-        (
-            view.show_activity_row_for_test(),
-            view.activity_line_for_test(),
-        )
-    });
-    assert!(row, "the row holds while the tool runs");
+    let read = |fixture: &mut Fixture| {
+        let view = view.clone();
+        fixture.cx.update(move |cx| {
+            let view = view.upgrade().expect("view alive").read(cx);
+            (
+                view.show_activity_row_for_test(),
+                view.running_words_for_test(),
+                view.activity_line_for_test(),
+            )
+        })
+    };
+
+    // Parked mid-run, pinned to the bottom: the row yields to the
+    // card, the card's clock line carries the run total.
+    let (row, words, line) = read(&mut fixture);
+    assert!(!row, "the row yields to the running card at the bottom");
+    let words = words.expect("a running card");
+    assert!(
+        words.contains("running · "),
+        "the card's own clock: {words}"
+    );
+    assert!(
+        words.contains(" · run "),
+        "the run total rides the card: {words}"
+    );
     assert!(
         line.contains(" · run "),
-        "the run total rides the line: {line}"
+        "the row's line still carries the total for when it speaks: {line}"
+    );
+
+    // Scrolled up, the card is off-screen: the row is the now again,
+    // and the total moves to it. The seeded transcript overflows the
+    // window, so the scroll to row 0 is a real "not at the bottom"
+    // and the kit's pause sticks through the paint.
+    fixture.act(|_window, cx| {
+        let view = view.upgrade().expect("view alive");
+        view.update(cx, |view, _| view.scroll_to_item_for_test(0));
+    });
+    pump(&mut fixture, 10);
+    let (row, _words, line) = read(&mut fixture);
+    assert!(row, "scrolled up, the row is the now");
+    assert!(
+        line.contains(" · run "),
+        "the run total rides the row when the row speaks: {line}"
     );
 
     // Released, the run ends, the row retires with the turn.
     drop(release);
     pump(&mut fixture, 30);
-    let row = fixture.cx.update(|cx| {
-        fixture
-            .view
-            .upgrade()
-            .expect("view alive")
-            .read(cx)
-            .show_activity_row_for_test()
-    });
+    let (row, _, _) = read(&mut fixture);
     assert!(!row, "the row retires when the run is over");
 }
 
@@ -2210,6 +2259,28 @@ fn the_activity_row_holds_while_a_tool_runs() {
 /// for "a tool is executing right now" with no pending ask.
 struct ParkTool {
     park: std::sync::Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
+}
+
+/// The label builder's truncation contract: one line, one cap, one
+/// ellipsis. A command that arrives wearing its own trailing dots
+/// must not grow a second set next to ours (the screenshot bug:
+/// `garbage......` in the row, `garbage...` on the card).
+#[test]
+fn a_label_truncates_to_a_single_ellipsis() {
+    let long = format!("{{\"command\": \"echo {}\"}}", "x".repeat(120));
+    let running = gertie::tools_ui::action_label("bash", &long, true);
+    assert!(
+        running.ends_with('…') && !running.contains("……"),
+        "one ellipsis at the cap: {running}"
+    );
+    // Trailing dots are stripped before the tense's one ellipsis goes
+    // on, so a command that ends in dots never reads as a stutter.
+    let dotted = "{\"command\": \"# malformed-SSE garbage...\"}";
+    let labeled = gertie::tools_ui::action_label("bash", dotted, true);
+    assert!(
+        labeled.ends_with("garbage`…"),
+        "dots stripped, exactly one ellipsis, outside the chip: {labeled}"
+    );
 }
 
 impl gertie_core::Tool for ParkTool {
