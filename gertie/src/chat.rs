@@ -457,6 +457,9 @@ pub struct ChatView {
     /// turn's posture. Follows the open session; a fresh chat starts
     /// at the configured default.
     mode: PermissionMode,
+    /// The mode menu's open state (the chip's click opens it; picking
+    /// a row applies, full access opens the confirm card first).
+    mode_menu: bool,
     /// The mode new sessions open in ([permissions] default_mode).
     default_mode: PermissionMode,
     input: Entity<TextareaState>,
@@ -631,6 +634,13 @@ impl ChatView {
             // Typing ends the recall walk, but recall's own writes
             // don't: the set text is the walk's, until the user edits.
             if let InputEvent::Change = event {
+                // Typing also closes the mode menu: a popup left open
+                // over the composer steals the next dispatch (the
+                // menu anchors up from the footer chip, over the
+                // composer's own area).
+                if this.mode_menu {
+                    this.mode_menu = false;
+                }
                 let value = this.input.read(cx).value().to_string();
                 if let Some(recall) = &this.recall
                     && value != recall.set
@@ -811,6 +821,7 @@ impl ChatView {
             mode_scope,
             sandbox_bash,
             mode,
+            mode_menu: false,
             default_mode,
             input,
             renaming: None,
@@ -1527,25 +1538,36 @@ impl ChatView {
             && !(self.activity_echoes_card && self.tail_following)
     }
 
-    /// The composer chip's click: the mode advances around the ring,
-    /// and persists with the session. It applies from the next turn on;
-    /// a running turn keeps the posture it was built with, and the
-    /// notice says so when it matters.
-    ///
-    /// The ring is de-escalation-only: a click never lands on full
-    /// access (auto wraps to supervised), and leaving full access
-    /// returns to supervised. Reaching full access costs intent: the
-    /// palette command opens a confirm card (M7 plan, PR 1) that says
-    /// exactly what it removes. Escalation costs a keystroke of
-    /// intent; de-escalation is frictionless.
+    /// Opens the mode menu: the four postures, the current one
+    /// marked, each row's meaning spelled out. Full access is a row
+    /// like the rest (so it is discoverable from every session), but
+    /// picking it opens the confirm card rather than applying — the
+    /// popup names the dangerous choice, the confirm keeps its intent
+    /// cost. The old ring died for this: a chip click could only walk
+    /// down, so a session born in `auto` (like any the store's row
+    /// holds) could never see or reach full access at all.
     fn cycle_mode(&mut self, cx: &mut Context<Self>) {
-        let next = match self.mode {
-            PermissionMode::Supervised => PermissionMode::AcceptEdits,
-            PermissionMode::AcceptEdits => PermissionMode::Auto,
-            PermissionMode::Auto => PermissionMode::Supervised,
-            PermissionMode::FullAccess => PermissionMode::Supervised,
-        };
-        self.set_mode(next, cx);
+        // The click becomes a menu: the four postures, each spelled
+        // out, the current one marked, full access gated behind the
+        // confirm card. The ring walk this replaces could never reach
+        // full access (M7's de-escalation-only rule), which made
+        // sessions born in `auto` unable to even see the option.
+        self.mode_menu = !self.mode_menu;
+        cx.notify();
+    }
+
+    /// Applies the picked row. Full access does not apply from here:
+    /// it opens the confirm card (the same card the palette's command
+    /// opens), keeping escalation's intent cost inside the menu.
+    fn pick_mode(&mut self, mode: PermissionMode, cx: &mut Context<Self>) {
+        self.mode_menu = false;
+        if mode == PermissionMode::FullAccess {
+            if self.mode != PermissionMode::FullAccess {
+                self.full_access_confirm(cx);
+            }
+            return;
+        }
+        self.set_mode(mode, cx);
     }
 
     /// The palette's "full access" command: the only path to the mode
@@ -1579,6 +1601,7 @@ impl ChatView {
 
     fn set_mode(&mut self, mode: PermissionMode, cx: &mut Context<Self>) {
         self.mode = mode;
+        self.mode_menu = false;
         if let Some(session_id) = self.session_id {
             let _ = self.store.set_session_mode(session_id, mode);
             self.sessions = self.store.list_sessions().unwrap_or_default();
@@ -2252,8 +2275,79 @@ impl ChatView {
         cx.notify();
     }
 
-    /// The memory panel toggle: entries from both tiers as rows, each
-    /// with its votes. Refreshed on every open, votes write through.
+    /// The mode menu, rendered as the chip's popup: one row per
+    /// posture, the current one marked, each meaning spelled out.
+    /// Rows are pick_mode listeners; full access keeps its confirm
+    /// gate. Lives on the chip (a relative child), so it reads as
+    /// what it is: the chip's menu, not a panel.
+    fn render_mode_menu(&self, cx: &Context<Self>) -> AnyElement {
+        use gpui_kit::component::ActiveTheme as _;
+        let theme = cx.theme();
+        let rows = mode_menu_rows(self.mode)
+            .into_iter()
+            .map(|(mode, meaning, current)| {
+                div()
+                    .id(SharedString::from(format!(
+                        "mode-menu-{}",
+                        mode_label(mode).replace(' ', "-")
+                    )))
+                    .cursor_pointer()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .px_2()
+                    .py_1()
+                    .rounded_sm()
+                    .when(current, |row| row.bg(theme.secondary))
+                    .hover(|style| style.bg(theme.secondary))
+                    .on_mouse_down(gpui_kit::MouseButton::Left, |_, _, cx| {
+                        cx.stop_propagation()
+                    })
+                    .on_click(cx.listener(move |this, _, _, cx| this.pick_mode(mode, cx)))
+                    .test_support()
+                    .child(
+                        div()
+                            .text_size(px(11.))
+                            .text_color(if current {
+                                theme.foreground
+                            } else {
+                                theme.muted_foreground
+                            })
+                            .child(mode_label(mode)),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(10.))
+                            .text_color(theme.muted_foreground)
+                            .child(meaning),
+                    )
+                    .into_any_element()
+            });
+        div()
+            .id("mode-menu")
+            .absolute()
+            .test_support()
+            .bottom_full()
+            .left_0()
+            .mb_1()
+            .w_56()
+            .flex()
+            .flex_col()
+            .gap_0p5()
+            .p_1()
+            .rounded_md()
+            .border_1()
+            .border_color(theme.border)
+            .bg(theme.popover)
+            .shadow_sm()
+            .children(rows)
+            .into_any_element()
+    }
+
+    /// The composer chip's click: opens the mode menu (the four
+    /// postures, the current one marked). Picking applies from the
+    /// next turn on; a running turn keeps the posture it was built
+    /// with, and the notice says so when it matters.
     fn toggle_memory(&mut self, cx: &mut Context<Self>) {
         self.panel = if self.panel == Panel::Memory {
             Panel::None
@@ -5346,6 +5440,7 @@ impl ChatView {
         };
         let mode = div()
             .id("mode-chip")
+            .relative()
             .cursor_pointer()
             .text_size(px(11.))
             .text_color(mode_color)
@@ -5355,7 +5450,8 @@ impl ChatView {
             .child(mode_label(self.mode))
             // Observed so the test harness can click the word; a
             // no-op outside test-support builds.
-            .test_support();
+            .test_support()
+            .children(self.mode_menu.then(|| self.render_mode_menu(cx)));
         // The memory word: how much this workspace remembers. Shown
         // when the store holds *entries*; when it only holds files
         // (prose notes, not yet indexed entries) the chip still shows,
@@ -7784,4 +7880,28 @@ mod tests {
         let patch = diff_data(&call, Some("same\n")).expect("write face");
         assert_eq!((patch.adds, patch.removes), (0, 0));
     }
+}
+
+/// The mode menu's rows: the four postures with their one-line
+/// meanings, in escalation order. The current mode is marked; the
+/// full-access row routes through the confirm card (pick_mode), so
+/// the menu names the dangerous choice without dropping its gate.
+fn mode_menu_rows(current: PermissionMode) -> Vec<(PermissionMode, &'static str, bool)> {
+    use PermissionMode::*;
+    [
+        (Supervised, "everything asks", current == Supervised),
+        (
+            AcceptEdits,
+            "edits run unasked, bash asks",
+            current == AcceptEdits,
+        ),
+        (
+            Auto,
+            "edits and sandboxed bash run unasked",
+            current == Auto,
+        ),
+        (FullAccess, "nothing asks, ever", current == FullAccess),
+    ]
+    .into_iter()
+    .collect()
 }

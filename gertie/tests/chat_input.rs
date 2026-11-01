@@ -356,20 +356,40 @@ fn the_composer_chip_cycles_the_permission_mode_and_persists_it() {
         gertie_core::PermissionMode::Supervised
     );
 
-    // One click per ring position; the store records each stop, and
-    // the ring wraps back to supervised. The ring is de-escalation-
-    // only (M7 PR 1): auto wraps to supervised, and no click ever
-    // lands on full access.
-    for expected in [
+    // The chip's click opens the menu (the ring walk died: a click
+    // could never reach full access, which stranded sessions born in
+    // `auto`). The menu's rows apply directly; the full-access row
+    // opens the confirm card instead of applying.
+    fixture.act(|window, cx| {
+        window.click("mode-chip", cx);
+    });
+    fixture.act(|window, cx| {
+        assert!(window.try_find("mode-menu").is_some(), "the menu opened");
+        window.click("mode-menu-accept-edits", cx);
+    });
+    assert_eq!(
+        store_mode(&mut fixture),
         gertie_core::PermissionMode::AcceptEdits,
-        gertie_core::PermissionMode::Auto,
-        gertie_core::PermissionMode::Supervised,
-    ] {
-        fixture.act(|window, cx| {
-            window.click("mode-chip", cx);
-        });
-        assert_eq!(store_mode(&mut fixture), expected, "chip click persists");
-    }
+        "the picked row persists"
+    );
+    // Reopen, pick full access: the confirm card opens, the mode is
+    // unchanged until the card's own approve.
+    fixture.act(|window, cx| window.click("mode-chip", cx));
+    fixture.act(|window, cx| window.click("mode-menu-full-access", cx));
+    let gated = fixture.cx.update(|cx| {
+        fixture
+            .view
+            .upgrade()
+            .expect("view alive")
+            .read(cx)
+            .pending_card_index_for_test("mode_confirm")
+    });
+    assert!(gated.is_some(), "the confirm card gates the dangerous row");
+    assert_eq!(
+        store_mode(&mut fixture),
+        gertie_core::PermissionMode::AcceptEdits,
+        "picking full access does not apply from the menu"
+    );
 }
 
 #[test]
@@ -1021,14 +1041,16 @@ fn full_access_costs_a_palette_command_and_a_confirm() {
         "approve applies the mode"
     );
 
-    // From full access the chip walks straight home to supervised.
+    // From full access the menu's supervised row walks straight home:
+    // one click opens the menu, one click picks the row.
     fixture.act(|window, cx| {
         window.click("mode-chip", cx);
+        window.click("mode-menu-supervised", cx);
     });
     assert_eq!(
         mode(&mut fixture),
         gertie_core::PermissionMode::Supervised,
-        "full access de-escalates in one click"
+        "full access de-escalates in one menu pick"
     );
 }
 
@@ -1082,6 +1104,7 @@ fn accept_edits_runs_the_checkpointed_edit_without_asking() {
     // born with the chip's posture.
     fixture.act(|window, cx| {
         window.click("mode-chip", cx);
+        window.click("mode-menu-accept-edits", cx);
     });
     fixture.act(|window, cx| {
         window.input("go", cx);
@@ -3606,8 +3629,22 @@ fn a_workspace_switch_moves_the_tools_and_the_ledger_restores_where_it_ran() {
     fixture.hold = vec![scenarios, first, second, snapshots_dir];
 
     // Accept edits up front: the writes run unasked, no approvals in
-    // the way of the two turns.
+    // the way of the two turns. Chip opens the menu, row applies.
     fixture.act(|window, cx| window.click("mode-chip", cx));
+    fixture.act(|window, cx| window.click("mode-menu-accept-edits", cx));
+    let picked = fixture.cx.update(|cx| {
+        fixture
+            .view
+            .upgrade()
+            .expect("view alive")
+            .read(cx)
+            .mode_for_test()
+    });
+    assert_eq!(
+        picked,
+        gertie_core::PermissionMode::AcceptEdits,
+        "the row click moved the mode (workspace-switch fixture)"
+    );
 
     // Turn 1 writes into the first folder.
     fixture.act(|window, cx| {
