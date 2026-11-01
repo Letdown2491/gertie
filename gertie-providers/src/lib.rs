@@ -661,6 +661,7 @@ pub(crate) mod test_support {
     /// tokio tasks run on their own runtime; this only polls the receiving
     /// end, so `Pending` here means "task still producing", not deadlock.
     pub fn drain(mut stream: BoxStream<'static, Event>) -> Vec<Event> {
+        let started = std::time::Instant::now();
         let waker = Waker::noop();
         let mut cx = TaskContext::from_waker(waker);
         let mut events = Vec::new();
@@ -668,7 +669,15 @@ pub(crate) mod test_support {
             match std::pin::Pin::new(&mut stream).poll_next(&mut cx) {
                 Poll::Ready(Some(event)) => events.push(event),
                 Poll::Ready(None) => return events,
-                Poll::Pending => std::thread::sleep(Duration::from_millis(10)),
+                Poll::Pending => {
+                    // The hang guard: a task wedged mid-await must fail
+                    // the test fast and by name, never spin politely
+                    // forever.
+                    if started.elapsed() > Duration::from_secs(10) {
+                        panic!("the stream stayed Pending for 10s, an await never resolved");
+                    }
+                    std::thread::sleep(Duration::from_millis(10));
+                }
             }
         }
     }

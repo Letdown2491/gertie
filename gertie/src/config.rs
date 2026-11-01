@@ -1561,11 +1561,9 @@ default_mode = "accept_edits"
         );
     }
 
-    /// The panel owns the agents section: every field round-trips,
-    /// including a hand-written `invocation = "user"`, which the form
-    /// doesn't edit but must not drop, and the comment above the
-    /// section survives like any other user voice.
-    #[test]
+    /// The panel's memory keys round-trip, and keys the form doesn't
+    /// own (index_budget, auto_apply) survive the save like any other
+    /// hand-written user voice.
     #[test]
     fn edits_preserve_hand_written_memory_keys() {
         let dir = tempfile::tempdir().unwrap();
@@ -1603,6 +1601,11 @@ default_mode = "accept_edits"
         );
     }
 
+    /// The panel owns the agents section: every field round-trips,
+    /// including a hand-written `invocation = "user"`, which the form
+    /// doesn't edit but must not drop, and the comment above the
+    /// section survives like any other user voice.
+    #[test]
     fn edits_round_trip_agents_with_pins_and_invocation() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");

@@ -401,8 +401,8 @@ fn the_empty_state_says_ready_and_first_run_gets_the_tour() {
     let mut configured = fixture();
     configured.cx.update(|cx| {
         let view = configured.view.upgrade().expect("view alive");
-        let mut view = view.downgrade();
-        view.update(cx, |chat, cx| {
+        let view = view.downgrade();
+        let _ = view.update(cx, |chat, cx| {
             chat.set_endpoint_label_for_test("ppq · glm-5.3-flash", cx);
         });
     });
@@ -426,8 +426,8 @@ fn the_empty_state_says_ready_and_first_run_gets_the_tour() {
     let mut empty = fixture();
     empty.cx.update(|cx| {
         let view = empty.view.upgrade().expect("view alive");
-        let mut view = view.downgrade();
-        view.update(cx, |chat, cx| {
+        let view = view.downgrade();
+        let _ = view.update(cx, |chat, cx| {
             chat.set_endpoint_label_for_test("no endpoint configured", cx);
         });
     });
@@ -647,8 +647,8 @@ fn the_arrows_walk_the_mention_popup_and_enter_takes_the_walked_row() {
     // path). Selection 1 = the second row (b.txt).
     fixture.cx.update(|cx| {
         let view = fixture.view.upgrade().expect("view alive");
-        let mut view = view.downgrade();
-        view.update(cx, |chat, cx| {
+        let view = view.downgrade();
+        let _ = view.update(cx, |chat, cx| {
             chat.set_popup_selection_for_test(Some(1), cx);
         });
     });
@@ -715,8 +715,8 @@ fn a_new_query_resets_the_popup_walk() {
     });
     fixture.cx.update(|cx| {
         let view = fixture.view.upgrade().expect("view alive");
-        let mut view = view.downgrade();
-        view.update(cx, |chat, cx| {
+        let view = view.downgrade();
+        let _ = view.update(cx, |chat, cx| {
             chat.set_popup_selection_for_test(Some(1), cx);
         });
     });
@@ -958,8 +958,8 @@ fn full_access_costs_a_palette_command_and_a_confirm() {
     let open_confirm = |fixture: &mut Fixture| {
         fixture.cx.update(|cx| {
             let view = fixture.view.upgrade().expect("view alive");
-            let mut view = view.downgrade();
-            view.update(cx, |chat, cx| chat.full_access_confirm(cx));
+            let view = view.downgrade();
+            let _ = view.update(cx, |chat, cx| chat.full_access_confirm(cx));
         });
     };
     let card_index = |fixture: &mut Fixture| {
@@ -1899,7 +1899,7 @@ fn a_worker_ask_bubbles_into_the_transcript_and_the_answer_reaches_the_worker() 
         window.press("enter", cx);
     });
     pump(&mut fixture, 30);
-    fixture.act(|window, cx| {
+    fixture.act(|window, _cx| {
         assert!(
             window.try_find("approve-2").is_some(),
             "the worker ask bubbled into the parent transcript as a pending card"
@@ -2065,7 +2065,7 @@ fn deleting_hides_the_session_then_the_undo_window_purges_it() {
     fixture.act(|window, cx| {
         window.click("delete-1", cx);
     });
-    fixture.act(|window, cx| {
+    fixture.act(|window, _cx| {
         assert!(
             window.try_find("session-1").is_none(),
             "the row leaves the list the moment ✕ is clicked"
@@ -2089,7 +2089,7 @@ fn deleting_hides_the_session_then_the_undo_window_purges_it() {
         .advance_clock(std::time::Duration::from_secs(6));
     settle(&mut fixture.cx, fixture.window.into());
     assert_eq!(store.list_sessions().unwrap().len(), 1);
-    fixture.act(|window, cx| {
+    fixture.act(|window, _cx| {
         assert!(
             window.try_find("undo-delete").is_none(),
             "a spent window has nothing left to undo"
@@ -2111,7 +2111,7 @@ fn undo_brings_a_deleted_session_back_before_the_window_closes() {
     fixture.act(|window, cx| {
         window.click("undo-delete", cx);
     });
-    fixture.act(|window, cx| {
+    fixture.act(|window, _cx| {
         assert!(
             window.try_find("session-1").is_some(),
             "the undone row returns to its list"
@@ -2148,7 +2148,7 @@ fn ctrl_z_outside_the_composer_undoes_the_delete() {
     fixture.act(|window, cx| {
         window.press("ctrl-z", cx);
     });
-    fixture.act(|window, cx| {
+    fixture.act(|window, _cx| {
         assert!(
             window.try_find("session-1").is_some(),
             "ctrl-z undid the delete via the global binding"
@@ -2229,7 +2229,7 @@ fn a_rate_limited_turn_offers_resume_and_resuming_clears_it() {
             .limited,
         "limited persists in the store, it survives a restart"
     );
-    fixture.act(|window, cx| {
+    fixture.act(|window, _cx| {
         assert!(
             window.try_find("resume-turn").is_some(),
             "the resume bar is up on a limited session"
@@ -2252,7 +2252,7 @@ fn a_rate_limited_turn_offers_resume_and_resuming_clears_it() {
             .limited,
         "a resumed turn clears the limited state"
     );
-    fixture.act(|window, cx| {
+    fixture.act(|window, _cx| {
         assert!(
             window.try_find("resume-turn").is_none(),
             "the bar drops once the session is no longer limited"
@@ -2316,7 +2316,7 @@ fn snoozing_a_limited_session_resumes_it_when_the_timer_fires() {
     fixture.act(|window, cx| {
         window.click("snooze-turn", cx);
     });
-    fixture.act(|window, cx| {
+    fixture.act(|window, _cx| {
         assert!(
             window.try_find("cancel-snooze").is_some(),
             "snoozing is visible and cancellable"
@@ -2351,7 +2351,7 @@ fn snoozing_a_limited_session_resumes_it_when_the_timer_fires() {
             .limited,
         "the snoozed resume ran by itself and cleared the limit"
     );
-    fixture.act(|window, cx| {
+    fixture.act(|window, _cx| {
         assert!(window.try_find("resume-turn").is_none());
         assert!(window.try_find("cancel-snooze").is_none());
     });
@@ -2404,7 +2404,7 @@ fn canceling_the_snooze_leaves_the_session_limited_and_quiet() {
     fixture.act(|window, cx| {
         window.click("cancel-snooze", cx);
     });
-    fixture.act(|window, cx| {
+    fixture.act(|window, _cx| {
         assert!(
             window.try_find("cancel-snooze").is_none(),
             "the snoozed marker went with the cancel"
@@ -2680,7 +2680,7 @@ fn a_queued_followup_is_a_row_that_drafts_drains_and_survives() {
     let queued = fixture.store.queued_followups(session).expect("rows");
     assert_eq!(queued.len(), 1, "the follow-up persisted as a row");
     assert_eq!(queued[0].content, "follow up please");
-    fixture.act(|window, cx| {
+    fixture.act(|window, _cx| {
         assert!(
             window.try_find("queue-edit-1").is_some(),
             "the draft renders with its actions"
@@ -2730,7 +2730,7 @@ fn queued_drafts_render_from_rows_and_every_action_is_real() {
 
     // The resumed session renders the queued row as a draft with
     // actions, the words survived the restart.
-    fixture.act(|window, cx| {
+    fixture.act(|window, _cx| {
         assert!(
             window.try_find("queue-edit-1").is_some(),
             "the queued row drafts on reopen"
@@ -3322,7 +3322,7 @@ fn finished_tool_runs_collapse_into_one_summary() {
     let mut fixture = fixture_with_store(store);
 
     // Collapsed: one summary, no member cards in sight.
-    fixture.act(|window, cx| {
+    fixture.act(|window, _cx| {
         assert!(window.try_find("tool-run-1").is_some(), "the summary shows");
         assert!(
             window.try_find("tool-toggle-2").is_none(),
@@ -3331,13 +3331,13 @@ fn finished_tool_runs_collapse_into_one_summary() {
     });
     // Expanded: every card is back, failures included.
     fixture.act(|window, cx| window.click("tool-run-1", cx));
-    fixture.act(|window, cx| {
+    fixture.act(|window, _cx| {
         assert!(window.try_find("tool-toggle-2").is_some(), "expanded");
         assert!(window.try_find("tool-toggle-3").is_some(), "expanded");
     });
     // Collapsed again.
     fixture.act(|window, cx| window.click("tool-run-1", cx));
-    fixture.act(|window, cx| {
+    fixture.act(|window, _cx| {
         assert!(window.try_find("tool-toggle-2").is_none(), "hidden again");
     });
 }
@@ -3393,7 +3393,7 @@ fn a_pending_card_breaks_the_run_until_it_settles() {
         window.press("enter", cx);
     });
     pump(&mut fixture, 30);
-    fixture.act(|window, cx| {
+    fixture.act(|window, _cx| {
         assert!(
             window.try_find("tool-run-1").is_none(),
             "the pending write breaks the run, no summary over a live ask"
@@ -3408,7 +3408,7 @@ fn a_pending_card_breaks_the_run_until_it_settles() {
     // over both.
     fixture.act(|window, cx| window.click("approve-2", cx));
     pump(&mut fixture, 40);
-    fixture.act(|window, cx| {
+    fixture.act(|window, _cx| {
         assert!(
             window.try_find("tool-run-1").is_some(),
             "both finished, the run collapses"

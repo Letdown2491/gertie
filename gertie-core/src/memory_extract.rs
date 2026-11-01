@@ -154,6 +154,31 @@ pub fn parse_ops(raw: &str) -> Result<Vec<Op>, String> {
 /// One request, no tools, stream drained to completion. Returns the
 /// raw text (parsing is the caller's step, so the review card can
 /// show what the model actually said when parsing failed).
+pub async fn run_extraction(
+    provider: Arc<dyn Provider>,
+    digest: &str,
+    index: &str,
+) -> Result<String, String> {
+    let prompt = extraction_prompt(digest, index);
+    let request = Request {
+        messages: vec![crate::request::WireMessage::user(&prompt)],
+        tools: Vec::new(),
+        max_output_tokens: Some(512),
+    };
+    let mut stream = provider.stream(request);
+    let mut collected = String::new();
+    while let Some(event) = stream.next().await {
+        match event {
+            Event::Token { delta } => collected.push_str(&delta),
+            Event::Error { message } => return Err(message),
+            Event::Limited { message } => return Err(format!("rate limited: {message}")),
+            Event::Done => break,
+            _ => {}
+        }
+    }
+    Ok(collected)
+}
+
 /// Tests live here (the extraction module's behavior matrix).
 #[cfg(test)]
 mod tests {
@@ -218,29 +243,4 @@ mod tests {
         assert!(prompt.contains("\"op\":\"add\""));
         assert!(prompt.contains("existing memory"));
     }
-}
-
-pub async fn run_extraction(
-    provider: Arc<dyn Provider>,
-    digest: &str,
-    index: &str,
-) -> Result<String, String> {
-    let prompt = extraction_prompt(digest, index);
-    let request = Request {
-        messages: vec![crate::request::WireMessage::user(&prompt)],
-        tools: Vec::new(),
-        max_output_tokens: Some(512),
-    };
-    let mut stream = provider.stream(request);
-    let mut collected = String::new();
-    while let Some(event) = stream.next().await {
-        match event {
-            Event::Token { delta } => collected.push_str(&delta),
-            Event::Error { message } => return Err(message),
-            Event::Limited { message } => return Err(format!("rate limited: {message}")),
-            Event::Done => break,
-            _ => {}
-        }
-    }
-    Ok(collected)
 }

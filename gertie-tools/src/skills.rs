@@ -333,12 +333,21 @@ mod tests {
         mut future: std::pin::Pin<Box<dyn Future<Output = ToolResult> + Send + '_>>,
     ) -> ToolResult {
         use std::task::{Context, Poll, Waker};
+        let started = std::time::Instant::now();
         let waker = Waker::noop();
         let mut cx = Context::from_waker(waker);
         loop {
             match std::pin::Pin::new(&mut future).poll(&mut cx) {
                 Poll::Ready(result) => return result,
-                Poll::Pending => std::thread::sleep(std::time::Duration::from_millis(10)),
+                Poll::Pending => {
+                    // The hang guard: a future that never resolves must
+                    // fail the test fast and by name, never spin
+                    // politely forever.
+                    if started.elapsed() > std::time::Duration::from_secs(10) {
+                        panic!("the future stayed Pending for 10s, an await never resolved");
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
             }
         }
     }
