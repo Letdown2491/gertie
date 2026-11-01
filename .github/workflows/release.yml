@@ -76,3 +76,73 @@ jobs:
             target/debian/*.deb
             target/generate-rpm/*.rpm
           generate_release_notes: true
+
+  flatpak:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: linux-x86_64
+            runner: ubuntu-24.04
+          - arch: linux-aarch64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: write
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install the toolchain and libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y flatpak podman file
+          sudo apt-get install -y pkg-config libfontconfig-dev libfreetype-dev \
+            libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libxcb1-dev \
+            libvulkan-dev
+
+      - name: Build the release binary
+        run: cargo build --release --locked -p gertie
+
+      - name: Assemble and prepare the app tree (no publish, no key needed)
+        run: ./self/assemble.sh
+
+      - name: Bundle the flatpak
+        run: |
+          mkdir -p bundles
+          flatpak build-bundle --runtime self/tree \
+            "bundles/gertie-${GITHUB_REF_NAME#v}-linux-${{ matrix.arch }}.flatpak" \
+            io.github.Letdown2491.gertie stable
+
+      - name: Attach the flatpak bundles to the release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: bundles/*.flatpak
+          generate_release_notes: true
+
+  orchard:
+    needs: flatpak
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Clone orchard-publish, pinned by tag and commit
+        run: |
+          git clone --quiet --depth 1 --branch v0.3.0 \
+            https://github.com/Letdown2491/orchard /tmp/orchard
+          test "$(git -C /tmp/orchard rev-parse HEAD)" = f2e4635cb44722f104c4fd28d86616f114baf157
+          cd /tmp/orchard
+          cargo install --locked --path orchard-publish
+
+      - name: Publish to Orchard (requires the ORCHARD_NSEC secret)
+        if: ${{ vars.ORCHARD_NSEC_SET == 'true' }}
+        env:
+          ORCHARD_NSEC: ${{ secrets.ORCHARD_NSEC }}
+          ORCHARD_REGISTRY_USER: ${{ github.actor }}
+          ORCHARD_REGISTRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          ./self/assemble.sh
+          orchard-publish self/gertie.publish.toml

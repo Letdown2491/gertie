@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.Letdown2491.gertie</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MIT</project_license>
+  <name>Gertie</name>
+  <summary>A fast, native coding-agent harness</summary>
+  <description>
+    <p>
+      A coding agent with a GPU-rendered UI and a headless core:
+      long-term memory with a review inbox, worktree tabs, subagents,
+      skills, MCP, and permission modes that keep every mutating action
+      behind a card you approve.
+    </p>
+    <p>
+      The flatpak runs commands through your host environment, so your
+      toolchains (rust, node, go, python) work as they do outside the
+      sandbox; every action is gated by the permission mode you choose,
+      and full access costs a confirmation card.
+    </p>
+  </description>
+  <categories>
+    <category>Development</category>
+  </categories>
+  <launchable type="desktop-id">io.github.Letdown2491.gertie.desktop</launchable>
+  <url type="homepage">https://github.com/Letdown2491/gertie</url>
+  <releases>
+    <release version="1.0.0" date="2026-11-01">
+      <description>
+        <p>The first release: the whole contract, from the memory review inbox to the mode menu.</p>
+      </description>
+    </release>
+  </releases>
+</component>

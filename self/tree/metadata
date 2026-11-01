@@ -1,0 +1,19 @@
+[Application]
+name=io.github.Letdown2491.gertie
+runtime=org.freedesktop.Platform/x86_64/25.08
+command=gertie
+
+[Context]
+# wayland primary, x11 fallback, dri for Vulkan (gpui renders through
+# a Vulkan driver), network for endpoints/MCP/web, home for the projects
+# the agent works on.
+sockets=x11;wayland;
+devices=dri;
+shared=network;
+filesystems=home;
+
+[Session Bus Policy]
+# The bash tool spawns commands on the host (the flatpak build's
+# wrapper): your toolchains, your git, your MCP servers, gated by
+# gertie's permission modes.
+org.freedesktop.Flatpak=talk

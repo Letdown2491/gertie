@@ -1,0 +1,37 @@
+# Gertie's Orchard publish manifest, mirroring riddim's release shape:
+# CI prepares one tree per architecture and publishes one combined
+# release. Local preparation is safe:
+#   orchard-publish self/gertie.publish.toml --prepare
+# Publication uses the required relay plus the two public relays.
+
+[app]
+id = "io.github.Letdown2491.gertie"
+name = "Gertie"
+summary = "A fast, native coding-agent harness"
+description = """\
+A coding agent with a GPU-rendered UI and a headless core: long-term
+memory with a review inbox, worktree tabs, subagents, skills, MCP, and
+permission modes that keep every mutating action behind a card you
+approve. The flatpak runs commands through your host environment, so
+your toolchains (rust, node, go, python) work as they do outside the
+sandbox; every action is gated by the permission mode you choose, and
+full access costs a confirmation card."""
+categories = ["Development"]
+repository = "https://github.com/Letdown2491/gertie"
+icon = "https://raw.githubusercontent.com/Letdown2491/gertie/main/assets/gertie-512.png"
+
+[release]
+version = "1.0.0"
+arch = "linux-x86_64"
+# Every declared platform must be present in the combined release.
+platforms = ["linux-x86_64", "linux-aarch64"]
+notes = "The first flatpak: the same binary the release page carries, packaged for the desktop."
+
+[artifact]
+tree = "tree"
+
+[publish]
+# relay.orchard.rocks is required (see PUBLISHING.md): orchard-publish
+# refuses a manifest publish without it.
+relays = ["wss://relay.orchard.rocks", "wss://relay.primal.net", "wss://nos.lol"]
+tag = "latest"
