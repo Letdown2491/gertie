@@ -4362,3 +4362,167 @@ fn a_worktree_tabs_first_message_names_its_branch() {
         "the branch is the first message's slug under the prefix, got: {branch}"
     );
 }
+
+/// The routing rules against a real WorkspaceView: two sessions in
+/// two workspaces, a two-tab shell, and the decisions the single-tab
+/// fixture cannot reach. The shell is real (WorkspaceView::new over a
+/// real Bootstrap), so the routing runs the production code, not a
+/// re-implementation.
+#[test]
+fn routing_sends_a_session_to_the_tab_that_owns_its_workspace() {
+    // A temp config: Bootstrap::load writes no skeleton for an
+    // explicit path, and an empty file parses to the defaults.
+    let config_dir = tempfile::tempdir().expect("config dir");
+    let config_path = config_dir.path().join("config.toml");
+    std::fs::write(&config_path, "").expect("empty config");
+    let boot = Arc::new(gertie::bootstrap::Bootstrap::load(
+        Some(&config_path),
+        false,
+    ));
+
+    // The roots must EXIST: workspace_for_root canonicalizes, and a
+    // nonexistent folder is a switch refusal by design.
+    std::fs::create_dir_all("/tmp/routing-gertie").expect("root dir");
+    std::fs::create_dir_all("/tmp/routing-kuma").expect("root dir");
+
+    // Two sessions, two roots, both outside the boot's own root so
+    // every click is a cross-root decision.
+    let s_gertie = boot.store.create_session("gertie work").expect("session");
+    boot.store
+        .append_message(s_gertie, None, gertie_core::Role::User, "hello")
+        .expect("row");
+    boot.store
+        .set_session_workspace(s_gertie, Path::new("/tmp/routing-gertie"));
+    let s_kuma = boot.store.create_session("kuma work").expect("session");
+    boot.store
+        .append_message(s_kuma, None, gertie_core::Role::User, "hello")
+        .expect("row");
+    boot.store
+        .set_session_workspace(s_kuma, Path::new("/tmp/routing-kuma"));
+
+    let mut cx = HeadlessAppContext::with_asset_source(
+        Arc::new(NoopTextSystem),
+        Arc::new(gpui_kit::assets::Assets),
+    );
+    cx.update(|cx| {
+        gpui_kit::init(cx);
+        gertie::chat::bind_chat_keys(cx);
+        gpui_kit::component::Theme::change(gpui_kit::component::ThemeMode::Dark, None, cx);
+    });
+    let shell: std::sync::Mutex<Option<gpui_kit::WeakEntity<gertie::tabs::WorkspaceView>>> =
+        std::sync::Mutex::new(None);
+    let window = cx
+        .open_window(size(px(1200.), px(800.)), |window, cx| {
+            let view = cx.new(|cx| gertie::tabs::WorkspaceView::new(boot.clone(), window, cx));
+            *shell.lock().unwrap() = Some(view.downgrade());
+            cx.new(|cx| Root::new(view, window, cx))
+        })
+        .expect("window");
+    // Give the shell a moment: the first tab's sidebar carries both
+    // seeded sessions.
+    cx.update_window(window.into(), |_, window, cx| {
+        window.draw(cx).clear(cx);
+    })
+    .expect("draw");
+
+    // Helper: read the shell's (tab count, active chat root).
+    let probe = |cx: &mut HeadlessAppContext,
+                 shell: &gpui_kit::WeakEntity<gertie::tabs::WorkspaceView>| {
+        cx.update(|cx| {
+            let shell = shell.upgrade().expect("shell alive");
+            shell.read(cx).tab_probe(cx)
+        })
+    };
+
+    // ---- Rule 2: a tab that holds the root loads the click.
+    // State: tab 1 (the launch tab) holds /tmp/routing-gertie (boot
+    // root); tab 2 exists at /tmp/routing-kuma. Clicking the kuma
+    // session while tab 1 is active must load it in tab 2, not move
+    // tab 1.
+    {
+        let shell = shell.lock().unwrap().clone().expect("shell");
+        // Tab 2 at the kuma root: make_view is private, so the test
+        // reaches it through the shell's own add path... which roots
+        // at boot.workspace_root. So instead: switch tab 1 to kuma
+        // first (rule 3, pristine adopt), add a second tab, and have
+        // tab 2 adopt gertie — then click the gertie session from
+        // tab 2's sidebar: rule 2 must land it in tab 1.
+        cx.update_window(window.into(), |_, window, cx| {
+            let shell_entity = shell.upgrade().expect("shell");
+            shell_entity.update(cx, |shell, cx| {
+                // Tab 1 is pristine: clicking the kuma session adopts
+                // the kuma root into tab 1 (rule 3).
+                shell.route_session(s_kuma, Some("/tmp/routing-kuma".to_string()), window, cx);
+            });
+        })
+        .expect("route kuma");
+        cx.update_window(window.into(), |_, window, cx| {
+            window.draw(cx).clear(cx);
+        })
+        .expect("draw");
+        let (tabs, view, root) = probe(&mut cx, &shell);
+        assert_eq!(tabs, 1, "rule 3: the pristine tab adopts, no new tab");
+        assert_eq!(
+            root,
+            Path::new("/tmp/routing-kuma").to_path_buf(),
+            "the tab follows the session's workspace"
+        );
+        let _ = view;
+    }
+
+    // ---- Rule 4: a busy tab spawns a new one instead of moving.
+    {
+        let shell = shell.lock().unwrap().clone().expect("shell");
+        // Tab 1 now holds the kuma session (busy). Click the gertie
+        // session: no tab holds /tmp/routing-gertie, tab 1 is not
+        // pristine → a new tab opens rooted at gertie's workspace.
+        cx.update_window(window.into(), |_, window, cx| {
+            let shell_entity = shell.upgrade().expect("shell");
+            shell_entity.update(cx, |shell, cx| {
+                shell.route_session(
+                    s_gertie,
+                    Some("/tmp/routing-gertie".to_string()),
+                    window,
+                    cx,
+                );
+            });
+        })
+        .expect("route gertie");
+        cx.update_window(window.into(), |_, window, cx| {
+            window.draw(cx).clear(cx);
+        })
+        .expect("draw");
+        let (tabs, _view, root) = probe(&mut cx, &shell);
+        assert_eq!(tabs, 2, "rule 4: the busy tab stays, a new tab opens");
+        assert_eq!(
+            root,
+            Path::new("/tmp/routing-gertie").to_path_buf(),
+            "the new tab runs at the session's workspace"
+        );
+    }
+
+    // ---- Rule 2, the holder path: click the kuma session from the
+    // now-active gertie tab. Tab 1 holds /tmp/routing-kuma → the
+    // shell activates tab 1 and loads there; no third tab appears.
+    {
+        let shell = shell.lock().unwrap().clone().expect("shell");
+        cx.update_window(window.into(), |_, window, cx| {
+            let shell_entity = shell.upgrade().expect("shell");
+            shell_entity.update(cx, |shell, cx| {
+                shell.route_session(s_kuma, Some("/tmp/routing-kuma".to_string()), window, cx);
+            });
+        })
+        .expect("route kuma again");
+        cx.update_window(window.into(), |_, window, cx| {
+            window.draw(cx).clear(cx);
+        })
+        .expect("draw");
+        let (tabs, _view, root) = probe(&mut cx, &shell);
+        assert_eq!(tabs, 2, "rule 2: the holder loads it, no new tab");
+        assert_eq!(
+            root,
+            Path::new("/tmp/routing-kuma").to_path_buf(),
+            "the holder tab is active after the click"
+        );
+    }
+}

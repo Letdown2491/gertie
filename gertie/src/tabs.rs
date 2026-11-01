@@ -448,6 +448,20 @@ impl WorkspaceView {
     ///
     /// Streaming tabs are skipped by rule 2's load, not the routing:
     /// loading into a streaming view is refused by the view itself.
+    /// Tests: the active tab's chat handle, the tab count, and the
+    /// active tab's root. The routing assertions read these.
+    pub fn tab_probe(&self, cx: &gpui_kit::App) -> (usize, Entity<ChatView>, std::path::PathBuf) {
+        (
+            self.tabs.len(),
+            self.tabs[self.active].view.clone(),
+            self.tabs[self.active]
+                .view
+                .read(cx)
+                .workspace_root()
+                .to_path_buf(),
+        )
+    }
+
     pub fn route_session(
         &mut self,
         session_id: gertie_core::SessionId,
