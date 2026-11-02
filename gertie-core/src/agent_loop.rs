@@ -504,9 +504,16 @@ pub fn run_turn(spec: TurnSpec) -> BoxStream<'static, LoopEvent> {
                                 &call.arguments,
                                 workspace_root.as_deref(),
                             );
+                            // Containment is a fact about this
+                            // call, not the turn: the sandbox
+                            // contains bash, and nothing else. A
+                            // turn-wide flag here would wave a
+                            // gated fetch or an MCP tool through
+                            // every sandboxed auto turn.
+                            let contained = sandbox_bash && call.name == "bash";
                             let pre_approved = permission_mode.auto_allows(
                                 checkpoint_target.is_some(),
-                                sandbox_bash,
+                                contained,
                                 tool.third_party(),
                             );
                             let decision = match (&permission_broker, pre_approved) {
@@ -1343,6 +1350,70 @@ mod tests {
             "full access means no card"
         );
         assert_eq!(tool_result(&events, "watch"), "spied");
+    }
+
+    /// The containment flag is per-call, not turn-wide: a gated
+    /// read-only tool (web_fetch is the shape) must face its card in
+    /// auto mode even when the turn runs sandboxed, because the
+    /// sandbox contains bash, not the fetch.
+    #[test]
+    fn auto_mode_contains_bash_not_the_fetch() {
+        let asked = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let provider = Arc::new(ScriptedProvider {
+            seen: std::sync::Mutex::new(Vec::new()),
+            scripts: std::sync::Mutex::new(one_call_then_text("watch")),
+        });
+        let history: SharedHistory = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let (mut spec, broker) = turn(
+            provider,
+            registry(&[Arc::new(StubTool::gated("watch", "spied"))]),
+            history.clone(),
+            "go",
+        );
+        spec.permission_mode = PermissionMode::Auto;
+        spec.sandbox_bash = true;
+        let flag = asked.clone();
+        let events = drain(run_turn(spec), &broker, move |_| {
+            flag.store(true, std::sync::atomic::Ordering::Relaxed);
+            PermissionDecision::Approve
+        });
+
+        assert!(
+            asked.load(std::sync::atomic::Ordering::Relaxed),
+            "a gated tool must card in auto mode: the sandbox contains bash, not the fetch"
+        );
+        assert_eq!(tool_result(&events, "watch"), "spied");
+    }
+
+    /// And the contained bash itself stays pre-approved in auto: the
+    /// mode's whole point survives the tightening.
+    #[test]
+    fn auto_mode_still_pre_approves_contained_bash() {
+        let asked = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let provider = Arc::new(ScriptedProvider {
+            seen: std::sync::Mutex::new(Vec::new()),
+            scripts: std::sync::Mutex::new(one_call_then_text("bash")),
+        });
+        let history: SharedHistory = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let (mut spec, broker) = turn(
+            provider,
+            registry(&[Arc::new(StubTool::new("bash", true, "ran"))]),
+            history.clone(),
+            "go",
+        );
+        spec.permission_mode = PermissionMode::Auto;
+        spec.sandbox_bash = true;
+        let flag = asked.clone();
+        let events = drain(run_turn(spec), &broker, move |_| {
+            flag.store(true, std::sync::atomic::Ordering::Relaxed);
+            PermissionDecision::Approve
+        });
+
+        assert!(
+            !asked.load(std::sync::atomic::Ordering::Relaxed),
+            "contained bash is the one thing auto exists to pre-approve"
+        );
+        assert_eq!(tool_result(&events, "bash"), "ran");
     }
 
     /// The gate does not catch reads: a tool that neither mutates nor
