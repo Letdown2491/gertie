@@ -122,13 +122,21 @@ impl McpClient {
         command: &str,
         args: &[String],
         env: &[(String, String)],
+        deny_env: &[String],
     ) -> Result<Self, String> {
         let mut cmd = std::process::Command::new(command);
         cmd.args(args)
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::null());
-        for (key, value) in env {
+            .stderr(std::process::Stdio::null())
+            // A clean sheet minus the working set: servers are
+            // third-party code, they need PATH and friends, they do
+            // not need the LLM keys. Credential-shaped keys and the
+            // config's own credential names are filtered (see
+            // mcp_child_env); the server's configured env lands
+            // verbatim after: explicit user intent wins.
+            .env_clear();
+        for (key, value) in crate::mcp_child_env(env, deny_env) {
             cmd.env(key, value);
         }
         let mut child = cmd
@@ -618,7 +626,7 @@ mod tests {
 
     fn connect_fake() -> Arc<McpClient> {
         Arc::new(
-            McpClient::connect("fake", "sh", &["-c".into(), FAKE_SERVER.into()], &[])
+            McpClient::connect("fake", "sh", &["-c".into(), FAKE_SERVER.into()], &[], &[])
                 .expect("handshake"),
         )
     }

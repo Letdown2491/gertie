@@ -596,6 +596,15 @@ impl Bootstrap {
                         .iter()
                         .map(|(key, value)| (key.clone(), value.clone()))
                         .collect();
+                    // Names the config itself declared as credential
+                    // carriers (api_key_env): they need not look
+                    // secret-shaped, so they ride the deny list by
+                    // name, not by shape.
+                    let deny_env: Vec<String> = config
+                        .endpoints
+                        .iter()
+                        .filter_map(|endpoint| endpoint.api_key_env.clone())
+                        .collect();
                     let tx = tx.clone();
                     let spawned = std::thread::Builder::new()
                         .name(format!("mcp-{name}-connect"))
@@ -608,7 +617,7 @@ impl Bootstrap {
                                     gertie_tools::mcp::McpClient::connect_url(&name, url)
                                 }
                                 (None, Some(command)) => gertie_tools::mcp::McpClient::connect(
-                                    &name, command, &args, &env,
+                                    &name, command, &args, &env, &deny_env,
                                 ),
                                 (None, None) => {
                                     Err(format!("mcp {name}: needs a url or a command"))
