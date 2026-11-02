@@ -31,7 +31,10 @@ fn html_to_text(html: &str) -> String {
     };
 
     let mut out = String::new();
-    let mut skip: Vec<&'static str> = Vec::new();
+    // Local stack of open noisy tags: names only, dropped with the
+    // call, so a page of ten thousand <svg> tags allocates ten
+    // thousand short strings for the duration, not forever.
+    let mut skip: Vec<String> = Vec::new();
     let mut rest = html;
     while let Some(lt) = rest.find('<') {
         if skip.is_empty() {
@@ -63,7 +66,7 @@ fn html_to_text(html: &str) -> String {
                     if closing {
                         skip.pop();
                     } else if !name_part.ends_with('/') {
-                        skip.push(name.leak() as &'static str);
+                        skip.push(name);
                     }
                 } else if block_tag(&name) && skip.is_empty() {
                     out.push('\n');
