@@ -83,9 +83,12 @@ jobs:
         # The digest file ships next to the artifacts on the release
         # page: a download can be verified without trusting the
         # connection, which is the floor under any future signing
-        # story.
+        # story. Basenames only, so `sha256sum -c` works from a flat
+        # download directory instead of failing on target/ paths.
         run: |
-          sha256sum target/release/gertie target/debian/*.deb target/generate-rpm/*.rpm > SHA256SUMS
+          (cd target/release && sha256sum gertie) > SHA256SUMS
+          (cd target/debian && sha256sum *.deb) >> SHA256SUMS
+          (cd target/generate-rpm && sha256sum *.rpm) >> SHA256SUMS
           cat SHA256SUMS
 
       - name: Attach the artifacts to the release
@@ -159,11 +162,18 @@ jobs:
             "bundles/gertie-${GITHUB_REF_NAME#v}-${{ matrix.arch }}.flatpak" \
             io.github.Letdown2491.gertie stable
 
+      - name: Checksum the bundles
+        # Same basename rule as the binary's SHA256SUMS, per arch so
+        # the two matrix legs cannot collide on one file.
+        run: (cd bundles && sha256sum *.flatpak > "SHA256SUMS-${{ matrix.arch }}.txt")
+
       - name: Attach the flatpak bundles to the release
         # softprops/action-gh-release v2.3.4
         uses: softprops/action-gh-release@62c96d0c4e8a889135c1f3a25910db8dbe0e85f7
         with:
-          files: bundles/*.flatpak
+          files: |
+            bundles/*.flatpak
+            SHA256SUMS-${{ matrix.arch }}.txt
           generate_release_notes: true
 
       - name: Save the staged tree for the publish job
