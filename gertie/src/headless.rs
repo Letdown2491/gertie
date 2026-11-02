@@ -17,6 +17,7 @@ use std::task::{Context as TaskContext, Poll, Waker};
 pub fn run(
     prompt: Option<String>,
     yes: bool,
+    allow_dirty: bool,
     config_path: Option<PathBuf>,
     ephemeral: bool,
 ) -> i32 {
@@ -24,6 +25,16 @@ pub fn run(
     if let Some(error) = boot.config_error {
         eprintln!("error: {error}");
         return 1;
+    }
+    // The net check comes before anything persists or runs: --yes hands
+    // every mutating call to the model unchecked, so the tree it lands
+    // on is the only safety net, and uncommitted work has none.
+    if yes
+        && !allow_dirty
+        && let Err(error) = guard_yes_over_dirty(&boot.workspace_root)
+    {
+        eprintln!("error: {error}");
+        return 2;
     }
     let Some(provider) = boot.provider() else {
         eprintln!(
@@ -412,6 +423,37 @@ impl Recorder {
     }
 }
 
+/// `--yes` hands every mutating call to the model unchecked, so the
+/// tree it lands on is the only safety net: a checkpoint can restore
+/// what an edit touched, nothing restores what a bash command removed
+/// before any checkpoint saw it. Uncommitted work is work with no net,
+/// so the combination refuses; `--allow-dirty` says the operator knew.
+/// A non-git workspace has no baseline to protect and passes.
+fn guard_yes_over_dirty(root: &std::path::Path) -> Result<(), String> {
+    let output = std::process::Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["status", "--porcelain"])
+        .output();
+    let Ok(output) = output else {
+        return Ok(());
+    };
+    if !output.status.success() {
+        return Ok(());
+    }
+    let dirty = String::from_utf8_lossy(&output.stdout);
+    if dirty.trim().is_empty() {
+        return Ok(());
+    }
+    let count = dirty.lines().count();
+    Err(format!(
+        "--yes refuses to auto-approve over uncommitted work: {} {} in \
+         git status. Commit or stash first, or pass --allow-dirty to run anyway",
+        count,
+        if count == 1 { "entry" } else { "entries" }
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -419,6 +461,46 @@ mod tests {
     use std::collections::VecDeque;
     use std::future::Future;
     use std::pin::Pin;
+
+    /// The --yes footgun's guard, end to end: a scratch repo with a
+    /// commit passes, the same repo with an uncommitted change
+    /// refuses by name, a non-git directory passes (no baseline to
+    /// protect), and the refusal names the hatch.
+    #[test]
+    fn yes_refuses_a_dirty_workspace_and_passes_a_clean_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let git = |args: &[&str]| {
+            std::process::Command::new("git")
+                .args(["-C", root.to_str().unwrap()])
+                .args(["-c", "user.name=t"],)
+                .args(["-c", "user.email=t@t"])
+                .args(args)
+                .output()
+                .unwrap()
+        };
+        assert!(git(&["init"]).status.success());
+        std::fs::write(root.join("tracked.txt"), "one\n").unwrap();
+        assert!(git(&["add", "."]).status.success());
+        assert!(git(&["commit", "-m", "base"]).status.success());
+
+        // Clean tree: --yes may run.
+        assert!(guard_yes_over_dirty(root).is_ok());
+
+        // Uncommitted change: refused, by name, with the hatch named.
+        std::fs::write(root.join("tracked.txt"), "one\ntwo\n").unwrap();
+        let refused = guard_yes_over_dirty(root).unwrap_err();
+        assert!(refused.contains("uncommitted"), "{refused}");
+        assert!(refused.contains("--allow-dirty"), "{refused}");
+
+        // An untracked new file is the same kind of net-less work.
+        std::fs::write(root.join("fresh.txt"), "x").unwrap();
+        assert!(guard_yes_over_dirty(root).is_err());
+
+        // Non-git directories have no baseline and pass.
+        let plain = tempfile::tempdir().unwrap();
+        assert!(guard_yes_over_dirty(plain.path()).is_ok());
+    }
 
     /// A provider with a queue of scripted responses, one per request.
     struct Scripted(std::sync::Mutex<VecDeque<Vec<Event>>>);
