@@ -79,8 +79,10 @@ pub struct WorktreeConfig {
 #[derive(Deserialize, Debug, Clone, Default)]
 pub struct SecurityConfig {
     /// Landlock-isolate bash children: system reads, workspace//tmp
-    /// writes only. Opt-in; when the kernel can't enforce it, sandboxed
-    /// commands fail instead of running free. `Some` = the user's file
+    /// writes, and no network at all (connects and binds are
+    /// refused). Opt-in; when the kernel can't enforce it (the
+    /// network half wants 6.7+), sandboxed commands fail instead of
+    /// running free. `Some` = the user's file
     /// set it; `None` = unset, a lower tier decides.
     #[serde(default)]
     pub sandbox_bash: Option<bool>,

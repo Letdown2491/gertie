@@ -6,15 +6,18 @@
 //! misbehave (or were approved carelessly).
 //!
 //! Posture, fail-closed on purpose: read access to the system, write
-//! access to the workspace and /tmp only. When the kernel can't enforce
-//! (too old, blocked in a container), the spawn **fails**, gertie
-//! never runs a sandboxed command unsandboxed just because the sandbox
-//! was unavailable. `CompatLevel::HardRequirement` is what makes that
-//! guarantee: best-effort would silently downgrade to no sandbox.
+//! access to the workspace and /tmp only, and no network at all (ABI
+//! v4, kernel 6.7+): handled, no rules, connects and binds are
+//! refused, so an approved command is not an approved exfil. When the
+//! kernel can't enforce (too old, blocked in a container), the spawn
+//! **fails**, gertie never runs a sandboxed command unsandboxed just
+//! because the sandbox was unavailable. `CompatLevel::HardRequirement`
+//! is what makes that guarantee: best-effort would silently downgrade
+//! to no sandbox.
 
 use landlock::{
-    ABI, Access, AccessFs, CompatLevel, Compatible, Ruleset, RulesetAttr, RulesetCreatedAttr,
-    RulesetError, RulesetStatus, path_beneath_rules,
+    ABI, Access, AccessFs, AccessNet, CompatLevel, Compatible, Ruleset, RulesetAttr,
+    RulesetCreatedAttr, RulesetError, RulesetStatus, path_beneath_rules,
 };
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
@@ -66,6 +69,15 @@ fn enforce(root: &Path) -> Result<(), String> {
         Ruleset::default()
             .set_compatibility(CompatLevel::HardRequirement)
             .handle_access(AccessFs::from_all(ABI::V1))?
+            // The network half, ABI v4 (kernel 6.7+): handled, no
+            // rules, so every connect and bind is refused. An approved
+            // command is not an approved exfil; without this the
+            // sandbox was a filesystem-write jail and a sandboxed
+            // `curl` dialed anywhere. Same HardRequirement ladder as
+            // the filesystem half: a kernel that cannot enforce the
+            // network rules fails the spawn instead of running it
+            // unrestricted.
+            .handle_access(AccessNet::from_all(ABI::V4))?
             .create()?
             .add_rules(path_beneath_rules(
                 existing_readonly,
@@ -131,5 +143,39 @@ mod tests {
         // not exist.
         assert!(!std::path::Path::new("/etc/gertie-sandbox-test").exists());
         assert!(!output.status.success());
+    }
+
+    /// An approved command must not be an approved exfil: with the
+    /// network half handled, an outbound connection from inside the
+    /// sandbox is refused (EACCES on the connect), so a sandboxed
+    /// `curl` cannot phone home. Uses bash's /dev/tcp so the probe
+    /// needs no network tool installed. Needs a Landlock-4 kernel
+    /// (6.7+); older kernels fail the spawn and the test skips.
+    #[test]
+    fn sandboxed_children_cannot_open_network_connections() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mut cmd = std::process::Command::new("bash");
+        cmd.arg("-c")
+            .arg("exec 3<>/dev/tcp/1.1.1.1/80 && echo OPENED")
+            .current_dir(tmp.path());
+        if Sandbox::new(tmp.path().to_path_buf()).apply(&mut cmd).is_err() {
+            eprintln!("skipped: sandbox unavailable");
+            return;
+        }
+        let output = match cmd.output() {
+            Ok(output) => output,
+            // The ruleset refused to build (kernel without network
+            // support): fail-closed, recorded as skipped here.
+            Err(_) => {
+                eprintln!("skipped: kernel cannot enforce network rules");
+                return;
+            }
+        };
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            !stdout.contains("OPENED"),
+            "the sandboxed connect succeeded: {stdout}"
+        );
+        assert!(!output.status.success(), "{output:?}");
     }
 }
