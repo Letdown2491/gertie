@@ -75,6 +75,17 @@ pub trait Tool: Send + Sync {
         false
     }
 
+    /// Whether the tool owes the human a card before it runs, even
+    /// though it changes nothing. The default rides `mutates()`: the
+    /// gate is for mutation. A tool that reaches outward instead, a
+    /// fetch whose destination the model chose, overrides this: what
+    /// it moves is not a file the checkpoint can restore, it is
+    /// whatever the body carries, so the prompt is the only checkpoint
+    /// there is.
+    fn asks(&self) -> bool {
+        self.mutates()
+    }
+
     /// Hard policy vet, consulted *before* the permission prompt: an Err
     /// blocks the call outright, no approve button exists for it. This is
     /// for things no user should have to see a card for (fork bombs,
