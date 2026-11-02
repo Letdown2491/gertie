@@ -317,14 +317,20 @@ const DENY_PATTERNS: &[(&str, &str)] = &[
 /// call. A malformed pattern here is a compile-time review failure
 /// anyway; the lock panics loudly rather than silently disabling the
 /// guard.
-/// True for the paths whose payload runs later, outside any sandbox:
-/// `.git/` (hooks and config fire on the user's next git command),
-/// `.gertie/` (the next session's overlay and memory), `AGENTS.md`
-/// (the next session's instructions), `.envrc` (the next cd into the
-/// tree). An auto-approved edit must not be able to arm them, so the
-/// write tools refuse; a human edits these by hand.
-fn is_persistence_path(path: &Path) -> bool {
-    path.components().any(|component| {
+/// True for the workspace-relative paths whose payload runs later,
+/// outside any sandbox: `.git/` (hooks and config fire on the user's
+/// next git command), `.gertie/` (the next session's overlay and
+/// memory), `AGENTS.md` (the next session's instructions), `.envrc`
+/// (the next cd into the tree), and the config dirs other programs
+/// execute on the user's behalf (`.cargo/` build wrappers, `.vscode/`
+/// tasks, `.githooks/`, `.husky/`, `.devcontainer/`). An auto-approved
+/// edit must not be able to arm them, so the write tools refuse; a
+/// human edits these by hand. Judged on the workspace-relative suffix
+/// only: a worktree tab's root sits under the main checkout's
+/// `.gertie/worktrees/`, and the tab's own files are ordinary files.
+fn is_persistence_path(root: &Path, path: &Path) -> bool {
+    let suffix = path.strip_prefix(root).unwrap_or(path);
+    suffix.components().any(|component| {
         matches!(
             component,
             std::path::Component::Normal(name)
@@ -332,6 +338,11 @@ fn is_persistence_path(path: &Path) -> bool {
                     || name == std::ffi::OsStr::new(".gertie")
                     || name == std::ffi::OsStr::new("AGENTS.md")
                     || name == std::ffi::OsStr::new(".envrc")
+                    || name == std::ffi::OsStr::new(".cargo")
+                    || name == std::ffi::OsStr::new(".vscode")
+                    || name == std::ffi::OsStr::new(".githooks")
+                    || name == std::ffi::OsStr::new(".husky")
+                    || name == std::ffi::OsStr::new(".devcontainer")
         )
     })
 }
@@ -494,7 +505,7 @@ impl Tool for WriteFile {
         blocking(move || {
             let args: WriteArgs = parse(&arguments, "write_file")?;
             let path = resolve(&root, &args.path)?;
-            if is_persistence_path(&path) {
+            if is_persistence_path(&root, &path) {
                 return Err(format!(
                     "{}: gertie does not write this path (its payload runs later, \
                      outside any sandbox); edit it by hand",
@@ -557,7 +568,7 @@ impl Tool for EditFile {
         blocking(move || {
             let args: EditArgs = parse(&arguments, "edit_file")?;
             let path = resolve(&root, &args.path)?;
-            if is_persistence_path(&path) {
+            if is_persistence_path(&root, &path) {
                 return Err(format!(
                     "{}: gertie does not edit this path (its payload runs later, \
                      outside any sandbox); edit it by hand",
@@ -958,6 +969,11 @@ mod tests {
             ".envrc",
             "deep/.git/modules/x/config",
             "docs/AGENTS.md",
+            ".cargo/config.toml",
+            ".vscode/tasks.json",
+            ".githooks/pre-push",
+            ".husky/pre-commit",
+            ".devcontainer/devcontainer.json",
         ] {
             let write =
                 await_sync(writer.run(&format!(r#"{{"path": "{path}", "content": "pwned"}}"#)));
@@ -979,6 +995,34 @@ mod tests {
         std::fs::write(dir.path().join(".git/config"), "[core]\n").unwrap();
         let read = await_sync(reader.run(r#"{"path": ".git/config"}"#));
         assert!(read.is_ok(), "reading .git stays allowed: {read:?}");
+    }
+
+    /// The guard judges the workspace-relative path, not the absolute
+    /// one. Worktree tab roots live under the main checkout's
+    /// `.gertie/worktrees/<tab>`, so an absolute-component scan would
+    /// refuse every write a worktree session makes (the QA pass caught
+    /// this live). Inside the tab, the tab's own `.git` and `.gertie`
+    /// are still protected.
+    #[test]
+    fn a_worktree_tab_writes_normally() {
+        let dir = workspace();
+        let root = dir.path().join(".gertie/worktrees/feat-x");
+        std::fs::create_dir_all(&root).unwrap();
+        let writer = WriteFile::new(root.clone());
+        let editor = EditFile::new(root.clone());
+
+        let ok = await_sync(writer.run(r#"{"path": "src/main.rs", "content": "fn main() {}"}"#));
+        assert!(ok.is_ok(), "a worktree tab's files are ordinary files: {ok:?}");
+        let edited = await_sync(
+            editor.run(r#"{"path": "src/main.rs", "old_text": "fn main() {}", "new_text": "fn main() { }"}"#),
+        );
+        assert!(edited.is_ok(), "a worktree tab's files edit normally: {edited:?}");
+
+        for path in [".git/hooks/pre-commit", ".gertie/config.toml", "AGENTS.md"] {
+            let refused =
+                await_sync(writer.run(&format!(r#"{{"path": "{path}", "content": "pwned"}}"#)));
+            assert!(refused.is_err(), "inside the tab, {path} stays protected");
+        }
     }
 
     #[test]
