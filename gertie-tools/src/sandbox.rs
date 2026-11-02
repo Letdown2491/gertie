@@ -8,12 +8,15 @@
 //! Posture, fail-closed on purpose: read access to the system, write
 //! access to the workspace and /tmp only, and outbound TCP closed
 //! (ABI v4, kernel 6.7+): handled, no rules, so TCP connects and
-//! binds are refused and an approved command cannot open an approved
-//! channel. Landlock ABI v4 speaks TCP only: UDP (DNS included) and
-//! ICMP are NOT restricted here, so name resolution still works but a
-//! datagram channel also still exists; full network closure needs a
-//! namespace or a seccomp layer, which gertie does not build. Say
-//! "TCP-closed", never "network-free". When the
+//! binds are refused, loopback included (a sandboxed dev server
+//! cannot bind its port; that is part of the deal). Landlock ABI v4
+//! speaks TCP only: UDP (DNS included), ICMP, and abstract Unix
+//! sockets are NOT restricted here, so name resolution still works
+//! but a datagram channel also still exists; full network closure
+//! needs a namespace or a seccomp layer, which gertie does not build.
+//! Say "TCP-closed", never "network-free". The floor is the whole
+//! sandbox: 6.7+ or nothing (Debian 12's 6.1 and RHEL 9's 5.14 get no
+//! sandbox_bash at all). When the
 //! kernel can't enforce (too old, blocked in a container), the spawn
 //! **fails**, gertie never runs a sandboxed command unsandboxed just
 //! because the sandbox was unavailable. `CompatLevel::HardRequirement`
@@ -150,18 +153,25 @@ mod tests {
         assert!(!output.status.success());
     }
 
-    /// An approved command must not be an approved exfil: with the
-    /// network half handled, an outbound connection from inside the
-    /// sandbox is refused (EACCES on the connect), so a sandboxed
-    /// `curl` cannot phone home. Uses bash's /dev/tcp so the probe
-    /// needs no network tool installed. Needs a Landlock-4 kernel
-    /// (6.7+); older kernels fail the spawn and the test skips.
+    /// An approved command must not be an approved channel: with the
+    /// network half handled, a TCP connection from inside the sandbox
+    /// is refused. The probe dials a loopback listener the test holds
+    /// itself: hermetic (no internet, no network tool), and the
+    /// unsandboxed control connect proves a refusal is the sandbox's
+    /// doing, not the target's. Needs a Landlock-4 kernel (6.7+);
+    /// older kernels fail the spawn and the test skips.
     #[test]
     fn sandboxed_children_cannot_open_network_connections() {
+        // Positive control: the target is reachable from this host.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::net::TcpStream::connect(("127.0.0.1", port))
+            .expect("control: an unsandboxed loopback connect must work");
+
         let tmp = tempfile::tempdir().unwrap();
         let mut cmd = std::process::Command::new("bash");
         cmd.arg("-c")
-            .arg("exec 3<>/dev/tcp/1.1.1.1/80 && echo OPENED")
+            .arg(format!("exec 3<>/dev/tcp/127.0.0.1/{port} && echo OPENED"))
             .current_dir(tmp.path());
         if Sandbox::new(tmp.path().to_path_buf()).apply(&mut cmd).is_err() {
             eprintln!("skipped: sandbox unavailable");
