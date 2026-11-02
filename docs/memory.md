@@ -23,9 +23,9 @@ it off is one switch in the settings panel.
 ## The two knobs
 
 The settings panel has a MEMORY section: a switch for memory itself and a switch for
-the weekly cleanup. Two things stay in `config.toml` on purpose: `auto_apply`
-(remembers without asking, and changes what you should expect) and `extract_endpoint`
-(which model makes the proposals). Both are documented in `config.example.toml`.
+the weekly cleanup. One thing stays in `config.toml` on purpose: `extract_endpoint`
+(which model makes the proposals). Proposals only ever apply through the review
+inbox: nothing is remembered without asking. Documented in `config.example.toml`.
 
 ## If something's remembered wrong
 

@@ -81,7 +81,8 @@ Shipped (M0–M5), in order:
   the thin dreaming pass on the startup sweep (no-model, changelog-per-dream). Ledger gains
   cached-token columns; the metric is cached-input share. Defaults amended in flight:
   extraction and dreaming ship **on** (7-day cadence, empty-store cost is zero, discovery
-  beats caution); `auto_apply` stays off, the review inbox is what makes default-on safe.
+  beats caution); proposals only apply through the review inbox, which is what makes
+  default-on safe.
 - **M7, the UI pass** (shipped 2026-10-31): posture-ring safety (de-escalation-only chip, the
   palette + confirm card as full access's only path), the memory surface (footer word,
   panel, ▲/▼ voting as the counters' only writer), the first-run state, composer
@@ -342,8 +343,10 @@ only nominates.
 **Defaults** (amended 2026-10-31): extraction on, dreaming on a 7-day cadence, the review
 inbox the only gate. The original default-off stance borrowed anti-evidence from
 unbounded-injection architectures gertie did not build; an empty store renders zero index
-tokens, and the discovery cost of an invisible feature outweighed the caution. `auto_apply`
-stays false: the review inbox is what makes default-on safe.
+tokens, and the discovery cost of an invisible feature outweighed the caution. The review
+inbox is what makes default-on safe: proposals apply only when approved (the never-wired
+`auto_apply` knob is gone; a documented switch that did nothing was two surprises
+waiting to happen).
 
 **Posture**: memory is advisory. Instruction files and AGENTS.md stay the source of record
 for rules that must always apply; memory is recall, and Codex's own docs draw the same line.
