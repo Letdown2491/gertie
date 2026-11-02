@@ -126,7 +126,9 @@ fn parse<T: for<'de> Deserialize<'de>>(arguments: &str, tool: &str) -> Result<T,
     })
 }
 
-fn limit(text: String) -> String {
+/// pub(crate) so the MCP bridge shapes a server's answers the same
+/// way: a third-party result is the same kind of transcript input.
+pub(crate) fn limit(text: String) -> String {
     if text.chars().count() <= RESULT_CHAR_LIMIT {
         return text;
     }

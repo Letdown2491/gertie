@@ -577,18 +577,24 @@ impl Tool for McpTool {
                         .get("isError")
                         .and_then(Value::as_bool)
                         .unwrap_or(false);
+                    // The same ceiling our own tools ride: the
+                    // transcript is the model's context, not the
+                    // server's landfill, and context stuffing (cost,
+                    // dilution, injection volume) is an attack before
+                    // it is a bug. Error text rides it too: it lands
+                    // in the transcript either way.
                     if is_error {
                         // A tool-level failure is model-visible, same
                         // channel as gertie's own tool errors.
                         Err(if text.is_empty() {
                             "mcp tool reported an error".to_string()
                         } else {
-                            text
+                            crate::limit(text)
                         })
                     } else if text.is_empty() {
                         Ok("(no output)".to_string())
                     } else {
-                        Ok(text)
+                        Ok(crate::limit(text))
                     }
                 })
         })
@@ -642,6 +648,47 @@ mod tests {
         let tools = client.list_tools().expect("tools/list");
         let result = futures_now(tools[0].run(r#"{"text": "hi"}"#));
         assert_eq!(result.unwrap(), "echoed: hi");
+    }
+
+    /// Same shape as FAKE_SERVER, but tools/call answers with 100 KB
+    /// of text: the volume a hostile (or just chatty) server can push
+    /// at the transcript. gertie's own tools cap their results at
+    /// RESULT_CHAR_LIMIT before the model sees them; a server result
+    /// is the same kind of input and rides the same ceiling.
+    const BIG_SERVER: &str = r#"
+        while IFS= read -r line; do
+            case "$line" in
+                *'"method":"initialize"'*)
+                    printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2024-11-05","capabilities":{"tools":{}},"serverInfo":{"name":"big","version":"0"}}}';;
+                *'"method":"tools/list"'*)
+                    printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"tools":[{"name":"dump","description":"Dumps 100KB of text","inputSchema":{"type":"object","properties":{}}}]}}';;
+                *'"method":"tools/call"'*)
+                    printf '{"jsonrpc":"2.0","id":3,"result":{"content":[{"type":"text","text":"';
+                    head -c 100000 /dev/zero | tr '\0' 'x';
+                    printf '"}]}}\n';;
+            esac
+        done
+    "#;
+
+    /// A server's 100 KB answer must arrive capped: the transcript is
+    /// the model's context, not the server's landfill, and context
+    /// stuffing is an attack (cost, dilution, injection volume) before
+    /// it is a bug.
+    #[test]
+    fn a_server_dumping_100kb_comes_home_capped() {
+        let client = Arc::new(
+            McpClient::connect("big", "sh", &["-c".into(), BIG_SERVER.into()], &[])
+                .expect("handshake"),
+        );
+        let tools = client.list_tools().expect("tools/list");
+        assert_eq!(tools.len(), 1);
+        let result = futures_now(tools[0].run("{}")).expect("the call must succeed");
+        let count = result.chars().count();
+        assert!(
+            count < 20_000,
+            "a server result must ride the same cap as our own: {count} chars"
+        );
+        assert!(result.contains("[truncated]"), "the cap must say so");
     }
 
     /// Tests run outside a runtime; our tools' futures are already
