@@ -17,6 +17,7 @@ use gertie_core::{Tool, ToolResult};
 use serde::Deserialize;
 use std::future::Future;
 use std::io::Read as _;
+use std::os::unix::process::CommandExt as _;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
@@ -342,6 +343,93 @@ struct BashArgs {
     timeout: Option<u64>,
 }
 
+/// True for env names that read as credentials: a substring test on
+/// the uppercased name (API_KEY, TOKEN, SECRET, PASSWORD, PASSWD,
+/// CREDENTIAL). Deliberately not AUTH alone: the ssh agent socket is
+/// a path, not a key, and git over ssh breaks without it.
+fn is_secret_shaped(key: &str) -> bool {
+    // Names that merely contain a shape word and are known innocent:
+    // TOKENIZERS_PARALLELISM tunes a tokenizer library, and stripping
+    // it would silently degrade a working server.
+    const NOT_SECRET: &[&str] = &["TOKENIZERS_PARALLELISM"];
+    if NOT_SECRET.iter().any(|innocent| key.eq_ignore_ascii_case(innocent)) {
+        return false;
+    }
+    let upper = key.to_ascii_uppercase();
+    ["API_KEY", "TOKEN", "SECRET", "PASSWORD", "PASSWD", "CREDENTIAL"]
+        .iter()
+        .any(|shape| upper.contains(shape))
+}
+
+/// The environment a bash child starts from. Not the parent's: the
+/// parent carries every provider key the config resolved, and a
+/// command that needed a compiler should not inherit the credential
+/// list. The allowlist is the working set a toolchain needs, PWD
+/// names the workspace the command runs in. Walks vars_os: env is
+/// arbitrary bytes on Linux, and vars() would panic on a value that
+/// is not UTF-8.
+fn bash_child_env(root: &Path) -> Vec<(String, String)> {
+    const KEEP: &[&str] = &[
+        "PATH",
+        "HOME",
+        "USER",
+        "LOGNAME",
+        "LANG",
+        "LC_ALL",
+        "LC_CTYPE",
+        "TERM",
+        "SHLVL",
+        "SSH_AUTH_SOCK",
+        "XDG_RUNTIME_DIR",
+    ];
+    // vars_os, and entries that are not valid UTF-8 are skipped
+    // rather than mangled: a command that genuinely needs one takes
+    // it through its own tooling.
+    let mut env: Vec<(String, String)> = std::env::vars_os()
+        .filter_map(|(key, value)| {
+            let key = key.to_str()?;
+            let value = value.to_str()?;
+            KEEP.contains(&key).then(|| (key.to_string(), value.to_string()))
+        })
+        .collect();
+    // Guaranteed, not passthrough: a command needs a place for its
+    // temporaries and needs to know where it stands.
+    env.push(("PWD".to_string(), root.display().to_string()));
+    if !env.iter().any(|(key, _)| key == "TMPDIR") {
+        env.push(("TMPDIR".to_string(), "/tmp".to_string()));
+    }
+    env
+}
+
+/// The environment an MCP stdio server starts from: the parent's,
+/// minus the credential-shaped keys and minus whatever names the
+/// config itself declared as credential carriers (`api_key_env`:
+/// MY_LLM_CRED is a plausible spelling and no shape matches it).
+/// Servers are third-party code; they need PATH and friends, they do
+/// not need the LLM keys. A server that genuinely needs a credential
+/// takes it through its own `env` config, which lands after the
+/// filters: explicit user intent wins, and a same-named inherited
+/// key cannot shadow it.
+fn mcp_child_env(
+    configured: &[(String, String)],
+    deny_names: &[String],
+) -> Vec<(String, String)> {
+    // Same vars_os walk, same skip-not-mangle rule for non-UTF-8.
+    let mut env: Vec<(String, String)> = std::env::vars_os()
+        .filter_map(|(key, value)| {
+            let key = key.to_str()?;
+            let value = value.to_str()?;
+            (!is_secret_shaped(key) && !deny_names.iter().any(|deny| deny == key))
+                .then(|| (key.to_string(), value.to_string()))
+        })
+        .collect();
+    for (key, value) in configured {
+        env.retain(|(existing, _)| existing != key);
+        env.push((key.clone(), value.clone()));
+    }
+    env
+}
+
 pub struct Glob {
     root: PathBuf,
 }
@@ -630,24 +718,102 @@ impl Tool for Bash {
                     .arg(&args.command)
                     .current_dir(&root)
                     .stdout(std::process::Stdio::piped())
-                    .stderr(std::process::Stdio::piped());
+                    .stderr(std::process::Stdio::piped())
+                    // One process group: the timeout takes the whole
+                    // tree home, sh alone would die and leave its
+                    // children running unsupervised.
+                    .process_group(0);
+                // A clean sheet: the parent env is the credential
+                // list, the child gets the working set (bash_child_env).
+                command.env_clear();
+                for (key, value) in bash_child_env(&root) {
+                    command.env(key, value);
+                }
                 if let Some(sandbox) = &sandbox {
                     sandbox.apply(&mut command)?;
                 }
                 command.spawn().map_err(|error| format!("bash: {error}"))?
             };
 
+            // Drain the pipes while the command runs. A pipe holds
+            // about 64 KB and a writer that fills it never exits, so
+            // reading only after exit was a deadlock that masqueraded
+            // as a timeout (any chatty `cargo test` hit it). Each
+            // stream caps itself: the model sees limit() output
+            // anyway, memory should not be the command's to set.
+            const DRAIN_CAP: u64 = 2 * 1024 * 1024;
+            // How long a finished command's stragglers get to close
+            // the pipes before the group kill takes them. A
+            // backgrounded child (`sleep 5 &`) inherits the write end
+            // and can hold it open long after sh exited; without the
+            // grace the result waits on the child's whole lifetime.
+            const DRAIN_GRACE: std::time::Duration =
+                std::time::Duration::from_millis(400);
+
+            fn drain<R: std::io::Read + Send + 'static>(
+                stream: Option<R>,
+                done: std::sync::mpsc::Sender<()>,
+            ) -> std::thread::JoinHandle<Vec<u8>> {
+                std::thread::spawn(move || {
+                    let mut buf = Vec::new();
+                    if let Some(stream) = stream {
+                        let _ = stream.take(DRAIN_CAP).read_to_end(&mut buf);
+                    }
+                    let _ = done.send(());
+                    buf
+                })
+            }
+            let (done_tx, done_rx) = std::sync::mpsc::channel();
+            let stdout = drain(child.stdout.take(), done_tx.clone());
+            let stderr = drain(child.stderr.take(), done_tx);
+            // The channel counts the drains, not the threads: both
+            // senders dropped means both streams are at EOF.
+            // Collect both drains: the pipes get a short grace to
+            // reach EOF on their own (the ordinary case, immediate);
+            // stragglers holding the write end past the grace get the
+            // group kill, which is what produces the EOF.
+            fn close_drains(
+                child: &mut std::process::Child,
+                done_rx: &std::sync::mpsc::Receiver<()>,
+                stdout: std::thread::JoinHandle<Vec<u8>>,
+                stderr: std::thread::JoinHandle<Vec<u8>>,
+            ) -> String {
+                let deadline = std::time::Instant::now() + DRAIN_GRACE;
+                let mut pending = 2;
+                while pending > 0 {
+                    match done_rx.recv_timeout(
+                        deadline.saturating_duration_since(std::time::Instant::now()),
+                    ) {
+                        Ok(()) => pending -= 1,
+                        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                            // SAFETY: the group id is the child's own
+                            // (process_group(0)), a group this process
+                            // created for exactly this command. The
+                            // stragglers holding the pipe ends are in
+                            // it; killing them is what produces the
+                            // EOF the drains are waiting on.
+                            unsafe {
+                                libc::killpg(child.id() as libc::pid_t, libc::SIGKILL);
+                            }
+                            break;
+                        }
+                        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+                    }
+                }
+                let mut output = String::new();
+                output
+                    .push_str(&String::from_utf8_lossy(&stdout.join().unwrap_or_default()));
+                output
+                    .push_str(&String::from_utf8_lossy(&stderr.join().unwrap_or_default()));
+                output
+            }
+
             let start = std::time::Instant::now();
             loop {
                 match child.try_wait() {
                     Ok(Some(status)) => {
-                        let mut output = String::new();
-                        if let Some(mut stdout) = child.stdout.take() {
-                            let _ = stdout.read_to_string(&mut output);
-                        }
-                        if let Some(mut stderr) = child.stderr.take() {
-                            let _ = stderr.read_to_string(&mut output);
-                        }
+                        let output =
+                            close_drains(&mut child, &done_rx, stdout, stderr);
                         // Shape once, here: the model-visible string and
                         // the persisted string are the same string.
                         let summary = limit(shape::shape(&args.command, output.trim_end()));
@@ -664,8 +830,18 @@ impl Tool for Bash {
                         std::thread::sleep(std::time::Duration::from_millis(50));
                     }
                     Ok(None) => {
-                        let _ = child.kill();
+                        // The group, not just sh: children of the
+                        // command must not outlive the kill and
+                        // finish their work unsupervised.
+                        // SAFETY: the group id is the child's own
+                        // (process_group(0) above), a group this
+                        // process created for exactly this command.
+                        unsafe {
+                            libc::killpg(child.id() as libc::pid_t, libc::SIGKILL);
+                        }
                         let _ = child.wait();
+                        let _ = stdout.join();
+                        let _ = stderr.join();
                         return Err(format!("bash: timed out after {}s", timeout.as_secs()));
                     }
                     Err(error) => return Err(format!("bash: {error}")),
@@ -968,6 +1144,223 @@ mod tests {
         let tool = Bash::new(dir.path().into());
         let result = await_sync(tool.run(r#"{"command": "sleep 5", "timeout": 1}"#));
         assert!(result.unwrap_err().contains("timed out"));
+    }
+
+    /// A command that out-writes the pipe buffer (~64 KB) used to
+    /// wedge: the loop read the pipes only after the child exited,
+    /// and a child blocked on a full pipe never exits. The drain has
+    /// to run while the command runs.
+    #[test]
+    fn a_chatty_command_comes_home_before_the_timeout() {
+        let dir = workspace();
+        let tool = Bash::new(dir.path().into());
+        let output = await_sync(
+            tool.run(r#"{"command": "echo done-marker; head -c 204800 /dev/zero | tr '\\0' 'a'", "timeout": 3}"#),
+        )
+        .expect("200 KB of output must not deadlock the pipe");
+        assert!(output.contains("done-marker"));
+        assert!(output.contains("aaaa"), "the streamed body must be captured");
+    }
+
+    /// A backgrounded child inherits the stdout pipe and holds it open
+    /// past the parent sh's exit: waiting on the drains must not turn
+    /// `sleep 5 & echo done` into a 5-second tool call. The command
+    /// finished; stragglers still holding the pipe get the group kill
+    /// after a short grace, and the result comes home promptly.
+    #[test]
+    fn a_backgrounded_child_does_not_hang_the_result() {
+        let dir = workspace();
+        let tool = Bash::new(dir.path().into());
+        let started = std::time::Instant::now();
+        let output = await_sync(
+            tool.run(r#"{"command": "sleep 5 & echo done", "timeout": 3}"#),
+        )
+        .expect("a backgrounded child must not hang the finished command");
+        let elapsed = started.elapsed();
+        assert!(output.contains("done"), "{output}");
+        assert!(
+            elapsed < std::time::Duration::from_secs(2),
+            "the result waited {elapsed:?} on a child that inherited the pipe"
+        );
+    }
+
+    /// Environment variables are arbitrary bytes on Linux: vars()
+    /// panics on a non-UTF-8 value, and the panic would fire inside
+    /// every bash spawn and MCP connect. The env builders walk
+    /// vars_os and never panic.
+    #[cfg(unix)]
+    #[test]
+    fn non_utf8_env_does_not_panic() {
+        use std::os::unix::ffi::OsStringExt as _;
+        // SAFETY: single-threaded use here; names are unique to this test.
+        unsafe {
+            std::env::set_var(
+                std::ffi::OsString::from_vec(b"GERTIE_AUDIT_RAW".to_vec()),
+                std::ffi::OsString::from_vec(vec![0xff, 0xfe, b'x']),
+            );
+        }
+        let env = bash_child_env("/workspace/probe".as_ref());
+        assert!(!env.iter().any(|(key, _)| key == "GERTIE_AUDIT_RAW"));
+        let mcp = mcp_child_env(&[], &[]);
+        assert!(!mcp.iter().any(|(key, _)| key == "GERTIE_AUDIT_RAW"));
+    }
+
+    /// Endpoints resolve keys from env names the config names
+    /// (api_key_env), and those names need not look secret-shaped:
+    /// MY_LLM_CRED is a plausible spelling. Whatever the config
+    /// named as a credential is denied to MCP servers by name, on
+    /// top of the shape filter.
+    #[test]
+    fn mcp_env_honors_configured_deny_names() {
+        // SAFETY: single-threaded use here; names are unique to this test.
+        unsafe {
+            std::env::set_var("GERTIE_AUDIT_CRED", "hunter2");
+        }
+        let env = mcp_child_env(&[], &["GERTIE_AUDIT_CRED".to_string()]);
+        assert!(
+            env.iter().all(|(key, _)| key != "GERTIE_AUDIT_CRED"),
+            "a configured credential name reached the server"
+        );
+        // A name that is only shape-matched still goes through the shape.
+        let env = mcp_child_env(&[], &[]);
+        assert!(env.iter().all(|(key, _)| !is_secret_shaped(key)));
+    }
+
+    /// The timeout kills the whole tree: a backgrounded grandchild
+    /// must not outlive the kill and finish its work unsupervised.
+    #[test]
+    fn a_timed_out_command_takes_its_children_with_it() {
+        let dir = workspace();
+        let marker = dir.path().join("marker");
+        let tool = Bash::new(dir.path().into());
+        let result = await_sync(tool.run(
+            r#"{"command": "(sleep 2 && touch marker) & sleep 30", "timeout": 1}"#,
+        ));
+        assert!(result.unwrap_err().contains("timed out"));
+        // The grandchild wanted to land at 2s. If the process group
+        // died at ~1s, nothing lands. Poll past that window.
+        for _ in 0..30 {
+            if marker.exists() {
+                panic!("the grandchild survived the timeout and wrote its marker");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+    }
+
+    /// A bash child starts from a clean sheet: the parent carries
+    /// every provider key the config resolved, and a command that
+    /// only needed a compiler should not inherit the credential list.
+    /// The working set (PATH, HOME) still travels, so builds run.
+    #[test]
+    fn bash_children_start_from_a_clean_environment() {
+        let dir = workspace();
+        let tool = Bash::new(dir.path().into());
+        // SAFETY: single-threaded use here; the name is unique to this test.
+        unsafe {
+            std::env::set_var("GERTIE_AUDIT_LEAK_PROBE", "bash-hunter2");
+        }
+        let leaked =
+            await_sync(tool.run(r#"{"command": "echo $GERTIE_AUDIT_LEAK_PROBE", "timeout": 3}"#))
+                .unwrap();
+        assert!(
+            !leaked.contains("bash-hunter2"),
+            "the child saw the parent's environment: {leaked}"
+        );
+        let working = await_sync(
+            tool.run(r#"{"command": "echo PATH=$PATH HOME=$HOME", "timeout": 3}"#),
+        )
+        .unwrap();
+        assert!(!working.contains("PATH= HOME="), "the working set must travel");
+    }
+
+    /// The allowlist is the working set, nothing else: seen here as a
+    /// pure function so the list is legible in one place. PWD and
+    /// TMPDIR are guaranteed, not passthrough.
+    #[test]
+    fn bash_env_allowlist_keeps_the_working_set() {
+        // SAFETY: single-threaded use here; the name is allowlist
+        // space and the value unique to this test.
+        unsafe {
+            std::env::set_var("TERM", "GERTIE_AUDIT_VT100");
+        }
+        let env = bash_child_env("/workspace/probe".as_ref());
+        let names: Vec<&str> = env.iter().map(|(key, _)| key.as_str()).collect();
+        for key in ["PATH", "HOME", "PWD", "TMPDIR", "SSH_AUTH_SOCK", "TERM"] {
+            assert!(names.contains(&key), "{key} must survive the allowlist");
+        }
+        assert!(
+            env.iter().any(|(key, value)| key == "TERM" && value == "GERTIE_AUDIT_VT100"),
+            "a set working-set value passes through"
+        );
+        assert!(
+            !env.iter().any(|(key, _)| is_secret_shaped(key)),
+            "no secret-shaped key rides the allowlist"
+        );
+        let pwd = env.iter().find(|(key, _)| key == "PWD").map(|(_, v)| v.as_str());
+        assert_eq!(pwd, Some("/workspace/probe"));
+        let tmpdir = env
+            .iter()
+            .find(|(key, _)| key == "TMPDIR")
+            .map(|(_, v)| v.as_str());
+        assert_eq!(tmpdir, Some("/tmp"));
+    }
+
+    /// MCP servers are third-party code and still need a working
+    /// environment; the filter drops the credential-shaped keys and
+    /// keeps the rest, and a server's own configured env is explicit
+    /// user intent, it lands verbatim after the filter.
+    #[test]
+    fn mcp_env_strips_secret_shaped_keys_but_stays_working() {
+        // SAFETY: single-threaded use here; names are unique to this test.
+        unsafe {
+            std::env::set_var("GERTIE_AUDIT_MCP_API_KEY", "mcp-hunter2");
+            std::env::set_var("GERTIE_AUDIT_AWS_SECRET_ACCESS_KEY", "mcp-hunter2");
+            std::env::set_var("GERTIE_AUDIT_HARMLESS", "fine");
+        }
+        let env = mcp_child_env(&[], &[]);
+        assert!(
+            env.iter().all(|(_, value)| *value != "mcp-hunter2"),
+            "a secret-shaped key reached the server"
+        );
+        assert!(env.iter().any(|(k, v)| k == "GERTIE_AUDIT_HARMLESS" && v == "fine"));
+        assert!(env.iter().any(|(k, _)| k == "PATH"));
+        let configured = mcp_child_env(&[("SERVER_TOKEN".to_string(), "by-request".to_string())], &[]);
+        assert!(
+            configured
+                .iter()
+                .any(|(k, v)| k == "SERVER_TOKEN" && v == "by-request"),
+            "the server's own env lands verbatim"
+        );
+    }
+
+    /// The shape test itself: what counts as a credential name, and
+    /// the working-set names that must never match it (AUTH alone is
+    /// not a credential: the ssh agent socket is a path, not a key).
+    #[test]
+    fn secret_shaped_env_keys_are_recognized() {
+        for key in [
+            "MY_API_KEY",
+            "AUTH_TOKEN",
+            "AWS_SECRET_ACCESS_KEY",
+            "DB_PASSWORD",
+            "GERTIE_OLLAMA_API_KEY",
+            "CI_JOB_TOKEN",
+            "client_secret_file",
+        ] {
+            assert!(is_secret_shaped(key), "{key} should read as a credential");
+        }
+        for key in [
+            "PATH",
+            "HOME",
+            "LANG",
+            "TERM",
+            "SSH_AUTH_SOCK",
+            "HTTP_PROXY",
+            "NO_COLOR",
+            "XDG_RUNTIME_DIR",
+        ] {
+            assert!(!is_secret_shaped(key), "{key} should read as working set");
+        }
     }
 
     #[test]
