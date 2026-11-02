@@ -134,6 +134,28 @@ fn limit(text: String) -> String {
     format!("{truncated}\n… [truncated]")
 }
 
+/// A whole-file read has two failure modes `read_to_string` turns into
+/// hangs and memory bloat: special files (a FIFO never ends, there is
+/// no EOF coming) and oversize regular files (the model sees 16k chars
+/// either way, nothing justifies an unbounded allocation). Both are
+/// refused up front, by name.
+const READ_FILE_CAP: u64 = 10 * 1024 * 1024;
+
+fn check_readable_size(path: &Path, label: &str) -> Result<(), String> {
+    let meta = std::fs::metadata(path).map_err(|error| format!("{label}: {error}"))?;
+    if !meta.is_file() {
+        return Err(format!("{label}: not a regular file, gertie does not block on it"));
+    }
+    if meta.len() > READ_FILE_CAP {
+        return Err(format!(
+            "{label}: too large for one read ({} MB, cap 10 MB); \
+             range it with bash (head, tail, sed -n)",
+            meta.len() / (1024 * 1024)
+        ));
+    }
+    Ok(())
+}
+
 /// Shared plumbing: every tool holds its workspace root and turns the
 /// model's JSON into a result. Local file/process I/O is short and
 /// synchronous by nature, but not *bounded* by anything but the
@@ -423,6 +445,7 @@ impl Tool for ReadFile {
         blocking(move || {
             let args: ReadArgs = parse(&arguments, "read_file")?;
             let path = resolve(&root, &args.path)?;
+            check_readable_size(&path, &args.path)?;
             let text = std::fs::read_to_string(&path)
                 .map_err(|error| format!("{}: {error}", args.path))?;
 
@@ -531,6 +554,7 @@ impl Tool for EditFile {
         blocking(move || {
             let args: EditArgs = parse(&arguments, "edit_file")?;
             let path = resolve(&root, &args.path)?;
+            check_readable_size(&path, &args.path)?;
             let text = std::fs::read_to_string(&path)
                 .map_err(|error| format!("{}: {error}", args.path))?;
 
@@ -893,6 +917,61 @@ mod tests {
         let tail = await_sync(tool.run(r#"{"path": "a.txt", "offset": 2}"#)).unwrap();
         assert!(tail.contains("2  two"));
         assert!(!tail.contains("one"));
+    }
+
+    /// The reads are bounded. A whole-file read has no ceiling today:
+    /// an 11 GB log (or a FIFO, which never ends) is the model's
+    /// problem and the process's memory. Oversize is refused with the
+    /// ranged-read escape hatch; special files are refused outright.
+    #[test]
+    fn oversized_reads_are_refused_with_the_ranged_escape() {
+        let dir = workspace();
+        let big = dir.path().join("big.log");
+        std::fs::write(&big, vec![b'a'; 11 * 1024 * 1024]).unwrap();
+        let tool = ReadFile::new(dir.path().into());
+
+        let refused = await_sync(tool.run(r#"{"path": "big.log"}"#)).unwrap_err();
+        assert!(
+            refused.contains("too large"),
+            "an oversize read must refuse by name: {refused}"
+        );
+        // The offset/limit path reads the same file through the same
+        // open: the refusal is about the file, not the arguments.
+        let ranged = await_sync(tool.run(r#"{"path": "big.log", "limit": 5}"#)).unwrap_err();
+        assert!(ranged.contains("too large"));
+
+        // edit_file reads the whole file too, same ceiling.
+        let editor = EditFile::new(dir.path().into());
+        let edit_refused = await_sync(
+            editor.run(r#"{"path": "big.log", "old_text": "a", "new_text": "b"}"#),
+        )
+        .unwrap_err();
+        assert!(edit_refused.contains("too large"), "{edit_refused}");
+    }
+
+    /// A FIFO (or any special file) would hang a whole-file read
+    /// forever: there is no EOF coming. The read tools refuse
+    /// non-regular files instead of wedging a tool thread.
+    #[cfg(unix)]
+    #[test]
+    fn special_files_are_refused_not_wedged() {
+        let dir = workspace();
+        let fifo = dir.path().join("pipe");
+        nix_stub_mkfifo(&fifo);
+        let tool = ReadFile::new(dir.path().into());
+        let refused = await_sync(tool.run(r#"{"path": "pipe"}"#)).unwrap_err();
+        assert!(refused.contains("not a regular file"), "{refused}");
+    }
+
+    /// mkfifo(2) without a libc dependency in the tests: a shell out
+    /// is fine in a test this shape.
+    #[cfg(unix)]
+    fn nix_stub_mkfifo(path: &std::path::Path) {
+        let status = std::process::Command::new("mkfifo")
+            .arg(path)
+            .status()
+            .expect("mkfifo available on unix test hosts");
+        assert!(status.success());
     }
 
     #[test]
