@@ -317,6 +317,25 @@ const DENY_PATTERNS: &[(&str, &str)] = &[
 /// call. A malformed pattern here is a compile-time review failure
 /// anyway; the lock panics loudly rather than silently disabling the
 /// guard.
+/// True for the paths whose payload runs later, outside any sandbox:
+/// `.git/` (hooks and config fire on the user's next git command),
+/// `.gertie/` (the next session's overlay and memory), `AGENTS.md`
+/// (the next session's instructions), `.envrc` (the next cd into the
+/// tree). An auto-approved edit must not be able to arm them, so the
+/// write tools refuse; a human edits these by hand.
+fn is_persistence_path(path: &Path) -> bool {
+    path.components().any(|component| {
+        matches!(
+            component,
+            std::path::Component::Normal(name)
+                if name == std::ffi::OsStr::new(".git")
+                    || name == std::ffi::OsStr::new(".gertie")
+                    || name == std::ffi::OsStr::new("AGENTS.md")
+                    || name == std::ffi::OsStr::new(".envrc")
+        )
+    })
+}
+
 fn deny_patterns() -> &'static [(regex::Regex, &'static str)] {
     static PATTERNS: OnceLock<Vec<(regex::Regex, &'static str)>> = OnceLock::new();
     PATTERNS.get_or_init(|| {
@@ -475,6 +494,13 @@ impl Tool for WriteFile {
         blocking(move || {
             let args: WriteArgs = parse(&arguments, "write_file")?;
             let path = resolve(&root, &args.path)?;
+            if is_persistence_path(&path) {
+                return Err(format!(
+                    "{}: gertie does not write this path (its payload runs later, \
+                     outside any sandbox); edit it by hand",
+                    args.path
+                ));
+            }
             if let Some(parent) = path.parent() {
                 std::fs::create_dir_all(parent)
                     .map_err(|error| format!("{}: {error}", parent.display()))?;
@@ -531,6 +557,13 @@ impl Tool for EditFile {
         blocking(move || {
             let args: EditArgs = parse(&arguments, "edit_file")?;
             let path = resolve(&root, &args.path)?;
+            if is_persistence_path(&path) {
+                return Err(format!(
+                    "{}: gertie does not edit this path (its payload runs later, \
+                     outside any sandbox); edit it by hand",
+                    args.path
+                ));
+            }
             let text = std::fs::read_to_string(&path)
                 .map_err(|error| format!("{}: {error}", args.path))?;
 
@@ -901,6 +934,51 @@ mod tests {
         let tool = ReadFile::new(dir.path().into());
         let result = await_sync(tool.run(r#"{"path": "../../etc/passwd"}"#));
         assert!(result.unwrap_err().contains("escapes the workspace"));
+    }
+
+    /// The persistence escape: edits auto-run in accept_edits and auto,
+    /// and the workspace holds machinery that executes later outside
+    /// any sandbox (git hooks and config, gertie's own overlay and
+    /// memory, direnv and the instruction file the next session
+    /// loads). Writing those paths is how an injected instruction
+    /// graduates from text to code. The write tools refuse them; a
+    /// human edits them by hand.
+    #[test]
+    fn write_tools_refuse_the_persistence_paths() {
+        let dir = workspace();
+        let writer = WriteFile::new(dir.path().into());
+        let editor = EditFile::new(dir.path().into());
+
+        for path in [
+            ".git/hooks/pre-commit",
+            ".git/config",
+            ".gertie/config.toml",
+            ".gertie/memory/gotchas.md",
+            "AGENTS.md",
+            ".envrc",
+            "deep/.git/modules/x/config",
+            "docs/AGENTS.md",
+        ] {
+            let write =
+                await_sync(writer.run(&format!(r#"{{"path": "{path}", "content": "pwned"}}"#)));
+            assert!(write.is_err(), "write_file must refuse {path}: {write:?}");
+            let edit = await_sync(
+                editor.run(&format!(r#"{{"path": "{path}", "old_text": "x", "new_text": "y"}}"#)),
+            );
+            assert!(edit.is_err(), "edit_file must refuse {path}: {edit:?}");
+        }
+
+        // The refusal is about the paths, not the writes: ordinary
+        // workspace files stay writable, nested under new dirs too.
+        let ok = await_sync(writer.run(r#"{"path": "src/main.rs", "content": "fn main() {}"}"#));
+        assert!(ok.is_ok(), "an ordinary write must still work: {ok:?}");
+
+        // And the read tools keep reading: .git inspection is legitimate.
+        let reader = ReadFile::new(dir.path().into());
+        std::fs::create_dir_all(dir.path().join(".git")).unwrap();
+        std::fs::write(dir.path().join(".git/config"), "[core]\n").unwrap();
+        let read = await_sync(reader.run(r#"{"path": ".git/config"}"#));
+        assert!(read.is_ok(), "reading .git stays allowed: {read:?}");
     }
 
     #[test]
