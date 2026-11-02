@@ -7,9 +7,12 @@ fn main() {
         Ok(gertie::cli::Command::Run {
             prompt,
             yes,
+            allow_dirty,
             config,
             ephemeral,
-        }) => std::process::exit(gertie::headless::run(prompt, yes, config, ephemeral)),
+        }) => std::process::exit(gertie::headless::run(
+            prompt, yes, allow_dirty, config, ephemeral,
+        )),
         Ok(gertie::cli::Command::Doctor {
             config,
             clean_worktrees,
