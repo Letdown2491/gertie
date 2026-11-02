@@ -111,10 +111,6 @@ pub struct MemoryConfig {
     /// endpoint.
     #[serde(default)]
     pub extract_endpoint: Option<String>,
-    /// Apply proposed ops without the review card. Off = the default
-    /// review inbox: proposals render as diffs you approve or deny.
-    #[serde(default)]
-    pub auto_apply: Option<bool>,
     /// Dreaming cadence: consolidate (merge duplicates, archive
     /// counter-dead entries, rebuild the index) at most this often,
     /// riding the startup sweep. Absent or zero = never.
@@ -521,8 +517,8 @@ impl ConfigEdits {
 
         // Memory posture: the panel owns two keys of the [memory]
         // table (the switch and the cadence). The table is mutated in
-        // place, so hand-written keys (index_budget, extract_endpoint,
-        // auto_apply) survive a panel save untouched.
+        // place, so hand-written keys (index_budget, extract_endpoint)
+        // survive a panel save untouched.
         if !matches!(root.get("memory"), Some(toml_edit::Item::Table(_))) {
             root.insert("memory", toml_edit::Item::Table(toml_edit::Table::new()));
         }
@@ -877,13 +873,6 @@ impl Config {
             .as_ref()
             .and_then(|m| m.index_budget)
             .unwrap_or(600)
-    }
-
-    pub fn memory_auto_apply(&self) -> bool {
-        self.memory
-            .as_ref()
-            .and_then(|m| m.auto_apply)
-            .unwrap_or(false)
     }
 
     pub fn memory_dream_days(&self) -> u64 {
@@ -1562,8 +1551,8 @@ default_mode = "accept_edits"
     }
 
     /// The panel's memory keys round-trip, and keys the form doesn't
-    /// own (index_budget, auto_apply) survive the save like any other
-    /// hand-written user voice.
+    /// own (index_budget, extract_endpoint) survive the save like any
+    /// other hand-written user voice.
     #[test]
     fn edits_preserve_hand_written_memory_keys() {
         let dir = tempfile::tempdir().unwrap();
@@ -1572,7 +1561,7 @@ default_mode = "accept_edits"
             &path,
             "default_endpoint = \"ppq\"\n\n[endpoints]\nname = \"ppq\"\n\
              model = \"m1\"\n\n[memory]\nenabled = true\nindex_budget = 900\n\
-             auto_apply = false\n",
+             extract_endpoint = \"ppq\"\n",
         )
         .unwrap();
 
@@ -1596,7 +1585,7 @@ default_mode = "accept_edits"
             "file-only key kept: {raw}"
         );
         assert!(
-            raw.contains("auto_apply = false"),
+            raw.contains("extract_endpoint = \"ppq\""),
             "file-only key kept: {raw}"
         );
     }
