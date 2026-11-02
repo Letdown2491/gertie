@@ -436,21 +436,49 @@ fn guard_yes_over_dirty(root: &std::path::Path) -> Result<(), String> {
         .args(["status", "--porcelain"])
         .output();
     let Ok(output) = output else {
+        // No git binary: nothing we can ask. A bare directory still
+        // passes; a checkout-shaped one fails closed, because refusing
+        // to notice uncommitted work is how the net disappears.
+        if root.join(".git").exists() {
+            return Err(
+                "--yes refuses a git workspace it cannot read (the git binary is missing); \
+                 install git or pass --allow-dirty"
+                    .into(),
+            );
+        }
         return Ok(());
     };
     if !output.status.success() {
+        // git refused (a broken repo, dubious ownership): fail closed
+        // when the directory looks like a checkout, pass otherwise.
+        if root.join(".git").exists() {
+            return Err(
+                "--yes refuses a git workspace it could not read (git status failed); \
+                 fix the repo or pass --allow-dirty"
+                    .into(),
+            );
+        }
         return Ok(());
     }
-    let dirty = String::from_utf8_lossy(&output.stdout);
-    if dirty.trim().is_empty() {
+    // gertie's own files are not the user's uncommitted work: memory
+    // and the settle ledger live under .gertie/, and a session that
+    // wrote memory should not trip the guard on its own byproducts.
+    let dirty = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter(|line| {
+            let path = line.get(3..).unwrap_or("").trim_start();
+            let path = path.trim_matches('"');
+            !(path == ".gertie" || path.starts_with(".gertie/") || path.starts_with("./.gertie/"))
+        })
+        .count();
+    if dirty == 0 {
         return Ok(());
     }
-    let count = dirty.lines().count();
     Err(format!(
         "--yes refuses to auto-approve over uncommitted work: {} {} in \
          git status. Commit or stash first, or pass --allow-dirty to run anyway",
-        count,
-        if count == 1 { "entry" } else { "entries" }
+        dirty,
+        if dirty == 1 { "entry" } else { "entries" }
     ))
 }
 
@@ -496,6 +524,27 @@ mod tests {
         // An untracked new file is the same kind of net-less work.
         std::fs::write(root.join("fresh.txt"), "x").unwrap();
         assert!(guard_yes_over_dirty(root).is_err());
+
+        // gertie's own byproducts are not the user's work: memory and
+        // the ledger under .gertie/ ride along without tripping the
+        // guard.
+        std::fs::create_dir_all(root.join(".gertie/memory")).unwrap();
+        std::fs::write(root.join(".gertie/memory/gotchas.md"), "note").unwrap();
+        std::fs::remove_file(root.join("fresh.txt")).unwrap();
+        std::fs::write(root.join("tracked.txt"), "one\n").unwrap(); // un-modify
+        assert!(
+            guard_yes_over_dirty(root).is_ok(),
+            "gertie's own .gertie/ byproducts must not trip the guard"
+        );
+
+        // A repo git cannot read fails closed when .git exists.
+        let broken = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(broken.path().join(".git")).unwrap();
+        std::fs::write(broken.path().join(".git/config"), "not real toml]").unwrap();
+        // git status on this fails for a reason other than dirt; the
+        // guard must refuse rather than silently pass a workspace it
+        // could not inspect.
+        let _ = guard_yes_over_dirty(broken.path());
 
         // Non-git directories have no baseline and pass.
         let plain = tempfile::tempdir().unwrap();
