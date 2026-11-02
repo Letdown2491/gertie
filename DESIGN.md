@@ -175,8 +175,12 @@ The original "Deferred" row, every item shipped or decided:
   MCP servers, or agent types, and no settle command either: a shell command is
   process, not posture, and stays the user's. A cloned repo never configures what
   executes locally.
-  The chain is user config → project overlay → built-in default (the repo suggests,
-  you decide), and every resolved value says which tier decided: the settings panel
+  The chain is user config → project overlay → built-in default, and the overlay
+  may only tighten: a repo can name a calmer starting mode (accept_edits at most,
+  never auto or full_access) and turn the bash sandbox on, but standing the sandbox
+  down or opening the private-fetch gate is the user's alone, so a checkout's own
+  `config.toml` can never lower the guardrails a session starts with. Every
+  resolved value says which tier decided: the settings panel
   and `gertie doctor` print the origin. Inheritance is an explicit value, a field may
   hold `"inherit"` to stand down to the next tier, a state the UI can show, not an
   absence to infer. Overlay problems (unreadable, unparseable) surface in the status
@@ -257,8 +261,8 @@ literal private IPs (RFC 1918, loopback, the 169.254 metadata range, CGNAT), loc
 names, and public names that resolve into private space are all refused, and every dial,
 first fetch and every redirect hop, resolves through that same filter, so DNS rebinding
 has no gap to live in. A localhost dev server is a legitimate target for a coding agent,
-so `[security] allow_private_fetch = true` opens the gate (user config or repo overlay
-posture; never a model ask).
+so `[security] allow_private_fetch = true` opens the gate (user config only: the
+overlay carries no such key; never a model ask).
 
 **MCP**: stdio **and Streamable HTTP** transports, **tools capability only**, config-defined
 servers (`[[mcp_servers]]` with `command` or `url`). Resource/prompt capabilities come later.
