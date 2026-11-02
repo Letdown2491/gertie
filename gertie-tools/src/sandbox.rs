@@ -6,9 +6,14 @@
 //! misbehave (or were approved carelessly).
 //!
 //! Posture, fail-closed on purpose: read access to the system, write
-//! access to the workspace and /tmp only, and no network at all (ABI
-//! v4, kernel 6.7+): handled, no rules, connects and binds are
-//! refused, so an approved command is not an approved exfil. When the
+//! access to the workspace and /tmp only, and outbound TCP closed
+//! (ABI v4, kernel 6.7+): handled, no rules, so TCP connects and
+//! binds are refused and an approved command cannot open an approved
+//! channel. Landlock ABI v4 speaks TCP only: UDP (DNS included) and
+//! ICMP are NOT restricted here, so name resolution still works but a
+//! datagram channel also still exists; full network closure needs a
+//! namespace or a seccomp layer, which gertie does not build. Say
+//! "TCP-closed", never "network-free". When the
 //! kernel can't enforce (too old, blocked in a container), the spawn
 //! **fails**, gertie never runs a sandboxed command unsandboxed just
 //! because the sandbox was unavailable. `CompatLevel::HardRequirement`

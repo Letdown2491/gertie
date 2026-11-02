@@ -43,10 +43,12 @@ api_key_env = "MY_API_KEY"
 # url = "https://mcp.example.com/mcp"
 
 # Security posture. sandbox_bash = true Landlock-isolates bash children:
-# system read-only, writes limited to the workspace and /tmp, and no
-# network (connects and binds are refused, so an approved command cannot
-# phone home). Opt-in; when the kernel can't enforce it (the network
-# half wants 6.7+), sandboxed commands fail rather than run free.
+# system read-only, writes limited to the workspace and /tmp, and
+# outbound TCP closed (connects and binds are refused, so an approved
+# command cannot open a channel; UDP/DNS and ICMP stay, Landlock ABI v4
+# is TCP-only). Opt-in; when the kernel can't enforce it (6.7+ wanted;
+# older kernels refuse the whole sandbox), sandboxed commands fail
+# rather than run free.
 # [security]
 # sandbox_bash = true
 
