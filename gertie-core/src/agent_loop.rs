@@ -495,14 +495,25 @@ pub fn run_turn(spec: TurnSpec) -> BoxStream<'static, LoopEvent> {
                         // rest face the permission prompt: the ask
                         // registers with the broker (so the UI can
                         // answer it) and the loop awaits the answer.
-                        else if tool.mutates() {
+                        // The ask gate rides along: a tool can owe a
+                        // card without mutating anything (web_fetch),
+                        // its effect is not a file the checkpoint
+                        // could restore.
+                        else if tool.mutates() || tool.asks() {
                             let checkpoint_target = checkpoint_path(
                                 &call.arguments,
                                 workspace_root.as_deref(),
                             );
+                            // Containment is a fact about this
+                            // call, not the turn: the sandbox
+                            // contains bash, and nothing else. A
+                            // turn-wide flag here would wave a
+                            // gated fetch or an MCP tool through
+                            // every sandboxed auto turn.
+                            let contained = sandbox_bash && call.name == "bash";
                             let pre_approved = permission_mode.auto_allows(
                                 checkpoint_target.is_some(),
-                                sandbox_bash,
+                                contained,
                                 tool.third_party(),
                             );
                             let decision = match (&permission_broker, pre_approved) {
@@ -1076,6 +1087,7 @@ mod tests {
     struct StubTool {
         name: &'static str,
         mutates: bool,
+        asks: bool,
         result: &'static str,
     }
 
@@ -1084,6 +1096,18 @@ mod tests {
             Self {
                 name,
                 mutates,
+                asks: mutates,
+                result,
+            }
+        }
+
+        /// A read-only tool that still owes a card, the web_fetch
+        /// shape: nothing checkpoints, the prompt is the whole gate.
+        fn gated(name: &'static str, result: &'static str) -> Self {
+            Self {
+                name,
+                mutates: false,
+                asks: true,
                 result,
             }
         }
@@ -1104,6 +1128,10 @@ mod tests {
 
         fn mutates(&self) -> bool {
             self.mutates
+        }
+
+        fn asks(&self) -> bool {
+            self.asks
         }
 
         fn run<'a>(
@@ -1246,6 +1274,175 @@ mod tests {
         let ask = parse_ask(r#"{"question": "Which?", "options": ["a", "b"]}"#, "a1").expect("ask");
         assert_eq!(ask.call.id, "a1");
         assert_eq!(ask.call.name, "ask_user");
+    }
+
+    /// A script of one tool-call round, then a plain-text wrap-up.
+    fn one_call_then_text(name: &'static str) -> Vec<Vec<Event>> {
+        vec![
+            vec![
+                Event::ToolCall {
+                    id: "c0".into(),
+                    name: name.into(),
+                    arguments: "{}".into(),
+                },
+                Event::Done,
+            ],
+            vec![Event::Token { delta: "ok".into() }, Event::Done],
+        ]
+    }
+
+    /// A tool can owe a card without mutating anything (web_fetch is
+    /// the shape: the model chose the destination, and the effect is
+    /// whatever the body carries, outbound bytes included). In
+    /// supervised the gate asks; nothing runs before the answer.
+    #[test]
+    fn an_ask_gate_prompts_in_supervised() {
+        let asked = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let provider = Arc::new(ScriptedProvider {
+            seen: std::sync::Mutex::new(Vec::new()),
+            scripts: std::sync::Mutex::new(one_call_then_text("watch")),
+        });
+        let history: SharedHistory = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let (spec, broker) = turn(
+            provider,
+            registry(&[Arc::new(StubTool::gated("watch", "spied"))]),
+            history.clone(),
+            "go",
+        );
+        let flag = asked.clone();
+        let events = drain(run_turn(spec), &broker, move |_| {
+            flag.store(true, std::sync::atomic::Ordering::Relaxed);
+            PermissionDecision::Approve
+        });
+
+        assert!(
+            asked.load(std::sync::atomic::Ordering::Relaxed),
+            "the gated tool must face the prompt before it runs"
+        );
+        assert_eq!(tool_result(&events, "watch"), "spied");
+    }
+
+    /// Full access settles the same gate without a card: the mode is
+    /// the human saying nothing asks.
+    #[test]
+    fn full_access_settles_an_ask_gate_without_a_prompt() {
+        let asked = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let provider = Arc::new(ScriptedProvider {
+            seen: std::sync::Mutex::new(Vec::new()),
+            scripts: std::sync::Mutex::new(one_call_then_text("watch")),
+        });
+        let history: SharedHistory = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let (mut spec, broker) = turn(
+            provider,
+            registry(&[Arc::new(StubTool::gated("watch", "spied"))]),
+            history.clone(),
+            "go",
+        );
+        spec.permission_mode = PermissionMode::FullAccess;
+        let flag = asked.clone();
+        let events = drain(run_turn(spec), &broker, move |_| {
+            flag.store(true, std::sync::atomic::Ordering::Relaxed);
+            PermissionDecision::Approve
+        });
+
+        assert!(
+            !asked.load(std::sync::atomic::Ordering::Relaxed),
+            "full access means no card"
+        );
+        assert_eq!(tool_result(&events, "watch"), "spied");
+    }
+
+    /// The containment flag is per-call, not turn-wide: a gated
+    /// read-only tool (web_fetch is the shape) must face its card in
+    /// auto mode even when the turn runs sandboxed, because the
+    /// sandbox contains bash, not the fetch.
+    #[test]
+    fn auto_mode_contains_bash_not_the_fetch() {
+        let asked = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let provider = Arc::new(ScriptedProvider {
+            seen: std::sync::Mutex::new(Vec::new()),
+            scripts: std::sync::Mutex::new(one_call_then_text("watch")),
+        });
+        let history: SharedHistory = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let (mut spec, broker) = turn(
+            provider,
+            registry(&[Arc::new(StubTool::gated("watch", "spied"))]),
+            history.clone(),
+            "go",
+        );
+        spec.permission_mode = PermissionMode::Auto;
+        spec.sandbox_bash = true;
+        let flag = asked.clone();
+        let events = drain(run_turn(spec), &broker, move |_| {
+            flag.store(true, std::sync::atomic::Ordering::Relaxed);
+            PermissionDecision::Approve
+        });
+
+        assert!(
+            asked.load(std::sync::atomic::Ordering::Relaxed),
+            "a gated tool must card in auto mode: the sandbox contains bash, not the fetch"
+        );
+        assert_eq!(tool_result(&events, "watch"), "spied");
+    }
+
+    /// And the contained bash itself stays pre-approved in auto: the
+    /// mode's whole point survives the tightening.
+    #[test]
+    fn auto_mode_still_pre_approves_contained_bash() {
+        let asked = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let provider = Arc::new(ScriptedProvider {
+            seen: std::sync::Mutex::new(Vec::new()),
+            scripts: std::sync::Mutex::new(one_call_then_text("bash")),
+        });
+        let history: SharedHistory = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let (mut spec, broker) = turn(
+            provider,
+            registry(&[Arc::new(StubTool::new("bash", true, "ran"))]),
+            history.clone(),
+            "go",
+        );
+        spec.permission_mode = PermissionMode::Auto;
+        spec.sandbox_bash = true;
+        let flag = asked.clone();
+        let events = drain(run_turn(spec), &broker, move |_| {
+            flag.store(true, std::sync::atomic::Ordering::Relaxed);
+            PermissionDecision::Approve
+        });
+
+        assert!(
+            !asked.load(std::sync::atomic::Ordering::Relaxed),
+            "contained bash is the one thing auto exists to pre-approve"
+        );
+        assert_eq!(tool_result(&events, "bash"), "ran");
+    }
+
+    /// The gate does not catch reads: a tool that neither mutates nor
+    /// asks runs uncarded, the read-only contract stands.
+    #[test]
+    fn a_plain_read_still_runs_without_a_card() {
+        let asked = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let provider = Arc::new(ScriptedProvider {
+            seen: std::sync::Mutex::new(Vec::new()),
+            scripts: std::sync::Mutex::new(one_call_then_text("peek")),
+        });
+        let history: SharedHistory = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let (spec, broker) = turn(
+            provider,
+            registry(&[Arc::new(StubTool::new("peek", false, "saw"))]),
+            history.clone(),
+            "go",
+        );
+        let flag = asked.clone();
+        let events = drain(run_turn(spec), &broker, move |_| {
+            flag.store(true, std::sync::atomic::Ordering::Relaxed);
+            PermissionDecision::Approve
+        });
+
+        assert!(
+            !asked.load(std::sync::atomic::Ordering::Relaxed),
+            "a plain read must not gain a card"
+        );
+        assert_eq!(tool_result(&events, "peek"), "saw");
     }
 
     fn registry(tools: &[Arc<dyn Tool>]) -> ToolRegistry {

@@ -99,11 +99,14 @@ version of this whole list.
 
 ## Security posture
 
-- Zero telemetry. The only network traffic is to the endpoints you configure.
+- Zero telemetry. Outbound traffic: the endpoints you configure, the search backend,
+  and `web_fetch` to model-chosen hosts (each fetch prompts with its URL; the update
+  check is opt-in).
 - API keys resolve from the environment (`api_key_env`), never required in the config
   file; a literal key is allowed but flagged in the status line.
-- Tool calls: reads auto-approved; writes and bash prompt with a diff; bash can be
-  Landlock-sandboxed at the kernel level (opt-in).
+- Tool calls: reads auto-approved; `web_fetch` shows a card with its URL before it
+  dials; writes and bash prompt with a diff; bash can be Landlock-sandboxed at the
+  kernel level (opt-in).
 - MCP tools are third-party code: descriptions are sanitized untrusted input and every
   call prompts: the user is the capability system.
 - Long-term memory is advisory and auditable: plain markdown files you can read and

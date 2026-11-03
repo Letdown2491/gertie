@@ -177,6 +177,17 @@ impl Tool for WebFetch {
         })
     }
 
+    /// The card is the whole exfil gate. The fetch mutates nothing on
+    /// disk, so mutates() alone would let it auto-run next to the
+    /// read tools, and a fetched page is attacker-readable text that
+    /// just asked a read tool for a secret: without a card, injected
+    /// instructions get a zero-prompt send of that secret to any host
+    /// the model names. The prompt shows the URL; the human sees the
+    /// destination before the bytes leave.
+    fn asks(&self) -> bool {
+        true
+    }
+
     fn run<'a>(
         &'a self,
         arguments: &'a str,
@@ -821,6 +832,15 @@ mod tests {
         assert!(WebFetch::check_target(&url("http://127.0.0.1:8080/dev"), true).is_ok());
         // Literal public addresses pass with no DNS at all.
         assert!(WebFetch::check_target(&url("http://93.184.216.34/"), false).is_ok());
+    }
+
+    /// The fetch owes a card: the model chose the destination, and the
+    /// body may carry the session's secrets out. Read-only in the
+    /// filesystem sense only, so mutates() alone would never ask.
+    #[test]
+    fn web_fetch_sits_on_the_ask_path() {
+        assert!(WebFetch::new(false).asks());
+        assert!(WebFetch::new(true).asks());
     }
 
     #[test]
