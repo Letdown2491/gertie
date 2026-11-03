@@ -103,7 +103,9 @@ version of this whole list.
 - API keys resolve from the environment (`api_key_env`), never required in the config
   file; a literal key is allowed but flagged in the status line.
 - Tool calls: reads auto-approved; writes and bash prompt with a diff; bash can be
-  Landlock-sandboxed at the kernel level (opt-in).
+  Landlock-sandboxed at the kernel level (opt-in, outbound TCP closed), and
+  `sandbox_netns = true` escalates to a full network namespace (UDP, DNS, and
+  ICMP closed too).
 - MCP tools are third-party code: descriptions are sanitized untrusted input and every
   call prompts: the user is the capability system.
 - Long-term memory is advisory and auditable: plain markdown files you can read and

@@ -1,0 +1,40 @@
+From c52b3802152d3ad804e6a3c690cec4b33c577d2f Mon Sep 17 00:00:00 2001
+From: mptfire <263163432+mptfire@users.noreply.github.com>
+Date: Tue, 3 Nov 2026 18:46:05 +0100
+Subject: [PATCH 22/22] release: pin the packaging tools by version
+
+cargo install without a version is a code path into the shipped
+artifacts, same shape as a floating action tag: whatever
+cargo-deb/cargo-generate-rpm publish next becomes what packages the
+release. Both pinned to their current stable versions (3.8.0,
+0.21.1), --locked as before.
+---
+ .github/workflows/release.yml | 6 ++++--
+ 1 file changed, 4 insertions(+), 2 deletions(-)
+
+diff --git a/.github/workflows/release.yml b/.github/workflows/release.yml
+index 185f158..0792658 100644
+--- a/.github/workflows/release.yml
++++ b/.github/workflows/release.yml
+@@ -61,14 +61,16 @@ jobs:
+ 
+       - name: Build the deb
+         run: |
+-          cargo install cargo-deb --locked
++          # Version-pinned: an unpinned `cargo install` is a code path
++          # into the artifacts this workflow ships.
++          cargo install cargo-deb --locked --version 3.8.0
+           cargo deb -p gertie --no-build
+           # Smoke: the deb parses and its payload carries the expected paths.
+           dpkg-deb --info target/debian/*.deb | head -20
+ 
+       - name: Build the rpm
+         run: |
+-          cargo install cargo-generate-rpm --locked
++          cargo install cargo-generate-rpm --locked --version 0.21.1
+           cargo generate-rpm -p gertie
+           # Smoke: the rpm reads back (rpmlint is not installed; the
+           # header listing is the check).
+-- 
+2.56.0
+

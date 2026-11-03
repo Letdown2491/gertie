@@ -19,6 +19,9 @@ tokio = { version = "1", features = ["sync"] }
 walkdir = "2"
 # Kernel-level filesystem sandbox for bash children (opt-in).
 landlock = "0.4"
+# unshare for sandbox_netns: the child moves to a fresh user+network
+# namespace, closing what Landlock cannot express (UDP, DNS, ICMP).
+libc = "0.2"
 # Same reqwest fork the provider uses: one TLS stack in the binary.
 reqwest = { package = "gpui-pre-reqwest", version = "0.12.15", default-features = false, features = ["rustls-tls", "json", "blocking"] }
 

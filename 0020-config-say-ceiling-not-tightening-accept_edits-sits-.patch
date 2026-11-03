@@ -1,0 +1,88 @@
+From 09b44c033acd90a76c79ae26ad4684614c8118c7 Mon Sep 17 00:00:00 2001
+From: mptfire <263163432+mptfire@users.noreply.github.com>
+Date: Tue, 3 Nov 2026 18:13:31 +0100
+Subject: [PATCH 20/22] config: say ceiling, not tightening: accept_edits sits
+ above supervised
+
+A reviewer caught the phrase, and it was false: supervised is the
+built-in default, so an overlay naming accept_edits raises the
+starting mode one step. What bounds it is what accept_edits means
+(checkpointed, reversible edits; bash and MCP still prompt), not
+tightening. The overlay doc, the clamp doc, and DESIGN.md now state
+the ceiling and the reason; the clamp behavior and its tests are
+unchanged.
+---
+ DESIGN.md            |  9 +++++----
+ gertie/src/config.rs | 22 +++++++++++++---------
+ 2 files changed, 18 insertions(+), 13 deletions(-)
+
+diff --git a/DESIGN.md b/DESIGN.md
+index 8e6e7ce..f731ba9 100644
+--- a/DESIGN.md
++++ b/DESIGN.md
+@@ -176,10 +176,11 @@ The original "Deferred" row, every item shipped or decided:
+   process, not posture, and stays the user's. A cloned repo never configures what
+   executes locally.
+   The chain is user config → project overlay → built-in default, and the overlay
+-  may only tighten: a repo can name a calmer starting mode (accept_edits at most,
+-  never auto or full_access) and turn the bash sandbox on, but standing the sandbox
+-  down or opening the private-fetch gate is the user's alone, so a checkout's own
+-  `config.toml` can never lower the guardrails a session starts with. Every
++  is bounded at the accept_edits ceiling: a repo can start its sessions at
++  accept_edits (checkpointed edits run unasked and reversible; bash and MCP still
++  prompt) and turn the bash sandbox on, but auto, full_access, standing the sandbox
++  down, and the private-fetch gate are the user's alone, so a checkout's own
++  `config.toml` can never reach the shell or the network by itself. Every
+   resolved value says which tier decided: the settings panel
+   and `gertie doctor` print the origin. Inheritance is an explicit value, a field may
+   hold `"inherit"` to stand down to the next tier, a state the UI can show, not an
+diff --git a/gertie/src/config.rs b/gertie/src/config.rs
+index 43c3f31..064e82a 100644
+--- a/gertie/src/config.rs
++++ b/gertie/src/config.rs
+@@ -177,10 +177,12 @@ impl<'de, T: Deserialize<'de>> Deserialize<'de> for Inheritable<T> {
+ /// or agent types, because a cloned repo never gets to configure what
+ /// runs on your machine. The settle command is *not* here either: a
+ /// shell command is process, not posture, it stays the user's.
+-/// The overlay sits below the user's config, and it may only tighten:
+-/// a calmer starting mode and the sandbox on are posture a repo may
+-/// suggest; auto, full_access, an un-sandboxed bash, and the
+-/// private-fetch gate are choices that stay the user's.
++/// The overlay sits below the user's config, bounded at the
++/// accept_edits ceiling: a repo may suggest starting at accept_edits
++/// (checkpointed edits run unasked; bash and MCP still prompt) and may
++/// turn the sandbox on. Auto, full_access, standing the sandbox down,
++/// and the private-fetch gate are choices that stay the user's, so a
++/// checkout can never hand itself the shell or the network.
+ #[derive(Deserialize, Debug, Clone, Default)]
+ pub struct ProjectOverlay {
+     #[serde(default)]
+@@ -833,9 +835,12 @@ impl Config {
+     }
+ 
+     /// The hottest starting posture a repo may name: accept_edits.
+-    /// Auto and full_access strip the prompt gate in ways only the
+-    /// user's own config should choose; a repo asking for them gets
+-    /// the clamp instead.
++    /// This is a ceiling, not a tightening (it sits above the
++    /// supervised default): what keeps it honest is what accept_edits
++    /// means, checkpointed edits run unasked and reversible, and bash
++    /// and MCP still prompt. Auto and full_access strip the prompt
++    /// gate in ways only the user's own config should choose; a repo
++    /// asking for them gets the clamp instead.
+     fn clamp_project_mode(value: gertie_core::PermissionMode) -> gertie_core::PermissionMode {
+         match value {
+             gertie_core::PermissionMode::Auto | gertie_core::PermissionMode::FullAccess => {
+@@ -846,8 +851,7 @@ impl Config {
+     }
+ 
+     /// The starting permission mode: your config, else the repo's
+-    /// overlay clamped to the tightening ceiling (accept_edits), else
+-    /// supervised.
++    /// overlay clamped to the accept_edits ceiling, else supervised.
+     pub fn resolve_default_mode(
+         &self,
+         overlay: Option<&ProjectOverlay>,
+-- 
+2.56.0
+

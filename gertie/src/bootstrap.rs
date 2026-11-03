@@ -416,13 +416,22 @@ impl Bootstrap {
             }
         });
         // Sandbox: opt-in Landlock isolation for bash children,
-        // yours, else the repo overlay's, else off.
+        // yours, else the repo overlay's, else off; the namespace
+        // escalation (sandbox_netns) closes what Landlock cannot
+        // express (UDP, DNS, ICMP).
         let sandbox = config
             .resolve_sandbox_bash(overlay.as_ref())
             .value
             .then(|| {
-                std::sync::Arc::new(gertie_tools::sandbox::Sandbox::new(workspace_root.clone()))
-            });
+                let sandbox =
+                    gertie_tools::sandbox::Sandbox::new(workspace_root.clone());
+                if config.resolve_sandbox_netns(overlay.as_ref()).value {
+                    sandbox.network_isolated()
+                } else {
+                    sandbox
+                }
+            })
+            .map(std::sync::Arc::new);
         let mut tools = gertie_tools::builtin_tools_with(&workspace_root, sandbox);
         let mut root_independent: Vec<String> = Vec::new();
 
@@ -791,7 +800,15 @@ impl Bootstrap {
 
         let sandbox_bash = config.resolve_sandbox_bash(overlay.as_ref()).value;
         let sandbox = sandbox_bash
-            .then(|| std::sync::Arc::new(gertie_tools::sandbox::Sandbox::new(root.clone())));
+            .then(|| {
+                let sandbox = gertie_tools::sandbox::Sandbox::new(root.clone());
+                if config.resolve_sandbox_netns(overlay.as_ref()).value {
+                    sandbox.network_isolated()
+                } else {
+                    sandbox
+                }
+            })
+            .map(std::sync::Arc::new);
         let mut tools = gertie_tools::builtin_tools_with(&root, sandbox);
         {
             let map = Arc::get_mut(&mut tools).expect("registry not yet shared");
@@ -929,7 +946,19 @@ impl Bootstrap {
             .live_config()
             .resolve_sandbox_bash(self.overlay.as_ref())
             .value
-            .then(|| std::sync::Arc::new(gertie_tools::sandbox::Sandbox::new(root.to_path_buf())));
+            .then(|| {
+                let sandbox = gertie_tools::sandbox::Sandbox::new(root.to_path_buf());
+                if self
+                    .live_config()
+                    .resolve_sandbox_netns(self.overlay.as_ref())
+                    .value
+                {
+                    sandbox.network_isolated()
+                } else {
+                    sandbox
+                }
+            })
+            .map(std::sync::Arc::new);
         let mut tools = gertie_tools::builtin_tools_with(root, sandbox);
         {
             let map = Arc::get_mut(&mut tools).expect("registry not yet shared");
