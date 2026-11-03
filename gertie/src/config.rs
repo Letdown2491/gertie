@@ -86,8 +86,10 @@ pub struct SecurityConfig {
     pub sandbox_bash: Option<bool>,
     /// Let web_fetch reach private-network targets, localhost dev
     /// servers, the LAN, tailnets. Off by default: the model has no
-    /// business probing a router or a cloud-metadata endpoint. `Some`
-    /// = the user's file set it; `None` = unset, a lower tier decides.
+    /// business probing a router or a cloud-metadata endpoint. The
+    /// user's file is the only tier that may set this: the project
+    /// overlay carries no such key, and a model ask never opens it.
+    /// `Some` = the user's file set it.
     #[serde(default)]
     pub allow_private_fetch: Option<bool>,
 }
@@ -175,7 +177,12 @@ impl<'de, T: Deserialize<'de>> Deserialize<'de> for Inheritable<T> {
 /// or agent types, because a cloned repo never gets to configure what
 /// runs on your machine. The settle command is *not* here either: a
 /// shell command is process, not posture, it stays the user's.
-/// The overlay sits below the user's config: it suggests, you decide.
+/// The overlay sits below the user's config, bounded at the
+/// accept_edits ceiling: a repo may suggest starting at accept_edits
+/// (checkpointed edits run unasked; bash and MCP still prompt) and may
+/// turn the sandbox on. Auto, full_access, standing the sandbox down,
+/// and the private-fetch gate are choices that stay the user's, so a
+/// checkout can never hand itself the shell or the network.
 #[derive(Deserialize, Debug, Clone, Default)]
 pub struct ProjectOverlay {
     #[serde(default)]
@@ -196,10 +203,11 @@ pub struct ProjectPermissions {
 
 #[derive(Deserialize, Debug, Clone, Default)]
 pub struct ProjectSecurity {
+    /// On is the project's posture: work here wants the kernel floor.
+    /// Off is not the repo's to name; the value stands down to the
+    /// built-in default, only the user's file may un-sandbox.
     #[serde(default)]
     pub sandbox_bash: Option<Inheritable<bool>>,
-    #[serde(default)]
-    pub allow_private_fetch: Option<Inheritable<bool>>,
 }
 
 #[derive(Deserialize, Debug, Clone, Default)]
@@ -738,7 +746,7 @@ impl Config {
             match key.as_str() {
                 "security" => unknown.extend(Self::unknown_section_keys(
                     item,
-                    &["sandbox_bash", "allow_private_fetch"],
+                    &["sandbox_bash"],
                 )),
                 "permissions" => {
                     unknown.extend(Self::unknown_section_keys(item, &["default_mode"]))
@@ -776,15 +784,24 @@ impl Config {
                     value: false,
                     origin: Origin::Default,
                 },
-                Inheritable::Set(value) => Resolved {
-                    value: *value,
+                // The overlay may only tighten: on is the project's
+                // posture, off stands down to the default (a cloned
+                // repo never un-sandboxes).
+                Inheritable::Set(true) => Resolved {
+                    value: true,
                     origin: Origin::Project,
+                },
+                Inheritable::Set(false) => Resolved {
+                    value: false,
+                    origin: Origin::Default,
                 },
             })
     }
 
     /// The bash sandbox in force: your config, else the repo's
-    /// overlay, else off.
+    /// overlay, else off. The overlay may only turn it on: standing
+    /// it down stands down to the built-in default, un-sandboxing is
+    /// the user's alone.
     pub fn resolve_sandbox_bash(&self, overlay: Option<&ProjectOverlay>) -> Resolved<bool> {
         if let Some(value) = self.security.sandbox_bash {
             return Resolved {
@@ -798,43 +815,43 @@ impl Config {
         })
     }
 
-    fn overlay_fetch(overlay: Option<&ProjectOverlay>) -> Option<Resolved<bool>> {
-        overlay
-            .and_then(|overlay| overlay.security.as_ref())
-            .and_then(|security| security.allow_private_fetch.as_ref())
-            .map(|inheritable| match inheritable {
-                // Explicit Inherit: the next tier, the built-in
-                // default, decides.
-                Inheritable::Inherit => Resolved {
-                    value: false,
-                    origin: Origin::Default,
-                },
-                Inheritable::Set(value) => Resolved {
-                    value: *value,
-                    origin: Origin::Project,
-                },
-            })
-    }
-
-    /// The private-fetch gate: your config, else the repo's overlay,
-    /// else closed. Open is a *posture* the repo may suggest, its dev
-    /// server may be the whole point of the checkout, but only the
-    /// user's config or the overlay says so, never a model ask.
+    /// The private-fetch gate: your config, else closed. Open is a
+    /// posture only the user's config may name. A repo's dev server
+    /// may be the whole point of the checkout, but the repo does not
+    /// get to reopen LAN and metadata targets on its own: the overlay
+    /// carries no such key, and it is never a model ask.
     pub fn resolve_allow_private_fetch(&self, overlay: Option<&ProjectOverlay>) -> Resolved<bool> {
+        let _ = overlay;
         if let Some(value) = self.security.allow_private_fetch {
             return Resolved {
                 value,
                 origin: Origin::User,
             };
         }
-        Self::overlay_fetch(overlay).unwrap_or(Resolved {
+        Resolved {
             value: false,
             origin: Origin::Default,
-        })
+        }
+    }
+
+    /// The hottest starting posture a repo may name: accept_edits.
+    /// This is a ceiling, not a tightening (it sits above the
+    /// supervised default): what keeps it honest is what accept_edits
+    /// means, checkpointed edits run unasked and reversible, and bash
+    /// and MCP still prompt. Auto and full_access strip the prompt
+    /// gate in ways only the user's own config should choose; a repo
+    /// asking for them gets the clamp instead.
+    fn clamp_project_mode(value: gertie_core::PermissionMode) -> gertie_core::PermissionMode {
+        match value {
+            gertie_core::PermissionMode::Auto | gertie_core::PermissionMode::FullAccess => {
+                gertie_core::PermissionMode::AcceptEdits
+            }
+            calm => calm,
+        }
     }
 
     /// The starting permission mode: your config, else the repo's
-    /// overlay, else supervised.
+    /// overlay clamped to the accept_edits ceiling, else supervised.
     pub fn resolve_default_mode(
         &self,
         overlay: Option<&ProjectOverlay>,
@@ -854,7 +871,7 @@ impl Config {
                     origin: Origin::Default,
                 },
                 Inheritable::Set(value) => Resolved {
-                    value: *value,
+                    value: Self::clamp_project_mode(*value),
                     origin: Origin::Project,
                 },
             })
@@ -1243,10 +1260,10 @@ default_mode = "accept_edits"
             (resolved.value, resolved.origin),
             (Some(3), Origin::Project)
         );
-        // The private-fetch gate is posture: the repo's overlay may
-        // open it, the user's config still outranks it.
+        // The private-fetch gate is the user's alone: the overlay
+        // carries no such key, the gate stays closed.
         let resolved = empty_user.resolve_allow_private_fetch(Some(&overlay));
-        assert_eq!((resolved.value, resolved.origin), (true, Origin::Project));
+        assert_eq!((resolved.value, resolved.origin), (false, Origin::Default));
 
         // The settle command is the user's alone, an overlay that
         // writes one is ignored (a shell command is process, not
@@ -1276,6 +1293,83 @@ default_mode = "accept_edits"
             toml::from_str("[security]\nsandbox_bash = \"inherit\"").unwrap();
         let resolved = empty_user.resolve_sandbox_bash(Some(&overlay_inherit));
         assert_eq!((resolved.value, resolved.origin), (false, Origin::Default));
+    }
+
+    /// The overlay may only tighten. A repo can suggest a calmer
+    /// starting posture than the built-in default (accept_edits, the
+    /// sandbox on), never a hotter one: a cloned repo does not get to
+    /// name full_access, stand the sandbox down, or open the
+    /// private-fetch gate. Those lines are the user's alone.
+    #[test]
+    fn overlay_cannot_escalate() {
+        let hot: ProjectOverlay = toml::from_str(
+            r#"
+[security]
+sandbox_bash = false
+allow_private_fetch = true
+
+[permissions]
+default_mode = "full_access"
+"#,
+        )
+        .unwrap();
+        let user = Config::default();
+
+        // full_access and auto from a repo read as accept_edits,
+        // still labeled as the project's choice: the clamp ships,
+        // the escalation does not.
+        let resolved = user.resolve_default_mode(Some(&hot));
+        assert_eq!(
+            (resolved.value, resolved.origin),
+            (gertie_core::PermissionMode::AcceptEdits, Origin::Project)
+        );
+        let warm: ProjectOverlay =
+            toml::from_str("[permissions]\ndefault_mode = \"auto\"").unwrap();
+        let resolved = user.resolve_default_mode(Some(&warm));
+        assert_eq!(
+            (resolved.value, resolved.origin),
+            (gertie_core::PermissionMode::AcceptEdits, Origin::Project)
+        );
+
+        // Standing the sandbox down stands down to the default:
+        // only the user's file may un-sandbox.
+        let resolved = user.resolve_sandbox_bash(Some(&hot));
+        assert_eq!((resolved.value, resolved.origin), (false, Origin::Default));
+
+        // The private-fetch gate is the user's alone. The overlay's
+        // key is ignored, the gate stays closed.
+        let resolved = user.resolve_allow_private_fetch(Some(&hot));
+        assert_eq!((resolved.value, resolved.origin), (false, Origin::Default));
+
+        // The calm directions stay open to the repo: sandbox on,
+        // accept_edits, supervised.
+        let cold: ProjectOverlay = toml::from_str("[security]\nsandbox_bash = true").unwrap();
+        let resolved = user.resolve_sandbox_bash(Some(&cold));
+        assert_eq!((resolved.value, resolved.origin), (true, Origin::Project));
+        let calm: ProjectOverlay =
+            toml::from_str("[permissions]\ndefault_mode = \"accept_edits\"").unwrap();
+        let resolved = user.resolve_default_mode(Some(&calm));
+        assert_eq!(
+            (resolved.value, resolved.origin),
+            (gertie_core::PermissionMode::AcceptEdits, Origin::Project)
+        );
+        let supervised: ProjectOverlay =
+            toml::from_str("[permissions]\ndefault_mode = \"supervised\"").unwrap();
+        let resolved = user.resolve_default_mode(Some(&supervised));
+        assert_eq!(
+            (resolved.value, resolved.origin),
+            (gertie_core::PermissionMode::Supervised, Origin::Project)
+        );
+
+        // The user's hotter choice still outranks the clamp: an
+        // explicit full_access in the user's file is the user's.
+        let mut hotter = Config::default();
+        hotter.permissions.default_mode = Some(gertie_core::PermissionMode::FullAccess);
+        let resolved = hotter.resolve_default_mode(Some(&hot));
+        assert_eq!(
+            (resolved.value, resolved.origin),
+            (gertie_core::PermissionMode::FullAccess, Origin::User)
+        );
     }
 
     /// The overlay loads from `<workspace>/.gertie/config.toml`:
