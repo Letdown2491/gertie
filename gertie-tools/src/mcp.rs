@@ -32,7 +32,7 @@
 use crate::{Tool, ToolResult, blocking};
 use serde_json::{Value, json};
 use std::future::Future;
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{BufReader, Read, Write};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::mpsc::{RecvTimeoutError, channel};
@@ -100,6 +100,68 @@ enum Transport {
     },
 }
 
+
+/// One \n-terminated frame, bounded: a server that streams an endless
+/// line cannot balloon the reader's memory. Returns Eof when nothing
+/// was read and the stream is done; Line { oversized } when a frame
+/// (whole if false, discarded if true) was consumed. Discarding keeps
+/// the connection alive and the next frame intact.
+enum Frame {
+    Eof,
+    Line { oversized: bool },
+}
+
+const MAX_FRAME: usize = 8 * 1024 * 1024;
+
+fn read_bounded_frame<R: std::io::BufRead>(
+    reader: &mut R,
+    out: &mut Vec<u8>,
+    cap: usize,
+) -> Frame {
+    loop {
+        // Snapshot a bounded slice, then release the fill_buf borrow
+        // before consuming: the two calls cannot overlap.
+        let (chunk, ends_frame) = match reader.fill_buf() {
+            Ok(buf) => match buf.iter().position(|&byte| byte == b'\n') {
+                Some(end) => (buf[..=end].to_vec(), true),
+                None => (buf.to_vec(), false),
+            },
+            Err(_) => return Frame::Line { oversized: out.len() > cap },
+        };
+        if chunk.is_empty() {
+            return if out.is_empty() {
+                Frame::Eof
+            } else {
+                Frame::Line { oversized: out.len() > cap }
+            };
+        }
+        reader.consume(chunk.len());
+        out.extend_from_slice(&chunk);
+        if ends_frame {
+            return Frame::Line { oversized: out.len() > cap };
+        }
+        if out.len() > cap {
+            // Overflowed: stop buffering, discard to the next newline.
+            loop {
+                let discard = match reader.fill_buf() {
+                    Ok(buf) => match buf.iter().position(|&byte| byte == b'\n') {
+                        Some(end) => buf[..=end].to_vec(),
+                        None => buf.to_vec(),
+                    },
+                    Err(_) => return Frame::Line { oversized: true },
+                };
+                if discard.is_empty() {
+                    return Frame::Line { oversized: true }; // EOF mid-frame
+                }
+                reader.consume(discard.len());
+                if discard.ends_with(b"\n") {
+                    return Frame::Line { oversized: true };
+                }
+            }
+        }
+    }
+}
+
 /// A server's tool, bridged into gertie's Tool trait.
 pub struct McpTool {
     client: Arc<McpClient>,
@@ -159,24 +221,31 @@ impl McpClient {
             .name(format!("mcp-{server_name}-reader"))
             .spawn(move || {
                 let mut reader = BufReader::new(stdout);
-                let mut line = String::new();
                 loop {
-                    line.clear();
-                    match reader.read_line(&mut line) {
-                        Ok(0) | Err(_) => break,
-                        Ok(_) => {
-                            let Ok(value) = serde_json::from_str::<Value>(line.trim_end()) else {
-                                continue; // not JSON, server noise
-                            };
-                            let Some(id) = value.get("id").and_then(Value::as_u64) else {
-                                continue; // a notification, nothing waits on it
-                            };
-                            let answer = Self::rpc_result(&reader_name, id, &value);
-                            let waiter = reader_pending.lock().unwrap().remove(&id);
-                            if let Some(waiter) = waiter {
-                                let _ = waiter.send(answer);
-                            }
+                    // One JSON-RPC frame per read, bounded: a hostile
+                    // (or wedged) server can stream an endless line
+                    // without a newline, and read_line would allocate
+                    // forever. Frames over the cap are discarded up to
+                    // their newline and the connection keeps working
+                    // (read_bounded_frame).
+                    let mut bytes: Vec<u8> = Vec::with_capacity(4096);
+                    match read_bounded_frame(&mut reader, &mut bytes, MAX_FRAME) {
+                        Frame::Eof => break, // the server is gone
+                        Frame::Line { oversized: true } => {
+                            continue; // the frame is dropped, the server lives
                         }
+                        Frame::Line { oversized: false } => {}
+                    }
+                    let Ok(value) = serde_json::from_slice::<Value>(bytes.trim_ascii()) else {
+                        continue; // not JSON, server noise
+                    };
+                    let Some(id) = value.get("id").and_then(Value::as_u64) else {
+                        continue; // a notification, nothing waits on it
+                    };
+                    let answer = Self::rpc_result(&reader_name, id, &value);
+                    let waiter = reader_pending.lock().unwrap().remove(&id);
+                    if let Some(waiter) = waiter {
+                        let _ = waiter.send(answer);
                     }
                 }
                 // The server is gone; nothing more will arrive.
@@ -577,18 +646,24 @@ impl Tool for McpTool {
                         .get("isError")
                         .and_then(Value::as_bool)
                         .unwrap_or(false);
+                    // The same ceiling our own tools ride: the
+                    // transcript is the model's context, not the
+                    // server's landfill, and context stuffing (cost,
+                    // dilution, injection volume) is an attack before
+                    // it is a bug. Error text rides it too: it lands
+                    // in the transcript either way.
                     if is_error {
                         // A tool-level failure is model-visible, same
                         // channel as gertie's own tool errors.
                         Err(if text.is_empty() {
                             "mcp tool reported an error".to_string()
                         } else {
-                            text
+                            crate::limit(text)
                         })
                     } else if text.is_empty() {
                         Ok("(no output)".to_string())
                     } else {
-                        Ok(text)
+                        Ok(crate::limit(text))
                     }
                 })
         })
@@ -642,6 +717,47 @@ mod tests {
         let tools = client.list_tools().expect("tools/list");
         let result = futures_now(tools[0].run(r#"{"text": "hi"}"#));
         assert_eq!(result.unwrap(), "echoed: hi");
+    }
+
+    /// Same shape as FAKE_SERVER, but tools/call answers with 100 KB
+    /// of text: the volume a hostile (or just chatty) server can push
+    /// at the transcript. gertie's own tools cap their results at
+    /// RESULT_CHAR_LIMIT before the model sees them; a server result
+    /// is the same kind of input and rides the same ceiling.
+    const BIG_SERVER: &str = r#"
+        while IFS= read -r line; do
+            case "$line" in
+                *'"method":"initialize"'*)
+                    printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2024-11-05","capabilities":{"tools":{}},"serverInfo":{"name":"big","version":"0"}}}';;
+                *'"method":"tools/list"'*)
+                    printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"tools":[{"name":"dump","description":"Dumps 100KB of text","inputSchema":{"type":"object","properties":{}}}]}}';;
+                *'"method":"tools/call"'*)
+                    printf '{"jsonrpc":"2.0","id":3,"result":{"content":[{"type":"text","text":"';
+                    head -c 100000 /dev/zero | tr '\0' 'x';
+                    printf '"}]}}\n';;
+            esac
+        done
+    "#;
+
+    /// A server's 100 KB answer must arrive capped: the transcript is
+    /// the model's context, not the server's landfill, and context
+    /// stuffing is an attack (cost, dilution, injection volume) before
+    /// it is a bug.
+    #[test]
+    fn a_server_dumping_100kb_comes_home_capped() {
+        let client = Arc::new(
+            McpClient::connect("big", "sh", &["-c".into(), BIG_SERVER.into()], &[])
+                .expect("handshake"),
+        );
+        let tools = client.list_tools().expect("tools/list");
+        assert_eq!(tools.len(), 1);
+        let result = futures_now(tools[0].run("{}")).expect("the call must succeed");
+        let count = result.chars().count();
+        assert!(
+            count < 20_000,
+            "a server result must ride the same cap as our own: {count} chars"
+        );
+        assert!(result.contains("[truncated]"), "the cap must say so");
     }
 
     /// Tests run outside a runtime; our tools' futures are already
