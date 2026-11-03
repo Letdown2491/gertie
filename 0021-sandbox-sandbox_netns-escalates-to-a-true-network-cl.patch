@@ -1,0 +1,382 @@
+From 02923910bf2d4158455a6b8438bcbdb066f43cba Mon Sep 17 00:00:00 2001
+From: mptfire <263163432+mptfire@users.noreply.github.com>
+Date: Tue, 3 Nov 2026 18:45:25 +0100
+Subject: [PATCH 21/22] sandbox: sandbox_netns escalates to a true network
+ closure
+
+Landlock ABI v4 speaks TCP only, so the base sandbox leaves UDP (DNS
+included), ICMP, and abstract Unix sockets open: a sandboxed command
+can still exfil through a datagram, and the audit's High #3 was only
+TCP-closed. sandbox_netns = true escalates: the child unshares into a
+fresh user + network namespace, where the only interface is a downed
+loopback, and maps its own uid/gid back through so the filesystem
+half keeps working. Nothing datagram-shaped can leave; the probe
+sends to a live local listener and hears silence (red-first: with the
+flag neutered, the packet arrived).
+
+Same posture as everything here: unprivileged where user namespaces
+are allowed, and any refusal fails the spawn instead of degrading
+(fail-closed). Opt-in and off by default; the overlay may turn it on
+(never off), mirroring sandbox_bash. Config, example, and all three
+sandbox construction sites in bootstrap are wired, so worktree tabs
+and re-rooted registries inherit the escalation.
+---
+ Cargo.lock                  |   1 +
+ config.example.toml         |   4 ++
+ gertie-tools/Cargo.toml     |   3 +
+ gertie-tools/src/sandbox.rs | 127 ++++++++++++++++++++++++++++++++++--
+ gertie/src/bootstrap.rs     |  39 +++++++++--
+ gertie/src/config.rs        |  43 +++++++++++-
+ 6 files changed, 207 insertions(+), 10 deletions(-)
+
+diff --git a/Cargo.lock b/Cargo.lock
+index 82d5cb2..e78cb88 100644
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -2207,6 +2207,7 @@ dependencies = [
+  "glob",
+  "gpui-pre-reqwest",
+  "landlock",
++ "libc",
+  "regex",
+  "serde",
+  "serde_json",
+diff --git a/config.example.toml b/config.example.toml
+index ad665f8..9a41243 100644
+--- a/config.example.toml
++++ b/config.example.toml
+@@ -49,8 +49,12 @@ api_key_env = "MY_API_KEY"
+ # is TCP-only). Opt-in; when the kernel can't enforce it (6.7+ wanted;
+ # older kernels refuse the whole sandbox), sandboxed commands fail
+ # rather than run free.
++# sandbox_netns = true escalates further: the child moves into a fresh
++# user+network namespace, closing UDP/DNS and ICMP too (true no-network;
++# needs unprivileged user namespaces, and fails closed where refused).
+ # [security]
+ # sandbox_bash = true
++# sandbox_netns = true
+ 
+ # The permission mode new sessions open in: "supervised" (every write
+ # and command prompts), "accept_edits" (checkpointed file edits run
+diff --git a/gertie-tools/Cargo.toml b/gertie-tools/Cargo.toml
+index 6f47d67..c7e9292 100644
+--- a/gertie-tools/Cargo.toml
++++ b/gertie-tools/Cargo.toml
+@@ -19,6 +19,9 @@ tokio = { version = "1", features = ["sync"] }
+ walkdir = "2"
+ # Kernel-level filesystem sandbox for bash children (opt-in).
+ landlock = "0.4"
++# unshare for sandbox_netns: the child moves to a fresh user+network
++# namespace, closing what Landlock cannot express (UDP, DNS, ICMP).
++libc = "0.2"
+ # Same reqwest fork the provider uses: one TLS stack in the binary.
+ reqwest = { package = "gpui-pre-reqwest", version = "0.12.15", default-features = false, features = ["rustls-tls", "json", "blocking"] }
+ 
+diff --git a/gertie-tools/src/sandbox.rs b/gertie-tools/src/sandbox.rs
+index a3114e4..74821a6 100644
+--- a/gertie-tools/src/sandbox.rs
++++ b/gertie-tools/src/sandbox.rs
+@@ -43,11 +43,29 @@ pub struct Sandbox {
+     /// The workspace gets read *and* write; brief files and tool work
+     /// live here.
+     root: PathBuf,
++    /// True = the child also moves into a fresh user+network
++    /// namespace: Landlock closes TCP, the namespace closes everything
++    /// else (UDP, DNS, ICMP, raw sockets). Opt-in on top of the base
++    /// sandbox, fail-closed like everything else here.
++    network_isolated: bool,
+ }
+ 
+ impl Sandbox {
+     pub fn new(root: PathBuf) -> Self {
+-        Self { root }
++        Self {
++            root,
++            network_isolated: false,
++        }
++    }
++
++    /// Escalate to a fresh user+network namespace: the true
++    /// no-network closure Landlock alone cannot express. Unprivileged
++    /// where user namespaces are allowed (most modern distros); on
++    /// kernels or configurations that refuse the unshare, the spawn
++    /// fails instead of degrading.
++    pub fn network_isolated(mut self) -> Self {
++        self.network_isolated = true;
++        self
+     }
+ 
+     /// Installs the sandbox into a child command via `pre_exec`: the
+@@ -56,15 +74,52 @@ impl Sandbox {
+     /// runs inherits them. Any error aborts the spawn (fail-closed).
+     pub fn apply(&self, command: &mut std::process::Command) -> Result<(), String> {
+         let root = self.root.clone();
+-        // Safety: the closure only makes Landlock syscalls; it touches
+-        // no state that fork left inconsistent.
++        let network_isolated = self.network_isolated;
++        // Safety: the closure only makes namespace and Landlock
++        // syscalls plus the uid/gid map writes to /proc/self (tiny
++        // allocations, nothing fork left inconsistent); the maps
++        // restore the child's own identity so filesystem access keeps
++        // working inside the new user namespace.
+         unsafe {
+-            command.pre_exec(move || enforce(root.as_path()).map_err(std::io::Error::other));
++            command.pre_exec(move || {
++                if network_isolated {
++                    isolate_network().map_err(std::io::Error::other)?;
++                }
++                enforce(root.as_path()).map_err(std::io::Error::other)
++            });
+         }
+         Ok(())
+     }
+ }
+ 
++/// Moves the calling (child) process into a fresh user + network
++/// namespace, then maps its own uid/gid through so filesystem access
++/// keeps working. The new network namespace has no interfaces but a
++/// downed loopback: no UDP, no DNS, no ICMP, no raw sockets, no
++/// anything. Unprivileged on kernels that allow user namespaces; any
++/// refusal propagates and the spawn fails (fail-closed, the module's
++/// one posture).
++fn isolate_network() -> Result<(), String> {
++    let rc = unsafe { libc::unshare(libc::CLONE_NEWUSER | libc::CLONE_NEWNET) };
++    if rc != 0 {
++        return Err(format!(
++            "sandbox_netns: unshare(CLONE_NEWUSER | CLONE_NEWNET) refused; \
++             this kernel or distro blocks unprivileged user namespaces: {}",
++            std::io::Error::last_os_error()
++        ));
++    }
++    // The process owns its new user namespace, so mapping its own
++    // uid/gid through is allowed unprivileged. setgroups must be
++    // denied before the group map.
++    std::fs::write("/proc/self/setgroups", b"deny")
++        .map_err(|error| format!("sandbox_netns: setgroups: {error}"))?;
++    std::fs::write("/proc/self/gid_map", format!("{} {} 1\n", unsafe { libc::getgid() }, unsafe { libc::getgid() }))
++        .map_err(|error| format!("sandbox_netns: gid_map: {error}"))?;
++    std::fs::write("/proc/self/uid_map", format!("{} {} 1\n", unsafe { libc::getuid() }, unsafe { libc::getuid() }))
++        .map_err(|error| format!("sandbox_netns: uid_map: {error}"))?;
++    Ok(())
++}
++
+ /// Builds and enforces the ruleset on the calling (child) process.
+ fn enforce(root: &Path) -> Result<(), String> {
+     let existing_readonly: Vec<&str> = READONLY_PATHS
+@@ -160,6 +215,70 @@ mod tests {
+     /// unsandboxed control connect proves a refusal is the sandbox's
+     /// doing, not the target's. Needs a Landlock-4 kernel (6.7+);
+     /// older kernels fail the spawn and the test skips.
++    /// The true closure: with the namespace on, even a UDP datagram
++    /// has nowhere to go (Landlock closes TCP; the netns closes
++    /// everything, DNS included). The probe sends to a listener the
++    /// test holds and expects silence: pre-fix, the packet arrives
++    /// and this fails.
++    #[test]
++    fn a_netns_sandboxed_child_cannot_send_udp_datagrams() {
++        use std::time::Duration;
++        let listener = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
++        let port = listener.local_addr().unwrap().port();
++        // Positive control: the datagram path works unsandboxed.
++        listener.set_read_timeout(Some(Duration::from_millis(300))).unwrap();
++        std::net::UdpSocket::bind("127.0.0.1:0")
++            .unwrap()
++            .send_to(b"control", ("127.0.0.1", port))
++            .unwrap();
++        let mut buf = [0u8; 16];
++        listener.recv_from(&mut buf).expect("control datagram arrives unsandboxed");
++
++        let tmp = tempfile::tempdir().unwrap();
++        let mut cmd = std::process::Command::new("bash");
++        cmd.arg("-c")
++            .arg(format!("echo probe > /dev/udp/127.0.0.1/{port} && echo SENT"))
++            .current_dir(tmp.path());
++        let applied = Sandbox::new(tmp.path().to_path_buf())
++            .network_isolated()
++            .apply(&mut cmd);
++        if applied.is_err() {
++            eprintln!("skipped: sandbox unavailable");
++            return;
++        }
++        let output = match cmd.output() {
++            Ok(output) => output,
++            Err(_) => {
++                eprintln!("skipped: kernel cannot enforce the namespace");
++                return;
++            }
++        };
++        listener
++            .set_read_timeout(Some(Duration::from_millis(700)))
++            .unwrap();
++        let quiet = listener.recv_from(&mut buf).is_err();
++        assert!(quiet, "a UDP datagram escaped the network namespace");
++        assert!(
++            !output.status.success(),
++            "the sandboxed write itself must fail: {output:?}"
++        );
++    }
++
++    /// The namespace maps the child's own uid/gid back through, so
++    /// the filesystem half of the sandbox keeps working: reads, and
++    /// workspace writes with real ownership.
++    #[test]
++    fn a_netns_child_keeps_filesystem_access() {
++        let output = match sandboxed("ls /usr/bin > out.txt && echo ok") {
++            Ok(output) => output,
++            Err(_) => {
++                eprintln!("skipped: sandbox unavailable");
++                return;
++            }
++        };
++        assert!(output.status.success(), "{output:?}");
++    }
++
+     #[test]
+     fn sandboxed_children_cannot_open_network_connections() {
+         // Positive control: the target is reachable from this host.
+diff --git a/gertie/src/bootstrap.rs b/gertie/src/bootstrap.rs
+index db430aa..4924aea 100644
+--- a/gertie/src/bootstrap.rs
++++ b/gertie/src/bootstrap.rs
+@@ -416,13 +416,22 @@ impl Bootstrap {
+             }
+         });
+         // Sandbox: opt-in Landlock isolation for bash children,
+-        // yours, else the repo overlay's, else off.
++        // yours, else the repo overlay's, else off; the namespace
++        // escalation (sandbox_netns) closes what Landlock cannot
++        // express (UDP, DNS, ICMP).
+         let sandbox = config
+             .resolve_sandbox_bash(overlay.as_ref())
+             .value
+             .then(|| {
+-                std::sync::Arc::new(gertie_tools::sandbox::Sandbox::new(workspace_root.clone()))
+-            });
++                let sandbox =
++                    gertie_tools::sandbox::Sandbox::new(workspace_root.clone());
++                if config.resolve_sandbox_netns(overlay.as_ref()).value {
++                    sandbox.network_isolated()
++                } else {
++                    sandbox
++                }
++            })
++            .map(std::sync::Arc::new);
+         let mut tools = gertie_tools::builtin_tools_with(&workspace_root, sandbox);
+         let mut root_independent: Vec<String> = Vec::new();
+ 
+@@ -791,7 +800,15 @@ impl Bootstrap {
+ 
+         let sandbox_bash = config.resolve_sandbox_bash(overlay.as_ref()).value;
+         let sandbox = sandbox_bash
+-            .then(|| std::sync::Arc::new(gertie_tools::sandbox::Sandbox::new(root.clone())));
++            .then(|| {
++                let sandbox = gertie_tools::sandbox::Sandbox::new(root.clone());
++                if config.resolve_sandbox_netns(overlay.as_ref()).value {
++                    sandbox.network_isolated()
++                } else {
++                    sandbox
++                }
++            })
++            .map(std::sync::Arc::new);
+         let mut tools = gertie_tools::builtin_tools_with(&root, sandbox);
+         {
+             let map = Arc::get_mut(&mut tools).expect("registry not yet shared");
+@@ -929,7 +946,19 @@ impl Bootstrap {
+             .live_config()
+             .resolve_sandbox_bash(self.overlay.as_ref())
+             .value
+-            .then(|| std::sync::Arc::new(gertie_tools::sandbox::Sandbox::new(root.to_path_buf())));
++            .then(|| {
++                let sandbox = gertie_tools::sandbox::Sandbox::new(root.to_path_buf());
++                if self
++                    .live_config()
++                    .resolve_sandbox_netns(self.overlay.as_ref())
++                    .value
++                {
++                    sandbox.network_isolated()
++                } else {
++                    sandbox
++                }
++            })
++            .map(std::sync::Arc::new);
+         let mut tools = gertie_tools::builtin_tools_with(root, sandbox);
+         {
+             let map = Arc::get_mut(&mut tools).expect("registry not yet shared");
+diff --git a/gertie/src/config.rs b/gertie/src/config.rs
+index 959a518..af2b3cf 100644
+--- a/gertie/src/config.rs
++++ b/gertie/src/config.rs
+@@ -87,6 +87,14 @@ pub struct SecurityConfig {
+     /// user's file set it; `None` = unset, a lower tier decides.
+     #[serde(default)]
+     pub sandbox_bash: Option<bool>,
++    /// Escalate the bash sandbox to a full network namespace: the
++    /// child moves into a fresh user+network namespace, closing what
++    /// Landlock cannot express (UDP, DNS, ICMP). Requires kernel 6.x
++    /// with unprivileged user namespaces; where that is refused, the
++    /// sandboxed spawn fails (fail-closed). `Some` = the user's file
++    /// set it; `None` = unset, a lower tier decides.
++    #[serde(default)]
++    pub sandbox_netns: Option<bool>,
+     /// Let web_fetch reach private-network targets, localhost dev
+     /// servers, the LAN, tailnets. Off by default: the model has no
+     /// business probing a router or a cloud-metadata endpoint. `Some`
+@@ -201,6 +209,10 @@ pub struct ProjectPermissions {
+ pub struct ProjectSecurity {
+     #[serde(default)]
+     pub sandbox_bash: Option<Inheritable<bool>>,
++    /// Tightening only, same rules as sandbox_bash: a repo may
++    /// escalate to the network namespace, never stand it down.
++    #[serde(default)]
++    pub sandbox_netns: Option<Inheritable<bool>>,
+     #[serde(default)]
+     pub allow_private_fetch: Option<Inheritable<bool>>,
+ }
+@@ -741,7 +753,7 @@ impl Config {
+             match key.as_str() {
+                 "security" => unknown.extend(Self::unknown_section_keys(
+                     item,
+-                    &["sandbox_bash", "allow_private_fetch"],
++                    &["sandbox_bash", "sandbox_netns", "allow_private_fetch"],
+                 )),
+                 "permissions" => {
+                     unknown.extend(Self::unknown_section_keys(item, &["default_mode"]))
+@@ -819,6 +831,35 @@ impl Config {
+             })
+     }
+ 
++    /// The namespace escalation in force: your config, else the
++    /// repo's overlay (on only, a cloned repo never stands isolation
++    /// down), else off. Meaningful when the bash sandbox is on.
++    pub fn resolve_sandbox_netns(&self, overlay: Option<&ProjectOverlay>) -> Resolved<bool> {
++        if let Some(value) = self.security.sandbox_netns {
++            return Resolved {
++                value,
++                origin: Origin::User,
++            };
++        }
++        overlay
++            .and_then(|overlay| overlay.security.as_ref())
++            .and_then(|security| security.sandbox_netns.as_ref())
++            .map(|inheritable| match inheritable {
++                Inheritable::Inherit | Inheritable::Set(false) => Resolved {
++                    value: false,
++                    origin: Origin::Default,
++                },
++                Inheritable::Set(true) => Resolved {
++                    value: true,
++                    origin: Origin::Project,
++                },
++            })
++            .unwrap_or(Resolved {
++                value: false,
++                origin: Origin::Default,
++            })
++    }
++
+     /// The private-fetch gate: your config, else the repo's overlay,
+     /// else closed. Open is a *posture* the repo may suggest, its dev
+     /// server may be the whole point of the checkout, but only the
+-- 
+2.56.0
+

@@ -1,0 +1,246 @@
+From c02b5b81674ac8ac00986a1a0c0f5dd18719c93b Mon Sep 17 00:00:00 2001
+From: mptfire <263163432+mptfire@users.noreply.github.com>
+Date: Mon, 2 Nov 2026 16:00:19 +0100
+Subject: [PATCH 09/22] run: --yes refuses a dirty git workspace, --allow-dirty
+ opts in
+
+--yes hands every mutating call to the model unchecked, so the tree it
+lands on is the only safety net: a checkpoint restores what an edit
+touched, nothing restores what a bash command removed before any
+checkpoint saw it. Uncommitted work is work with no net, and the
+combination used to run silently (HARDENING 5.5, still open there).
+The guard fires before anything persists or spawns: a git workspace
+with entries in status refuses with the count and the escape named;
+--allow-dirty says the operator knew; non-git workspaces have no
+baseline to protect and pass.
+
+Verified against the real binary: dirty repo + --yes exits 2 with the
+refusal, + --allow-dirty runs.
+---
+ gertie/src/cli.rs      | 30 +++++++++++++++-
+ gertie/src/headless.rs | 82 ++++++++++++++++++++++++++++++++++++++++++
+ gertie/src/main.rs     |  5 ++-
+ 3 files changed, 115 insertions(+), 2 deletions(-)
+
+diff --git a/gertie/src/cli.rs b/gertie/src/cli.rs
+index 1a40400..97a6026 100644
+--- a/gertie/src/cli.rs
++++ b/gertie/src/cli.rs
+@@ -23,12 +23,16 @@ USAGE:
+ OPTIONS:
+     --config <PATH>    config file (default: the standard config dir)
+     -y, --yes          run: auto-approve every mutating tool call
++    --allow-dirty      run: let --yes run over a git workspace with
++                       uncommitted changes (the net is off)
+     -h, --help         print this help
+     -V, --version      print version
+ 
+ run approval: mutating calls print the tool and arguments on stderr and
+ wait. Enter/y approves, anything else denies. Without a terminal, runs
+-deny mutations unless --yes is given. Reads are always auto-approved.";
++deny mutations unless --yes is given, and --yes refuses a dirty git
++workspace unless --allow-dirty is also given. Reads are always
++auto-approved.";
+ 
+ /// What the command line asked for.
+ #[derive(Debug, PartialEq)]
+@@ -41,6 +45,9 @@ pub enum Command {
+     Run {
+         prompt: Option<String>,
+         yes: bool,
++        /// Let `--yes` run over a git workspace with uncommitted
++        /// changes: the net is knowingly off.
++        allow_dirty: bool,
+         config: Option<PathBuf>,
+         ephemeral: bool,
+     },
+@@ -67,6 +74,7 @@ pub struct UsageError(pub String);
+ pub fn parse(arguments: &[String]) -> Result<Command, UsageError> {
+     let mut config: Option<PathBuf> = None;
+     let mut yes = false;
++    let mut allow_dirty = false;
+     let mut ephemeral = false;
+     let mut positional: Vec<String> = Vec::new();
+     let mut run = false;
+@@ -81,6 +89,7 @@ pub fn parse(arguments: &[String]) -> Result<Command, UsageError> {
+             "-h" | "--help" => return Ok(Command::Help),
+             "-V" | "--version" => return Ok(Command::Version),
+             "-y" | "--yes" => yes = true,
++            "--allow-dirty" if run => allow_dirty = true,
+             "--ephemeral" if run => ephemeral = true,
+             "--clean-worktrees" if !run => clean_worktrees = true,
+             "--check-updates" if !run => check_updates = true,
+@@ -148,6 +157,7 @@ pub fn parse(arguments: &[String]) -> Result<Command, UsageError> {
+     Ok(Command::Run {
+         prompt,
+         yes,
++        allow_dirty,
+         config,
+         ephemeral,
+     })
+@@ -179,12 +189,30 @@ mod tests {
+             Command::Run {
+                 prompt: Some("fix the tests".into()),
+                 yes: true,
++                allow_dirty: false,
+                 config: None,
+                 ephemeral: false,
+             }
+         );
+     }
+ 
++    /// The dirty-git escape hatch is run-only and parses anywhere in
++    /// the run invocation.
++    #[test]
++    fn allow_dirty_parses_on_run_and_nowhere_else() {
++        let command = parse_arguments(&["run", "--yes", "--allow-dirty", "hi"]).unwrap();
++        assert!(matches!(
++            command,
++            Command::Run {
++                yes: true,
++                allow_dirty: true,
++                ..
++            }
++        ));
++        let refused = parse_arguments(&["--allow-dirty"]);
++        assert!(refused.is_err(), "--allow-dirty without run is a usage error");
++    }
++
+     #[test]
+     fn run_without_a_prompt_reads_stdin() {
+         let command = parse_arguments(&["run", "-y"]).unwrap();
+diff --git a/gertie/src/headless.rs b/gertie/src/headless.rs
+index 4a1a4bc..d78d49a 100644
+--- a/gertie/src/headless.rs
++++ b/gertie/src/headless.rs
+@@ -17,6 +17,7 @@ use std::task::{Context as TaskContext, Poll, Waker};
+ pub fn run(
+     prompt: Option<String>,
+     yes: bool,
++    allow_dirty: bool,
+     config_path: Option<PathBuf>,
+     ephemeral: bool,
+ ) -> i32 {
+@@ -25,6 +26,16 @@ pub fn run(
+         eprintln!("error: {error}");
+         return 1;
+     }
++    // The net check comes before anything persists or runs: --yes hands
++    // every mutating call to the model unchecked, so the tree it lands
++    // on is the only safety net, and uncommitted work has none.
++    if yes
++        && !allow_dirty
++        && let Err(error) = guard_yes_over_dirty(&boot.workspace_root)
++    {
++        eprintln!("error: {error}");
++        return 2;
++    }
+     let Some(provider) = boot.provider() else {
+         eprintln!(
+             "error: no endpoint configured, add one to config.toml (see config.example.toml)"
+@@ -412,6 +423,37 @@ impl Recorder {
+     }
+ }
+ 
++/// `--yes` hands every mutating call to the model unchecked, so the
++/// tree it lands on is the only safety net: a checkpoint can restore
++/// what an edit touched, nothing restores what a bash command removed
++/// before any checkpoint saw it. Uncommitted work is work with no net,
++/// so the combination refuses; `--allow-dirty` says the operator knew.
++/// A non-git workspace has no baseline to protect and passes.
++fn guard_yes_over_dirty(root: &std::path::Path) -> Result<(), String> {
++    let output = std::process::Command::new("git")
++        .arg("-C")
++        .arg(root)
++        .args(["status", "--porcelain"])
++        .output();
++    let Ok(output) = output else {
++        return Ok(());
++    };
++    if !output.status.success() {
++        return Ok(());
++    }
++    let dirty = String::from_utf8_lossy(&output.stdout);
++    if dirty.trim().is_empty() {
++        return Ok(());
++    }
++    let count = dirty.lines().count();
++    Err(format!(
++        "--yes refuses to auto-approve over uncommitted work: {} {} in \
++         git status. Commit or stash first, or pass --allow-dirty to run anyway",
++        count,
++        if count == 1 { "entry" } else { "entries" }
++    ))
++}
++
+ #[cfg(test)]
+ mod tests {
+     use super::*;
+@@ -420,6 +462,46 @@ mod tests {
+     use std::future::Future;
+     use std::pin::Pin;
+ 
++    /// The --yes footgun's guard, end to end: a scratch repo with a
++    /// commit passes, the same repo with an uncommitted change
++    /// refuses by name, a non-git directory passes (no baseline to
++    /// protect), and the refusal names the hatch.
++    #[test]
++    fn yes_refuses_a_dirty_workspace_and_passes_a_clean_one() {
++        let dir = tempfile::tempdir().unwrap();
++        let root = dir.path();
++        let git = |args: &[&str]| {
++            std::process::Command::new("git")
++                .args(["-C", root.to_str().unwrap()])
++                .args(["-c", "user.name=t"],)
++                .args(["-c", "user.email=t@t"])
++                .args(args)
++                .output()
++                .unwrap()
++        };
++        assert!(git(&["init"]).status.success());
++        std::fs::write(root.join("tracked.txt"), "one\n").unwrap();
++        assert!(git(&["add", "."]).status.success());
++        assert!(git(&["commit", "-m", "base"]).status.success());
++
++        // Clean tree: --yes may run.
++        assert!(guard_yes_over_dirty(root).is_ok());
++
++        // Uncommitted change: refused, by name, with the hatch named.
++        std::fs::write(root.join("tracked.txt"), "one\ntwo\n").unwrap();
++        let refused = guard_yes_over_dirty(root).unwrap_err();
++        assert!(refused.contains("uncommitted"), "{refused}");
++        assert!(refused.contains("--allow-dirty"), "{refused}");
++
++        // An untracked new file is the same kind of net-less work.
++        std::fs::write(root.join("fresh.txt"), "x").unwrap();
++        assert!(guard_yes_over_dirty(root).is_err());
++
++        // Non-git directories have no baseline and pass.
++        let plain = tempfile::tempdir().unwrap();
++        assert!(guard_yes_over_dirty(plain.path()).is_ok());
++    }
++
+     /// A provider with a queue of scripted responses, one per request.
+     struct Scripted(std::sync::Mutex<VecDeque<Vec<Event>>>);
+ 
+diff --git a/gertie/src/main.rs b/gertie/src/main.rs
+index 70e117a..e615708 100644
+--- a/gertie/src/main.rs
++++ b/gertie/src/main.rs
+@@ -7,9 +7,12 @@ fn main() {
+         Ok(gertie::cli::Command::Run {
+             prompt,
+             yes,
++            allow_dirty,
+             config,
+             ephemeral,
+-        }) => std::process::exit(gertie::headless::run(prompt, yes, config, ephemeral)),
++        }) => std::process::exit(gertie::headless::run(
++            prompt, yes, allow_dirty, config, ephemeral,
++        )),
+         Ok(gertie::cli::Command::Doctor {
+             config,
+             clean_worktrees,
+-- 
+2.56.0
+

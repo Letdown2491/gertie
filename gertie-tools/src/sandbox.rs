@@ -75,15 +75,21 @@ impl Sandbox {
     pub fn apply(&self, command: &mut std::process::Command) -> Result<(), String> {
         let root = self.root.clone();
         let network_isolated = self.network_isolated;
-        // Safety: the closure only makes namespace and Landlock
-        // syscalls plus the uid/gid map writes to /proc/self (tiny
-        // allocations, nothing fork left inconsistent); the maps
-        // restore the child's own identity so filesystem access keeps
-        // working inside the new user namespace.
+        // Safety: the namespace half of this closure is strictly
+        // async-signal-safe (unshare, getuid/getgid, open/write/close,
+        // a fixed stack buffer; errors carry the raw errno, never an
+        // allocation), because pre_exec runs after fork in what may be
+        // a multi-threaded process, where a non-safe call can deadlock
+        // the child on a lock another thread held at fork time. The
+        // Landlock half keeps upstream's idiom (the crate allocates
+        // internally); that deviation is the module's founding
+        // trade-off, not this PR's.
         unsafe {
             command.pre_exec(move || {
-                if network_isolated {
-                    isolate_network().map_err(std::io::Error::other)?;
+                if network_isolated
+                    && let Err(errno) = isolate_network_raw()
+                {
+                    return Err(std::io::Error::from_raw_os_error(errno));
                 }
                 enforce(root.as_path()).map_err(std::io::Error::other)
             });
@@ -95,28 +101,98 @@ impl Sandbox {
 /// Moves the calling (child) process into a fresh user + network
 /// namespace, then maps its own uid/gid through so filesystem access
 /// keeps working. The new network namespace has no interfaces but a
-/// downed loopback: no UDP, no DNS, no ICMP, no raw sockets, no
-/// anything. Unprivileged on kernels that allow user namespaces; any
-/// refusal propagates and the spawn fails (fail-closed, the module's
-/// one posture).
-fn isolate_network() -> Result<(), String> {
-    let rc = unsafe { libc::unshare(libc::CLONE_NEWUSER | libc::CLONE_NEWNET) };
-    if rc != 0 {
-        return Err(format!(
-            "sandbox_netns: unshare(CLONE_NEWUSER | CLONE_NEWNET) refused; \
-             this kernel or distro blocks unprivileged user namespaces: {}",
-            std::io::Error::last_os_error()
-        ));
+/// downed loopback (inside the child's own namespace, unreachable
+/// from the host): no UDP, no DNS, no ICMP, no raw sockets. The child
+/// holds every capability inside its new namespace, so it can bring
+/// that loopback up, but localhost-in-a-netns reaches nothing of the
+/// host's. Unprivileged on kernels that allow user namespaces; any
+/// refusal propagates as a raw errno and the spawn fails
+/// (fail-closed, the module's one posture).
+///
+/// Strictly async-signal-safe: `pre_exec` runs after fork in a
+/// possibly multi-threaded process, so this touches nothing that can
+/// lock or allocate. `unshare(2)`, `getuid(2)`, `getgid(2)`,
+/// `open(2)`, `write(2)`, `close(2)` are all on POSIX's
+/// async-signal-safe list; the map strings are composed into a fixed
+/// stack buffer; errors carry the raw errno, never a `String`.
+fn isolate_network_raw() -> Result<(), i32> {
+    if unsafe { libc::unshare(libc::CLONE_NEWUSER | libc::CLONE_NEWNET) } != 0 {
+        return Err(std::io::Error::last_os_error()
+            .raw_os_error()
+            .unwrap_or(libc::EPERM));
     }
     // The process owns its new user namespace, so mapping its own
     // uid/gid through is allowed unprivileged. setgroups must be
-    // denied before the group map.
-    std::fs::write("/proc/self/setgroups", b"deny")
-        .map_err(|error| format!("sandbox_netns: setgroups: {error}"))?;
-    std::fs::write("/proc/self/gid_map", format!("{} {} 1\n", unsafe { libc::getgid() }, unsafe { libc::getgid() }))
-        .map_err(|error| format!("sandbox_netns: gid_map: {error}"))?;
-    std::fs::write("/proc/self/uid_map", format!("{} {} 1\n", unsafe { libc::getuid() }, unsafe { libc::getuid() }))
-        .map_err(|error| format!("sandbox_netns: uid_map: {error}"))?;
+    // denied before the group map is written.
+    write_proc_map(b"/proc/self/setgroups\0", b"deny")?;
+    let gid = unsafe { libc::getgid() };
+    let uid = unsafe { libc::getuid() };
+    let mut line = [0u8; 64];
+    write_proc_map(b"/proc/self/gid_map\0", identity_map_line(gid, &mut line))?;
+    write_proc_map(b"/proc/self/uid_map\0", identity_map_line(uid, &mut line))?;
+    Ok(())
+}
+
+/// `<id> <id> 1\n` for a single identity mapping, composed into a
+/// fixed stack buffer: decimal digits only, no allocation.
+fn identity_map_line(id: u32, buf: &mut [u8; 64]) -> &[u8] {
+    let mut len = 0usize;
+    fn push_u32(buf: &mut [u8; 64], len: &mut usize, mut value: u32) {
+        let start = *len;
+        loop {
+            buf[*len] = b'0' + (value % 10) as u8;
+            *len += 1;
+            value /= 10;
+            if value == 0 {
+                break;
+            }
+        }
+        buf[start..*len].reverse();
+    }
+    push_u32(buf, &mut len, id);
+    buf[len] = b' ';
+    len += 1;
+    push_u32(buf, &mut len, id);
+    buf[len] = b' ';
+    buf[len + 1] = b'1';
+    buf[len + 2] = b'\n';
+    &buf[..len + 3]
+}
+
+/// `open(2)` + `write(2)` + `close(2)` on a NUL-terminated /proc path:
+/// every call on POSIX's async-signal-safe list, EINTR-tolerant,
+/// errno-only errors.
+fn write_proc_map(path: &[u8], payload: &[u8]) -> Result<(), i32> {
+    let fd = unsafe {
+        libc::open(path.as_ptr() as *const libc::c_char, libc::O_WRONLY | libc::O_CLOEXEC)
+    };
+    if fd < 0 {
+        return Err(
+            std::io::Error::last_os_error().raw_os_error().unwrap_or(libc::EPERM)
+        );
+    }
+    let mut written = 0usize;
+    while written < payload.len() {
+        let n = unsafe {
+            libc::write(
+                fd,
+                payload[written..].as_ptr() as *const libc::c_void,
+                payload.len() - written,
+            )
+        };
+        if n < 0 {
+            let errno = std::io::Error::last_os_error()
+                .raw_os_error()
+                .unwrap_or(libc::EIO);
+            unsafe { libc::close(fd) };
+            if errno == libc::EINTR {
+                continue;
+            }
+            return Err(errno);
+        }
+        written += n as usize;
+    }
+    unsafe { libc::close(fd) };
     Ok(())
 }
 
@@ -246,6 +322,7 @@ mod tests {
             eprintln!("skipped: sandbox unavailable");
             return;
         }
+        let started = std::time::Instant::now();
         let output = match cmd.output() {
             Ok(output) => output,
             Err(_) => {
@@ -253,6 +330,14 @@ mod tests {
                 return;
             }
         };
+        // Deadlock tripwire: pre_exec runs after fork in a
+        // multi-threaded process. A non-async-signal-safe call there
+        // would hang the spawn forever; this assert turns that hang
+        // into a named failure.
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(3),
+            "the spawn hung past 3s: something in pre_exec is not async-signal-safe"
+        );
         listener
             .set_read_timeout(Some(Duration::from_millis(700)))
             .unwrap();
@@ -269,6 +354,7 @@ mod tests {
     /// workspace writes with real ownership.
     #[test]
     fn a_netns_child_keeps_filesystem_access() {
+        let started = std::time::Instant::now();
         let output = match sandboxed("ls /usr/bin > out.txt && echo ok") {
             Ok(output) => output,
             Err(_) => {
@@ -276,6 +362,10 @@ mod tests {
                 return;
             }
         };
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(3),
+            "the spawn hung past 3s: something in pre_exec is not async-signal-safe"
+        );
         assert!(output.status.success(), "{output:?}");
     }
 

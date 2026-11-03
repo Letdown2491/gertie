@@ -1,0 +1,185 @@
+From ee19adf6d61d0d819d3de9a5541d258130bf4524 Mon Sep 17 00:00:00 2001
+From: mptfire <263163432+mptfire@users.noreply.github.com>
+Date: Mon, 2 Nov 2026 22:03:25 +0100
+Subject: [PATCH 15/22] permissions: containment is per-call, and it never
+ pre-approves third-party code
+
+Found in a QA pass over the series: auto_allows took the turn-wide
+sandbox flag, and its auto arm was (checkpointed && !third_party) ||
+sandboxed_bash. With sandbox_bash on, the second term approved
+everything: a gated web_fetch ran without its card in auto mode (the
+README line this series added was untrue there), and worse, an MCP
+tool ran uncarded in every sandboxed auto turn, contradicting the
+mode's own contract that third-party code always asks outside
+full_access.
+
+Containment is now a fact about the call: true only when this exact
+call is bash under the Landlock sandbox. Auto becomes (checkpointed ||
+contained) && !third_party: a checkpointed edit or a sandboxed command
+pre-approves, third-party code never does, and the gated fetch faces
+its card in every mode short of full_access. Supervised and
+accept_edits are unchanged; full_access unchanged.
+---
+ gertie-core/src/agent_loop.rs  | 73 +++++++++++++++++++++++++++++++++-
+ gertie-core/src/permissions.rs | 42 +++++++++++++++----
+ 2 files changed, 106 insertions(+), 9 deletions(-)
+
+diff --git a/gertie-core/src/agent_loop.rs b/gertie-core/src/agent_loop.rs
+index ecda231..aee2945 100644
+--- a/gertie-core/src/agent_loop.rs
++++ b/gertie-core/src/agent_loop.rs
+@@ -504,9 +504,16 @@ pub fn run_turn(spec: TurnSpec) -> BoxStream<'static, LoopEvent> {
+                                 &call.arguments,
+                                 workspace_root.as_deref(),
+                             );
++                            // Containment is a fact about this
++                            // call, not the turn: the sandbox
++                            // contains bash, and nothing else. A
++                            // turn-wide flag here would wave a
++                            // gated fetch or an MCP tool through
++                            // every sandboxed auto turn.
++                            let contained = sandbox_bash && call.name == "bash";
+                             let pre_approved = permission_mode.auto_allows(
+                                 checkpoint_target.is_some(),
+-                                sandbox_bash,
++                                contained,
+                                 tool.third_party(),
+                             );
+                             let decision = match (&permission_broker, pre_approved) {
+@@ -1345,6 +1352,70 @@ mod tests {
+         assert_eq!(tool_result(&events, "watch"), "spied");
+     }
+ 
++    /// The containment flag is per-call, not turn-wide: a gated
++    /// read-only tool (web_fetch is the shape) must face its card in
++    /// auto mode even when the turn runs sandboxed, because the
++    /// sandbox contains bash, not the fetch.
++    #[test]
++    fn auto_mode_contains_bash_not_the_fetch() {
++        let asked = Arc::new(std::sync::atomic::AtomicBool::new(false));
++        let provider = Arc::new(ScriptedProvider {
++            seen: std::sync::Mutex::new(Vec::new()),
++            scripts: std::sync::Mutex::new(one_call_then_text("watch")),
++        });
++        let history: SharedHistory = Arc::new(tokio::sync::Mutex::new(Vec::new()));
++        let (mut spec, broker) = turn(
++            provider,
++            registry(&[Arc::new(StubTool::gated("watch", "spied"))]),
++            history.clone(),
++            "go",
++        );
++        spec.permission_mode = PermissionMode::Auto;
++        spec.sandbox_bash = true;
++        let flag = asked.clone();
++        let events = drain(run_turn(spec), &broker, move |_| {
++            flag.store(true, std::sync::atomic::Ordering::Relaxed);
++            PermissionDecision::Approve
++        });
++
++        assert!(
++            asked.load(std::sync::atomic::Ordering::Relaxed),
++            "a gated tool must card in auto mode: the sandbox contains bash, not the fetch"
++        );
++        assert_eq!(tool_result(&events, "watch"), "spied");
++    }
++
++    /// And the contained bash itself stays pre-approved in auto: the
++    /// mode's whole point survives the tightening.
++    #[test]
++    fn auto_mode_still_pre_approves_contained_bash() {
++        let asked = Arc::new(std::sync::atomic::AtomicBool::new(false));
++        let provider = Arc::new(ScriptedProvider {
++            seen: std::sync::Mutex::new(Vec::new()),
++            scripts: std::sync::Mutex::new(one_call_then_text("bash")),
++        });
++        let history: SharedHistory = Arc::new(tokio::sync::Mutex::new(Vec::new()));
++        let (mut spec, broker) = turn(
++            provider,
++            registry(&[Arc::new(StubTool::new("bash", true, "ran"))]),
++            history.clone(),
++            "go",
++        );
++        spec.permission_mode = PermissionMode::Auto;
++        spec.sandbox_bash = true;
++        let flag = asked.clone();
++        let events = drain(run_turn(spec), &broker, move |_| {
++            flag.store(true, std::sync::atomic::Ordering::Relaxed);
++            PermissionDecision::Approve
++        });
++
++        assert!(
++            !asked.load(std::sync::atomic::Ordering::Relaxed),
++            "contained bash is the one thing auto exists to pre-approve"
++        );
++        assert_eq!(tool_result(&events, "bash"), "ran");
++    }
++
+     /// The gate does not catch reads: a tool that neither mutates nor
+     /// asks runs uncarded, the read-only contract stands.
+     #[test]
+diff --git a/gertie-core/src/permissions.rs b/gertie-core/src/permissions.rs
+index f8fcb23..02ed637 100644
+--- a/gertie-core/src/permissions.rs
++++ b/gertie-core/src/permissions.rs
+@@ -161,17 +161,18 @@ impl PermissionMode {
+     /// Whether this mode settles a mutating-tool ask without the
+     /// broker. `checkpointed`, the checkpoint hook will snapshot
+     /// what the call touches, so the change is reversible;
+-    /// `sandboxed_bash`, the process runs bash inside the Landlock
+-    /// sandbox; `third_party`, an MCP tool, whose side effects
+-    /// gertie cannot vouch for. The reversibility argument only
+-    /// covers gertie's own tools: a third-party tool's notion of a
+-    /// "path" is its own, so accept-edits and auto never pre-approve
+-    /// one, every mode short of full_access asks.
+-    pub fn auto_allows(&self, checkpointed: bool, sandboxed_bash: bool, third_party: bool) -> bool {
++    /// `contained`, this exact call is bash running inside the
++    /// Landlock sandbox (a per-call fact: the sandbox contains bash,
++    /// not whatever else the turn does); `third_party`, an MCP tool,
++    /// whose side effects gertie cannot vouch for. The reversibility
++    /// and containment arguments only cover gertie's own tools: a
++    /// third-party tool's notion of a "path" is its own, so neither
++    /// ever pre-approves one, every mode short of full_access asks.
++    pub fn auto_allows(&self, checkpointed: bool, contained: bool, third_party: bool) -> bool {
+         match self {
+             PermissionMode::Supervised => false,
+             PermissionMode::AcceptEdits => checkpointed && !third_party,
+-            PermissionMode::Auto => (checkpointed && !third_party) || sandboxed_bash,
++            PermissionMode::Auto => (checkpointed || contained) && !third_party,
+             PermissionMode::FullAccess => true,
+         }
+     }
+@@ -232,6 +233,31 @@ impl ModeScope {
+ mod tests {
+     use super::*;
+ 
++    /// Auto's containment argument is per-call: true means this exact
++    /// call is bash inside the Landlock sandbox. Containment never
++    /// extends the auto-approval to third-party code, whose side
++    /// effects and path notions gertie cannot vouch for: a
++    /// sandbox-looking turn must not wave an MCP tool through.
++    #[test]
++    fn auto_never_pre_approves_third_party_even_contained() {
++        let auto = PermissionMode::Auto;
++        assert!(
++            !auto.auto_allows(false, true, true),
++            "the QA finding: a turn-wide sandbox flag waved MCP tools through"
++        );
++        assert!(!auto.auto_allows(true, true, true));
++        // Contained bash and checkpointed own tools still pre-approve.
++        assert!(auto.auto_allows(false, true, false));
++        assert!(auto.auto_allows(true, false, false));
++        // Accept-edits: checkpointed own tools only, containment adds
++        // nothing there.
++        assert!(!PermissionMode::AcceptEdits.auto_allows(false, true, false));
++        assert!(PermissionMode::AcceptEdits.auto_allows(true, false, false));
++        // Supervised never pre-approves anything.
++        assert!(!PermissionMode::Supervised.auto_allows(true, true, false));
++        assert!(!PermissionMode::Supervised.auto_allows(false, true, true));
++    }
++
+     fn call() -> ToolCall {
+         ToolCall {
+             id: "c1".into(),
+-- 
+2.56.0
+

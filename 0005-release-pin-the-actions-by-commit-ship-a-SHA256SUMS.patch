@@ -1,0 +1,131 @@
+From d80d722265d0176d4ada848d1ced393f996444fd Mon Sep 17 00:00:00 2001
+From: mptfire <263163432+mptfire@users.noreply.github.com>
+Date: Mon, 2 Nov 2026 13:32:16 +0100
+Subject: [PATCH 05/22] release: pin the actions by commit, ship a SHA256SUMS
+
+The workflow holds contents:write, and three of its actions moved on
+floating tags (checkout@v4, rust-toolchain@stable, action-gh-release@v2)
+with upload/download-artifact@v4 alongside: a moved tag is a code path
+into the release, and the Orchard leg already showed the right shape
+(tag and commit pinned, verified). Every third-party action is now at
+the commit SHA of the release it was audited at, the version named in
+the adjacent comment, renewal a deliberate diff.
+
+The build job also ships a SHA256SUMS of the binary, deb, and rpm next
+to them on the release page: a download verifies without trusting the
+connection, the floor under any future signing story.
+---
+ .github/workflows/release.yml | 40 ++++++++++++++++++++++++++++-------
+ 1 file changed, 32 insertions(+), 8 deletions(-)
+
+diff --git a/.github/workflows/release.yml b/.github/workflows/release.yml
+index a65250b..3097619 100644
+--- a/.github/workflows/release.yml
++++ b/.github/workflows/release.yml
+@@ -13,6 +13,11 @@
+ # Secrets:
+ #   ORCHARD_NSEC  the publisher's Nostr key (set before the Orchard
+ #                 publish leg goes live; flatpak bundles attach without it).
++#
++# Every third-party action is pinned to the commit SHA of the release
++# it was audited at (version named in the comment, never a floating
++# tag): this workflow holds contents:write, so a moved tag is a code
++# path into the release. Renew the pins deliberately.
+ 
+ name: release
+ 
+@@ -30,10 +35,13 @@ jobs:
+   build-linux:
+     runs-on: ubuntu-24.04
+     steps:
+-      - uses: actions/checkout@v4
++      # v4.2.2
++      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+ 
+       - name: Install the Rust toolchain
+-        uses: dtolnay/rust-toolchain@stable
++        # dtolnay/rust-toolchain, the stable branch, audited here by
++        # commit; renewal is a deliberate diff.
++        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec
+ 
+       - name: Install the client libraries gertie links
+         run: |
+@@ -71,13 +79,24 @@ jobs:
+           ./target/release/gertie --version
+           ./target/release/gertie doctor || true
+ 
++      - name: Checksum the artifacts
++        # The digest file ships next to the artifacts on the release
++        # page: a download can be verified without trusting the
++        # connection, which is the floor under any future signing
++        # story.
++        run: |
++          sha256sum target/release/gertie target/debian/*.deb target/generate-rpm/*.rpm > SHA256SUMS
++          cat SHA256SUMS
++
+       - name: Attach the artifacts to the release
+-        uses: softprops/action-gh-release@v2
++        # softprops/action-gh-release v2.3.4
++        uses: softprops/action-gh-release@62c96d0c4e8a889135c1f3a25910db8dbe0e85f7
+         with:
+           files: |
+             target/release/gertie
+             target/debian/*.deb
+             target/generate-rpm/*.rpm
++            SHA256SUMS
+           generate_release_notes: true
+ 
+   flatpak:
+@@ -94,7 +113,8 @@ jobs:
+       contents: write
+       packages: write
+     steps:
+-      - uses: actions/checkout@v4
++      # v4.2.2
++      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+ 
+       - name: Install the toolchain and libraries
+         run: |
+@@ -140,7 +160,8 @@ jobs:
+             io.github.Letdown2491.gertie stable
+ 
+       - name: Attach the flatpak bundles to the release
+-        uses: softprops/action-gh-release@v2
++        # softprops/action-gh-release v2.3.4
++        uses: softprops/action-gh-release@62c96d0c4e8a889135c1f3a25910db8dbe0e85f7
+         with:
+           files: bundles/*.flatpak
+           generate_release_notes: true
+@@ -150,7 +171,8 @@ jobs:
+         # metadata), not the bundle. One tar per leg; the publish job
+         # prepares both trees and signs the listing once.
+         run: tar -C self/tree -czf app-tree.tar.gz export files metadata
+-      - uses: actions/upload-artifact@v4
++      # actions/upload-artifact v4.6.2
++      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+         with:
+           name: app-tree-${{ matrix.arch }}
+           path: app-tree.tar.gz
+@@ -163,7 +185,8 @@ jobs:
+       contents: write
+       packages: write
+     steps:
+-      - uses: actions/checkout@v4
++      # v4.2.2
++      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+ 
+       - name: Version from the tag
+         id: ver
+@@ -180,7 +203,8 @@ jobs:
+           cargo install --locked --path crates/orchard-publish
+ 
+       - name: Download the staged trees
+-        uses: actions/download-artifact@v4
++        # actions/download-artifact v4.3.0
++        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+         with:
+           pattern: app-tree-*
+           path: trees
+-- 
+2.56.0
+

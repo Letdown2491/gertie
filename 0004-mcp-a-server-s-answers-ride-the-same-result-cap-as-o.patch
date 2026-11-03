@@ -1,0 +1,116 @@
+From a579007c19d99c470cc43e26066c2658bbc1780d Mon Sep 17 00:00:00 2001
+From: mptfire <263163432+mptfire@users.noreply.github.com>
+Date: Mon, 2 Nov 2026 13:30:21 +0100
+Subject: [PATCH 04/22] mcp: a server's answers ride the same result cap as our
+ own tools
+
+gertie's own tools cap results at 16k chars before the model sees
+them; MCP tool results did not. A hostile (or just chatty) server
+could push megabytes straight into the transcript: cost, context
+dilution, and injection volume at once, the code-side body of
+HARDENING.md's open 2.4. Both the success text and the isError text
+now go through the same limit() (error text lands in the transcript
+either way). Tested against the sh fixture family: a server answering
+tools/call with 100 KB comes home capped and saying so.
+---
+ gertie-tools/src/lib.rs |  4 +++-
+ gertie-tools/src/mcp.rs | 51 +++++++++++++++++++++++++++++++++++++++--
+ 2 files changed, 52 insertions(+), 3 deletions(-)
+
+diff --git a/gertie-tools/src/lib.rs b/gertie-tools/src/lib.rs
+index 01d9c6a..6c4a400 100644
+--- a/gertie-tools/src/lib.rs
++++ b/gertie-tools/src/lib.rs
+@@ -126,7 +126,9 @@ fn parse<T: for<'de> Deserialize<'de>>(arguments: &str, tool: &str) -> Result<T,
+     })
+ }
+ 
+-fn limit(text: String) -> String {
++/// pub(crate) so the MCP bridge shapes a server's answers the same
++/// way: a third-party result is the same kind of transcript input.
++pub(crate) fn limit(text: String) -> String {
+     if text.chars().count() <= RESULT_CHAR_LIMIT {
+         return text;
+     }
+diff --git a/gertie-tools/src/mcp.rs b/gertie-tools/src/mcp.rs
+index e571122..e8f0d60 100644
+--- a/gertie-tools/src/mcp.rs
++++ b/gertie-tools/src/mcp.rs
+@@ -577,18 +577,24 @@ impl Tool for McpTool {
+                         .get("isError")
+                         .and_then(Value::as_bool)
+                         .unwrap_or(false);
++                    // The same ceiling our own tools ride: the
++                    // transcript is the model's context, not the
++                    // server's landfill, and context stuffing (cost,
++                    // dilution, injection volume) is an attack before
++                    // it is a bug. Error text rides it too: it lands
++                    // in the transcript either way.
+                     if is_error {
+                         // A tool-level failure is model-visible, same
+                         // channel as gertie's own tool errors.
+                         Err(if text.is_empty() {
+                             "mcp tool reported an error".to_string()
+                         } else {
+-                            text
++                            crate::limit(text)
+                         })
+                     } else if text.is_empty() {
+                         Ok("(no output)".to_string())
+                     } else {
+-                        Ok(text)
++                        Ok(crate::limit(text))
+                     }
+                 })
+         })
+@@ -644,6 +650,47 @@ mod tests {
+         assert_eq!(result.unwrap(), "echoed: hi");
+     }
+ 
++    /// Same shape as FAKE_SERVER, but tools/call answers with 100 KB
++    /// of text: the volume a hostile (or just chatty) server can push
++    /// at the transcript. gertie's own tools cap their results at
++    /// RESULT_CHAR_LIMIT before the model sees them; a server result
++    /// is the same kind of input and rides the same ceiling.
++    const BIG_SERVER: &str = r#"
++        while IFS= read -r line; do
++            case "$line" in
++                *'"method":"initialize"'*)
++                    printf '%s\n' '{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2024-11-05","capabilities":{"tools":{}},"serverInfo":{"name":"big","version":"0"}}}';;
++                *'"method":"tools/list"'*)
++                    printf '%s\n' '{"jsonrpc":"2.0","id":2,"result":{"tools":[{"name":"dump","description":"Dumps 100KB of text","inputSchema":{"type":"object","properties":{}}}]}}';;
++                *'"method":"tools/call"'*)
++                    printf '{"jsonrpc":"2.0","id":3,"result":{"content":[{"type":"text","text":"';
++                    head -c 100000 /dev/zero | tr '\0' 'x';
++                    printf '"}]}}\n';;
++            esac
++        done
++    "#;
++
++    /// A server's 100 KB answer must arrive capped: the transcript is
++    /// the model's context, not the server's landfill, and context
++    /// stuffing is an attack (cost, dilution, injection volume) before
++    /// it is a bug.
++    #[test]
++    fn a_server_dumping_100kb_comes_home_capped() {
++        let client = Arc::new(
++            McpClient::connect("big", "sh", &["-c".into(), BIG_SERVER.into()], &[])
++                .expect("handshake"),
++        );
++        let tools = client.list_tools().expect("tools/list");
++        assert_eq!(tools.len(), 1);
++        let result = futures_now(tools[0].run("{}")).expect("the call must succeed");
++        let count = result.chars().count();
++        assert!(
++            count < 20_000,
++            "a server result must ride the same cap as our own: {count} chars"
++        );
++        assert!(result.contains("[truncated]"), "the cap must say so");
++    }
++
+     /// Tests run outside a runtime; our tools' futures are already
+     /// computed by `blocking`, so a plain poll loop suffices.
+     fn futures_now(
+-- 
+2.56.0
+

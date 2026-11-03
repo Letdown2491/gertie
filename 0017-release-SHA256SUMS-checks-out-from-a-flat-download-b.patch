@@ -1,0 +1,58 @@
+From 02a0c086dd8c0461acfd99356e3e0caa3fe01030 Mon Sep 17 00:00:00 2001
+From: mptfire <263163432+mptfire@users.noreply.github.com>
+Date: Mon, 2 Nov 2026 22:04:34 +0100
+Subject: [PATCH 17/22] release: SHA256SUMS checks out from a flat download,
+ bundles covered too
+
+Two QA findings: the digest file recorded target/ paths, so
+sha256sum -c failed for anyone verifying a flat download directory
+(the whole point of the file); and the flatpak bundles shipped with
+no digests at all. The binary/deb/rpm step now writes basenames, and
+each flatpak leg attaches its own per-arch digest file so the matrix
+legs cannot collide.
+---
+ .github/workflows/release.yml | 16 +++++++++++++---
+ 1 file changed, 13 insertions(+), 3 deletions(-)
+
+diff --git a/.github/workflows/release.yml b/.github/workflows/release.yml
+index 3097619..185f158 100644
+--- a/.github/workflows/release.yml
++++ b/.github/workflows/release.yml
+@@ -83,9 +83,12 @@ jobs:
+         # The digest file ships next to the artifacts on the release
+         # page: a download can be verified without trusting the
+         # connection, which is the floor under any future signing
+-        # story.
++        # story. Basenames only, so `sha256sum -c` works from a flat
++        # download directory instead of failing on target/ paths.
+         run: |
+-          sha256sum target/release/gertie target/debian/*.deb target/generate-rpm/*.rpm > SHA256SUMS
++          (cd target/release && sha256sum gertie) > SHA256SUMS
++          (cd target/debian && sha256sum *.deb) >> SHA256SUMS
++          (cd target/generate-rpm && sha256sum *.rpm) >> SHA256SUMS
+           cat SHA256SUMS
+ 
+       - name: Attach the artifacts to the release
+@@ -159,11 +162,18 @@ jobs:
+             "bundles/gertie-${GITHUB_REF_NAME#v}-${{ matrix.arch }}.flatpak" \
+             io.github.Letdown2491.gertie stable
+ 
++      - name: Checksum the bundles
++        # Same basename rule as the binary's SHA256SUMS, per arch so
++        # the two matrix legs cannot collide on one file.
++        run: (cd bundles && sha256sum *.flatpak > "SHA256SUMS-${{ matrix.arch }}.txt")
++
+       - name: Attach the flatpak bundles to the release
+         # softprops/action-gh-release v2.3.4
+         uses: softprops/action-gh-release@62c96d0c4e8a889135c1f3a25910db8dbe0e85f7
+         with:
+-          files: bundles/*.flatpak
++          files: |
++            bundles/*.flatpak
++            SHA256SUMS-${{ matrix.arch }}.txt
+           generate_release_notes: true
+ 
+       - name: Save the staged tree for the publish job
+-- 
+2.56.0
+

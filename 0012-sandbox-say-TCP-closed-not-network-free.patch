@@ -1,0 +1,89 @@
+From e64aea729b0810380c2189ffc87bdfcaf5ff2ceb Mon Sep 17 00:00:00 2001
+From: mptfire <263163432+mptfire@users.noreply.github.com>
+Date: Mon, 2 Nov 2026 20:45:42 +0100
+Subject: [PATCH 12/22] sandbox: say TCP-closed, not network-free
+
+An adversarial review caught the overstatement: Landlock ABI v4 added
+LANDLOCK_ACCESS_NET_CONNECT_TCP and BIND_TCP only. The ruleset refuses
+those, and that is all it can refuse: UDP (DNS included) and ICMP are
+not expressible, so a datagram channel still exists from inside the
+sandbox. The module doc, the config comment, and the example now say
+TCP-closed and name the residual honestly (full closure needs a
+namespace or a seccomp layer, which gertie does not build), and the
+kernel floor is stated as what it is: sandbox_bash is 6.7+ or nothing,
+on older kernels the whole sandbox refuses rather than just the
+network half.
+---
+ config.example.toml         | 10 ++++++----
+ gertie-tools/src/sandbox.rs | 11 ++++++++---
+ gertie/src/config.rs        | 11 ++++++-----
+ 3 files changed, 20 insertions(+), 12 deletions(-)
+
+diff --git a/config.example.toml b/config.example.toml
+index b77f62d..ad665f8 100644
+--- a/config.example.toml
++++ b/config.example.toml
+@@ -43,10 +43,12 @@ api_key_env = "MY_API_KEY"
+ # url = "https://mcp.example.com/mcp"
+ 
+ # Security posture. sandbox_bash = true Landlock-isolates bash children:
+-# system read-only, writes limited to the workspace and /tmp, and no
+-# network (connects and binds are refused, so an approved command cannot
+-# phone home). Opt-in; when the kernel can't enforce it (the network
+-# half wants 6.7+), sandboxed commands fail rather than run free.
++# system read-only, writes limited to the workspace and /tmp, and
++# outbound TCP closed (connects and binds are refused, so an approved
++# command cannot open a channel; UDP/DNS and ICMP stay, Landlock ABI v4
++# is TCP-only). Opt-in; when the kernel can't enforce it (6.7+ wanted;
++# older kernels refuse the whole sandbox), sandboxed commands fail
++# rather than run free.
+ # [security]
+ # sandbox_bash = true
+ 
+diff --git a/gertie-tools/src/sandbox.rs b/gertie-tools/src/sandbox.rs
+index 07ee1c5..fd5fed1 100644
+--- a/gertie-tools/src/sandbox.rs
++++ b/gertie-tools/src/sandbox.rs
+@@ -6,9 +6,14 @@
+ //! misbehave (or were approved carelessly).
+ //!
+ //! Posture, fail-closed on purpose: read access to the system, write
+-//! access to the workspace and /tmp only, and no network at all (ABI
+-//! v4, kernel 6.7+): handled, no rules, connects and binds are
+-//! refused, so an approved command is not an approved exfil. When the
++//! access to the workspace and /tmp only, and outbound TCP closed
++//! (ABI v4, kernel 6.7+): handled, no rules, so TCP connects and
++//! binds are refused and an approved command cannot open an approved
++//! channel. Landlock ABI v4 speaks TCP only: UDP (DNS included) and
++//! ICMP are NOT restricted here, so name resolution still works but a
++//! datagram channel also still exists; full network closure needs a
++//! namespace or a seccomp layer, which gertie does not build. Say
++//! "TCP-closed", never "network-free". When the
+ //! kernel can't enforce (too old, blocked in a container), the spawn
+ //! **fails**, gertie never runs a sandboxed command unsandboxed just
+ //! because the sandbox was unavailable. `CompatLevel::HardRequirement`
+diff --git a/gertie/src/config.rs b/gertie/src/config.rs
+index 5bd85c3..959a518 100644
+--- a/gertie/src/config.rs
++++ b/gertie/src/config.rs
+@@ -79,11 +79,12 @@ pub struct WorktreeConfig {
+ #[derive(Deserialize, Debug, Clone, Default)]
+ pub struct SecurityConfig {
+     /// Landlock-isolate bash children: system reads, workspace//tmp
+-    /// writes, and no network at all (connects and binds are
+-    /// refused). Opt-in; when the kernel can't enforce it (the
+-    /// network half wants 6.7+), sandboxed commands fail instead of
+-    /// running free. `Some` = the user's file
+-    /// set it; `None` = unset, a lower tier decides.
++    /// writes, and outbound TCP closed (connects and binds are
++    /// refused; UDP/DNS and ICMP stay, Landlock ABI v4 is TCP-only).
++    /// Opt-in; when the kernel can't enforce it (6.7+ wanted), the
++    /// whole sandbox refuses and sandboxed commands fail instead of
++    /// running free: sandbox_bash is 6.7+ or nothing. `Some` = the
++    /// user's file set it; `None` = unset, a lower tier decides.
+     #[serde(default)]
+     pub sandbox_bash: Option<bool>,
+     /// Let web_fetch reach private-network targets, localhost dev
+-- 
+2.56.0
+
