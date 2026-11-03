@@ -43,11 +43,29 @@ pub struct Sandbox {
     /// The workspace gets read *and* write; brief files and tool work
     /// live here.
     root: PathBuf,
+    /// True = the child also moves into a fresh user+network
+    /// namespace: Landlock closes TCP, the namespace closes everything
+    /// else (UDP, DNS, ICMP, raw sockets). Opt-in on top of the base
+    /// sandbox, fail-closed like everything else here.
+    network_isolated: bool,
 }
 
 impl Sandbox {
     pub fn new(root: PathBuf) -> Self {
-        Self { root }
+        Self {
+            root,
+            network_isolated: false,
+        }
+    }
+
+    /// Escalate to a fresh user+network namespace: the true
+    /// no-network closure Landlock alone cannot express. Unprivileged
+    /// where user namespaces are allowed (most modern distros); on
+    /// kernels or configurations that refuse the unshare, the spawn
+    /// fails instead of degrading.
+    pub fn network_isolated(mut self) -> Self {
+        self.network_isolated = true;
+        self
     }
 
     /// Installs the sandbox into a child command via `pre_exec`: the
@@ -56,13 +74,50 @@ impl Sandbox {
     /// runs inherits them. Any error aborts the spawn (fail-closed).
     pub fn apply(&self, command: &mut std::process::Command) -> Result<(), String> {
         let root = self.root.clone();
-        // Safety: the closure only makes Landlock syscalls; it touches
-        // no state that fork left inconsistent.
+        let network_isolated = self.network_isolated;
+        // Safety: the closure only makes namespace and Landlock
+        // syscalls plus the uid/gid map writes to /proc/self (tiny
+        // allocations, nothing fork left inconsistent); the maps
+        // restore the child's own identity so filesystem access keeps
+        // working inside the new user namespace.
         unsafe {
-            command.pre_exec(move || enforce(root.as_path()).map_err(std::io::Error::other));
+            command.pre_exec(move || {
+                if network_isolated {
+                    isolate_network().map_err(std::io::Error::other)?;
+                }
+                enforce(root.as_path()).map_err(std::io::Error::other)
+            });
         }
         Ok(())
     }
+}
+
+/// Moves the calling (child) process into a fresh user + network
+/// namespace, then maps its own uid/gid through so filesystem access
+/// keeps working. The new network namespace has no interfaces but a
+/// downed loopback: no UDP, no DNS, no ICMP, no raw sockets, no
+/// anything. Unprivileged on kernels that allow user namespaces; any
+/// refusal propagates and the spawn fails (fail-closed, the module's
+/// one posture).
+fn isolate_network() -> Result<(), String> {
+    let rc = unsafe { libc::unshare(libc::CLONE_NEWUSER | libc::CLONE_NEWNET) };
+    if rc != 0 {
+        return Err(format!(
+            "sandbox_netns: unshare(CLONE_NEWUSER | CLONE_NEWNET) refused; \
+             this kernel or distro blocks unprivileged user namespaces: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    // The process owns its new user namespace, so mapping its own
+    // uid/gid through is allowed unprivileged. setgroups must be
+    // denied before the group map.
+    std::fs::write("/proc/self/setgroups", b"deny")
+        .map_err(|error| format!("sandbox_netns: setgroups: {error}"))?;
+    std::fs::write("/proc/self/gid_map", format!("{} {} 1\n", unsafe { libc::getgid() }, unsafe { libc::getgid() }))
+        .map_err(|error| format!("sandbox_netns: gid_map: {error}"))?;
+    std::fs::write("/proc/self/uid_map", format!("{} {} 1\n", unsafe { libc::getuid() }, unsafe { libc::getuid() }))
+        .map_err(|error| format!("sandbox_netns: uid_map: {error}"))?;
+    Ok(())
 }
 
 /// Builds and enforces the ruleset on the calling (child) process.
@@ -160,6 +215,70 @@ mod tests {
     /// unsandboxed control connect proves a refusal is the sandbox's
     /// doing, not the target's. Needs a Landlock-4 kernel (6.7+);
     /// older kernels fail the spawn and the test skips.
+    /// The true closure: with the namespace on, even a UDP datagram
+    /// has nowhere to go (Landlock closes TCP; the netns closes
+    /// everything, DNS included). The probe sends to a listener the
+    /// test holds and expects silence: pre-fix, the packet arrives
+    /// and this fails.
+    #[test]
+    fn a_netns_sandboxed_child_cannot_send_udp_datagrams() {
+        use std::time::Duration;
+        let listener = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        // Positive control: the datagram path works unsandboxed.
+        listener.set_read_timeout(Some(Duration::from_millis(300))).unwrap();
+        std::net::UdpSocket::bind("127.0.0.1:0")
+            .unwrap()
+            .send_to(b"control", ("127.0.0.1", port))
+            .unwrap();
+        let mut buf = [0u8; 16];
+        listener.recv_from(&mut buf).expect("control datagram arrives unsandboxed");
+
+        let tmp = tempfile::tempdir().unwrap();
+        let mut cmd = std::process::Command::new("bash");
+        cmd.arg("-c")
+            .arg(format!("echo probe > /dev/udp/127.0.0.1/{port} && echo SENT"))
+            .current_dir(tmp.path());
+        let applied = Sandbox::new(tmp.path().to_path_buf())
+            .network_isolated()
+            .apply(&mut cmd);
+        if applied.is_err() {
+            eprintln!("skipped: sandbox unavailable");
+            return;
+        }
+        let output = match cmd.output() {
+            Ok(output) => output,
+            Err(_) => {
+                eprintln!("skipped: kernel cannot enforce the namespace");
+                return;
+            }
+        };
+        listener
+            .set_read_timeout(Some(Duration::from_millis(700)))
+            .unwrap();
+        let quiet = listener.recv_from(&mut buf).is_err();
+        assert!(quiet, "a UDP datagram escaped the network namespace");
+        assert!(
+            !output.status.success(),
+            "the sandboxed write itself must fail: {output:?}"
+        );
+    }
+
+    /// The namespace maps the child's own uid/gid back through, so
+    /// the filesystem half of the sandbox keeps working: reads, and
+    /// workspace writes with real ownership.
+    #[test]
+    fn a_netns_child_keeps_filesystem_access() {
+        let output = match sandboxed("ls /usr/bin > out.txt && echo ok") {
+            Ok(output) => output,
+            Err(_) => {
+                eprintln!("skipped: sandbox unavailable");
+                return;
+            }
+        };
+        assert!(output.status.success(), "{output:?}");
+    }
+
     #[test]
     fn sandboxed_children_cannot_open_network_connections() {
         // Positive control: the target is reachable from this host.

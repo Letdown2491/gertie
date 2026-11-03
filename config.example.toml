@@ -49,8 +49,12 @@ api_key_env = "MY_API_KEY"
 # is TCP-only). Opt-in; when the kernel can't enforce it (6.7+ wanted;
 # older kernels refuse the whole sandbox), sandboxed commands fail
 # rather than run free.
+# sandbox_netns = true escalates further: the child moves into a fresh
+# user+network namespace, closing UDP/DNS and ICMP too (true no-network;
+# needs unprivileged user namespaces, and fails closed where refused).
 # [security]
 # sandbox_bash = true
+# sandbox_netns = true
 
 # The permission mode new sessions open in: "supervised" (every write
 # and command prompts), "accept_edits" (checkpointed file edits run

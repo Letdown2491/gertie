@@ -87,6 +87,14 @@ pub struct SecurityConfig {
     /// user's file set it; `None` = unset, a lower tier decides.
     #[serde(default)]
     pub sandbox_bash: Option<bool>,
+    /// Escalate the bash sandbox to a full network namespace: the
+    /// child moves into a fresh user+network namespace, closing what
+    /// Landlock cannot express (UDP, DNS, ICMP). Requires kernel 6.x
+    /// with unprivileged user namespaces; where that is refused, the
+    /// sandboxed spawn fails (fail-closed). `Some` = the user's file
+    /// set it; `None` = unset, a lower tier decides.
+    #[serde(default)]
+    pub sandbox_netns: Option<bool>,
     /// Let web_fetch reach private-network targets, localhost dev
     /// servers, the LAN, tailnets. Off by default: the model has no
     /// business probing a router or a cloud-metadata endpoint. `Some`
@@ -201,6 +209,10 @@ pub struct ProjectPermissions {
 pub struct ProjectSecurity {
     #[serde(default)]
     pub sandbox_bash: Option<Inheritable<bool>>,
+    /// Tightening only, same rules as sandbox_bash: a repo may
+    /// escalate to the network namespace, never stand it down.
+    #[serde(default)]
+    pub sandbox_netns: Option<Inheritable<bool>>,
     #[serde(default)]
     pub allow_private_fetch: Option<Inheritable<bool>>,
 }
@@ -741,7 +753,7 @@ impl Config {
             match key.as_str() {
                 "security" => unknown.extend(Self::unknown_section_keys(
                     item,
-                    &["sandbox_bash", "allow_private_fetch"],
+                    &["sandbox_bash", "sandbox_netns", "allow_private_fetch"],
                 )),
                 "permissions" => {
                     unknown.extend(Self::unknown_section_keys(item, &["default_mode"]))
@@ -816,6 +828,35 @@ impl Config {
                     value: *value,
                     origin: Origin::Project,
                 },
+            })
+    }
+
+    /// The namespace escalation in force: your config, else the
+    /// repo's overlay (on only, a cloned repo never stands isolation
+    /// down), else off. Meaningful when the bash sandbox is on.
+    pub fn resolve_sandbox_netns(&self, overlay: Option<&ProjectOverlay>) -> Resolved<bool> {
+        if let Some(value) = self.security.sandbox_netns {
+            return Resolved {
+                value,
+                origin: Origin::User,
+            };
+        }
+        overlay
+            .and_then(|overlay| overlay.security.as_ref())
+            .and_then(|security| security.sandbox_netns.as_ref())
+            .map(|inheritable| match inheritable {
+                Inheritable::Inherit | Inheritable::Set(false) => Resolved {
+                    value: false,
+                    origin: Origin::Default,
+                },
+                Inheritable::Set(true) => Resolved {
+                    value: true,
+                    origin: Origin::Project,
+                },
+            })
+            .unwrap_or(Resolved {
+                value: false,
+                origin: Origin::Default,
             })
     }
 
