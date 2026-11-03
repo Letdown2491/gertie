@@ -61,14 +61,16 @@ jobs:
 
       - name: Build the deb
         run: |
-          cargo install cargo-deb --locked
+          # Version-pinned: an unpinned `cargo install` is a code path
+          # into the artifacts this workflow ships.
+          cargo install cargo-deb --locked --version 3.8.0
           cargo deb -p gertie --no-build
           # Smoke: the deb parses and its payload carries the expected paths.
           dpkg-deb --info target/debian/*.deb | head -20
 
       - name: Build the rpm
         run: |
-          cargo install cargo-generate-rpm --locked
+          cargo install cargo-generate-rpm --locked --version 0.21.1
           cargo generate-rpm -p gertie
           # Smoke: the rpm reads back (rpmlint is not installed; the
           # header listing is the check).
