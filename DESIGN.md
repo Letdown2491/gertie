@@ -176,10 +176,11 @@ The original "Deferred" row, every item shipped or decided:
   process, not posture, and stays the user's. A cloned repo never configures what
   executes locally.
   The chain is user config → project overlay → built-in default, and the overlay
-  may only tighten: a repo can name a calmer starting mode (accept_edits at most,
-  never auto or full_access) and turn the bash sandbox on, but standing the sandbox
-  down or opening the private-fetch gate is the user's alone, so a checkout's own
-  `config.toml` can never lower the guardrails a session starts with. Every
+  is bounded at the accept_edits ceiling: a repo can start its sessions at
+  accept_edits (checkpointed edits run unasked and reversible; bash and MCP still
+  prompt) and turn the bash sandbox on, but auto, full_access, standing the sandbox
+  down, and the private-fetch gate are the user's alone, so a checkout's own
+  `config.toml` can never reach the shell or the network by itself. Every
   resolved value says which tier decided: the settings panel
   and `gertie doctor` print the origin. Inheritance is an explicit value, a field may
   hold `"inherit"` to stand down to the next tier, a state the UI can show, not an

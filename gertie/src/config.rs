@@ -177,10 +177,12 @@ impl<'de, T: Deserialize<'de>> Deserialize<'de> for Inheritable<T> {
 /// or agent types, because a cloned repo never gets to configure what
 /// runs on your machine. The settle command is *not* here either: a
 /// shell command is process, not posture, it stays the user's.
-/// The overlay sits below the user's config, and it may only tighten:
-/// a calmer starting mode and the sandbox on are posture a repo may
-/// suggest; auto, full_access, an un-sandboxed bash, and the
-/// private-fetch gate are choices that stay the user's.
+/// The overlay sits below the user's config, bounded at the
+/// accept_edits ceiling: a repo may suggest starting at accept_edits
+/// (checkpointed edits run unasked; bash and MCP still prompt) and may
+/// turn the sandbox on. Auto, full_access, standing the sandbox down,
+/// and the private-fetch gate are choices that stay the user's, so a
+/// checkout can never hand itself the shell or the network.
 #[derive(Deserialize, Debug, Clone, Default)]
 pub struct ProjectOverlay {
     #[serde(default)]
@@ -833,9 +835,12 @@ impl Config {
     }
 
     /// The hottest starting posture a repo may name: accept_edits.
-    /// Auto and full_access strip the prompt gate in ways only the
-    /// user's own config should choose; a repo asking for them gets
-    /// the clamp instead.
+    /// This is a ceiling, not a tightening (it sits above the
+    /// supervised default): what keeps it honest is what accept_edits
+    /// means, checkpointed edits run unasked and reversible, and bash
+    /// and MCP still prompt. Auto and full_access strip the prompt
+    /// gate in ways only the user's own config should choose; a repo
+    /// asking for them gets the clamp instead.
     fn clamp_project_mode(value: gertie_core::PermissionMode) -> gertie_core::PermissionMode {
         match value {
             gertie_core::PermissionMode::Auto | gertie_core::PermissionMode::FullAccess => {
@@ -846,8 +851,7 @@ impl Config {
     }
 
     /// The starting permission mode: your config, else the repo's
-    /// overlay clamped to the tightening ceiling (accept_edits), else
-    /// supervised.
+    /// overlay clamped to the accept_edits ceiling, else supervised.
     pub fn resolve_default_mode(
         &self,
         overlay: Option<&ProjectOverlay>,
