@@ -317,6 +317,28 @@ const DENY_PATTERNS: &[(&str, &str)] = &[
 /// call. A malformed pattern here is a compile-time review failure
 /// anyway; the lock panics loudly rather than silently disabling the
 /// guard.
+/// Writes through a final component that is guaranteed not to be a
+/// symlink at open time: `O_NOFOLLOW` makes the refusal atomic with
+/// the open, closing the window between `resolve()`'s canonicalization
+/// and the write where a raced-in symlink would turn an auto-approved
+/// edit into a write outside the checked path. ELOOP names itself.
+fn open_write_trunc_nofollow(path: &Path, label: &str) -> Result<std::fs::File, String> {
+    use std::os::unix::fs::OpenOptionsExt as _;
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(path)
+        .map_err(|error| {
+            if error.raw_os_error() == Some(libc::ELOOP) {
+                format!("{label}: is a symlink, gertie does not write through links")
+            } else {
+                format!("{label}: {error}")
+            }
+        })
+}
+
 fn deny_patterns() -> &'static [(regex::Regex, &'static str)] {
     static PATTERNS: OnceLock<Vec<(regex::Regex, &'static str)>> = OnceLock::new();
     PATTERNS.get_or_init(|| {
@@ -480,7 +502,8 @@ impl Tool for WriteFile {
                     .map_err(|error| format!("{}: {error}", parent.display()))?;
             }
             let existed = path.exists();
-            std::fs::write(&path, &args.content)
+            let mut file = open_write_trunc_nofollow(&path, &args.path)?;
+            std::io::Write::write_all(&mut file, args.content.as_bytes())
                 .map_err(|error| format!("{}: {error}", args.path))?;
             Ok(format!(
                 "{} {} ({} bytes)",
@@ -557,7 +580,9 @@ impl Tool for EditFile {
             } else {
                 text.replacen(&args.old_text, &args.new_text, 1)
             };
-            std::fs::write(&path, &edited).map_err(|error| format!("{}: {error}", args.path))?;
+            let mut file = open_write_trunc_nofollow(&path, &args.path)?;
+            std::io::Write::write_all(&mut file, edited.as_bytes())
+                .map_err(|error| format!("{}: {error}", args.path))?;
             Ok(format!(
                 "edited {} ({count} occurrence{})",
                 args.path,
@@ -901,6 +926,36 @@ mod tests {
         let tool = ReadFile::new(dir.path().into());
         let result = await_sync(tool.run(r#"{"path": "../../etc/passwd"}"#));
         assert!(result.unwrap_err().contains("escapes the workspace"));
+    }
+
+    /// The race this closes: resolve() canonicalizes at one instant,
+    /// the open happens at another, and a symlink planted into that
+    /// window used to become the write target (outside the checked
+    /// path). O_NOFOLLOW makes the refusal atomic with the open, so
+    /// the primitive refuses a symlinked final component whatever the
+    /// timing; pre-existing links are a different, deterministic case
+    /// (resolve() folds them into their target before any permission
+    /// decision, and that target is inside the checked workspace).
+    #[test]
+    fn the_write_primitive_refuses_symlinks_atomically() {
+        let dir = workspace();
+        std::fs::write(dir.path().join("real.txt"), "real").unwrap();
+        std::os::unix::fs::symlink("real.txt", dir.path().join("link")).unwrap();
+
+        let refused = open_write_trunc_nofollow(&dir.path().join("link"), "link");
+        assert!(
+            refused.is_err(),
+            "the write primitive must not open through a symlink"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("real.txt")).unwrap(),
+            "real",
+            "the link's target must stay untouched"
+        );
+
+        // New files and ordinary files open exactly as before.
+        assert!(open_write_trunc_nofollow(&dir.path().join("brand-new.txt"), "new").is_ok());
+        assert!(open_write_trunc_nofollow(&dir.path().join("real.txt"), "real").is_ok());
     }
 
     #[test]

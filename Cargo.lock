@@ -2207,6 +2207,7 @@ dependencies = [
  "glob",
  "gpui-pre-reqwest",
  "landlock",
+ "libc",
  "regex",
  "serde",
  "serde_json",

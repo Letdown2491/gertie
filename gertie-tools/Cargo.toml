@@ -19,6 +19,8 @@ tokio = { version = "1", features = ["sync"] }
 walkdir = "2"
 # Kernel-level filesystem sandbox for bash children (opt-in).
 landlock = "0.4"
+# O_NOFOLLOW for the write tools (the raced-symlink guard).
+libc = "0.2"
 # Same reqwest fork the provider uses: one TLS stack in the binary.
 reqwest = { package = "gpui-pre-reqwest", version = "0.12.15", default-features = false, features = ["rustls-tls", "json", "blocking"] }
 
