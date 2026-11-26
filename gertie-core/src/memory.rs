@@ -205,6 +205,26 @@ impl MemoryStore {
         topic_files(&self.project_root).len() + topic_files(&self.global_root).len()
     }
 
+    /// A cheap change signal for the topic files: names, sizes and
+    /// modification times across both tiers, hashed. A listing and a
+    /// stat per file, no reads, so a caller can ask every frame and
+    /// rescan only when the answer moves (the files are rewritten in
+    /// place, so a directory mtime alone would miss edits).
+    pub fn fingerprint(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        for root in [&self.project_root, &self.global_root] {
+            for path in topic_files(root) {
+                path.hash(&mut hasher);
+                if let Ok(meta) = std::fs::metadata(&path) {
+                    meta.len().hash(&mut hasher);
+                    meta.modified().ok().hash(&mut hasher);
+                }
+            }
+        }
+        hasher.finish()
+    }
+
     pub fn scan(&self) -> Vec<MemoryEntry> {
         let mut entries = Vec::new();
         for tier in [Tier::Project, Tier::Global] {

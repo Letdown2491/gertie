@@ -25,6 +25,12 @@
   <launchable type="desktop-id">io.github.Letdown2491.gertie.desktop</launchable>
   <url type="homepage">https://github.com/Letdown2491/gertie</url>
   <releases>
+    <release version="1.1.0" date="2026-11-25">
+      <description>
+        <p>A UX pass: the sidebar drives parallel chats (no tab bar), a Stop button for running turns, settings that save as you go, and a header for each conversation.</p>
+        <p>Security hardening: web fetches ask first, a repository's own settings can only tighten yours, writes refuse raced symlinks, reads refuse special and oversized files, and gertie run --yes refuses uncommitted work unless --allow-dirty is given.</p>
+      </description>
+    </release>
     <release version="1.0.1" date="2026-11-01">
       <description>
         <p>Deb, rpm, and flatpak packaging; the Orchard listing.</p>

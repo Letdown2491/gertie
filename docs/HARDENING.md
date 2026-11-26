@@ -193,3 +193,34 @@ this line used to say "classes 1-6 graded", which the checkboxes above never
 supported). Of the graded ones: zero C, zero open B, one A-with-caveat (the
 2048-char instruction cap keeps the first lines; documented). The 13 open ones are
 listed at the top and stay open until each is fired and written up.
+
+## Code audit for 1.1.0 (2026-11-25)
+
+A read-through for performance, resource use, leaks, security and duplication, run
+alongside a review of fourteen hardening PRs. Ten PRs merged (#1, #2, #5, #6, #8, #9,
+#10, #11, #12, #14); #3, #4, #7 and #13 went back with design requests (bash env as a
+denylist, protected paths ask instead of refusing, network isolation as its own
+setting). Fixed in the audit itself:
+
+- The write card's before-content read any path the model named, before approval, so
+  `/dev/zero` would hang the UI. It now goes through the read tools' rules: inside the
+  workspace, a regular file, under the read cap. The turn diff's disk read has the
+  same size and type guard.
+- The footer's memory word re-read every topic file on every frame (every streamed
+  token). It now re-reads only when a fingerprint of the files (names, sizes, mtimes)
+  moves.
+- The @-mention popup walked the workspace on every frame while open, with no bound on
+  entries visited. It is memoized per query and capped at 50,000 entries.
+- Every repaint of an off-screen chat redrew the window. The shell now notifies only
+  when the sidebar's view of it changes.
+- Dropping an idle off-screen view lost a pending delete (its purge timer lived there),
+  an unsent draft and attachments. Such views are kept.
+- The permission broker kept an entry for every ask abandoned by a stopped turn. Each
+  new ask prunes the dead ones.
+- Dependencies: rusqlite 0.43 (libsqlite3-sys RUSTSEC-2026-0459), plus patch releases
+  of url, heapless, rustix and async-executor. `cargo audit` reports no
+  vulnerabilities; nine unmaintained warnings arrive through gpui and have no fix yet.
+
+Open, for later: a worker's ask is broadcast to every subscribed view, so it can show in
+another chat's transcript; bash output over 64 KB still deadlocks until the timeout
+until #3 lands (its drain threads fix it); chat.rs (8.5k lines) wants splitting.

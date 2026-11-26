@@ -422,7 +422,7 @@ matching name replaces the built-in, and may pin its own `model` or `endpoint`):
 
 | Type | Toolset | Posture |
 |---|---|---|
-| `explore` | read-only + web_fetch | auto-approvable research workhorse; cheap model |
+| `explore` | read-only + web_fetch | read-only research workhorse (fetches ask); cheap model |
 | `plan` | read-only | turns fuzzy goals into step-by-step plans; never touches code |
 | `implement` | full | delegated code changes within leader-given scope |
 | `test` | bash + read-only | runs suites, reproduces, verifies; reports, doesn't fix |
@@ -621,7 +621,11 @@ icon.
 The window shell has no tab bar: two lists of the same conversations was one
 too many. The shell keeps one chat view per conversation that has something to say (a
 running turn, an unseen finish, a pause) and shows the active one; an idle view off
-screen is dropped, since its conversation lives in the store and the sidebar. A
+screen is dropped, since its conversation lives in the store and the sidebar, unless
+it holds something only it has (a delete inside its undo window, an unsent draft or
+attachment, a rename in progress). The shell repaints for an off-screen view only when
+what the sidebar shows changes (running, limited, which conversation), not on every
+streamed token. A
 sidebar click routes: a view that already has the conversation open is shown; an idle
 clicked view loads it (adopting its workspace if needed); a clicked view that is
 running a turn is never dragged, a new view opens instead. New chat while a turn runs

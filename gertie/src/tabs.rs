@@ -111,6 +111,10 @@ struct TabState {
     /// The previous render's streaming state: the rising/falling edge
     /// is how a finished turn is seen without a callback.
     prev_streaming: bool,
+    /// What the shell last saw of this view (streaming, limited, open
+    /// session): a repaint that changes none of it is not the shell's
+    /// business.
+    seen: Option<(bool, bool, Option<gertie_core::SessionId>)>,
     /// A turn finished (or the run limited) while another tab was up.
     /// The dot on this tab's label; cleared when the tab activates.
     done_unseen: bool,
@@ -162,67 +166,31 @@ impl WorkspaceView {
     /// starts blank, two views on one session would diverge their
     /// in-memory histories against one database.
     pub fn new(boot: Arc<Bootstrap>, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let panel = cx.new(|_| boot.settings_panel());
-        let guard = live_elsewhere(cx);
-        let switch = switch_to_root(&boot);
-        let shell = cx.entity().downgrade();
-        let this_router: crate::chat::SessionRouter =
-            Arc::new(move |session_id, session_root, origin, window, cx| {
-                let Some(shell) = shell.upgrade() else {
-                    return crate::chat::SessionRouting::Elsewhere;
-                };
-                shell.update(cx, |shell, cx| {
-                    shell.route_session(session_id, session_root, origin, window, cx)
-                })
-            });
-        let first = cx.new(|cx| {
-            ChatView::new(
-                boot.store.clone(),
-                boot.provider(),
-                boot.snapshots.clone(),
-                boot.tools.clone(),
-                boot.model_label(),
-                boot.system_prompt.clone(),
-                boot.instructions.clone(),
-                boot.memory_index.clone(),
-                boot.memory_enabled(),
-                boot.memory.clone(),
-                boot.memory_extract_provider(),
-                boot.max_tool_rounds(),
-                boot.grace_rounds(),
-                boot.templates.clone(),
-                boot.workspace_root.clone(),
-                boot.settle_command(),
-                boot.broker.clone(),
-                boot.session_scope.clone(),
-                boot.mode_scope.clone(),
-                boot.sandbox_bash,
-                boot.default_mode,
-                panel,
-                true,
-                // The first tab shares the workspace: no worktree
-                // branch to name.
-                None,
-                guard,
-                switch,
-                Some(this_router.clone()),
-                window,
-                cx,
-            )
-        });
         let mut this = Self {
             boot,
-            tabs: vec![TabState {
-                view: first,
-                prev_streaming: false,
-                done_unseen: false,
-            }],
+            tabs: Vec::new(),
             active: 0,
             next_worktree: 0,
             shown: None,
             armed_close: None,
         };
-        this.wire_view(0, window, cx);
+        let boot = this.boot.clone();
+        let first = this.make_view(
+            boot.tools.clone(),
+            boot.system_prompt.clone(),
+            boot.instructions.clone(),
+            boot.memory_index.clone(),
+            boot.memory_enabled(),
+            boot.memory.clone(),
+            boot.memory_extract_provider(),
+            // The first view shares the workspace: no worktree branch
+            // to name.
+            None,
+            true,
+            window,
+            cx,
+        );
+        this.push_view(first, window, cx);
         // The window-close gate: registered once, asked on every close
         // attempt (titlebar ✕, Alt+F4, WM gesture, there is no other
         // quit). Returning false holds the window open.
@@ -273,7 +241,25 @@ impl WorkspaceView {
             ChatViewEvent::ConfigSaved => this.reload_and_apply(cx),
         })
         .detach();
-        cx.observe(&view, |_, _, cx| cx.notify()).detach();
+        // A view repaints on every streamed token; the shell only
+        // cares when what the sidebar shows changes (running, limited,
+        // which conversation). An off-screen view's other repaints
+        // must not redraw the window.
+        cx.observe(&view, |this, view, cx| {
+            let chat = view.read(cx);
+            let seen = (
+                chat.is_streaming(),
+                chat.open_session_limited(),
+                chat.session_id(),
+            );
+            if let Some(tab) = this.tabs.iter_mut().find(|tab| tab.view == view)
+                && tab.seen != Some(seen)
+            {
+                tab.seen = Some(seen);
+                cx.notify();
+            }
+        })
+        .detach();
         let shell = cx.entity().downgrade();
         let ask: crate::chat::ShellAsk = std::sync::Arc::new(move |request, window, cx| {
             // The asking view is leased by its own click: the shell
@@ -322,23 +308,14 @@ impl WorkspaceView {
         memory: Option<Arc<gertie_core::MemoryStore>>,
         memory_extract_provider: Option<Arc<dyn gertie_core::Provider>>,
         naming: Option<crate::worktree::BranchNaming>,
+        first: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Entity<ChatView> {
         let panel = cx.new(|_| self.boot.settings_panel());
         let guard = live_elsewhere(cx);
         let switch = switch_to_root(&self.boot);
-        // The sidebar's routing hook: weak self, strong at click time.
-        let shell = cx.entity().downgrade();
-        let this_router: crate::chat::SessionRouter =
-            Arc::new(move |session_id, session_root, origin, window, cx| {
-                let Some(shell) = shell.upgrade() else {
-                    return crate::chat::SessionRouting::Elsewhere;
-                };
-                shell.update(cx, |shell, cx| {
-                    shell.route_session(session_id, session_root, origin, window, cx)
-                })
-            });
+        let router = Self::session_router(cx);
         let view = cx.new(|cx| {
             ChatView::new(
                 self.boot.store.clone(),
@@ -363,17 +340,44 @@ impl WorkspaceView {
                 self.boot.sandbox_bash,
                 self.boot.default_mode,
                 panel,
-                false,
+                first,
                 naming,
                 guard,
                 switch,
-                Some(this_router.clone()),
+                Some(router),
                 window,
                 cx,
             )
         });
-        // Wiring needs &mut self, the caller does it (wire_view).
+        // Wiring needs &mut self, the caller does it (push_view).
         view
+    }
+
+    /// The sidebar's routing hook for a view: weak self, strong at
+    /// click time.
+    fn session_router(cx: &mut Context<Self>) -> crate::chat::SessionRouter {
+        let shell = cx.entity().downgrade();
+        Arc::new(move |session_id, session_root, origin, window, cx| {
+            let Some(shell) = shell.upgrade() else {
+                return crate::chat::SessionRouting::Elsewhere;
+            };
+            shell.update(cx, |shell, cx| {
+                shell.route_session(session_id, session_root, origin, window, cx)
+            })
+        })
+    }
+
+    /// Adds a made view to the shell, shows it and wires it.
+    fn push_view(&mut self, view: Entity<ChatView>, window: &mut Window, cx: &mut Context<Self>) {
+        self.tabs.push(TabState {
+            view,
+            prev_streaming: false,
+            seen: None,
+            done_unseen: false,
+        });
+        self.active = self.tabs.len() - 1;
+        self.wire_view(self.active, window, cx);
+        cx.notify();
     }
 
     /// A new view: a parallel chat in the shared workspace (New chat
@@ -388,18 +392,11 @@ impl WorkspaceView {
             self.boot.memory.clone(),
             self.boot.memory_extract_provider(),
             None,
+            false,
             window,
             cx,
         );
-        self.tabs.push(TabState {
-            view,
-            prev_streaming: false,
-            done_unseen: false,
-        });
-        let index = self.tabs.len() - 1;
-        self.active = index;
-        self.wire_view(index, window, cx);
-        cx.notify();
+        self.push_view(view, window, cx);
     }
 
     /// A worktree chat: parallel chat in its own checkout of the repo,
@@ -439,18 +436,11 @@ impl WorkspaceView {
                             memory,
                             this.boot.memory_extract_provider(),
                             Some(naming),
+                            false,
                             window,
                             cx,
                         );
-                        this.tabs.push(TabState {
-                            view,
-                            prev_streaming: false,
-                            done_unseen: false,
-                        });
-                        let index = this.tabs.len() - 1;
-                        this.active = index;
-                        this.wire_view(index, window, cx);
-                        cx.notify();
+                        this.push_view(view, window, cx);
                     }
                     Err(error) => {
                         this.tell_active(format!("No worktree chat: {error}"), cx);
@@ -462,6 +452,20 @@ impl WorkspaceView {
 }
 
 impl WorkspaceView {
+    /// Tests: the active tab's chat handle, the tab count, and the
+    /// active tab's root. The routing assertions read these.
+    pub fn tab_probe(&self, cx: &gpui_kit::App) -> (usize, Entity<ChatView>, std::path::PathBuf) {
+        (
+            self.tabs.len(),
+            self.tabs[self.active].view.clone(),
+            self.tabs[self.active]
+                .view
+                .read(cx)
+                .workspace_root()
+                .to_path_buf(),
+        )
+    }
+
     /// Routes a sidebar click to the view where the session belongs:
     /// 0. a view already has it open → show that view (two views on
     ///    one session would diverge their histories);
@@ -479,20 +483,6 @@ impl WorkspaceView {
     /// its share of the work (rules 1 and 3, the refusals) leaves as
     /// the returned instruction. Whatever the shell does itself
     /// touches only off-screen views.
-    /// Tests: the active tab's chat handle, the tab count, and the
-    /// active tab's root. The routing assertions read these.
-    pub fn tab_probe(&self, cx: &gpui_kit::App) -> (usize, Entity<ChatView>, std::path::PathBuf) {
-        (
-            self.tabs.len(),
-            self.tabs[self.active].view.clone(),
-            self.tabs[self.active]
-                .view
-                .read(cx)
-                .workspace_root()
-                .to_path_buf(),
-        )
-    }
-
     pub fn route_session(
         &mut self,
         session_id: gertie_core::SessionId,
@@ -586,6 +576,7 @@ impl WorkspaceView {
             switched.memory.clone(),
             switched.memory_extract_provider.clone(),
             None,
+            false,
             window,
             cx,
         );
@@ -593,15 +584,7 @@ impl WorkspaceView {
             view.adopt_switch(switched, cx);
             view.switch_to_session(session_id, window, cx);
         });
-        self.tabs.push(TabState {
-            view,
-            prev_streaming: false,
-            done_unseen: false,
-        });
-        let index = self.tabs.len() - 1;
-        self.active = index;
-        self.wire_view(index, window, cx);
-        cx.notify();
+        self.push_view(view, window, cx);
         crate::chat::SessionRouting::Elsewhere
     }
 
@@ -635,14 +618,20 @@ impl Render for WorkspaceView {
             };
             attention.push(mark);
         }
-        // Drop the off-screen views with nothing to say: their
+        // Drop the off-screen views with nothing to say and nothing
+        // unsaved (holds_unsaved): their
         // conversations are in the store, a sidebar click reopens them.
+        let unsaved: Vec<bool> = self
+            .tabs
+            .iter()
+            .map(|tab| tab.view.read(cx).holds_unsaved(cx))
+            .collect();
         let mut index = 0;
         let mut kept_attention = Vec::with_capacity(attention.len());
         let active = self.active;
         let mut new_active = 0;
         self.tabs.retain(|_| {
-            let keep = index == active || attention[index] != Attention::None;
+            let keep = index == active || attention[index] != Attention::None || unsaved[index];
             if keep {
                 if index == active {
                     new_active = kept_attention.len();

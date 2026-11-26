@@ -160,6 +160,18 @@ fn check_readable_size(path: &Path, label: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// A workspace file's text, under the same rules the read tools
+/// follow: the path must resolve inside `root` (no escapes, symlinks
+/// folded), and it must be a regular file under the read cap. For the
+/// UI's previews (a write card's before-content), which must never
+/// read what the tools themselves would refuse: a model-named
+/// `/dev/zero` or a 10 GB log is a hang, not a preview.
+pub fn read_workspace_file(root: &Path, path: &str) -> Result<String, String> {
+    let resolved = resolve(root, path)?;
+    check_readable_size(&resolved, path)?;
+    std::fs::read_to_string(&resolved).map_err(|error| format!("{path}: {error}"))
+}
+
 /// Shared plumbing: every tool holds its workspace root and turns the
 /// model's JSON into a result. Local file/process I/O is short and
 /// synchronous by nature, but not *bounded* by anything but the

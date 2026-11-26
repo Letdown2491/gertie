@@ -73,6 +73,9 @@ impl PermissionBroker {
         let (respond, answer) = oneshot::channel();
         let id = {
             let mut state = self.state.lock().unwrap();
+            // Asks whose asker is gone (a stopped turn, a closed view)
+            // can never be answered: their entries would only pile up.
+            state.pending.retain(|(_, sender)| !sender.is_closed());
             let id = state.next_id;
             state.next_id += 1;
             state.pending.push((id, respond));
@@ -256,6 +259,19 @@ mod tests {
         // Supervised never pre-approves anything.
         assert!(!PermissionMode::Supervised.auto_allows(true, true, false));
         assert!(!PermissionMode::Supervised.auto_allows(false, true, true));
+    }
+
+    /// A stopped turn drops its receiver mid-ask: the next request
+    /// prunes the dead entry, and answering it is a harmless no-op.
+    #[test]
+    fn abandoned_asks_do_not_pile_up() {
+        let broker = PermissionBroker::new();
+        let (stale, receiver) = broker.request(call(), PromptSource::Leader);
+        drop(receiver);
+        let (live, _receiver) = broker.request(call(), PromptSource::Leader);
+        assert_eq!(broker.state.lock().unwrap().pending.len(), 1);
+        assert!(!broker.respond(stale, PermissionDecision::Approve));
+        assert!(broker.respond(live, PermissionDecision::Approve));
     }
 
     fn call() -> ToolCall {

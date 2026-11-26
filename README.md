@@ -99,7 +99,8 @@ explains the whole system, including the weekly cleanup pass ("dreaming").
 `config.example.toml` documents everything else: wire selection (`openai` |
 `anthropic`), fallback endpoints, MCP servers, custom agents, search backends,
 sandboxing. `gertie run` prompts for approval of mutating tool calls; pipe-safe mode
-denies them unless `--yes` is given. [docs/TOUR.md](docs/TOUR.md) is the guided
+denies them unless `--yes` is given, and `--yes` refuses uncommitted work unless
+`--allow-dirty` is given too. [docs/TOUR.md](docs/TOUR.md) is the guided
 version of this whole list.
 
 ## Security posture
@@ -120,8 +121,8 @@ version of this whole list.
 
 ## Status
 
-**1.0.1**, with an unreleased UX pass on main (no tab bar, Stop, settings that save
-as you go). Feature-complete against [DESIGN.md](DESIGN.md) (see "The original 'Deferred'
+**1.1.0**: the sidebar drives parallel chats (no tab bar), Stop, settings that save
+as you go, and a round of security hardening. Feature-complete against [DESIGN.md](DESIGN.md) (see "The original 'Deferred'
 row" for every decision and its rationale). New to the tool? [The tour](docs/TOUR.md)
 walks the whole surface in ten minutes.
 

@@ -30,14 +30,14 @@ icon = "https://raw.githubusercontent.com/Letdown2491/gertie/main/assets/gertie-
 
 [release]
 # Placeholder. The workflow sets ORCHARD_PUBLISH_VERSION from the tag.
-version = "1.0.1"
+version = "1.1.0"
 channel = "stable"
 arch = "linux-x86_64"
 # The listing declares coverage for both arches; the CI prepare legs
 # pass --arch for their own build, and the single signing run publishes
 # one listing with both prepared assets.
 platforms = ["linux-x86_64", "linux-aarch64"]
-notes = "The first flatpak: the same binary the release page carries, packaged for the desktop."
+notes = "A cleaner window (the sidebar drives parallel chats), a Stop button, settings that save as you go, and a round of security hardening."
 
 [artifact]
 tree = "tree"

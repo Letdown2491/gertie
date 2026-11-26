@@ -390,6 +390,15 @@ pub struct ChatView {
     /// session's own endpoint). Filled from config at construction.
     memory_enabled: bool,
     memory_store: Option<Arc<gertie_core::MemoryStore>>,
+    /// The footer's memory word, cached: computing it reads every
+    /// topic file, and the footer renders every frame (every token of
+    /// a streaming turn). Keyed by the store's fingerprint, so a write
+    /// from anywhere (panel, agent, editor) shows on the next frame.
+    memory_word: std::cell::RefCell<Option<(u64, Option<String>)>>,
+    /// The @-mention popup's last answer, keyed by the query and the
+    /// root: matching walks the workspace, and the composer's popup
+    /// asks every frame while it is open.
+    mention_cache: std::cell::RefCell<Option<(String, std::path::PathBuf, Vec<MentionMatch>)>>,
     /// The extraction provider, resolved at construction (the named
     /// endpoint, else the session's own). None = extraction disabled.
     memory_extract_provider: Option<Arc<dyn gertie_core::Provider>>,
@@ -892,6 +901,8 @@ impl ChatView {
             memory_index,
             memory_enabled,
             memory_store,
+            memory_word: Default::default(),
+            mention_cache: Default::default(),
             memory_extract_provider,
             max_tool_rounds,
             grace_rounds,
@@ -985,6 +996,17 @@ impl ChatView {
     }
 
     /// The session the transcript is bound to, for tests and tooling.
+    /// Work that lives only in this view and would be lost with it: a
+    /// delete inside its undo window (the purge timer runs here), an
+    /// unsent draft or attachments, a rename in progress. The shell
+    /// keeps such a view alive even when it is idle and off screen.
+    pub fn holds_unsaved(&self, cx: &App) -> bool {
+        !self.pending_deletes.is_empty()
+            || !self.attachments.is_empty()
+            || self.renaming.is_some()
+            || !self.input.read(cx).value().trim().is_empty()
+    }
+
     /// The shell's hook, set once after construction.
     pub fn set_shell_ask(&mut self, ask: ShellAsk) {
         self.shell_ask = Some(ask);
@@ -2116,7 +2138,15 @@ impl ChatView {
                         let root = snapshots
                             .workspace_of(change.checkpoint)
                             .unwrap_or_else(|| self.workspace_root.clone());
-                        std::fs::read(resolve_tool_path(&root, &change.path)).unwrap_or_default()
+                        // A regular file under the read cap only: the
+                        // path may have become a FIFO or a huge file
+                        // since the turn ran.
+                        let path = resolve_tool_path(&root, &change.path);
+                        std::fs::metadata(&path)
+                            .ok()
+                            .filter(|meta| meta.is_file() && meta.len() <= 10 * 1024 * 1024)
+                            .and_then(|_| std::fs::read(&path).ok())
+                            .unwrap_or_default()
                     }
                 };
                 let diff = match (std::str::from_utf8(&before), std::str::from_utf8(&after)) {
@@ -2536,6 +2566,7 @@ impl ChatView {
     /// (a directory read per tier) and always current, so the panel
     /// never shows a stale count after a vote or a dream.
     fn refresh_memory_rows(&mut self) {
+        self.memory_word.replace(None);
         self.memory_rows = self
             .memory_store
             .as_ref()
@@ -3391,7 +3422,7 @@ impl ChatView {
     /// Enter's mention acceptance: the popup's top row attaches.
     fn accept_mention_top(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
         let value = self.input.read(cx).value().to_string();
-        let mut matches = mention_matches(&value, &self.workspace_root);
+        let mut matches = self.mentions(&value);
         let selected = self
             .popup_selection
             .take()
@@ -5147,7 +5178,7 @@ impl ChatView {
         let query = value.trim_end_matches('\n');
         let slash_rows = slash_matches(query, &self.templates).len();
         let popup_rows = if slash_rows == 0 {
-            mention_matches(query, &self.workspace_root).len()
+            self.mentions(query).len()
         } else {
             slash_rows
         };
@@ -5802,6 +5833,53 @@ impl ChatView {
             .into_any_element()
     }
 
+    /// How much this workspace remembers, for the footer. Shown when
+    /// the store holds *entries*; when it only holds files (prose
+    /// notes, not yet indexed entries) the word still shows, with the
+    /// file count: an existing store with a blank word reads as
+    /// "memory does not exist", and the word is the door to the panel
+    /// either way. Truly empty stores show nothing (a memoryless
+    /// session pays zero attention). Cached, see `memory_word`.
+    /// The @-mention matches for the composer's text, memoized on the
+    /// text and the root (see `mention_cache`). A file created while
+    /// the popup is open shows once the query changes.
+    fn mentions(&self, input: &str) -> Vec<MentionMatch> {
+        if let Some((query, root, matches)) = self.mention_cache.borrow().as_ref()
+            && query == input
+            && *root == self.workspace_root
+        {
+            return matches.clone();
+        }
+        let matches = mention_matches(input, &self.workspace_root);
+        self.mention_cache.replace(Some((
+            input.to_string(),
+            self.workspace_root.clone(),
+            matches.clone(),
+        )));
+        matches
+    }
+
+    fn memory_word(&self) -> Option<String> {
+        let store = self.memory_store.as_ref()?;
+        let fingerprint = store.fingerprint();
+        if let Some((seen, word)) = self.memory_word.borrow().as_ref()
+            && *seen == fingerprint
+        {
+            return word.clone();
+        }
+        let entries = store.scan().len();
+        let files = store.topic_file_count();
+        let word = if entries > 0 {
+            Some(format!("memory {entries}"))
+        } else if files > 0 {
+            Some(format!("memory ({files} files)"))
+        } else {
+            None
+        };
+        self.memory_word.replace(Some((fingerprint, word.clone())));
+        word
+    }
+
     fn render_token_footer(&self, cx: &Context<Self>) -> AnyElement {
         let parts = self.footer_parts();
         let near_compaction = self
@@ -5841,18 +5919,8 @@ impl ChatView {
         // reads as "memory does not exist", and the chip is the door
         // to the panel either way. Truly empty stores hide it (a
         // memoryless session pays zero attention).
-        let memory = self.memory_store.as_ref().map(|store| {
-            let entries = store.scan().len();
-            let files = store.topic_file_count();
-            if entries > 0 {
-                format!("memory {entries}")
-            } else if files > 0 {
-                format!("memory ({files} files)")
-            } else {
-                String::new()
-            }
-        });
-        let memory = memory.filter(|label| !label.is_empty()).map(|label| {
+        let memory = self.memory_word();
+        let memory = memory.map(|label| {
             let tooltip =
                 "memory: what gertie recalls in this repo and for you; click to read and vote.";
             div()
@@ -6492,8 +6560,10 @@ impl ChatView {
         }
         let value: serde_json::Value = serde_json::from_str(&call.arguments).ok()?;
         let path = value.get("path")?.as_str()?;
-        let resolved = resolve_tool_path(&self.workspace_root, std::path::Path::new(path));
-        std::fs::read_to_string(resolved).ok()
+        // The tools' own rules: inside the workspace, a regular file,
+        // under the read cap. The model names this path before anyone
+        // approves anything.
+        gertie_tools::read_workspace_file(&self.workspace_root, path).ok()
     }
 
     /// The ledger's before-content for a write card: the checkpoint
@@ -6937,7 +7007,7 @@ impl Render for ChatView {
         let value = self.input.read(cx).value().to_string();
         let slash = slash_matches(&value, &self.templates);
         let mentions = if slash.is_empty() {
-            mention_matches(&value, &self.workspace_root)
+            self.mentions(&value)
         } else {
             Vec::new()
         };
@@ -8175,6 +8245,11 @@ fn mention_matches(input: &str, root: &std::path::Path) -> Vec<MentionMatch> {
         return Vec::new();
     }
     let token = input[at..].to_string();
+    // The walk's budget in directory entries: a repo with a vendored
+    // tree or a data directory is millions of entries, and the popup
+    // owes an answer now, not a complete one.
+    const MAX_VISITED: usize = 50_000;
+    let mut visited = 0usize;
     let mut files = Vec::new();
     let mut stack = vec![root.to_path_buf()];
     while let Some(dir) = stack.pop() {
@@ -8182,6 +8257,11 @@ fn mention_matches(input: &str, root: &std::path::Path) -> Vec<MentionMatch> {
             continue;
         };
         for entry in read.flatten() {
+            visited += 1;
+            if visited > MAX_VISITED {
+                stack.clear();
+                break;
+            }
             let path = entry.path();
             let Ok(file_type) = entry.file_type() else {
                 continue;
@@ -8194,9 +8274,7 @@ fn mention_matches(input: &str, root: &std::path::Path) -> Vec<MentionMatch> {
                 ) {
                     continue;
                 }
-                if files.len() < 512 {
-                    stack.push(path);
-                }
+                stack.push(path);
                 continue;
             }
             let relative = path

@@ -1,14 +1,16 @@
 #!/usr/bin/env bash
-# Builds gertie inside a container (kumaOS is atomic: no host toolchain).
-# Derives localhost/gertie-dev from kuma-dev-gcc on first use; rustup and
-# the cargo registry live in named volumes so later builds are incremental.
+# Builds gertie inside a container (the host is atomic: no toolchain).
+# Builds localhost/gertie-dev (fedora:43, containers/) on first use; rustup
+# and the cargo registry live in named volumes so later builds are
+# incremental. Never run two of these at once: they share target/.
 #
 #   ./scripts/build.sh check             # cargo check, all targets
-#   ./scripts/build.sh build             # debug build, installs to ~/.local/bin
+#   ./scripts/build.sh build             # debug build, installs the binary to ~/.local/bin
 #   ./scripts/build.sh build --release
 #   ./scripts/build.sh test
 #   ./scripts/build.sh clippy
 #   ./scripts/build.sh fmt --all --check
+#   ./scripts/build.sh audit             # cargo-audit (installed in the volume)
 set -euo pipefail
 cd "$(dirname "$0")/.."
 

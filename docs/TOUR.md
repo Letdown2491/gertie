@@ -97,7 +97,9 @@ the capability system. Configure in `config.toml` (`[[mcp_servers]]`) or the pan
 ## Headless: the same engine, no window
 
 `gertie run "one-turn task"` runs the identical loop with stdout for the answer and
-pipe-safe approvals (mutating calls deny themselves unless you pass `--yes`). The
+pipe-safe approvals (mutating calls deny themselves unless you pass `--yes`, and
+`--yes` refuses a git workspace with uncommitted changes unless you also pass
+`--allow-dirty`: auto-approval over work you can't roll back is opt-in). The
 library behind it (`gertie-core`) is plain Rust: embed the agent in CI, an editor, a
 server. Same sessions, same memory, same permission broker.
 
