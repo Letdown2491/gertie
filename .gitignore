@@ -1,3 +1,6 @@
 /target
 /research/
 /.gertie/
+# Built by self/assemble.sh (CI does it per release); only metadata is source.
+/self/tree/files/
+/self/tree/export/
