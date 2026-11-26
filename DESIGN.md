@@ -310,7 +310,12 @@ Provenance rides every entry, it is the memory-poisoning mitigation and the audi
 A `memories` table + FTS5 index (the `messages_fts` pattern) mirrors the files: ids, counters,
 dates, validity, typed links, source session. Markdown is the record; the sidecar is derived
 and rebuilt on hash mismatch. Superseding an entry sets `valid_until`, history is never
-deleted, so "what did we believe when we wrote this code" is a query.
+deleted, so "what did we believe when we wrote this code" is a query. A supersede that knows
+its replacement writes it on the line (`[superseded by: p31; valid until: DATE]`), and typed
+links live on the `from` entry's line (`[links: builds_on p7]`): the structure travels with
+the files (a clone, a wiped sidecar), and `memory_links` is rebuilt from them on every sync.
+Links that once lived only in the sidecar moved onto their lines once, on the first sync
+after upgrade.
 
 **Read path: frozen index, fetched body.** Cache prefixes build tools→system→messages, and any
 byte change busts everything after the change, a mutable index inside the system prompt is a
@@ -319,8 +324,9 @@ the index is snapshotted at session start, frozen for the session (mutations lan
 session), injected *after* the static system prompt, and capped (`[memory] index_budget`,
 default 600 tokens). Everything else is on demand: `search_memory` (FTS5 over the sidecar,
 returning ranked id/date/title pointers the model reads the file for), ordinary file reads,
-validity-filtered queries. Typed links (SOLVES/CAUSES/BUILDS_ON/REPLACES) and PPR reranking
-wait until the linked graph is large enough to need them, graph structure helps multi-hop
+validity-filtered queries. Typed links (relates_to, solves, causes, builds_on, replaces) ride
+`search_memory` hits by id and show in the panel, beside a superseded entry's replacement
+chain; PPR reranking over them waits until the linked graph is large enough to need them, graph structure helps multi-hop
 queries, and coding queries are mostly single-hop identifier lookups FTS5 already wins.
 
 **Three write paths, all delta-only** (the one hard law in the ablation literature: Dynamic

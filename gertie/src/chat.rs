@@ -10,7 +10,8 @@ pub mod turn;
 use transcript::resolve_tool_path;
 
 pub use aux::{
-    MentionMatch, human_tokens, mention_matches, mention_matches_for_test, mode_menu_rows, tildify,
+    MentionMatch, human_tokens, memory_chain, mention_matches, mention_matches_for_test,
+    mode_menu_rows, tildify,
 };
 
 use crate::bootstrap::Reloaded;
@@ -2667,6 +2668,17 @@ impl ChatView {
                         (None, Some(added)) => format!("added {added}"),
                         (None, None) => String::new(),
                     };
+                    // The structure line: the replacement chain for a
+                    // superseded entry, then its links, by id.
+                    let mut structure = Vec::new();
+                    let chain = memory_chain(&self.memory_rows, &entry.id);
+                    if !chain.is_empty() {
+                        structure.push(format!("replaced by {}", chain.join(" → ")));
+                    }
+                    for link in &entry.links {
+                        structure.push(format!("{} {}", link.relation.replace('_', " "), link.to));
+                    }
+                    let structure = structure.join(" · ");
                     h_flex()
                         .id(SharedString::from(format!("memory-row-{id}")))
                         .gap_2()
@@ -2727,6 +2739,16 @@ impl ChatView {
                                     .text_size(px(10.5))
                                     .text_color(cx.theme().muted_foreground)
                                     .child(provenance),
+                            )
+                        })
+                        .when(!structure.is_empty(), |row| {
+                            row.child(
+                                div()
+                                    .id(SharedString::from(format!("memory-structure-{id}")))
+                                    .text_size(px(10.5))
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child(structure)
+                                    .test_support(),
                             )
                         })
                         .into_any_element()
@@ -2911,7 +2933,10 @@ impl ChatView {
                     format!("add {} :: {text}", file)
                 }
                 gertie_core::Op::Update { id, text } => format!("update {id} :: {text}"),
-                gertie_core::Op::Supersede { id } => format!("supersede {id}"),
+                gertie_core::Op::Supersede { id, by: Some(by) } => {
+                    format!("supersede {id} (replaced by {by})")
+                }
+                gertie_core::Op::Supersede { id, by: None } => format!("supersede {id}"),
                 gertie_core::Op::Archive { id } => format!("archive {id}"),
                 gertie_core::Op::Merge { keep, drop, .. } => {
                     format!("merge {drop} into {keep}")

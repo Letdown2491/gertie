@@ -15,6 +15,12 @@
 //! unique across the two roots without coordination. Superseded and
 //! archived lines end in `[valid until: DATE]` or `[archived: DATE]`;
 //! both parse back into `valid_until` and both keep history queryable.
+//! A supersede that names its replacement writes
+//! `[superseded by: p31; valid until: DATE]`, so the chain is in the
+//! file. Typed links live on the `from` entry's line,
+//! `[links: builds_on p7, solves p9]`: the files carry the whole
+//! structure, and the sidecar's `memory_links` is rebuilt from them on
+//! every sync, like everything else it holds.
 
 use crate::agent::sanitize_untrusted;
 use rusqlite::Connection;
@@ -70,7 +76,25 @@ pub struct MemoryEntry {
     /// Set by supersede/archive: the entry stopped being current on
     /// this date. History keeps the row and the line.
     pub valid_until: Option<String>,
+    /// Set by a supersede that names its replacement: the id that
+    /// took this entry's place.
+    pub superseded_by: Option<String>,
+    /// Typed links from this entry to others, in line order.
+    pub links: Vec<Link>,
 }
+
+/// A typed link from one entry to another, stored on the `from`
+/// entry's line.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Link {
+    pub relation: String,
+    pub to: String,
+}
+
+/// The relations a link may carry. Anything else is refused at the
+/// op, and a hand-written unknown relation leaves the bracket as
+/// entry text (the parser's rule for brackets it does not own).
+pub const RELATIONS: [&str; 5] = ["relates_to", "solves", "causes", "builds_on", "replaces"];
 
 /// A search hit: enough to find the entry (the model reads the file),
 /// never the whole store.
@@ -81,6 +105,8 @@ pub struct MemoryHit {
     pub file: String,
     pub text: String,
     pub added_at: Option<String>,
+    /// The hit's typed links, so the model can follow them by id.
+    pub links: Vec<Link>,
 }
 
 /// A delta operation, the only way memory changes under harness hands.
@@ -98,8 +124,11 @@ pub enum Op {
     },
     /// Replace an entry's text, counters and provenance preserved.
     Update { id: String, text: String },
-    /// Mark an entry replaced by newer knowledge.
-    Supersede { id: String },
+    /// Mark an entry replaced by newer knowledge. `by` names the
+    /// replacing entry; None inside a batch with exactly one Add
+    /// resolves to that add's new id (extraction's add-then-supersede
+    /// pair), otherwise the line records only the date.
+    Supersede { id: String, by: Option<String> },
     /// Mark an entry retired (no replacement).
     Archive { id: String },
     /// Consolidation: two entries say the same thing. The first id
@@ -111,7 +140,8 @@ pub enum Op {
         drop: String,
         text: String,
     },
-    /// A typed link between entries, stored in the sidecar only.
+    /// A typed link between entries, written to the `from` entry's
+    /// line (the sidecar rebuilds from it).
     Link {
         from: String,
         to: String,
@@ -259,9 +289,10 @@ impl MemoryStore {
 
     /// Brings the sidecar in line with the files: parse only what the
     /// hash says changed, drop rows for files that left. Link rows are
-    /// preserved across syncs (they point at ids, not files); the
-    /// dreaming pass owns their cleanup.
+    /// rebuilt whole from the files every time: they are a handful of
+    /// rows, and a rebuild can never disagree with the record.
     pub fn sync(&self) -> rusqlite::Result<()> {
+        self.migrate_sidecar_links()?;
         self.store.with_connection(|connection| {
             let on_disk: Vec<(Tier, PathBuf, String, Vec<MemoryEntry>)> =
                 [Tier::Project, Tier::Global]
@@ -331,8 +362,8 @@ impl MemoryStore {
                 for entry in unique {
                     connection.execute(
                         "INSERT INTO memories (id, tier, file, content, helpful, harmful,
-                            source_session, added_at, valid_until)
-                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                            source_session, added_at, valid_until, superseded_by)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
                         rusqlite::params![
                             entry.id,
                             tier.name(),
@@ -343,6 +374,7 @@ impl MemoryStore {
                             entry.source_session,
                             entry.added_at,
                             entry.valid_until,
+                            entry.superseded_by,
                         ],
                     )?;
                     connection.execute(
@@ -381,6 +413,19 @@ impl MemoryStore {
                     rusqlite::params![tier.name(), file_name(Path::new(known_path))],
                 )?;
                 connection.execute("DELETE FROM memory_files WHERE path = ?1", [known_path])?;
+            }
+
+            connection.execute("DELETE FROM memory_links", [])?;
+            for (_, _, _, entries) in &on_disk {
+                for entry in entries {
+                    for link in &entry.links {
+                        connection.execute(
+                            "INSERT OR IGNORE INTO memory_links (from_id, to_id, relation)
+                             VALUES (?1, ?2, ?3)",
+                            rusqlite::params![entry.id, link.to, link.relation],
+                        )?;
+                    }
+                }
             }
             Ok(())
         })
@@ -436,9 +481,25 @@ impl MemoryStore {
                     file: row.get(2)?,
                     text: row.get(3)?,
                     added_at: row.get(4)?,
+                    links: Vec::new(),
                 })
             })?;
-            rows.collect()
+            let mut hits = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+            let mut links = connection.prepare(
+                "SELECT relation, to_id FROM memory_links WHERE from_id = ?1
+                 ORDER BY rowid",
+            )?;
+            for hit in &mut hits {
+                hit.links = links
+                    .query_map([&hit.id], |row| {
+                        Ok(Link {
+                            relation: row.get(0)?,
+                            to: row.get(1)?,
+                        })
+                    })?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+            }
+            Ok(hits)
         })
     }
 
@@ -448,7 +509,7 @@ impl MemoryStore {
         self.store.with_connection(|connection| {
             let mut statement = connection.prepare(
                 "SELECT id, tier, file, content, helpful, harmful, source_session, added_at,
-                        valid_until
+                        valid_until, superseded_by
                  FROM memories
                  WHERE valid_until IS NULL OR valid_until > ?1
                  ORDER BY id",
@@ -463,6 +524,8 @@ impl MemoryStore {
                     source_session: row.get(6)?,
                     added_at: row.get(7)?,
                     valid_until: row.get(8)?,
+                    superseded_by: row.get(9)?,
+                    links: Vec::new(),
                 })
             })?;
             rows.collect()
@@ -475,6 +538,11 @@ impl MemoryStore {
     pub fn apply(&self, ops: &[Op], budget_tokens: usize) -> rusqlite::Result<ApplyReport> {
         let mut report = ApplyReport::default();
         let mut spent = 0usize;
+        // A supersede that names nothing, in a batch with exactly one
+        // add, was replaced by that add (extraction cannot know the
+        // new id, so the pair is the reference).
+        let lone_add = ops.iter().filter(|op| matches!(op, Op::Add { .. })).count() == 1;
+        let mut added: Option<String> = None;
         for op in ops {
             let cost = match op {
                 Op::Add { text, .. } | Op::Update { text, .. } => text.len() / 4 + 1,
@@ -488,20 +556,19 @@ impl MemoryStore {
                 continue;
             }
             let result = match op {
-                Op::Add { file, text, source } => self.add_entry(file, text, source.clone()),
+                Op::Add { file, text, source } => {
+                    self.add_entry(file, text, source.clone()).map(|id| {
+                        added = Some(id);
+                    })
+                }
                 Op::Update { id, text } => self.update_entry(id, text),
-                Op::Supersede { id } => self.retire_entry(id, "[valid until: "),
+                Op::Supersede { id, by } => {
+                    let by = by.clone().or_else(|| added.clone().filter(|_| lone_add));
+                    self.supersede_entry(id, by.as_deref())
+                }
                 Op::Archive { id } => self.retire_entry(id, "[archived: "),
                 Op::Merge { keep, drop, text } => self.merge_entries(keep, drop, text),
-                Op::Link { from, to, relation } => self.store.with_connection(|connection| {
-                    connection
-                        .execute(
-                            "INSERT OR IGNORE INTO memory_links (from_id, to_id, relation)
-                             VALUES (?1, ?2, ?3)",
-                            rusqlite::params![from, to, relation],
-                        )
-                        .map(|_| ())
-                }),
+                Op::Link { from, to, relation } => self.link_entries(from, to, relation),
             };
             match result {
                 Ok(()) => {
@@ -518,7 +585,12 @@ impl MemoryStore {
     /// Appends one entry to the project tier. The file name is
     /// constrained to a plain topic file inside the tier root: no
     /// traversal, no `MEMORY.md` (the index is derived, not authored).
-    fn add_entry(&self, file: &str, text: &str, source: Option<String>) -> rusqlite::Result<()> {
+    fn add_entry(
+        &self,
+        file: &str,
+        text: &str,
+        source: Option<String>,
+    ) -> rusqlite::Result<String> {
         let file = sanitize_untrusted(file, 64);
         if !valid_topic_name(&file) {
             return Err(rusqlite::Error::InvalidParameterName("file".into()));
@@ -535,8 +607,11 @@ impl MemoryStore {
             source_session: source,
             added_at: Some(date),
             valid_until: None,
+            superseded_by: None,
+            links: Vec::new(),
         });
-        append_line(self.root(Tier::Project).join(&file), &line)
+        append_line(self.root(Tier::Project).join(&file), &line)?;
+        Ok(id)
     }
 
     fn update_entry(&self, id: &str, text: &str) -> rusqlite::Result<()> {
@@ -599,6 +674,110 @@ impl MemoryStore {
             |_| Ok(merged),
         )?;
         self.retire_entry(drop, "[archived: ")
+    }
+
+    /// Supersede, naming the replacement when there is one. The
+    /// replacement must exist and must not be the entry itself; an
+    /// already-retired entry keeps its first retirement.
+    fn supersede_entry(&self, id: &str, by: Option<&str>) -> rusqlite::Result<()> {
+        let Some(by) = by else {
+            return self.retire_entry(id, "[valid until: ");
+        };
+        let entries = self.scan();
+        if by == id || !entries.iter().any(|entry| entry.id == by) {
+            return Err(rusqlite::Error::InvalidParameterName("by".into()));
+        }
+        let entry = entries
+            .into_iter()
+            .find(|entry| entry.id == id)
+            .ok_or(rusqlite::Error::QueryReturnedNoRows)?;
+        if entry.valid_until.is_some() {
+            return Ok(());
+        }
+        let line = render_line(&MemoryEntry {
+            valid_until: Some(self.today()?),
+            superseded_by: Some(by.to_string()),
+            ..entry.clone()
+        });
+        rewrite_line(self.root(tier_of(&entry.id)).join(&entry.file), id, |_| {
+            Ok(line)
+        })
+    }
+
+    /// Writes a typed link onto the `from` entry's line. Both ends
+    /// must exist, the relation must be one of [`RELATIONS`]
+    /// (case-folded), and a link already on the line is a no-op.
+    fn link_entries(&self, from: &str, to: &str, relation: &str) -> rusqlite::Result<()> {
+        let relation = relation.trim().to_ascii_lowercase();
+        if !RELATIONS.contains(&relation.as_str()) {
+            return Err(rusqlite::Error::InvalidParameterName("relation".into()));
+        }
+        let entries = self.scan();
+        if from == to || !entries.iter().any(|entry| entry.id == to) {
+            return Err(rusqlite::Error::InvalidParameterName("to".into()));
+        }
+        let entry = entries
+            .into_iter()
+            .find(|entry| entry.id == from)
+            .ok_or(rusqlite::Error::QueryReturnedNoRows)?;
+        let link = Link {
+            relation,
+            to: to.to_string(),
+        };
+        if entry.links.contains(&link) {
+            return Ok(());
+        }
+        let mut links = entry.links.clone();
+        links.push(link);
+        let line = render_line(&MemoryEntry {
+            links,
+            ..entry.clone()
+        });
+        rewrite_line(
+            self.root(tier_of(&entry.id)).join(&entry.file),
+            from,
+            |_| Ok(line),
+        )
+    }
+
+    /// The one-time move of links that lived only in the sidecar
+    /// (before they were written to the files) onto their `from`
+    /// lines. Rows whose ends no longer exist, or with an unknown
+    /// relation, are dropped: the files are the record from here on.
+    fn migrate_sidecar_links(&self) -> rusqlite::Result<()> {
+        type Row = (String, String, String);
+        let rows: Option<Vec<Row>> =
+            self.store
+                .with_connection(|connection| -> rusqlite::Result<Option<Vec<Row>>> {
+                    let done: i64 = connection.query_row(
+                        "SELECT count(*) FROM memory_migrations WHERE name = 'links_to_files'",
+                        [],
+                        |row| row.get(0),
+                    )?;
+                    if done > 0 {
+                        return Ok(None);
+                    }
+                    let mut statement =
+                        connection.prepare("SELECT from_id, to_id, relation FROM memory_links")?;
+                    let rows = statement
+                        .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
+                        .collect::<rusqlite::Result<Vec<_>>>()?;
+                    Ok(Some(rows))
+                })?;
+        let Some(rows) = rows else {
+            return Ok(());
+        };
+        for (from, to, relation) in rows {
+            // A refused row is exactly the case the doc above drops.
+            let _ = self.link_entries(&from, &to, &relation);
+        }
+        self.store.with_connection(|connection| {
+            connection.execute(
+                "INSERT OR IGNORE INTO memory_migrations (name) VALUES ('links_to_files')",
+                [],
+            )?;
+            Ok(())
+        })
     }
 
     fn retire_entry(&self, id: &str, marker: &str) -> rusqlite::Result<()> {
@@ -698,6 +877,8 @@ pub fn add_global(
         source_session: source,
         added_at: Some(date),
         valid_until: None,
+        superseded_by: None,
+        links: Vec::new(),
     });
     append_line(store.global_root.join(&file), &line)
 }
@@ -776,6 +957,8 @@ fn parse_entry(line: &str, tier: Tier, file: &str) -> Option<MemoryEntry> {
     let mut source_session = None;
     let mut added_at = None;
     let mut valid_until = None;
+    let mut superseded_by = None;
+    let mut links = Vec::new();
     loop {
         let trimmed = text.trim_end();
         if !trimmed.ends_with(']') {
@@ -787,6 +970,19 @@ fn parse_entry(line: &str, tier: Tier, file: &str) -> Option<MemoryEntry> {
         let inner = &trimmed[open + 1..trimmed.len() - 1];
         if let Some(date) = inner.strip_prefix("valid until:") {
             valid_until = Some(date.trim().to_string());
+        } else if inner.starts_with("superseded by:") {
+            for part in inner.split(';') {
+                let part = part.trim();
+                if let Some(by) = part.strip_prefix("superseded by:") {
+                    superseded_by = Some(by.trim().to_string());
+                } else if let Some(date) = part.strip_prefix("valid until:") {
+                    valid_until = Some(date.trim().to_string());
+                }
+            }
+        } else if let Some(list) = inner.strip_prefix("links:")
+            && let Some(parsed) = parse_links(list)
+        {
+            links = parsed;
         } else if let Some(date) = inner.strip_prefix("archived:") {
             valid_until = Some(date.trim().to_string());
         } else if inner.starts_with("source:") || inner.starts_with("added:") {
@@ -815,7 +1011,28 @@ fn parse_entry(line: &str, tier: Tier, file: &str) -> Option<MemoryEntry> {
         source_session,
         added_at,
         valid_until,
+        superseded_by,
+        links,
     })
+}
+
+/// `builds_on p7, solves p9` into links; None (the bracket stays
+/// text) when any item is not `relation id` with a known relation.
+fn parse_links(list: &str) -> Option<Vec<Link>> {
+    list.split(',')
+        .map(|item| {
+            let mut words = item.split_whitespace();
+            let relation = words.next()?;
+            let to = words.next()?;
+            if words.next().is_some() || !RELATIONS.contains(&relation) {
+                return None;
+            }
+            Some(Link {
+                relation: relation.to_string(),
+                to: to.to_string(),
+            })
+        })
+        .collect()
 }
 
 /// Renders an entry back to its canonical line. Parse then render is
@@ -825,6 +1042,15 @@ fn render_line(entry: &MemoryEntry) -> String {
         "- [{}] helpful={} harmful={} {}",
         entry.id, entry.helpful, entry.harmful, entry.text
     );
+    if !entry.links.is_empty() {
+        let list = entry
+            .links
+            .iter()
+            .map(|link| format!("{} {}", link.relation, link.to))
+            .collect::<Vec<_>>()
+            .join(", ");
+        line.push_str(&format!(" [links: {list}]"));
+    }
     if entry.source_session.is_some() || entry.added_at.is_some() {
         line.push_str(" [source: ");
         let mut first = true;
@@ -840,8 +1066,13 @@ fn render_line(entry: &MemoryEntry) -> String {
         }
         line.push(']');
     }
-    if let Some(until) = &entry.valid_until {
-        line.push_str(&format!(" [valid until: {until}]"));
+    match (&entry.superseded_by, &entry.valid_until) {
+        (Some(by), Some(until)) => {
+            line.push_str(&format!(" [superseded by: {by}; valid until: {until}]"))
+        }
+        (Some(by), None) => line.push_str(&format!(" [superseded by: {by}]")),
+        (None, Some(until)) => line.push_str(&format!(" [valid until: {until}]")),
+        (None, None) => {}
     }
     line
 }
@@ -908,7 +1139,8 @@ fn describe(op: &Op) -> String {
     match op {
         Op::Add { file, text, .. } => format!("add {file}: {}", first_words(text)),
         Op::Update { id, text } => format!("update {id}: {}", first_words(text)),
-        Op::Supersede { id } => format!("supersede {id}"),
+        Op::Supersede { id, by: Some(by) } => format!("supersede {id} by {by}"),
+        Op::Supersede { id, by: None } => format!("supersede {id}"),
         Op::Archive { id } => format!("archive {id}"),
         Op::Merge { keep, drop, .. } => format!("merge {keep} into {drop}"),
         Op::Link { from, to, relation } => format!("link {from} {relation} {to}"),
@@ -938,7 +1170,8 @@ pub(crate) fn migrate(connection: &Connection) -> rusqlite::Result<()> {
              source_session TEXT,
              added_at TEXT,
              valid_until TEXT,
-             retrieved_at TEXT
+             retrieved_at TEXT,
+             superseded_by TEXT
          );
          CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts
              USING fts5(content, id UNINDEXED, tier UNINDEXED);
@@ -952,6 +1185,10 @@ pub(crate) fn migrate(connection: &Connection) -> rusqlite::Result<()> {
              relation TEXT NOT NULL,
              PRIMARY KEY (from_id, to_id, relation)
          );
+         -- One-time data moves, by name.
+         CREATE TABLE IF NOT EXISTS memory_migrations (
+             name TEXT PRIMARY KEY
+         );
          -- Extraction's once-per-digest gate: a session whose digest
          -- hash is here has already had its proposal taken.
          CREATE TABLE IF NOT EXISTS memory_extracted (
@@ -959,7 +1196,19 @@ pub(crate) fn migrate(connection: &Connection) -> rusqlite::Result<()> {
              session_id INTEGER,
              extracted_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
          );",
-    )
+    )?;
+    // Columns added after a table first shipped: CREATE TABLE IF NOT
+    // EXISTS leaves an existing table as it was.
+    let has_superseded_by = connection
+        .prepare("SELECT 1 FROM pragma_table_info('memories') WHERE name = 'superseded_by'")?
+        .exists([])?;
+    if !has_superseded_by {
+        connection.execute("ALTER TABLE memories ADD COLUMN superseded_by TEXT", [])?;
+        // Rows synced before the column existed must be re-parsed for
+        // it: forgetting the file hashes makes the next sync do that.
+        connection.execute("DELETE FROM memory_files", [])?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1071,7 +1320,10 @@ mod tests {
                         id: "p1".into(),
                         text: "the flake is the teardown, always was".into(),
                     },
-                    Op::Supersede { id: "p1".into() },
+                    Op::Supersede {
+                        id: "p1".into(),
+                        by: None,
+                    },
                     Op::Archive { id: "p999".into() },
                 ],
                 4096,
@@ -1098,34 +1350,50 @@ mod tests {
         );
     }
 
-    #[test]
-    fn sync_rebuilds_from_files_and_preserves_links() {
-        let tmp = tempfile::tempdir().unwrap();
-        let (store, session) = store_with_roots(&tmp);
-        store
+    fn link_count(session: &crate::SessionStore) -> i64 {
+        session
+            .with_connection(|connection| {
+                connection.query_row("SELECT count(*) FROM memory_links", [], |row| row.get(0))
+            })
+            .unwrap()
+    }
+
+    fn add(store: &MemoryStore, text: &str) {
+        let report = store
             .apply(
                 &[Op::Add {
                     file: "decisions.md".into(),
-                    text: "postgres over sqlite".into(),
+                    text: text.into(),
                     source: None,
                 }],
                 4096,
             )
             .unwrap();
-        store
+        assert_eq!(report.applied.len(), 1);
+    }
+
+    #[test]
+    fn sync_rebuilds_from_files_and_links_come_from_the_lines() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (store, session) = store_with_roots(&tmp);
+        add(&store, "postgres over sqlite");
+        add(&store, "the pool is sized for postgres");
+        let report = store
             .apply(
                 &[Op::Link {
-                    from: "p1".into(),
+                    from: "p2".into(),
                     to: "p1".into(),
-                    relation: "CAUSES".into(),
+                    relation: "BUILDS_ON".into(),
                 }],
                 16,
             )
             .unwrap();
-
-        // A hand edit: the next sync picks it up (the hash changed).
+        assert_eq!(report.applied.len(), 1);
         let path = tmp.path().join("project-memory/decisions.md");
         let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("the pool is sized for postgres [links: builds_on p1]"));
+
+        // A hand edit: the next sync picks it up (the hash changed).
         std::fs::write(
             &path,
             format!("{text}- [p1] helpful=9 harmful=9 tampered [source: 1; added: 2026-01-01]\n"),
@@ -1133,21 +1401,227 @@ mod tests {
         .unwrap();
         store.sync().unwrap();
         let entries = store.scan();
-        assert_eq!(entries.len(), 2, "the hand-written line parses too");
-        assert_eq!(entries[1].helpful, 9);
-
-        // The tamper reaches the sidecar: same id, replaced content.
+        assert_eq!(entries.len(), 3, "the hand-written line parses too");
+        assert_eq!(entries[2].helpful, 9);
         let hits = store.search("tampered", 10).unwrap();
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].id, "p1");
+        assert_eq!(link_count(&session), 1);
 
-        // Links survive the resync (they point at ids, not files).
-        let count: i64 = session
+        // The sidecar is derived: wiped, it comes back from the files,
+        // links included, the way a clone's would.
+        session
             .with_connection(|connection| {
-                connection.query_row("SELECT count(*) FROM memory_links", [], |row| row.get(0))
+                connection.execute_batch("DELETE FROM memory_links; DELETE FROM memory_files;")
             })
             .unwrap();
-        assert_eq!(count, 1);
+        store.sync().unwrap();
+        assert_eq!(link_count(&session), 1);
+        let hits = store.search("pool", 10).unwrap();
+        assert_eq!(
+            hits[0].links,
+            vec![Link {
+                relation: "builds_on".into(),
+                to: "p1".into()
+            }]
+        );
+
+        // Removing the link from the line removes it from the sidecar.
+        let text = std::fs::read_to_string(&path).unwrap();
+        std::fs::write(&path, text.replace(" [links: builds_on p1]", "")).unwrap();
+        store.sync().unwrap();
+        assert_eq!(link_count(&session), 0);
+    }
+
+    #[test]
+    fn a_link_needs_two_real_ends_and_a_known_relation() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (store, _session) = store_with_roots(&tmp);
+        add(&store, "one");
+        add(&store, "two");
+        let link = |from: &str, to: &str, relation: &str| Op::Link {
+            from: from.into(),
+            to: to.into(),
+            relation: relation.into(),
+        };
+        let report = store
+            .apply(
+                &[
+                    link("p1", "p1", "solves"),
+                    link("p1", "p9", "solves"),
+                    link("p1", "p2", "inspires"),
+                    link("p1", "p2", "solves"),
+                    link("p1", "p2", "solves"),
+                ],
+                4096,
+            )
+            .unwrap();
+        assert_eq!(report.skipped.len(), 3);
+        let entries = store.scan();
+        assert_eq!(entries[0].links.len(), 1, "a repeated link is a no-op");
+    }
+
+    #[test]
+    fn a_supersede_names_its_replacement_on_the_line() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (store, session) = store_with_roots(&tmp);
+        add(&store, "old belief");
+        add(&store, "new belief");
+        let report = store
+            .apply(
+                &[Op::Supersede {
+                    id: "p1".into(),
+                    by: Some("p2".into()),
+                }],
+                16,
+            )
+            .unwrap();
+        assert_eq!(report.applied, vec!["supersede p1 by p2"]);
+        let text = std::fs::read_to_string(tmp.path().join("project-memory/decisions.md")).unwrap();
+        let today = store.today().unwrap();
+        assert!(text.contains(&format!(
+            "old belief [source: added: {today}] [superseded by: p2; valid until: {today}]"
+        )));
+        let entries = store.scan();
+        assert_eq!(entries[0].superseded_by.as_deref(), Some("p2"));
+        assert_eq!(entries[0].valid_until.as_deref(), Some(today.as_str()));
+        // The sidecar carries the pointer too.
+        let by: Option<String> = session
+            .with_connection(|connection| {
+                connection.query_row(
+                    "SELECT superseded_by FROM memories WHERE id = 'p1'",
+                    [],
+                    |row| row.get(0),
+                )
+            })
+            .unwrap();
+        assert_eq!(by.as_deref(), Some("p2"));
+
+        // A replacement that does not exist, or the entry itself, is refused.
+        add(&store, "third");
+        let report = store
+            .apply(
+                &[
+                    Op::Supersede {
+                        id: "p3".into(),
+                        by: Some("p77".into()),
+                    },
+                    Op::Supersede {
+                        id: "p3".into(),
+                        by: Some("p3".into()),
+                    },
+                ],
+                16,
+            )
+            .unwrap();
+        assert_eq!(report.skipped.len(), 2);
+    }
+
+    #[test]
+    fn a_lone_add_is_what_its_batch_supersede_was_replaced_by() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (store, _session) = store_with_roots(&tmp);
+        add(&store, "use tabs");
+        store
+            .apply(
+                &[
+                    Op::Add {
+                        file: "decisions.md".into(),
+                        text: "use spaces".into(),
+                        source: None,
+                    },
+                    Op::Supersede {
+                        id: "p1".into(),
+                        by: None,
+                    },
+                ],
+                4096,
+            )
+            .unwrap();
+        assert_eq!(store.scan()[0].superseded_by.as_deref(), Some("p2"));
+
+        // Two adds: no guess, the date alone.
+        store
+            .apply(
+                &[
+                    Op::Add {
+                        file: "decisions.md".into(),
+                        text: "a".into(),
+                        source: None,
+                    },
+                    Op::Add {
+                        file: "decisions.md".into(),
+                        text: "b".into(),
+                        source: None,
+                    },
+                    Op::Supersede {
+                        id: "p2".into(),
+                        by: None,
+                    },
+                ],
+                4096,
+            )
+            .unwrap();
+        let p2 = store
+            .scan()
+            .into_iter()
+            .find(|entry| entry.id == "p2")
+            .unwrap();
+        assert!(p2.valid_until.is_some());
+        assert_eq!(p2.superseded_by, None);
+    }
+
+    #[test]
+    fn the_new_markers_round_trip_and_unknown_links_stay_text() {
+        let line = "- [p4] helpful=1 harmful=0 the pool is tuned [links: builds_on p1, solves p2] \
+                    [source: 12; added: 2026-11-01] [superseded by: p9; valid until: 2026-11-20]";
+        let entry = parse_entry(line, Tier::Project, "decisions.md").unwrap();
+        assert_eq!(entry.text, "the pool is tuned");
+        assert_eq!(entry.links.len(), 2);
+        assert_eq!(entry.superseded_by.as_deref(), Some("p9"));
+        assert_eq!(entry.valid_until.as_deref(), Some("2026-11-20"));
+        assert_eq!(render_line(&entry), line);
+
+        let odd = "- [p5] helpful=0 harmful=0 see [links: inspired p1]";
+        let entry = parse_entry(odd, Tier::Project, "decisions.md").unwrap();
+        assert_eq!(entry.text, "see [links: inspired p1]");
+        assert!(entry.links.is_empty());
+    }
+
+    #[test]
+    fn sidecar_only_links_move_into_the_files_once() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (store, session) = store_with_roots(&tmp);
+        add(&store, "one");
+        add(&store, "two");
+        // The pre-1.2 state: links in the sidecar, none on the lines,
+        // and the migration not yet run.
+        session
+            .with_connection(|connection| {
+                connection.execute_batch(
+                    "DELETE FROM memory_migrations;
+                     INSERT INTO memory_links VALUES ('p2', 'p1', 'solves');
+                     INSERT INTO memory_links VALUES ('p2', 'p404', 'solves');",
+                )
+            })
+            .unwrap();
+        store.sync().unwrap();
+        let entries = store.scan();
+        assert_eq!(
+            entries[1].links,
+            vec![Link {
+                relation: "solves".into(),
+                to: "p1".into()
+            }]
+        );
+        assert_eq!(link_count(&session), 1, "the dangling row is dropped");
+
+        // Once: a link removed by hand afterwards stays removed.
+        let path = tmp.path().join("project-memory/decisions.md");
+        let text = std::fs::read_to_string(&path).unwrap();
+        std::fs::write(&path, text.replace(" [links: solves p1]", "")).unwrap();
+        store.sync().unwrap();
+        assert!(store.scan()[1].links.is_empty());
     }
 
     #[test]

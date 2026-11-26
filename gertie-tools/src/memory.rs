@@ -524,12 +524,22 @@ impl Tool for SearchMemory {
             let mut out = String::new();
             for hit in hits {
                 out.push_str(&format!(
-                    "[{}] {}, added {}\n   {}\n\n",
+                    "[{}] {}, added {}\n   {}\n",
                     hit.id,
                     hit.file,
                     hit.added_at.as_deref().unwrap_or("-"),
                     hit.text
                 ));
+                if !hit.links.is_empty() {
+                    let links = hit
+                        .links
+                        .iter()
+                        .map(|link| format!("{} {}", link.relation, link.to))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    out.push_str(&format!("   links: {links}\n"));
+                }
+                out.push('\n');
             }
             Ok(out)
         })

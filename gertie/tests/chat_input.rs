@@ -855,6 +855,40 @@ fn a_down_vote_alone_lands() {
     );
 }
 
+/// A superseded entry's row says what replaced it, and a linked
+/// entry's row names its links: the structure the files carry is
+/// visible where the entries are.
+#[test]
+fn the_panel_shows_the_replacement_chain_and_links() {
+    let (mut fixture, dir) = fixture_with_memory();
+    std::fs::create_dir_all(dir.path().join("project")).expect("tier root");
+    std::fs::write(
+        dir.path().join("project").join("decisions.md"),
+        "- [p1] helpful=0 harmful=0 tabs [superseded by: p2; valid until: 2026-11-01]\n\
+         - [p2] helpful=0 harmful=0 spaces [superseded by: p3; valid until: 2026-11-20]\n\
+         - [p3] helpful=0 harmful=0 spaces, four wide [links: builds_on p2]\n",
+    )
+    .expect("topic file");
+    fixture.act(|window, cx| {
+        window.input("hello", cx);
+        window.press("enter", cx);
+    });
+    fixture.act(|window, cx| {
+        window.click("memory-chip", cx);
+    });
+    let mut shown = (false, false, false);
+    fixture.act(|window, _| {
+        shown = (
+            window.try_find("memory-structure-p1").is_some(),
+            window.try_find("memory-structure-p3").is_some(),
+            window.try_find("memory-vote-up-p3").is_some(),
+        );
+    });
+    assert!(shown.2, "the panel is open with its rows");
+    assert!(shown.0, "a superseded entry shows its chain");
+    assert!(shown.1, "a linked entry shows its links");
+}
+
 #[test]
 fn voting_through_the_panel_writes_the_counters() {
     let (mut fixture, dir) = fixture_with_memory();

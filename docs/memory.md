@@ -43,8 +43,8 @@ your rules, the repo root for project rules), not memory. Gertie reads those eve
 turn. An `AGENTS.md` in a subdirectory (`docs/AGENTS.md`, `migrations/AGENTS.md`)
 holds rules for that part of the tree: it is loaded the first time a tool reads or
 edits a file under it, and shows up in that tool's result in the transcript. Each file
-is capped at 2048 characters. Memory is recall it consults when relevant. Keep keys and credentials in config
-or env, never in either.
+is capped at 2048 characters. Memory is recall it consults when relevant. Keep keys
+and credentials in config or env, never in either.
 
 ## Under the hood, briefly
 
@@ -54,3 +54,18 @@ session so prompt caching works; everything else the model fetches on demand wit
 search tool. Proposals come from one cheap model call at session end. The cleanup is a
 deterministic pass, no model, so it can't invent a merge. Nothing is ever deleted;
 superseded entries gain a marker and stay in the file for history.
+
+An entry is one line, with its markers in brackets at the end:
+
+```
+- [p12] helpful=2 harmful=0 the pool is sized for postgres [links: builds_on p7] [source: 388; added: 2026-07-11] [superseded by: p31; valid until: 2026-11-20]
+```
+
+- `[links: ...]` connects an entry to others: `relates_to`, `solves`, `causes`,
+  `builds_on` or `replaces`, then the other entry's id.
+- `[superseded by: p31; valid until: ...]` says what replaced an entry and when. An
+  entry retired with nothing to replace it says only `[valid until: ...]`.
+
+Because these live in the file, they travel with the repo and survive a rebuilt
+database. The memory panel shows each superseded entry's chain ("replaced by p31 →
+p40") and each entry's links. Edit them by hand like anything else in the file.

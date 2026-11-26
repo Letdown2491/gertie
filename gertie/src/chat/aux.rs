@@ -39,6 +39,26 @@ pub fn mode_menu_rows(current: PermissionMode) -> Vec<(PermissionMode, &'static 
     .collect()
 }
 
+/// The replacement chain of a superseded entry, by id: whatever
+/// replaced it, then whatever replaced that, in order. Empty for a
+/// current entry. A cycle (a hand edit) or a missing id ends the walk.
+pub fn memory_chain(entries: &[gertie_core::MemoryEntry], id: &str) -> Vec<String> {
+    let mut chain: Vec<String> = Vec::new();
+    let mut current = id;
+    while let Some(next) = entries
+        .iter()
+        .find(|entry| entry.id == current)
+        .and_then(|entry| entry.superseded_by.as_deref())
+    {
+        if next == id || chain.iter().any(|seen| seen == next) {
+            break;
+        }
+        chain.push(next.to_string());
+        current = next;
+    }
+    chain
+}
+
 /// `HOME`, or a path outside it: printed whole.
 pub fn tildify(path: &std::path::Path) -> String {
     let home = std::env::var("HOME").ok().filter(|home| !home.is_empty());
@@ -158,4 +178,37 @@ pub fn mention_matches(input: &str, root: &std::path::Path) -> Vec<MentionMatch>
             token: token.clone(),
         })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn entry(id: &str, by: Option<&str>) -> gertie_core::MemoryEntry {
+        gertie_core::MemoryEntry {
+            id: id.into(),
+            file: "decisions.md".into(),
+            text: id.into(),
+            helpful: 0,
+            harmful: 0,
+            source_session: None,
+            added_at: None,
+            valid_until: by.map(|_| "2026-11-26".into()),
+            superseded_by: by.map(Into::into),
+            links: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn the_chain_follows_each_replacement_and_stops_on_a_cycle() {
+        let rows = vec![
+            entry("p12", Some("p31")),
+            entry("p31", Some("p40")),
+            entry("p40", None),
+        ];
+        assert_eq!(memory_chain(&rows, "p12"), vec!["p31", "p40"]);
+        assert!(memory_chain(&rows, "p40").is_empty());
+        let looped = vec![entry("p1", Some("p2")), entry("p2", Some("p1"))];
+        assert_eq!(memory_chain(&looped, "p1"), vec!["p2"]);
+    }
 }

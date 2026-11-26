@@ -56,12 +56,14 @@ Propose changes to a long-term memory store as a JSON array of ops. \
 Ops:\n\
 - {{\"op\":\"add\",\"file\":\"<topic-file>.md\",\"text\":\"<one-line entry>\",\"source\":\"<session ref>\"}}\n\
 - {{\"op\":\"update\",\"id\":\"<entry id>\",\"text\":\"<one-line replacement>\"}}\n\
-- {{\"op\":\"supersede\",\"id\":\"<entry id>\"}}\n\
+- {{\"op\":\"supersede\",\"id\":\"<entry id>\",\"by\":\"<id of the existing entry that replaces it, if any>\"}}\n\
 - {{\"op\":\"archive\",\"id\":\"<entry id>\"}}\n\
 - {{\"op\":\"link\",\"from\":\"<id>\",\"to\":\"<id>\",\"relation\":\"relates_to|solves|causes|builds_on|replaces\"}}\n\n\
 Rules: one line per entry, under 160 chars. Facts and preferences only, \
 never task narration. Supersede an existing entry when the new fact \
-replaces it. Existing memory (do not repeat it):\n{index}\n\n\
+replaces it: pair the supersede with the add that states the new fact \
+(with exactly one add in the array, the pair is linked automatically), \
+or name an existing replacement in by. Existing memory (do not repeat it):\n{index}\n\n\
 Return ONLY the JSON array, no prose.\n\nSession:\n{digest}"
     )
 }
@@ -130,6 +132,11 @@ pub fn parse_ops(raw: &str) -> Result<Vec<Op>, String> {
             },
             "supersede" => Op::Supersede {
                 id: text_field("id")?,
+                by: obj
+                    .get("by")
+                    .and_then(|value| value.as_str())
+                    .map(|value| sanitize_untrusted(value, 16))
+                    .filter(|value| !value.trim().is_empty()),
             },
             "archive" => Op::Archive {
                 id: text_field("id")?,
@@ -199,8 +206,13 @@ mod tests {
             ops[0],
             Op::Add { ref file, .. } if file == "gotchas.md"
         ));
-        assert!(matches!(ops[2], Op::Supersede { ref id } if id == "p7"));
+        assert!(matches!(ops[2], Op::Supersede { ref id, by: None } if id == "p7"));
         assert!(matches!(ops[4], Op::Link { ref relation, .. } if relation == "solves"));
+        let named = parse_ops(r#"[{"op":"supersede","id":"p7","by":"p8"}]"#).unwrap();
+        assert!(matches!(
+            named[0],
+            Op::Supersede { ref id, by: Some(ref by) } if id == "p7" && by == "p8"
+        ));
     }
 
     #[test]
