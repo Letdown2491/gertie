@@ -773,25 +773,33 @@ impl ChatView {
                     // whole rather than losing it.
                     None => (action.as_str(), ""),
                 };
-                v_flex()
+                // Single-line, the FILES idiom: the entry's file
+                // left (truncated when long), the verb right-aligned
+                // where FILES puts its badge.
+                div()
                     .id(SharedString::from(format!("status-memory-{action}")))
-                    .gap_0p5()
+                    .flex()
+                    .items_center()
+                    .justify_between()
+                    .gap_2()
                     .px_2()
-                    .py_1p5()
+                    .py_1()
                     .rounded_sm()
                     .bg(theme.secondary)
                     .text_size(px(12.))
                     .child(
                         div()
-                            .text_size(px(10.5))
-                            .font_weight(gpui_kit::FontWeight::SEMIBOLD)
-                            .text_color(theme.muted_foreground)
-                            .child(verb.to_string()),
+                            .min_w_0()
+                            .flex_1()
+                            .truncate()
+                            .text_color(theme.foreground)
+                            .child(SharedString::from(file.to_string())),
                     )
                     .child(
                         div()
-                            .text_color(theme.foreground)
-                            .child(SharedString::from(file.to_string())),
+                            .text_size(px(10.5))
+                            .text_color(theme.muted_foreground)
+                            .child(verb.to_string()),
                     )
                     .into_any_element()
             });
