@@ -23,12 +23,16 @@ USAGE:
 OPTIONS:
     --config <PATH>    config file (default: the standard config dir)
     -y, --yes          run: auto-approve every mutating tool call
+    --allow-dirty      run: let --yes run over a git workspace with
+                       uncommitted changes (the net is off)
     -h, --help         print this help
     -V, --version      print version
 
 run approval: mutating calls print the tool and arguments on stderr and
 wait. Enter/y approves, anything else denies. Without a terminal, runs
-deny mutations unless --yes is given. Reads are always auto-approved.";
+deny mutations unless --yes is given, and --yes refuses a dirty git
+workspace unless --allow-dirty is also given. Reads are always
+auto-approved.";
 
 /// What the command line asked for.
 #[derive(Debug, PartialEq)]
@@ -41,6 +45,9 @@ pub enum Command {
     Run {
         prompt: Option<String>,
         yes: bool,
+        /// Let `--yes` run over a git workspace with uncommitted
+        /// changes: the net is knowingly off.
+        allow_dirty: bool,
         config: Option<PathBuf>,
         ephemeral: bool,
     },
@@ -67,6 +74,7 @@ pub struct UsageError(pub String);
 pub fn parse(arguments: &[String]) -> Result<Command, UsageError> {
     let mut config: Option<PathBuf> = None;
     let mut yes = false;
+    let mut allow_dirty = false;
     let mut ephemeral = false;
     let mut positional: Vec<String> = Vec::new();
     let mut run = false;
@@ -81,6 +89,7 @@ pub fn parse(arguments: &[String]) -> Result<Command, UsageError> {
             "-h" | "--help" => return Ok(Command::Help),
             "-V" | "--version" => return Ok(Command::Version),
             "-y" | "--yes" => yes = true,
+            "--allow-dirty" if run => allow_dirty = true,
             "--ephemeral" if run => ephemeral = true,
             "--clean-worktrees" if !run => clean_worktrees = true,
             "--check-updates" if !run => check_updates = true,
@@ -148,6 +157,7 @@ pub fn parse(arguments: &[String]) -> Result<Command, UsageError> {
     Ok(Command::Run {
         prompt,
         yes,
+        allow_dirty,
         config,
         ephemeral,
     })
@@ -179,10 +189,28 @@ mod tests {
             Command::Run {
                 prompt: Some("fix the tests".into()),
                 yes: true,
+                allow_dirty: false,
                 config: None,
                 ephemeral: false,
             }
         );
+    }
+
+    /// The dirty-git escape hatch is run-only and parses anywhere in
+    /// the run invocation.
+    #[test]
+    fn allow_dirty_parses_on_run_and_nowhere_else() {
+        let command = parse_arguments(&["run", "--yes", "--allow-dirty", "hi"]).unwrap();
+        assert!(matches!(
+            command,
+            Command::Run {
+                yes: true,
+                allow_dirty: true,
+                ..
+            }
+        ));
+        let refused = parse_arguments(&["--allow-dirty"]);
+        assert!(refused.is_err(), "--allow-dirty without run is a usage error");
     }
 
     #[test]
