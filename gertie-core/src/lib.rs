@@ -10,6 +10,7 @@ pub mod directory_instructions;
 pub mod memory;
 pub mod memory_extract;
 pub mod permissions;
+pub mod projects;
 pub mod provider;
 pub mod request;
 pub mod snapshot;
@@ -25,6 +26,7 @@ pub use memory::{Link, MemoryEntry, MemoryHit, MemoryStore, Op, Tier};
 pub use permissions::{
     AskFilter, ModeScope, PendingAsk, PermissionBroker, PermissionMode, PromptSource, TurnToken,
 };
+pub use projects::{Project, project_for};
 pub use provider::Provider;
 pub use request::{
     IMAGE_MARKER_PREFIX, Request, ToolCall, ToolSpec, WireMessage, data_url_parts,
@@ -361,6 +363,7 @@ impl SessionStore {
         // Memory's sidecar tables (the always-layer's index). No
         // triggers: the sync pass owns these rows in batches.
         crate::memory::migrate(&connection)?;
+        crate::projects::migrate(&connection)?;
         Ok(Self {
             connection: std::sync::Mutex::new(connection),
         })

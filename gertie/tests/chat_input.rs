@@ -1904,6 +1904,115 @@ fn two_session_store() -> Arc<SessionStore> {
     store
 }
 
+/// Two chats in two folders, one of them a project.
+fn project_store() -> (Arc<SessionStore>, i64) {
+    let store = two_session_store();
+    store.set_session_workspace(gertie_core::SessionId(1), Path::new("/w/alpha"));
+    store.set_session_workspace(gertie_core::SessionId(2), Path::new("/w/beta"));
+    let project = store
+        .add_project(Path::new("/w/alpha"), None)
+        .expect("project");
+    (store, project.id)
+}
+
+fn shown(fixture: &mut Fixture, ids: &[&str]) -> Vec<bool> {
+    let mut out = Vec::new();
+    fixture.act(|window, _| {
+        out = ids
+            .iter()
+            .map(|id| window.try_find(id.to_string()).is_some())
+            .collect();
+    });
+    out
+}
+
+/// Projects group the sidebar: a chat sits under the project its
+/// folder is in, the rest under Other, and both groups fold, the
+/// project's fold persisting in the store.
+#[test]
+fn chats_group_under_their_project_and_the_rest_under_other() {
+    let (store, id) = project_store();
+    let mut fixture = fixture_with_store(store.clone());
+    let header = format!("project-{id}");
+    assert_eq!(
+        shown(
+            &mut fixture,
+            &[&header, "project-other", "session-1", "session-2"]
+        ),
+        vec![true, true, true, true]
+    );
+    fixture.act(|window, cx| window.click(header.clone(), cx));
+    assert_eq!(
+        shown(&mut fixture, &["session-1", "session-2"]),
+        vec![false, true],
+        "folding the project hides its chat only"
+    );
+    assert!(
+        store.list_projects().unwrap()[0].collapsed,
+        "the fold persists"
+    );
+    fixture.act(|window, cx| window.click("project-other", cx));
+    assert_eq!(shown(&mut fixture, &["session-2"]), vec![false]);
+    assert!(store.store_flag("other_collapsed"));
+}
+
+/// Removing a project only takes it off the list: its chat stays, now
+/// under the flat list (no projects left), and keeps its folder.
+#[test]
+fn removing_a_project_keeps_its_chats_and_their_folder() {
+    let (store, id) = project_store();
+    let mut fixture = fixture_with_store(store.clone());
+    fixture.act(|window, cx| window.click(format!("project-remove-{id}"), cx));
+    assert!(store.list_projects().unwrap().is_empty());
+    assert_eq!(
+        shown(
+            &mut fixture,
+            &[&format!("project-{id}"), "project-other", "session-1"]
+        ),
+        vec![false, false, true],
+        "no projects: the list is flat again"
+    );
+    assert_eq!(
+        store
+            .session_workspace(gertie_core::SessionId(1))
+            .as_deref(),
+        Some("/w/alpha")
+    );
+}
+
+/// A project's + opens a blank chat rooted in its folder.
+#[test]
+fn a_projects_plus_starts_a_chat_in_its_folder() {
+    let store = Arc::new(SessionStore::open(Path::new(":memory:")).expect("memory store"));
+    let folder = tempfile::tempdir().expect("project folder");
+    let project = store.add_project(folder.path(), None).expect("project");
+    let mut fixture = fixture_with_store(store);
+    fixture.act(|window, cx| window.click(format!("project-new-{}", project.id), cx));
+    let (root, session) = fixture.cx.update(|cx| {
+        let view = fixture.view.upgrade().expect("view alive").read(cx);
+        (view.workspace_root_for_test(), view.session_id())
+    });
+    assert_eq!(
+        root.canonicalize().unwrap(),
+        folder.path().canonicalize().unwrap()
+    );
+    assert_eq!(session, None, "a blank chat, created by its first message");
+}
+
+/// The palette finds a project by name; confirming it opens the group.
+#[test]
+fn the_palette_finds_a_project_and_opens_its_group() {
+    let (store, id) = project_store();
+    store.set_project_collapsed(id, true).expect("fold");
+    let mut fixture = fixture_with_store(store.clone());
+    assert_eq!(shown(&mut fixture, &["session-1"]), vec![false]);
+    fixture.act(|window, cx| window.press("ctrl-k", cx));
+    fixture.act(|window, cx| window.input("alpha", cx));
+    fixture.act(|window, cx| window.press("enter", cx));
+    assert_eq!(shown(&mut fixture, &["session-1"]), vec![true]);
+    assert!(!store.list_projects().unwrap()[0].collapsed);
+}
+
 /// Settle is a lifecycle, not a filter: ✓ folds a session out of the
 /// active list, the fold expands, ↩ (or just opening the session)
 /// brings it back. The record is untouched throughout.

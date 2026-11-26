@@ -650,6 +650,20 @@ are. The sidebar carries the working marker: a live turn shows a green dot on it
 conversation's row, a finish seen by nobody a blue one, a rate-limit pause the pause
 icon.
 
+**Projects** group the sidebar. A project is a folder and a name in the session store
+(`projects`), nothing more: no settings ride on it yet. A conversation belongs to the
+project whose folder is the longest component-wise prefix of its recorded
+`workspace_root`, so membership is derived, never stored per chat: a worktree chat
+(its checkout sits under `<repo>/.gertie/worktrees/`) lands under its repo for free,
+and adding or removing a project re-sorts history without touching a session row.
+Removing is list-only (the folder and the chats stay; the chats fall into Other).
+Each group folds, and the fold persists. With no projects the sidebar is the old flat
+list. The first launch after the upgrade makes one project per folder existing chats
+ran in, minus the home folder and worktree checkouts, once per store, so a removed
+project is never resurrected. A project's + opens a blank chat rooted in its folder;
+a view that cannot take it (a turn running, a worktree tab) asks the shell for a new
+one. The palette matches project names and folders above history hits.
+
 The window shell has no tab bar: two lists of the same conversations was one
 too many. The shell keeps one chat view per conversation that has something to say (a
 running turn, an unseen finish, a pause) and shows the active one; an idle view off

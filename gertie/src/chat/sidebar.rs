@@ -32,6 +32,7 @@ impl ChatView {
                     .px_2()
                     .gap_0p5()
                     .overflow_y_scroll()
+                    .track_scroll(&self.sidebar_scroll)
                     // Who this is: the mark and the name, as in
                     // the launcher.
                     .child(
@@ -80,17 +81,7 @@ impl ChatView {
                             .test_support(),
                         )
                     })
-                    .child(
-                        div()
-                            .px_2()
-                            .pt_4()
-                            .pb_1()
-                            .text_size(px(11.))
-                            .font_weight(gpui_kit::FontWeight::SEMIBOLD)
-                            .text_color(cx.theme().muted_foreground)
-                            .child("SESSIONS"),
-                    )
-                    .children(self.active_session_rows(&visible, cx))
+                    .children(self.grouped_rows(&visible, cx))
                     // The settled fold: put-down work, collapsed
                     // by default, findable, never in the way.
                     .when(visible.iter().any(|summary| summary.settled), |col| {
@@ -209,6 +200,253 @@ impl ChatView {
                         .test_support(),
                     ),
             )
+            .into_any_element()
+    }
+
+    /// The active list: a header with the add-project button, then one
+    /// group per project (its chats under a collapsible header) and an
+    /// "Other" group for chats outside every project. With no projects
+    /// the list is flat, as before projects existed.
+    fn grouped_rows(
+        &self,
+        visible: &[gertie_core::SessionSummary],
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
+        let mut rows = vec![self.list_header(cx)];
+        let active: Vec<&gertie_core::SessionSummary> =
+            visible.iter().filter(|summary| !summary.settled).collect();
+        if self.projects.is_empty() {
+            rows.extend(active.iter().map(|summary| self.session_row(summary, cx)));
+            return rows;
+        }
+        let owner = |summary: &gertie_core::SessionSummary| {
+            gertie_core::project_for(&self.projects, summary.workspace_root.as_deref())
+                .map(|project| project.id)
+        };
+        for project in &self.projects {
+            let chats: Vec<_> = active
+                .iter()
+                .filter(|summary| owner(summary) == Some(project.id))
+                .collect();
+            rows.push(self.project_header(project, chats.len(), cx));
+            if !project.collapsed {
+                rows.extend(chats.iter().map(|summary| {
+                    div()
+                        .pl_3()
+                        .child(self.session_row(summary, cx))
+                        .into_any_element()
+                }));
+            }
+        }
+        let others: Vec<_> = active
+            .iter()
+            .filter(|summary| owner(summary).is_none())
+            .collect();
+        if !others.is_empty() {
+            rows.push(self.other_header(others.len(), cx));
+            if !self.other_collapsed {
+                rows.extend(others.iter().map(|summary| {
+                    div()
+                        .pl_3()
+                        .child(self.session_row(summary, cx))
+                        .into_any_element()
+                }));
+            }
+        }
+        rows
+    }
+
+    fn list_header(&self, cx: &mut Context<Self>) -> AnyElement {
+        h_flex()
+            .pl_2()
+            .pt_4()
+            .pb_1()
+            .items_center()
+            .child(
+                div()
+                    .flex_1()
+                    .text_size(px(11.))
+                    .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                    .text_color(cx.theme().muted_foreground)
+                    .child(if self.projects.is_empty() {
+                        "SESSIONS"
+                    } else {
+                        "PROJECTS"
+                    }),
+            )
+            .child(
+                Button::new("add-project")
+                    .icon(IconName::FolderPlus)
+                    .xsmall()
+                    .ghost()
+                    .tooltip("Add a project: a folder whose chats group together")
+                    .on_click(cx.listener(|this, _, _, cx| this.add_project_clicked(cx))),
+            )
+            .into_any_element()
+    }
+
+    /// One project's header: the fold chevron, the name (the chat count
+    /// while folded), a + for a new chat there, and on hover rename and
+    /// remove. The tooltip names the folder.
+    fn project_header(
+        &self,
+        project: &gertie_core::Project,
+        chats: usize,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let id = project.id;
+        if self.renaming_project == Some(id) {
+            return h_flex()
+                .w_full()
+                .mt_1()
+                .child(Input::new(&self.rename_input).small())
+                .into_any_element();
+        }
+        let root = std::path::PathBuf::from(&project.root);
+        let folder = tildify(&root);
+        let group = SharedString::from(format!("project-row-{id}"));
+        let hover_bg = cx.theme().foreground.opacity(0.06);
+        let action = |name: String, icon: IconName, tip: &'static str| {
+            Button::new(SharedString::from(name))
+                .icon(icon)
+                .xsmall()
+                .ghost()
+                .tooltip(tip)
+        };
+        div()
+            .id(SharedString::from(format!("project-{id}")))
+            .test_support()
+            .group(group.clone())
+            .w_full()
+            .min_w_0()
+            .h(px(28.))
+            .mt_1()
+            .pl_1()
+            .pr_1()
+            .flex()
+            .items_center()
+            .gap_1()
+            .rounded(px(6.))
+            .cursor_pointer()
+            .hover(move |row| row.bg(hover_bg))
+            .tooltip(move |window, cx| Tooltip::new(folder.clone()).build(window, cx))
+            .on_click(cx.listener(move |this, _, _, cx| this.toggle_project(id, cx)))
+            .child(
+                Icon::new(if project.collapsed {
+                    IconName::ChevronRight
+                } else {
+                    IconName::ChevronDown
+                })
+                .with_size(px(12.))
+                .text_color(cx.theme().muted_foreground),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .text_size(px(13.))
+                    .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                    .child(project.name.clone()),
+            )
+            .when(project.collapsed && chats > 0, |row| {
+                row.child(
+                    div()
+                        .text_size(px(11.))
+                        .text_color(cx.theme().muted_foreground)
+                        .child(chats.to_string()),
+                )
+            })
+            .child(
+                h_flex()
+                    .flex_shrink_0()
+                    .opacity(0.)
+                    .group_hover(group, |actions| actions.opacity(1.))
+                    .child(
+                        action(
+                            format!("project-rename-{id}"),
+                            IconName::Pencil,
+                            "Rename this project",
+                        )
+                        .on_click(cx.listener(
+                            move |this, _, window, cx| {
+                                cx.stop_propagation();
+                                this.start_project_rename(id, window, cx);
+                            },
+                        )),
+                    )
+                    .child(
+                        action(
+                            format!("project-remove-{id}"),
+                            IconName::FolderMinus,
+                            "Remove from the list (the folder and its chats stay)",
+                        )
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            cx.stop_propagation();
+                            this.remove_project_clicked(id, cx);
+                        })),
+                    ),
+            )
+            .child(
+                action(
+                    format!("project-new-{id}"),
+                    IconName::Plus,
+                    "New chat in this project",
+                )
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    cx.stop_propagation();
+                    this.new_chat_in(root.clone(), window, cx);
+                })),
+            )
+            .into_any_element()
+    }
+
+    /// The "Other" group's header: chats whose folder is in no project.
+    fn other_header(&self, chats: usize, cx: &mut Context<Self>) -> AnyElement {
+        let hover_bg = cx.theme().foreground.opacity(0.06);
+        div()
+            .id("project-other")
+            .test_support()
+            .w_full()
+            .h(px(28.))
+            .mt_1()
+            .pl_1()
+            .pr_2()
+            .flex()
+            .items_center()
+            .gap_1()
+            .rounded(px(6.))
+            .cursor_pointer()
+            .hover(move |row| row.bg(hover_bg))
+            .tooltip(|window, cx| {
+                Tooltip::new("Chats whose folder is in no project").build(window, cx)
+            })
+            .on_click(cx.listener(|this, _, _, cx| this.toggle_other(cx)))
+            .child(
+                Icon::new(if self.other_collapsed {
+                    IconName::ChevronRight
+                } else {
+                    IconName::ChevronDown
+                })
+                .with_size(px(12.))
+                .text_color(cx.theme().muted_foreground),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .text_size(px(13.))
+                    .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                    .text_color(cx.theme().muted_foreground)
+                    .child("Other"),
+            )
+            .when(self.other_collapsed, |row| {
+                row.child(
+                    div()
+                        .text_size(px(11.))
+                        .text_color(cx.theme().muted_foreground)
+                        .child(chats.to_string()),
+                )
+            })
             .into_any_element()
     }
 }

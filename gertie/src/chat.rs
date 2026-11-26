@@ -261,13 +261,16 @@ pub struct ClickOrigin {
 
 /// What a chat asks of the window shell, the views it cannot make
 /// itself.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ShellRequest {
     /// A new chat while this one's turn runs: a second view, so the
     /// running turn keeps going.
     NewChat,
     /// A new chat in its own git worktree of this repo.
     NewWorktreeChat,
+    /// A new chat rooted in a project's folder, asked for when this
+    /// view can't take it (a turn runs, or it is a worktree tab).
+    NewChatIn(std::path::PathBuf),
 }
 
 /// The shell hook: weak to the shell, set by tabs.rs. None in tests
@@ -554,6 +557,12 @@ pub struct ChatView {
     /// The hits behind the palette's rows, in search-rank order, the
     /// row index a confirm hands back indexes this vector.
     palette_hits: Vec<gertie_core::HistoryHit>,
+    /// Projects whose name or folder matches the palette query: rows
+    /// above the history hits, confirming one opens its group.
+    palette_projects: Vec<gertie_core::Project>,
+    /// The sidebar's scroll position: a palette jump to a project
+    /// scrolls its header into view.
+    sidebar_scroll: gpui_kit::ScrollHandle,
     /// The `>` mode's matched commands, same row-index contract.
     palette_commands: Vec<(&'static str, &'static str, crate::palette::PaletteCommand)>,
     /// The query the palette is sitting on, the pick ledger's key and
@@ -619,6 +628,14 @@ pub struct ChatView {
     /// default, settled work is put down, not gone; one click brings
     /// it back.
     settled_open: bool,
+    /// The sidebar's groups: named folders, refreshed with the
+    /// sessions (`reload_lists`).
+    projects: Vec<gertie_core::Project>,
+    /// Which project header is being renamed; it shares the rename
+    /// field with the session rows.
+    renaming_project: Option<i64>,
+    /// Whether the "Other" group is folded, persisted as a store flag.
+    other_collapsed: bool,
     /// The right column: the settings view.
     panel: Panel,
     /// The settings editor (summary + form), its Saved event bubbles
@@ -890,6 +907,8 @@ impl ChatView {
         .detach();
 
         let sessions = store.list_sessions().unwrap_or_default();
+        let projects = store.list_projects().unwrap_or_default();
+        let other_collapsed = store.store_flag("other_collapsed");
         // Resume the newest unsettled session **of this workspace** if
         // there is one; settled work stays folded (opening it is the
         // un-settle door, and a cold open shouldn't shove put-down work
@@ -971,6 +990,8 @@ impl ChatView {
             palette,
             palette_open: false,
             palette_hits: Vec::new(),
+            palette_projects: Vec::new(),
+            sidebar_scroll: gpui_kit::ScrollHandle::new(),
             palette_commands: Vec::new(),
             palette_query: String::new(),
             turn_diff: None,
@@ -1011,6 +1032,9 @@ impl ChatView {
             pending_deletes: Vec::new(),
             snoozed: None,
             settled_open: false,
+            projects,
+            renaming_project: None,
+            other_collapsed,
             panel: Panel::None,
             settings_panel,
             // Tail: follow new content while pinned to the bottom, stop
@@ -1072,8 +1096,15 @@ impl ChatView {
     /// Reloads the sidebar's list: another view may have made or
     /// renamed a conversation while this one was off screen.
     pub fn refresh_sessions(&mut self, cx: &mut Context<Self>) {
-        self.sessions = self.store.list_sessions().unwrap_or_default();
+        self.reload_lists();
         cx.notify();
+    }
+
+    /// The sidebar's two lists, read together: a project added or
+    /// removed in another tab shows up with that tab's next refresh.
+    fn reload_lists(&mut self) {
+        self.sessions = self.store.list_sessions().unwrap_or_default();
+        self.projects = self.store.list_projects().unwrap_or_default();
     }
 
     pub fn session_id(&self) -> Option<SessionId> {
@@ -1815,7 +1846,7 @@ impl ChatView {
         self.mode_menu = false;
         if let Some(session_id) = self.session_id {
             let _ = self.store.set_session_mode(session_id, mode);
-            self.sessions = self.store.list_sessions().unwrap_or_default();
+            self.reload_lists();
         }
         if self.streaming {
             self.push_notice("Permission mode applies when this turn ends.", cx);
@@ -1912,7 +1943,7 @@ impl ChatView {
         // the active list. The one un-settle door besides its own ↩.
         if summary.as_ref().is_some_and(|summary| summary.settled) {
             let _ = self.store.set_session_settled(session_id, false);
-            self.sessions = self.store.list_sessions().unwrap_or_default();
+            self.reload_lists();
         }
         // The cross-folder check, decided before `summary` is
         // consumed below: a session rooted elsewhere (or pre-dating
@@ -2024,10 +2055,21 @@ impl ChatView {
     fn palette_search(&mut self, query: &str, cx: &mut Context<Self>) {
         self.palette_hits.clear();
         self.palette_commands.clear();
+        self.palette_projects.clear();
         self.palette_query = query.trim().to_string();
         if let Some(term) = query.trim().strip_prefix('>') {
             self.palette_commands = crate::palette::command_matches(term);
         } else if !query.trim().is_empty() {
+            let needle = query.trim().to_lowercase();
+            self.palette_projects = self
+                .projects
+                .iter()
+                .filter(|project| {
+                    project.name.to_lowercase().contains(&needle)
+                        || project.root.to_lowercase().contains(&needle)
+                })
+                .cloned()
+                .collect();
             let mut hits: Vec<_> = self
                 .store
                 .search(query, 20)
@@ -2072,6 +2114,13 @@ impl ChatView {
             }
             return;
         }
+        if let Some(project) = self.palette_projects.get(row) {
+            let id = project.id;
+            self.close_palette(window, cx);
+            self.reveal_project(id, cx);
+            return;
+        }
+        let row = row - self.palette_projects.len();
         let Some(hit) = self.palette_hits.get(row) else {
             self.close_palette(window, cx);
             return;
@@ -2891,6 +2940,7 @@ impl ChatView {
 
     /// Puts a sidebar row into rename mode, prefilled with its title.
     fn start_rename(&mut self, session_id: SessionId, window: &mut Window, cx: &mut Context<Self>) {
+        self.renaming_project = None;
         self.renaming = Some(session_id);
         let title = self
             .sessions
@@ -2908,13 +2958,22 @@ impl ChatView {
     /// Enter in the rename field: persist the title, refresh the sidebar.
     /// Empty input cancels, an unnamed session is worse than a stale title.
     fn commit_rename(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(project) = self.renaming_project.take() {
+            // A blank name is ignored by the store: the old one stays.
+            let name = self.rename_input.read(cx).value().to_string();
+            let _ = self.store.rename_project(project, &name);
+            self.reload_lists();
+            window.focus(&self.input.read(cx).focus_handle(cx), cx);
+            cx.notify();
+            return;
+        }
         let Some(session_id) = self.renaming.take() else {
             return;
         };
         let title = self.rename_input.read(cx).value().trim().to_string();
         if !title.is_empty() {
             let _ = self.store.retitle_session(session_id, &title);
-            self.sessions = self.store.list_sessions().unwrap_or_default();
+            self.reload_lists();
         }
         window.focus(&self.input.read(cx).focus_handle(cx), cx);
         cx.notify();
@@ -3146,7 +3205,7 @@ impl ChatView {
         self.pending_deletes
             .retain(|pending| pending.session_id != session_id);
         let _ = self.store.delete_session(session_id);
-        self.sessions = self.store.list_sessions().unwrap_or_default();
+        self.reload_lists();
         cx.notify();
     }
 
@@ -3155,7 +3214,7 @@ impl ChatView {
     /// untouched, the store row was never gone.
     fn undo_delete_clicked(&mut self, cx: &mut Context<Self>) {
         if self.pending_deletes.pop().is_some() {
-            self.sessions = self.store.list_sessions().unwrap_or_default();
+            self.reload_lists();
             cx.notify();
         }
     }
@@ -3170,7 +3229,7 @@ impl ChatView {
             return;
         }
         if self.store.set_session_settled(session_id, settled).is_ok() {
-            self.sessions = self.store.list_sessions().unwrap_or_default();
+            self.reload_lists();
         }
         if settled {
             self.maybe_extract(session_id, cx);
@@ -3291,6 +3350,181 @@ impl ChatView {
             let _ = this.update(cx, |this, cx| this.apply_switch(switched, cx));
         })
         .detach();
+    }
+
+    /// A project header into rename mode, prefilled with its name.
+    pub(super) fn start_project_rename(
+        &mut self,
+        id: i64,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.renaming = None;
+        self.renaming_project = Some(id);
+        let name = self
+            .projects
+            .iter()
+            .find(|project| project.id == id)
+            .map(|project| project.name.clone())
+            .unwrap_or_default();
+        self.rename_input
+            .update(cx, |state, cx| state.set_value(name, window, cx));
+        window.focus(&self.rename_input.read(cx).focus_handle(cx), cx);
+        cx.notify();
+    }
+
+    /// The sidebar's add: a folder picker, and the folder joins the
+    /// list (named after itself; rename it in place).
+    pub(super) fn add_project_clicked(&mut self, cx: &mut Context<Self>) {
+        let picker = cx.prompt_for_paths(gpui_kit::PathPromptOptions {
+            files: false,
+            directories: true,
+            multiple: false,
+            prompt: Some("Choose a project folder".into()),
+        });
+        cx.spawn(async move |this, cx| {
+            let Ok(Ok(Some(paths))) = picker.await else {
+                return; // cancelled, or the portal is missing
+            };
+            let Some(root) = paths.first().cloned() else {
+                return;
+            };
+            let _ = this.update(cx, |this, cx| this.add_project(&root, cx));
+        })
+        .detach();
+    }
+
+    /// Adds a folder as a project and opens its group.
+    pub fn add_project(&mut self, root: &std::path::Path, cx: &mut Context<Self>) {
+        match self.store.add_project(root, None) {
+            Ok(project) => {
+                if project.collapsed {
+                    let _ = self.store.set_project_collapsed(project.id, false);
+                }
+                self.reload_lists();
+                cx.notify();
+            }
+            Err(error) => self.push_notice(format!("Project not added, {error}."), cx),
+        }
+    }
+
+    /// The palette's project jump: open the group (persisted, like a
+    /// click) and scroll its header into the sidebar's view.
+    pub fn reveal_project(&mut self, id: i64, cx: &mut Context<Self>) {
+        if let Some(project) = self.projects.iter_mut().find(|project| project.id == id)
+            && project.collapsed
+        {
+            project.collapsed = false;
+            let _ = self.store.set_project_collapsed(id, false);
+        }
+        if let Some(index) = self.project_row_index(id) {
+            self.sidebar_scroll.scroll_to_item(index);
+        }
+        cx.notify();
+    }
+
+    /// Where a project's header sits among the sidebar column's
+    /// children: the mark, New chat, New worktree chat (when offered),
+    /// the list header, then each earlier group's header and open rows.
+    /// Mirrors `grouped_rows`.
+    fn project_row_index(&self, id: i64) -> Option<usize> {
+        let mut index = 3 + usize::from(self.shell_ask.is_some());
+        let visible = self.visible_sessions();
+        for project in &self.projects {
+            if project.id == id {
+                return Some(index);
+            }
+            index += 1;
+            if !project.collapsed {
+                index += visible
+                    .iter()
+                    .filter(|summary| {
+                        !summary.settled
+                            && gertie_core::project_for(
+                                &self.projects,
+                                summary.workspace_root.as_deref(),
+                            )
+                            .is_some_and(|owner| owner.id == project.id)
+                    })
+                    .count();
+            }
+        }
+        None
+    }
+
+    /// Folds or opens a project's group; the state persists.
+    pub(super) fn toggle_project(&mut self, id: i64, cx: &mut Context<Self>) {
+        if let Some(project) = self.projects.iter_mut().find(|project| project.id == id) {
+            project.collapsed = !project.collapsed;
+            let _ = self.store.set_project_collapsed(id, project.collapsed);
+            cx.notify();
+        }
+    }
+
+    pub(super) fn toggle_other(&mut self, cx: &mut Context<Self>) {
+        self.other_collapsed = !self.other_collapsed;
+        let _ = self
+            .store
+            .set_store_flag("other_collapsed", self.other_collapsed);
+        cx.notify();
+    }
+
+    /// Takes a project off the list. Nothing else moves: its chats
+    /// show under Other, the folder is untouched, and adding the
+    /// folder again brings the group back.
+    pub(super) fn remove_project_clicked(&mut self, id: i64, cx: &mut Context<Self>) {
+        let Some(name) = self
+            .projects
+            .iter()
+            .find(|project| project.id == id)
+            .map(|project| project.name.clone())
+        else {
+            return;
+        };
+        if let Err(error) = self.store.remove_project(id) {
+            self.push_notice(format!("{name} stays, {error}."), cx);
+            return;
+        }
+        self.reload_lists();
+        self.push_notice(
+            format!("{name} is off the list. Its chats are under Other; the folder is untouched."),
+            cx,
+        );
+    }
+
+    /// A project's +: a blank chat rooted in its folder. This view
+    /// takes it when it can; a running turn or a worktree tab (whose
+    /// root is its checkout) hands it to a new view instead.
+    pub fn new_chat_in(
+        &mut self,
+        root: std::path::PathBuf,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.streaming || self.branch_naming.is_some() {
+            if let Some(ask) = self.shell_ask.clone() {
+                ask(ShellRequest::NewChatIn(root), window, cx);
+            }
+            return;
+        }
+        self.new_session(window, cx);
+        let same = root == self.workspace_root
+            || matches!(
+                (root.canonicalize(), self.workspace_root.canonicalize()),
+                (Ok(a), Ok(b)) if a == b
+            );
+        if !same {
+            match (self.switch)(&root) {
+                Ok(switched) => self.apply_switch(switched, cx),
+                Err(error) => self.push_notice(
+                    format!(
+                        "The chat stays in {}, {error}.",
+                        tildify(&self.workspace_root)
+                    ),
+                    cx,
+                ),
+            }
+        }
     }
 
     /// Lands a rebuilt workspace in this chat. The running turn is
@@ -3801,7 +4035,7 @@ impl ChatView {
                 // check (a fresh session's root reads None → written).
                 let _ = self.store.set_session_mode(session_id, self.mode);
                 self.session_id = Some(session_id);
-                self.sessions = self.store.list_sessions().unwrap_or_default();
+                self.reload_lists();
                 session_id
             }
         };
@@ -3879,7 +4113,7 @@ impl ChatView {
         // stopped the last turn, this one supersedes it.
         let _ = self.store.set_session_limited(session_id, false);
         self.snoozed = None;
-        self.sessions = self.store.list_sessions().unwrap_or_default();
+        self.reload_lists();
         self.drive_turn(Some(text), images, cx);
     }
 
@@ -4260,7 +4494,7 @@ impl ChatView {
             .unwrap_or_else(|| "fork".to_string());
         match self.store.fork_session(session_id, upto, &title) {
             Ok((new_id, _fork_point)) => {
-                self.sessions = self.store.list_sessions().unwrap_or_default();
+                self.reload_lists();
                 self.switch_to_session(new_id, window, cx);
             }
             Err(error) => self.push_notice(format!("Fork failed: {error}"), cx),
@@ -5236,7 +5470,12 @@ impl ChatView {
                             .child(
                                 Command::new(&self.palette)
                                     .items(if self.palette_commands.is_empty() {
-                                        crate::palette::search_items(&self.palette_hits)
+                                        let mut items =
+                                            crate::palette::project_items(&self.palette_projects);
+                                        items.extend(crate::palette::search_items(
+                                            &self.palette_hits,
+                                        ));
+                                        items
                                     } else {
                                         crate::palette::command_items(&self.palette_commands)
                                     })
@@ -5340,22 +5579,6 @@ impl ChatView {
         self.session_id
             .and_then(|id| self.sessions.iter().find(|summary| summary.id == id))
             .is_some_and(|summary| summary.limited)
-    }
-
-    /// The sidebar's active rows: every session not yet settled, in the
-    /// store's attention order (most recent activity first). The
-    /// caller's `visible_sessions` snapshot is shared: one clone per
-    /// render feeds the rows, the fold's guard, and its count.
-    fn active_session_rows(
-        &self,
-        sessions: &[gertie_core::SessionSummary],
-        cx: &mut Context<Self>,
-    ) -> Vec<AnyElement> {
-        sessions
-            .iter()
-            .filter(|summary| !summary.settled)
-            .map(|summary| self.session_row(summary, cx))
-            .collect()
     }
 
     /// The fold's rows: settled work, muted, restore affordance up front.
