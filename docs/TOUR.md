@@ -52,6 +52,15 @@ Each chat keeps its own memory tier and permission mode.
 While a turn runs, the send button becomes Stop when the composer is empty. Stop ends
 the turn at once: running commands are killed and open tool cards close as stopped.
 
+## Projects
+
+Projects organize conversations: a project is a name, not a folder. Make one with the
+button beside the list heading, then file a chat under it with the move button on the
+chat's row, or start a chat from the project's **+** (it runs in your current folder,
+already filed). A chat is in one project at most; ones you haven't filed sit in
+**Other**. Each group folds, removing a project only takes it off the list, and
+Ctrl+K finds a project by name.
+
 ## Subagents
 
 The agent dispatches specialists instead of doing everything itself: `explore` reads
@@ -76,8 +85,11 @@ for your team's conventions.
 
 The agent remembers across sessions, and you control every entry. Facts it proposes
 at session end arrive as review cards; approve or deny, and vote ▲/▼ on what it
-recalls so the useful stuff survives the weekly cleanup. Rules that must always apply
-belong in `AGENTS.md` instead; the `memory N` footer word opens the panel.
+recalls so the useful stuff survives the weekly cleanup. Entries cite the files they
+came from and are flagged when those files change; correcting an entry flags the ones
+that rested on it, for you to keep or archive. Rules that must always apply belong in
+`AGENTS.md` instead (one in a subdirectory applies when the agent works under it); the
+`memory N` footer word opens the panel.
 [docs/memory.md](memory.md) has the details.
 
 ## Settings
