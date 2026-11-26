@@ -410,9 +410,13 @@ dropped below its no-adaptation baseline, no consolidation may ever regenerate t
 
 1. **In-session**, a `memory` tool implementing Anthropic's `memory_20250818` command surface
    (view/create/str_replace/insert/delete/rename) over the two memory roots, path-traversal
-   guarded. The Anthropic wire serves the standard tool type; OpenAI-compatible endpoints get
-   gertie's definition of the same commands, one handler, both wires. Edits apply immediately
-   (the user is watching them happen); the frozen index picks them up next session.
+   guarded. Every wire gets gertie's definition of those commands (one handler; no wire maps it
+   to a native tool type). Which endpoints see the write commands is a per-model profile
+   setting (#42): `memory_writes` on the endpoint, defaulting on for Claude models (trained on
+   that command set) and off for the rest, where the tool is view only and `remember` is the
+   one write path. Models given two write paths wrote the same fact twice, and the write
+   commands are most of the tool's ~440 tokens per request. Edits apply immediately (the user
+   is watching them happen); the frozen index picks them up next session.
    Every file write passes `MemoryStore::normalize_edit`, so a model's headings, bullets,
    rewritten counters or invented hashes never reach the store as malformed entries. The
    `remember` tool is the preferred write path: a schema instead of a grammar.

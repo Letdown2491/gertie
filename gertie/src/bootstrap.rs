@@ -588,7 +588,7 @@ impl Bootstrap {
             });
         map.insert(
             "memory".into(),
-            Arc::new(gertie_tools::memory::Memory::new(memory.clone())),
+            memory_tool(&memory, config.memory_writes()),
         );
         root_independent.push("memory".into());
         map.insert(
@@ -865,7 +865,7 @@ impl Bootstrap {
             let map = Arc::get_mut(&mut tools).expect("registry not yet shared");
             map.insert(
                 "memory".into(),
-                Arc::new(gertie_tools::memory::Memory::new(memory.clone())),
+                memory_tool(&memory, self.live_config().memory_writes()),
             );
             map.insert(
                 "search_memory".into(),
@@ -1007,7 +1007,7 @@ impl Bootstrap {
             let map = Arc::get_mut(&mut tools).expect("registry not yet shared");
             map.insert(
                 "memory".into(),
-                Arc::new(gertie_tools::memory::Memory::new(memory.clone())),
+                memory_tool(&memory, self.live_config().memory_writes()),
             );
             map.insert(
                 "search_memory".into(),
@@ -1079,6 +1079,16 @@ impl Bootstrap {
 fn render_memory_index(memory: &gertie_core::MemoryStore) -> Option<String> {
     let index = memory.render_index(600);
     (index != "# Memory\n").then_some(index)
+}
+
+/// The memory tool for the endpoint in force (#42): full file commands,
+/// or view only with remember as the one write path.
+fn memory_tool(memory: &Arc<gertie_core::MemoryStore>, writes: bool) -> Arc<dyn gertie_core::Tool> {
+    if writes {
+        Arc::new(gertie_tools::memory::Memory::new(memory.clone()))
+    } else {
+        Arc::new(gertie_tools::memory::Memory::view_only(memory.clone()))
+    }
 }
 
 /// The global memory tier's root. The session store's open has already
@@ -1642,6 +1652,7 @@ mod tests {
             api_key: None,
             api_key_env: Some("ANTHROPIC_API_KEY".into()),
             context_window: Some(200_000),
+            memory_writes: None,
         });
         let mut seat = crate::config::AgentConfig {
             name: "council-anthropic".into(),

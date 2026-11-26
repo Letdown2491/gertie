@@ -388,6 +388,12 @@ pub struct EndpointConfig {
     /// disabled, gertie doesn't guess windows it doesn't know.
     #[serde(default)]
     pub context_window: Option<u64>,
+    /// Whether the memory tool keeps its file write commands for this
+    /// endpoint (#42). Absent: on for Claude models (trained on that
+    /// command set), off otherwise, where remember is the one write
+    /// path. `gertie eval memory` measures the difference.
+    #[serde(default)]
+    pub memory_writes: Option<bool>,
 }
 
 /// `~` or `~/…` at the start of an endpoint's base_url expands to the
@@ -442,6 +448,13 @@ impl EndpointConfig {
                 .and_then(gertie_providers::Wire::parse)
                 .unwrap_or_default(),
         }
+    }
+
+    /// [`memory_writes`](Self::memory_writes) with its default applied:
+    /// on for Claude models, off otherwise.
+    pub fn memory_writes_in_force(&self) -> bool {
+        self.memory_writes
+            .unwrap_or_else(|| self.model.to_lowercase().contains("claude"))
     }
 
     /// Where the key comes from, for `gertie doctor`:
@@ -1007,6 +1020,13 @@ impl Config {
             .map(|(_, _, command)| command.to_string())
     }
 
+    /// The selected endpoint's memory write setting (#42), see
+    /// [`EndpointConfig::memory_writes`].
+    pub fn memory_writes(&self) -> bool {
+        self.selected_endpoint_config()
+            .is_some_and(EndpointConfig::memory_writes_in_force)
+    }
+
     /// Every resolvable field's origin at once.
     pub fn resolve_origins(&self, overlay: Option<&ProjectOverlay>) -> Origins {
         Origins {
@@ -1241,6 +1261,7 @@ mod tests {
             api_key: None,
             api_key_env: Some(format!("{name}_KEY")),
             context_window: None,
+            memory_writes: None,
         }
     }
 
@@ -1834,6 +1855,7 @@ default_mode = "full_access"
             api_key: None,
             api_key_env: Some("GERTIE_TEST_UNSET_KEY_8347".into()),
             context_window: None,
+            memory_writes: None,
         });
         config.default_endpoint = Some("ppq".into());
         // No env mutation (unsafe under edition 2024), the variable is
@@ -1918,5 +1940,23 @@ default_mode = "full_access"
         assert_eq!(off_here.resolve_verify_with(repo, |_| true), None);
         let off = parse("[verify]\nenabled = false\ncommand = \"make\"\n".into());
         assert_eq!(off.resolve_verify_with(repo, |_| true), None);
+    }
+
+    /// #42: Claude models keep the memory tool's write commands (they
+    /// are trained on that set); others get remember as the one write
+    /// path; the endpoint's own setting wins either way.
+    #[test]
+    fn memory_writes_default_by_model_and_yield_to_the_endpoint() {
+        let parse = |raw: &str| -> Config { toml::from_str(raw).unwrap() };
+        let claude =
+            parse("[[endpoints]]\nname = \"a\"\nbase_url = \"x\"\nmodel = \"claude-sonnet-5-5\"\n");
+        assert!(claude.memory_writes());
+        let other = parse("[[endpoints]]\nname = \"a\"\nbase_url = \"x\"\nmodel = \"gpt-6\"\n");
+        assert!(!other.memory_writes());
+        let forced = parse(
+            "[[endpoints]]\nname = \"a\"\nbase_url = \"x\"\nmodel = \"gpt-6\"\nmemory_writes = true\n",
+        );
+        assert!(forced.memory_writes());
+        assert!(!Config::default().memory_writes(), "no endpoint, no writes");
     }
 }

@@ -261,6 +261,9 @@ fn run_scenario(scenario: &Scenario, config: &Path) -> Outcome {
 pub struct Row {
     pub endpoint: String,
     pub model: String,
+    /// The memory tool's write commands were offered (#42): the profile
+    /// setting a comparison varies.
+    pub memory_writes: bool,
     pub results: Vec<(&'static str, bool, Outcome)>,
 }
 
@@ -284,11 +287,11 @@ pub fn evaluate(config_path: &Path, endpoints: &[String]) -> Result<Vec<Row>, St
     }
     let mut rows = Vec::new();
     for name in names {
-        let Some(model) = config
+        let Some((model, memory_writes)) = config
             .endpoints
             .iter()
             .find(|endpoint| endpoint.name == name)
-            .map(|endpoint| endpoint.model.clone())
+            .map(|endpoint| (endpoint.model.clone(), endpoint.memory_writes_in_force()))
         else {
             return Err(format!("no endpoint named {name:?} in the config"));
         };
@@ -304,6 +307,7 @@ pub fn evaluate(config_path: &Path, endpoints: &[String]) -> Result<Vec<Row>, St
         rows.push(Row {
             endpoint: name,
             model,
+            memory_writes,
             results,
         });
     }
@@ -341,6 +345,14 @@ pub fn render(rows: &[Row]) -> String {
             format!("{passed}/{}", row.results.len()),
             input,
             output
+        ));
+        out.push_str(&format!(
+            "  memory writes: {}\n",
+            if row.memory_writes {
+                "memory tool and remember"
+            } else {
+                "remember only (memory is view only)"
+            }
         ));
         for (name, passed, outcome) in &row.results {
             let tools: Vec<&str> = outcome
@@ -408,6 +420,7 @@ pub fn record(rows: &[Row], date: &str) -> Vec<String> {
                 "version": crate::cli::VERSION,
                 "endpoint": row.endpoint,
                 "model": row.model,
+                "memory_writes": row.memory_writes,
                 "scenarios": scenarios,
             })
             .to_string()
@@ -669,6 +682,10 @@ mod tests {
         let line: serde_json::Value =
             serde_json::from_str(&record(&rows, "2026-11-26")[0]).unwrap();
         assert_eq!(line["model"], "scripted");
+        assert_eq!(
+            line["memory_writes"], false,
+            "not a Claude model: remember only"
+        );
         assert_eq!(line["scenarios"]["supersede"]["passed"], true);
         assert_eq!(line["scenarios"]["supersede"]["tools"][0], "remember");
     }

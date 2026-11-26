@@ -10,6 +10,9 @@ model = "the-model-id"                          # the id your endpoint serves
 api_key_env = "MY_API_KEY"
 # api_key = "sk-your-key"   # or inline, if you must
 # context_window = 1046576  # tokens; unset = compaction disabled
+# memory_writes = false      # memory tool's file write commands; unset =
+#                            # on for Claude models, off for the rest
+#                            # (view only, remember writes)
 
 # A local model needs no key:
 # [[endpoints]]

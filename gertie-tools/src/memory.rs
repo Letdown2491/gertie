@@ -73,7 +73,9 @@ fn refuse_memory_md(path: &Path) -> Result<(), String> {
 
 #[derive(Deserialize)]
 struct MemoryArgs {
-    command: String,
+    /// Absent reads as view: the view-only tool's schema has no command.
+    #[serde(default)]
+    command: Option<String>,
     path: String,
     /// create: the file's whole content, sanitized at the entrance.
     #[serde(default)]
@@ -102,11 +104,27 @@ struct MemoryArgs {
 /// sidecar, rusqlite failures surface as tool errors.
 pub struct Memory {
     store: Arc<gertie_core::MemoryStore>,
+    /// The file commands (create, str_replace, insert, delete, rename).
+    /// Off, the tool is view only and remember is the one write path
+    /// (#42): models given two ways to write a fact wrote it twice, and
+    /// the write commands are most of this tool's tokens.
+    writes: bool,
 }
 
 impl Memory {
     pub fn new(store: Arc<gertie_core::MemoryStore>) -> Self {
-        Self { store }
+        Self {
+            store,
+            writes: true,
+        }
+    }
+
+    /// View only: browse and read; remember writes.
+    pub fn view_only(store: Arc<gertie_core::MemoryStore>) -> Self {
+        Self {
+            store,
+            writes: false,
+        }
     }
 }
 
@@ -116,6 +134,12 @@ impl Tool for Memory {
     }
 
     fn description(&self) -> String {
+        if !self.writes {
+            return "Read long-term memory: `project` or `global` lists a tier's topic \
+                    files, `project/<file>.md` reads one (view_range `start:end` for part). \
+                    To save or correct a fact, use remember."
+                .into();
+        }
         "Read and write long-term memory. Two tiers, chosen by the \
          path's leading segment: `project/` (the repo's \
          `.gertie/memory/`, versioned with the clone) and `global/` \
@@ -132,6 +156,16 @@ impl Tool for Memory {
     }
 
     fn parameters(&self) -> serde_json::Value {
+        if !self.writes {
+            return json!({
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "`project`, `global`, or `project/<file>.md`"},
+                    "view_range": {"type": "string", "description": "`start:end` 1-based lines, the end optional"}
+                },
+                "required": ["path"]
+            });
+        }
         json!({
             "type": "object",
             "properties": {
@@ -161,8 +195,18 @@ impl Tool for Memory {
     ) -> Pin<Box<dyn Future<Output = ToolResult> + Send + 'a>> {
         let store = self.store.clone();
         let arguments = arguments.to_string();
+        let writes = self.writes;
         blocking(move || {
             let args: MemoryArgs = crate::parse(&arguments, "memory")?;
+            let command = match args.command.as_deref() {
+                None | Some("view") => "view",
+                Some(_) if !writes => {
+                    return Err("memory: this tool only reads; save or correct a fact with \
+                                remember (action add, supersede, update, archive or link)"
+                        .into());
+                }
+                Some(command) => command,
+            };
             let (tier, rel) = split_tier(&args.path);
             let root = store.root(tier);
             // The tier root is created on demand: a fresh boot has no
@@ -170,7 +214,7 @@ impl Tool for Memory {
             std::fs::create_dir_all(&root)
                 .map_err(|error| format!("memory: {}: {error}", root.display()))?;
             let path = resolve_in(&root, rel, &args.path)?;
-            match args.command.as_str() {
+            match command {
                 "view" => view(tier, &path, args.view_range.as_deref()),
                 "create" => mutate(&store, tier, &args.path, "create", || {
                     create(&store, tier, &path, &args)
@@ -1777,6 +1821,39 @@ mod tests {
         );
         let log = std::fs::read_to_string(tmp.path().join("project/MEMORY.md")).unwrap();
         assert!(log.contains("remember add"), "the audit trail: {log}");
+    }
+
+    /// #42: the view-only tool reads like the full one, refuses writes
+    /// with the way to write, and costs a fraction of the tokens.
+    #[test]
+    fn the_view_only_tool_reads_and_points_writes_at_remember() {
+        let (_tmp, store, _tool) =
+            seeded("- [p1] helpful=0 harmful=0 one [source: added: 2026-11-01]\n");
+        let full = Memory::new(store.clone());
+        let view = Memory::view_only(store);
+        let cost = |tool: &Memory| tool.description().len() + tool.parameters().to_string().len();
+        assert!(
+            cost(&view) * 3 < cost(&full),
+            "view only {} vs full {}",
+            cost(&view),
+            cost(&full)
+        );
+        assert!(view.parameters()["properties"].get("command").is_none());
+        let run = |tool: &Memory, arguments: serde_json::Value| {
+            let text = arguments.to_string();
+            let mut future = tool.run(&text);
+            settle(&mut future)
+        };
+        let listed = run(&view, json!({"path": "project"})).unwrap();
+        assert!(listed.contains("gotchas.md"), "{listed}");
+        let read = run(&view, json!({"path": "project/gotchas.md"})).unwrap();
+        assert!(read.contains("[p1]"), "{read}");
+        let refused = run(
+            &view,
+            json!({"command": "create", "path": "project/x.md", "content": "- a fact"}),
+        )
+        .unwrap_err();
+        assert!(refused.contains("remember"), "{refused}");
     }
 
     #[test]
