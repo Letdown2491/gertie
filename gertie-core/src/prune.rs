@@ -89,8 +89,9 @@ pub fn prune_superseded(history: &mut [WireMessage]) -> Option<(usize, usize)> {
         let content = message.content.take().unwrap_or_default();
         let attached = &content[body_end(&content)..];
         message.content = Some(format!(
-            "{POINTER_OPENING}{}: superseded by a later read of the same lines, which is \
-             current]{attached}",
+            "{POINTER_OPENING}{}: this read succeeded; gertie removed this earlier copy to \
+             save tokens, because a later read of the same lines, further down, has the \
+             current content]{attached}",
             read.path
         ));
     }
@@ -191,7 +192,7 @@ mod tests {
         assert!(recovered > BATCH_CHARS);
         let first = messages[1].content.as_deref().unwrap();
         assert!(
-            first.starts_with("[read_file src/a.rs: superseded"),
+            first.starts_with("[read_file src/a.rs: this read succeeded; gertie removed"),
             "{first}"
         );
         assert!(

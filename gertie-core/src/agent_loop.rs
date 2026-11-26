@@ -2794,7 +2794,7 @@ mod tests {
             .collect();
         assert_eq!(reads.len(), 2);
         assert!(
-            reads[0].starts_with("[read_file src/big.rs: superseded"),
+            reads[0].starts_with("[read_file src/big.rs: this read succeeded"),
             "{}",
             &reads[0][..60]
         );
