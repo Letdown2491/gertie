@@ -484,7 +484,11 @@ pub fn run_turn(spec: TurnSpec) -> BoxStream<'static, LoopEvent> {
                                     Ok(match answer.await {
                                         Err(_) => "the ask went unanswered".to_string(),
                                         Ok(PermissionDecision::Approve) => {
-                                            "the user dismissed the question".to_string()
+                                            "the user dismissed the question without \
+                                             answering: no choice was made and nothing is \
+                                             approved. Do not take the action you asked \
+                                             about; stop and say what is waiting on them"
+                                                .to_string()
                                         }
                                         Ok(PermissionDecision::Deny { feedback }) => match
                                             feedback

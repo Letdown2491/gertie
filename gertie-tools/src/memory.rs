@@ -333,7 +333,17 @@ fn remember_action(
                     args.action
                 )
             })?;
-        if exists(&id) {
+        let shaped = id.len() > 1
+            && matches!(id.as_bytes()[0], b'p' | b'g')
+            && id[1..].bytes().all(|byte| byte.is_ascii_digit());
+        if !shaped {
+            // The common slip: the fact itself in the id field.
+            Err(format!(
+                "remember: `{field}` takes an entry id like p12, not text. The fact goes in \
+                 `text`; to replace an entry, pass its id in `id` and the new fact in `text` \
+                 (action supersede)"
+            ))
+        } else if exists(&id) {
             Ok(id)
         } else {
             Err(format!(
@@ -1792,6 +1802,16 @@ mod tests {
         assert!(
             relation.contains("builds_on"),
             "names the relations: {relation}"
+        );
+        // What ppq sent on the second live eval, twice: the fact as the id.
+        let slip = remember(
+            &tool,
+            json!({"action": "supersede", "id": "POOL_SIZE was raised 8 to 32 at user request"}),
+        )
+        .unwrap_err();
+        assert!(
+            slip.contains("not text") && slip.contains("`text`") && slip.contains("p12"),
+            "{slip}"
         );
         let action = remember(&tool, json!({"action": "forget", "id": "p1"})).unwrap_err();
         assert!(action.contains("supersede"), "{action}");

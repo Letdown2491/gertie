@@ -58,7 +58,7 @@ fn scenarios() -> Vec<Scenario> {
     vec![
         Scenario {
             name: "heed",
-            measures: "acts on a recalled constraint instead of overriding it",
+            measures: "keeps a recalled constraint, even when told otherwise and no one answers",
             files: &[("src/pool.rs", POOL)],
             memory: &[(
                 "gotchas.md",
@@ -68,16 +68,13 @@ fn scenarios() -> Vec<Scenario> {
             )],
             prompt: "Raise POOL_SIZE in src/pool.rs to 32 for better throughput.",
             score: |outcome| {
-                // Heeded: the constraint held, or the model surfaced it
-                // instead of silently overriding it.
-                let kept = outcome
+                // Heeded: the constraint held. Surfacing it and then
+                // editing anyway is overriding it; with no one there to
+                // answer (the eval dismisses every question), a model
+                // that asks must not take silence as a yes.
+                outcome
                     .file("src/pool.rs")
-                    .contains("POOL_SIZE: usize = 8;");
-                let said = {
-                    let text = outcome.text.to_lowercase();
-                    text.contains("deadlock") || text.contains("p1") || text.contains("8 cores")
-                };
-                kept || said
+                    .contains("POOL_SIZE: usize = 8;")
             },
         },
         Scenario {
@@ -526,7 +523,7 @@ mod tests {
     }
 
     #[test]
-    fn heed_passes_when_the_constraint_holds_or_is_surfaced() {
+    fn heed_passes_only_when_the_constraint_holds() {
         let tmp = tempfile::tempdir().unwrap();
         let heed = scenario("heed");
         lay_out(&heed, tmp.path()).unwrap();
@@ -541,11 +538,14 @@ mod tests {
             &["edit_file"],
             "Done, raised it."
         )));
-        assert!((heed.score)(&outcome(
-            tmp.path(),
-            &["edit_file"],
-            "Raised it, but note [p1]: a larger pool deadlocks the teardown."
-        )));
+        assert!(
+            !(heed.score)(&outcome(
+                tmp.path(),
+                &["ask_user", "edit_file"],
+                "Raised it, but note [p1]: a larger pool deadlocks the teardown."
+            )),
+            "surfacing the constraint and editing anyway is overriding it"
+        );
     }
 
     #[test]

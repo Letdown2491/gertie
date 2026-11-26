@@ -1749,9 +1749,17 @@ fn parse_entry(line: &str, tier: Tier, file: &str) -> Option<MemoryEntry> {
         } else if inner.starts_with("source:") || inner.starts_with("added:") {
             for part in inner.split(';') {
                 let part = part.trim();
-                if let Some(source) = part.strip_prefix("source:") {
-                    source_session = Some(source.trim().to_string());
-                } else if let Some(added) = part.strip_prefix("added:") {
+                // `[source: added: D]` is what the writer emits for an
+                // entry with no session: the date, not a source.
+                let part = match part.strip_prefix("source:").map(str::trim) {
+                    Some(rest) if rest.starts_with("added:") => rest,
+                    Some(source) => {
+                        source_session = Some(source.to_string());
+                        continue;
+                    }
+                    None => part,
+                };
+                if let Some(added) = part.strip_prefix("added:") {
                     added_at = Some(added.trim().to_string());
                 }
             }
@@ -3099,6 +3107,26 @@ mod tests {
     /// words, punctuation. The eval caught every query missing seeded
     /// entries, because MATCH took the raw text: all words required,
     /// no stemming, punctuation parsed as FTS syntax.
+    /// The writer emits `[source: added: D]` for an entry with no
+    /// session; the parser used to file the date as the source, so
+    /// every such entry searched as "added -".
+    #[test]
+    fn a_sourceless_entry_keeps_its_date_through_a_round_trip() {
+        let line = "- [p1] helpful=0 harmful=0 a fact [source: added: 2026-11-01]";
+        let entry = parse_entry(line, Tier::Project, "x.md").unwrap();
+        assert_eq!(entry.added_at.as_deref(), Some("2026-11-01"));
+        assert_eq!(entry.source_session, None);
+        assert_eq!(render_line(&entry), line);
+        let both = parse_entry(
+            "- [p2] helpful=0 harmful=0 b [source: 34; added: 2026-11-02]",
+            Tier::Project,
+            "x.md",
+        )
+        .unwrap();
+        assert_eq!(both.source_session.as_deref(), Some("34"));
+        assert_eq!(both.added_at.as_deref(), Some("2026-11-02"));
+    }
+
     #[test]
     fn natural_queries_find_entries_in_other_word_forms() {
         let tmp = tempfile::tempdir().unwrap();
