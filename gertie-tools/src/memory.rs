@@ -259,32 +259,12 @@ fn parse_view_range(range: &str, len: usize) -> Result<(usize, usize), String> {
 /// create: the file must not exist yet, parents are created, the whole
 /// content passes the sanitizer (one entrance, one cap).
 ///
-/// Every content line the model adds becomes entry grammar: lines
-/// that already carry the `- [id]` prefix pass through, the rest are
-/// wrapped by the store (fresh id, counters, provenance, date). This
-/// keeps the tool path and the ops path producing the same shaped
-/// store.
-fn ensure_grammar(
-    store: &gertie_core::MemoryStore,
-    tier: Tier,
-    text: &str,
-) -> Result<Vec<String>, String> {
-    // The batch form: one scan for the whole text, ids minted
-    // sequentially (the per-line form minted duplicates — the hand
-    // test's ["g1","g2","g1"] finding).
-    let mut out = Vec::new();
-    for line in store
-        .entry_lines(tier, text)
-        .map_err(|error| format!("memory: {error}"))?
-    {
-        let trimmed = line.trim_start();
-        if trimmed.is_empty() {
-            out.push(String::new());
-        } else {
-            out.push(line);
-        }
-    }
-    Ok(out)
+/// The file name the store records entries under.
+fn file_label(path: &Path) -> String {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or_default()
+        .to_string()
 }
 
 fn create(
@@ -301,8 +281,7 @@ fn create(
     if path.exists() {
         return Err(format!("memory: {} already exists", path.display()));
     }
-    let lines = ensure_grammar(store, tier, content)?;
-    let content = lines.join("\n");
+    let content = store.normalize_edit(tier, &file_label(path), "", content)?;
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
             .map_err(|error| format!("memory: {}: {error}", parent.display()))?;
@@ -351,8 +330,8 @@ fn str_replace(
     // a memory action and must land as grammar (the last unwrapped
     // command; the per-line mint form would collide on multi-line
     // replacements, so this rides the batch).
-    let wrapped = ensure_grammar(store, tier, new_str)?;
-    let edited = text.replacen(old_str, &wrapped.join("\n"), 1);
+    let raw = text.replacen(old_str, new_str, 1);
+    let edited = store.normalize_edit(tier, &file_label(path), &text, &raw)?;
     std::fs::write(path, &edited)
         .map_err(|error| format!("memory: {}: {error}", path.display()))?;
     Ok(format!("edited {}", path.display()))
@@ -384,20 +363,22 @@ fn insert(
             lines.len()
         ));
     }
-    let wrapped = ensure_grammar(store, tier, new_str)?;
-    let inserted: Vec<String> = if wrapped.is_empty() {
-        vec![String::new()]
+    // Every write goes through the store's normalizer, so the tool
+    // path and the ops path produce the same shaped store.
+    let mut edited: Vec<&str> = Vec::with_capacity(lines.len() + 1);
+    edited.extend(&lines[..at]);
+    let added = if new_str.is_empty() {
+        ""
     } else {
-        wrapped
+        new_str.trim_end_matches('\n')
     };
-    let mut edited: Vec<String> = Vec::with_capacity(lines.len() + inserted.len());
-    edited.extend(lines[..at].iter().map(|line| line.to_string()));
-    edited.extend(inserted.iter().cloned());
-    edited.extend(lines[at..].iter().map(|line| line.to_string()));
-    let mut out = edited.join("\n");
+    edited.push(added);
+    edited.extend(&lines[at..]);
+    let mut raw = edited.join("\n");
     if text.ends_with('\n') {
-        out.push('\n');
+        raw.push('\n');
     }
+    let out = store.normalize_edit(tier, &file_label(path), &text, &raw)?;
     std::fs::write(path, out).map_err(|error| format!("memory: {}: {error}", path.display()))?;
     Ok(format!("inserted after line {at}"))
 }
@@ -1088,5 +1069,240 @@ mod tests {
             stale.contains("superseded by"),
             "the readout must ride the hit: {stale}"
         );
+    }
+
+    /// The write path's normalizer (the fix-1 class): what models
+    /// actually send through create/insert/str_replace must land as
+    /// clean entries, never as wrapped wrappers. Each case below is a
+    /// shape the old line-by-line wrap mangled.
+    fn grammar_fixture() -> (tempfile::TempDir, Arc<gertie_core::MemoryStore>, Memory) {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Arc::new(gertie_core::MemoryStore::open(
+            tmp.path().join("project"),
+            tmp.path().join("global"),
+            Arc::new(gertie_core::SessionStore::open(std::path::Path::new(":memory:")).unwrap()),
+        ));
+        let tool = Memory::new(store.clone());
+        (tmp, store, tool)
+    }
+
+    fn file_lines(tmp: &tempfile::TempDir, name: &str) -> Vec<String> {
+        std::fs::read_to_string(tmp.path().join("project").join(name))
+            .unwrap()
+            .lines()
+            .map(str::to_string)
+            .collect()
+    }
+
+    #[test]
+    fn create_keeps_headings_and_strips_the_models_bullets() {
+        let (tmp, store, tool) = grammar_fixture();
+        run_tool(
+            &tool,
+            json!({"command": "create", "path": "project/gotchas.md",
+                   "content": "# Gotchas\n\n- the pool is sized for postgres\n* warm it at boot\n"}),
+        )
+        .unwrap();
+        let lines = file_lines(&tmp, "gotchas.md");
+        assert_eq!(
+            lines[0], "# Gotchas",
+            "the heading is not an entry: {lines:?}"
+        );
+        let entries = store.scan();
+        let texts: Vec<&str> = entries.iter().map(|entry| entry.text.as_str()).collect();
+        assert_eq!(
+            texts,
+            vec!["the pool is sized for postgres", "warm it at boot"],
+            "the bullet is markdown, not the fact: {lines:?}"
+        );
+    }
+
+    #[test]
+    fn a_line_already_in_grammar_is_not_wrapped_again() {
+        let (tmp, store, tool) = grammar_fixture();
+        run_tool(
+            &tool,
+            json!({"command": "create", "path": "project/gotchas.md",
+                   "content": "- [p3] helpful=0 harmful=0 already an entry [source: hand; added: 2026-11-26]\n"}),
+        )
+        .unwrap();
+        let lines = file_lines(&tmp, "gotchas.md");
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert_eq!(
+            lines[0].matches("helpful=").count(),
+            1,
+            "one entry, not an entry inside an entry: {lines:?}"
+        );
+        assert_eq!(store.scan()[0].text, "already an entry");
+    }
+
+    #[test]
+    fn a_word_fix_edits_the_entry_in_place() {
+        let (tmp, store, tool) = grammar_fixture();
+        std::fs::create_dir_all(tmp.path().join("project")).unwrap();
+        std::fs::write(
+            tmp.path().join("project/gotchas.md"),
+            "# Gotchas\n\n- [p4] helpful=2 harmful=0 teh pool is sized for postgres [source: 12; added: 2026-11-01]\n",
+        )
+        .unwrap();
+        run_tool(
+            &tool,
+            json!({"command": "str_replace", "path": "project/gotchas.md",
+                   "old_str": "teh", "new_str": "the"}),
+        )
+        .unwrap();
+        let lines = file_lines(&tmp, "gotchas.md");
+        assert_eq!(
+            lines[2],
+            "- [p4] helpful=2 harmful=0 the pool is sized for postgres [source: 12; added: 2026-11-01]",
+            "the word changed, nothing else: {lines:?}"
+        );
+        assert_eq!(store.scan().len(), 1);
+    }
+
+    #[test]
+    fn an_edit_keeps_votes_provenance_and_evidence() {
+        let (tmp, store, tool) = grammar_fixture();
+        std::fs::create_dir_all(tmp.path().join("project")).unwrap();
+        std::fs::write(tmp.path().join("pool.rs"), "fn pool() {}\n").unwrap();
+        let original = "- [p4] helpful=2 harmful=1 the pool is sized for postgres \
+                        [evidence: pool.rs@000000000000] [source: 12; added: 2026-11-01]";
+        std::fs::write(
+            tmp.path().join("project/gotchas.md"),
+            format!("{original}\n"),
+        )
+        .unwrap();
+        // The model rewrites the whole line: new text, but also new
+        // counters and a fresh-looking hash (which would launder the
+        // stale-evidence flag).
+        run_tool(
+            &tool,
+            json!({"command": "str_replace", "path": "project/gotchas.md",
+                   "old_str": original,
+                   "new_str": "- [p4] helpful=9 harmful=0 the pool is sized for sqlite [evidence: pool.rs@ffffffffffff]"}),
+        )
+        .unwrap();
+        let entry = store.scan().pop().unwrap();
+        assert_eq!(entry.id, "p4");
+        assert_eq!(entry.text, "the pool is sized for sqlite");
+        assert_eq!(
+            (entry.helpful, entry.harmful),
+            (2, 1),
+            "votes are the human's"
+        );
+        assert_eq!(entry.source_session.as_deref(), Some("12"));
+        assert_eq!(
+            entry.evidence[0].hash, "000000000000",
+            "the stale flag survives"
+        );
+    }
+
+    #[test]
+    fn plain_text_over_an_entry_line_updates_that_entry() {
+        let (tmp, store, tool) = grammar_fixture();
+        std::fs::create_dir_all(tmp.path().join("project")).unwrap();
+        let original = "- [p4] helpful=2 harmful=0 the pool is sized for postgres [source: 12; added: 2026-11-01]";
+        std::fs::write(
+            tmp.path().join("project/gotchas.md"),
+            format!("{original}\n"),
+        )
+        .unwrap();
+        run_tool(
+            &tool,
+            json!({"command": "str_replace", "path": "project/gotchas.md",
+                   "old_str": original, "new_str": "the pool is sized for sqlite"}),
+        )
+        .unwrap();
+        let entries = store.scan();
+        assert_eq!(entries.len(), 1, "{entries:?}");
+        assert_eq!(entries[0].id, "p4", "the same entry, not a new one");
+        assert_eq!(entries[0].text, "the pool is sized for sqlite");
+        assert_eq!(entries[0].helpful, 2);
+    }
+
+    #[test]
+    fn removing_an_entry_is_refused_with_the_way_to_retire_it() {
+        let (tmp, store, tool) = grammar_fixture();
+        std::fs::create_dir_all(tmp.path().join("project")).unwrap();
+        let original = "- [p4] helpful=0 harmful=0 old advice [source: 12; added: 2026-11-01]";
+        std::fs::write(
+            tmp.path().join("project/gotchas.md"),
+            format!("{original}\n"),
+        )
+        .unwrap();
+        let error = run_tool(
+            &tool,
+            json!({"command": "str_replace", "path": "project/gotchas.md",
+                   "old_str": original, "new_str": ""}),
+        )
+        .unwrap_err();
+        assert!(
+            error.contains("p4") && error.contains("valid until"),
+            "{error}"
+        );
+        assert_eq!(store.scan().len(), 1, "the file is untouched");
+    }
+
+    #[test]
+    fn a_colliding_id_is_reminted_and_invented_hashes_are_replaced() {
+        let (tmp, store, tool) = grammar_fixture();
+        std::fs::create_dir_all(tmp.path().join("project")).unwrap();
+        std::fs::write(tmp.path().join("pool.rs"), "fn pool() {}\n").unwrap();
+        std::fs::write(
+            tmp.path().join("project/a.md"),
+            "- [p1] helpful=0 harmful=0 first [source: added: 2026-11-01]\n",
+        )
+        .unwrap();
+        run_tool(
+            &tool,
+            json!({"command": "create", "path": "project/b.md",
+                   "content": "- [p1] helpful=5 harmful=0 the pool warms at boot [evidence: pool.rs@abc123def456, gone.rs@abc123def456]\npool size is 8 [evidence: pool.rs]\n"}),
+        )
+        .unwrap();
+        let entries = store.scan();
+        let mut ids: Vec<&str> = entries.iter().map(|entry| entry.id.as_str()).collect();
+        ids.sort();
+        ids.dedup();
+        assert_eq!(ids.len(), 3, "unique ids: {entries:?}");
+        let real = gertie_core::blob_hash(b"fn pool() {}\n");
+        for text in ["the pool warms at boot", "pool size is 8"] {
+            let entry = entries.iter().find(|entry| entry.text == text).unwrap();
+            assert_eq!(entry.helpful, 0, "a new entry starts unvoted: {entry:?}");
+            assert_eq!(
+                entry.evidence.len(),
+                1,
+                "a missing file is not evidence: {entry:?}"
+            );
+            assert_eq!(entry.evidence[0].path, "pool.rs");
+            assert_eq!(entry.evidence[0].hash, real, "gertie hashes, not the model");
+        }
+    }
+
+    #[test]
+    fn insert_and_legacy_prose_leave_existing_lines_alone() {
+        let (tmp, store, tool) = grammar_fixture();
+        std::fs::create_dir_all(tmp.path().join("project")).unwrap();
+        std::fs::write(
+            tmp.path().join("project/notes.md"),
+            "# Notes\n\nsome legacy prose\n- [p2] helpful=1 harmful=0 kept [source: added: 2026-11-01]\n",
+        )
+        .unwrap();
+        run_tool(
+            &tool,
+            json!({"command": "insert", "path": "project/notes.md", "insert_line": 4,
+                   "new_str": "- a fresh fact"}),
+        )
+        .unwrap();
+        let lines = file_lines(&tmp, "notes.md");
+        assert_eq!(lines[2], "some legacy prose");
+        assert_eq!(
+            lines[3],
+            "- [p2] helpful=1 harmful=0 kept [source: added: 2026-11-01]"
+        );
+        assert!(
+            lines[4].starts_with("- [p3] helpful=0 harmful=0 a fresh fact"),
+            "{lines:?}"
+        );
+        assert_eq!(store.scan().len(), 2);
     }
 }

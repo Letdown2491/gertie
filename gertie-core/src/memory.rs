@@ -375,6 +375,165 @@ impl MemoryStore {
         Ok(out)
     }
 
+    /// The memory tool's write normalizer: `before` is the file as it
+    /// is on disk (empty for a create), `after` the model's edit of it.
+    /// Whatever the model typed, the result is clean entry grammar:
+    ///
+    /// - unchanged lines, headings, and legacy prose stay verbatim;
+    /// - an existing entry the edit changed keeps its id, votes,
+    ///   provenance, evidence and flags (update semantics: the model
+    ///   may change its text, links and supersede marker, nothing the
+    ///   human or the harness owns, so a rewritten hash can never
+    ///   launder a stale-evidence flag);
+    /// - new text becomes a new entry: its markdown bullet stripped,
+    ///   a fresh id, zeroed votes, today's date, and evidence hashed
+    ///   by the harness (a cited path that is not a workspace file is
+    ///   dropped; the model's own hash is ignored);
+    /// - an entry line with a colliding, duplicated or invented id is
+    ///   new text too, with a fresh id;
+    /// - plain text that replaces an entry line is that entry's new
+    ///   text (paired in order); an edit that removes an entry outright
+    ///   is refused, because memory never deletes.
+    pub fn normalize_edit(
+        &self,
+        tier: Tier,
+        file: &str,
+        before: &str,
+        after: &str,
+    ) -> Result<String, String> {
+        let prefix = tier.prefix();
+        let before_entries: Vec<MemoryEntry> = before
+            .lines()
+            .filter_map(|line| parse_entry(line, tier, file))
+            .collect();
+        let before_lines: std::collections::HashSet<&str> = before.lines().map(str::trim).collect();
+        let known: Vec<MemoryEntry> = self.scan();
+        let mut next = known
+            .iter()
+            .map(|entry| entry.id.as_str())
+            .chain(before_entries.iter().map(|entry| entry.id.as_str()))
+            .filter_map(|id| id.strip_prefix(prefix)?.parse::<u32>().ok())
+            .max()
+            .unwrap_or(0)
+            + 1;
+        let today = self.today().map_err(|error| format!("memory: {error}"))?;
+
+        // One slot per output line; new facts are resolved after the
+        // walk, once we know which entries the edit removed.
+        enum Slot {
+            Done(String),
+            New(Box<MemoryEntry>, Vec<String>),
+        }
+        let mut slots: Vec<Slot> = Vec::new();
+        let mut used: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for line in after.lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                slots.push(Slot::Done(String::new()));
+                continue;
+            }
+            if let Some(entry) = parse_entry(trimmed, tier, file) {
+                let original = before_entries.iter().find(|mine| mine.id == entry.id);
+                match original {
+                    Some(original) if !used.contains(&entry.id) => {
+                        used.insert(entry.id.clone());
+                        if before_lines.contains(trimmed) {
+                            slots.push(Slot::Done(line.to_string()));
+                        } else {
+                            slots.push(Slot::Done(render_line(&MemoryEntry {
+                                text: sanitize_untrusted(&entry.text, 512),
+                                links: entry.links,
+                                valid_until: entry.valid_until.or(original.valid_until.clone()),
+                                superseded_by: entry
+                                    .superseded_by
+                                    .or(original.superseded_by.clone()),
+                                ..original.clone()
+                            })));
+                        }
+                    }
+                    _ => {
+                        let paths = entry
+                            .evidence
+                            .iter()
+                            .map(|cited| cited.path.clone())
+                            .collect();
+                        slots.push(Slot::New(Box::new(entry), paths));
+                    }
+                }
+                continue;
+            }
+            if trimmed.starts_with('#') || before_lines.contains(trimmed) {
+                slots.push(Slot::Done(line.to_string()));
+                continue;
+            }
+            let (entry, paths) = loose_entry(trimmed, tier, file)?;
+            slots.push(Slot::New(Box::new(entry), paths));
+        }
+
+        // Entries the edit dropped: plain text in their place is their
+        // new text (in order); anything else would delete history.
+        let removed: Vec<&MemoryEntry> = before_entries
+            .iter()
+            .filter(|entry| !used.contains(&entry.id))
+            .collect();
+        let fresh = slots
+            .iter()
+            .filter(|slot| matches!(slot, Slot::New(..)))
+            .count();
+        if !removed.is_empty() && removed.len() != fresh {
+            let ids = removed
+                .iter()
+                .map(|entry| entry.id.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            return Err(format!(
+                "memory: this edit removes [{ids}], and memory never deletes. To retire an \
+                 entry, append [valid until: {today}] to its line; if a newer entry replaces \
+                 it, append [superseded by: pN; valid until: {today}] instead"
+            ));
+        }
+        let mut replaced = removed.into_iter();
+        let mut out = Vec::with_capacity(slots.len());
+        for slot in slots {
+            match slot {
+                Slot::Done(line) => out.push(line),
+                Slot::New(entry, paths) => {
+                    let text = sanitize_untrusted(&entry.text, 512);
+                    let line = match replaced.next() {
+                        Some(original) => render_line(&MemoryEntry {
+                            text,
+                            ..original.clone()
+                        }),
+                        None => {
+                            let id = format!("{prefix}{next}");
+                            next += 1;
+                            render_line(&MemoryEntry {
+                                id,
+                                file: file.to_string(),
+                                text,
+                                helpful: 0,
+                                harmful: 0,
+                                source_session: None,
+                                added_at: Some(today.clone()),
+                                valid_until: entry.valid_until,
+                                superseded_by: entry.superseded_by,
+                                links: entry.links,
+                                evidence: self.evidence_for(&paths),
+                                recheck: Vec::new(),
+                            })
+                        }
+                    };
+                    out.push(line);
+                }
+            }
+        }
+        let mut joined = out.join("\n");
+        if after.ends_with('\n') && !joined.is_empty() {
+            joined.push('\n');
+        }
+        Ok(joined)
+    }
+
     pub fn today(&self) -> rusqlite::Result<String> {
         self.store.with_connection(|connection| {
             connection.query_row("SELECT strftime('%Y-%m-%d','now')", [], |row| {
@@ -1352,6 +1511,61 @@ fn parse_entry(line: &str, tier: Tier, file: &str) -> Option<MemoryEntry> {
         evidence,
         recheck,
     })
+}
+
+/// A line of new model text as an entry: the markdown bullet and any
+/// half-written grammar (a stray `[p3]`, `helpful=N harmful=M`) are
+/// stripped, the trailing markers peel as they do for a real line, and
+/// a bare `[evidence: a.rs, b.rs]` (paths without hashes) is accepted,
+/// since the harness hashes anyway. Returns the entry and the cited
+/// paths.
+fn loose_entry(line: &str, tier: Tier, file: &str) -> Result<(MemoryEntry, Vec<String>), String> {
+    let mut text = line.trim();
+    for bullet in ["- ", "* ", "+ "] {
+        if let Some(rest) = text.strip_prefix(bullet) {
+            text = rest.trim_start();
+            break;
+        }
+    }
+    if let Some(rest) = text.strip_prefix('[')
+        && let Some((id, after)) = rest.split_once(']')
+        && id.len() >= 2
+        && (id.starts_with('p') || id.starts_with('g'))
+        && id[1..].chars().all(|c| c.is_ascii_digit())
+    {
+        text = after.trim_start();
+    }
+    if let Some(rest) = text.strip_prefix("helpful=")
+        && let Some((_, after)) = rest.split_once(' ')
+        && let Some(rest) = after.strip_prefix("harmful=")
+        && let Some((_, after)) = rest.split_once(' ')
+    {
+        text = after.trim_start();
+    }
+    // Bare evidence (no hashes) would stay in the text; lift it out.
+    let mut paths = Vec::new();
+    let mut body = text.to_string();
+    if let Some(open) = body.find("[evidence:")
+        && let Some(close) = body[open..].find(']')
+    {
+        let inner = &body[open + "[evidence:".len()..open + close];
+        if !inner.contains('@') {
+            paths = inner
+                .split(',')
+                .map(|path| path.trim().to_string())
+                .filter(|path| !path.is_empty())
+                .collect();
+            body = format!("{}{}", &body[..open], &body[open + close + 1..])
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ");
+        }
+    }
+    let candidate = format!("- [{}0] helpful=0 harmful=0 {body}", tier.prefix());
+    let entry = parse_entry(&candidate, tier, file)
+        .ok_or_else(|| format!("memory: nothing to remember in {line:?}"))?;
+    paths.extend(entry.evidence.iter().map(|cited| cited.path.clone()));
+    Ok((entry, paths))
 }
 
 /// `p12, g3` into ids; None (the bracket stays text) when any item is

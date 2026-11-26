@@ -23,7 +23,7 @@ pub use agent_loop::{
 };
 pub use directory_instructions::INSTRUCTIONS_CAP;
 pub use memory::{
-    CorrectionStep, Link, MemoryEntry, MemoryHit, MemoryStore, Op, Tier, correction_walk,
+    CorrectionStep, Link, MemoryEntry, MemoryHit, MemoryStore, Op, Tier, blob_hash, correction_walk,
 };
 pub use permissions::{
     AskFilter, ModeScope, PendingAsk, PermissionBroker, PermissionMode, PromptSource, TurnToken,
