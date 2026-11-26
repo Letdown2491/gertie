@@ -763,16 +763,38 @@ impl ChatView {
                     "s"
                 }
             ));
-            let rows: Vec<_> = facts
-                .memory_actions
-                .iter()
-                .map(|action| {
-                    div()
-                        .text_size(px(11.5))
-                        .text_color(theme.foreground)
-                        .child(SharedString::from(action.clone()))
-                })
-                .collect();
+            // Each action is a chip row, matching FILES and GROUNDED
+            // IN: the verb as the semibold head, the entry's file as
+            // the body, one row per action.
+            let rows = facts.memory_actions.iter().map(|action| {
+                let (verb, file) = match action.split_once(' ') {
+                    Some((verb, rest)) => (verb, rest),
+                    // A clip-truncated action has no space; render it
+                    // whole rather than losing it.
+                    None => (action.as_str(), ""),
+                };
+                v_flex()
+                    .id(SharedString::from(format!("status-memory-{action}")))
+                    .gap_0p5()
+                    .px_2()
+                    .py_1p5()
+                    .rounded_sm()
+                    .bg(theme.secondary)
+                    .text_size(px(12.))
+                    .child(
+                        div()
+                            .text_size(px(10.5))
+                            .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                            .text_color(theme.muted_foreground)
+                            .child(verb.to_string()),
+                    )
+                    .child(
+                        div()
+                            .text_color(theme.foreground)
+                            .child(SharedString::from(file.to_string())),
+                    )
+                    .into_any_element()
+            });
             sections.push(
                 v_flex()
                     .gap_1()

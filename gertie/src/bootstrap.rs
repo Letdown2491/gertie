@@ -531,9 +531,7 @@ impl Bootstrap {
             .unwrap_or_else(|error| eprintln!("warning: memory sync: {error}"));
         // Dreaming rides the same sweep: idle-gated, opt-in, and only
         // when memory is on. The changelog lands in the tier's dreams/.
-        if config.memory_enabled()
-            && config.memory_dream_days() > 0
-        {
+        if config.memory_enabled() && config.memory_dream_days() > 0 {
             // The idle clock: dream_days is a *cadence*, not a
             // boot-time constant. The stamp lives beside the
             // changelogs it gates; its absence (first run) dreams
@@ -543,13 +541,13 @@ impl Bootstrap {
             let stamp = tier.join("dreams/.last-dream");
             let due = std::fs::metadata(&stamp)
                 .and_then(|meta| meta.modified())
-                .map(|modified| modified.elapsed().is_ok_and(|age| {
-                    age.as_secs() >= config.memory_dream_days() * 86_400
-                }))
+                .map(|modified| {
+                    modified
+                        .elapsed()
+                        .is_ok_and(|age| age.as_secs() >= config.memory_dream_days() * 86_400)
+                })
                 .unwrap_or(true);
-            if due
-                && let Some(changelog) = dream(&memory, &tier)
-            {
+            if due && let Some(changelog) = dream(&memory, &tier) {
                 eprintln!("{changelog}");
                 let _ = std::fs::create_dir_all(stamp.parent().unwrap());
                 let _ = std::fs::write(&stamp, b"");
