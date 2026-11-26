@@ -268,10 +268,10 @@ impl WorkspaceView {
             shell.update(cx, |shell, cx| match request {
                 ShellRequest::NewChat => shell.add_tab(window, cx),
                 ShellRequest::NewWorktreeChat => shell.add_worktree_tab(window, cx),
-                ShellRequest::NewChatIn { root, project } => {
+                ShellRequest::NewChatIn { project } => {
                     shell.add_tab(window, cx);
                     let view = shell.tabs[shell.active].view.clone();
-                    view.update(cx, |view, cx| view.new_chat_in(root, project, window, cx));
+                    view.update(cx, |view, cx| view.new_chat_in(project, window, cx));
                 }
             });
         });

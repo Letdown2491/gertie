@@ -128,13 +128,13 @@ pub fn command_items(
 /// bracket the match). Ordered as `search` ranked them, best first;
 /// the row position is the index into the chat's hit vector, which is
 /// what confirming hands back.
-/// Project rows for the palette: the name, and the folder beside it.
+/// Project rows for the palette: the name, marked as a project.
 pub fn project_items(projects: &[gertie_core::Project]) -> Vec<CommandItem> {
     projects
         .iter()
         .map(|project| {
             let name = project.name.clone();
-            let folder = format!("project · {}", project.root);
+            let folder = "project".to_string();
             CommandItem::new()
                 .label(name.clone())
                 .keywords([folder.as_str()])

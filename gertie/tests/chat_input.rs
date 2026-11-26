@@ -1904,15 +1904,13 @@ fn two_session_store() -> Arc<SessionStore> {
     store
 }
 
-/// Two chats, both run in the project's folder, only the first filed
-/// under it: where a chat runs never files it.
+/// Two chats in one folder, only the first filed under the project:
+/// where a chat runs never files it.
 fn project_store() -> (Arc<SessionStore>, i64) {
     let store = two_session_store();
     store.set_session_workspace(gertie_core::SessionId(1), Path::new("/w/alpha"));
     store.set_session_workspace(gertie_core::SessionId(2), Path::new("/w/alpha"));
-    let project = store
-        .add_project(Path::new("/w/alpha"), None)
-        .expect("project");
+    let project = store.add_project("alpha").expect("store").expect("named");
     store
         .set_session_project(gertie_core::SessionId(1), Some(project.id))
         .expect("file");
@@ -2023,23 +2021,33 @@ fn a_chat_moves_into_a_project_and_back_out() {
     assert_eq!(filed(&store), None);
 }
 
-/// A project's + opens a blank chat rooted in its folder, filed under
-/// the project when the first message creates it.
+/// A project's + opens a blank chat in the current folder, filed
+/// under the project when the first message creates it.
 #[test]
-fn a_projects_plus_starts_a_chat_in_its_folder() {
+fn a_projects_plus_starts_a_chat_filed_there() {
     let store = Arc::new(SessionStore::open(Path::new(":memory:")).expect("memory store"));
-    let folder = tempfile::tempdir().expect("project folder");
-    let project = store.add_project(folder.path(), None).expect("project");
+    let project = store
+        .add_project("Research")
+        .expect("store")
+        .expect("named");
     let store_handle = store.clone();
     let mut fixture = fixture_with_store(store);
+    let root_before = fixture.cx.update(|cx| {
+        fixture
+            .view
+            .upgrade()
+            .expect("view alive")
+            .read(cx)
+            .workspace_root_for_test()
+    });
     fixture.act(|window, cx| window.click(format!("project-new-{}", project.id), cx));
     let (root, session) = fixture.cx.update(|cx| {
         let view = fixture.view.upgrade().expect("view alive").read(cx);
         (view.workspace_root_for_test(), view.session_id())
     });
     assert_eq!(
-        root.canonicalize().unwrap(),
-        folder.path().canonicalize().unwrap()
+        root, root_before,
+        "a project is not a folder: the chat stays put"
     );
     assert_eq!(session, None, "a blank chat, created by its first message");
     fixture.act(|window, cx| {
@@ -2049,6 +2057,32 @@ fn a_projects_plus_starts_a_chat_in_its_folder() {
     let sessions = store_handle.list_sessions().unwrap();
     assert_eq!(sessions.len(), 1);
     assert_eq!(sessions[0].project_id, Some(project.id));
+}
+
+/// The add button asks for a name, not a folder: Enter makes the
+/// project, Enter on an empty field makes nothing.
+#[test]
+fn the_add_button_names_a_new_project() {
+    let store = Arc::new(SessionStore::open(Path::new(":memory:")).expect("memory store"));
+    let mut fixture = fixture_with_store(store.clone());
+    fixture.act(|window, cx| window.click("add-project", cx));
+    fixture.act(|window, cx| window.press("enter", cx));
+    assert!(
+        store.list_projects().unwrap().is_empty(),
+        "blank is the cancel"
+    );
+    fixture.act(|window, cx| window.click("add-project", cx));
+    fixture.act(|window, cx| {
+        window.input("Side quests", cx);
+        window.press("enter", cx);
+    });
+    let projects = store.list_projects().unwrap();
+    assert_eq!(projects.len(), 1);
+    assert_eq!(projects[0].name, "Side quests");
+    assert_eq!(
+        shown(&mut fixture, &[&format!("project-{}", projects[0].id)]),
+        vec![true]
+    );
 }
 
 /// The palette finds a project by name; confirming it opens the group.

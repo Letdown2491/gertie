@@ -213,6 +213,15 @@ impl ChatView {
         cx: &mut Context<Self>,
     ) -> Vec<AnyElement> {
         let mut rows = vec![self.list_header(cx)];
+        if self.creating_project {
+            rows.push(
+                h_flex()
+                    .w_full()
+                    .mt_1()
+                    .child(Input::new(&self.rename_input).small())
+                    .into_any_element(),
+            );
+        }
         let active: Vec<&gertie_core::SessionSummary> =
             visible.iter().filter(|summary| !summary.settled).collect();
         if self.projects.is_empty() {
@@ -278,15 +287,17 @@ impl ChatView {
                     .icon(IconName::FolderPlus)
                     .xsmall()
                     .ghost()
-                    .tooltip("Add a project: a folder whose chats group together")
-                    .on_click(cx.listener(|this, _, _, cx| this.add_project_clicked(cx))),
+                    .tooltip("New project: a group to file conversations under")
+                    .on_click(
+                        cx.listener(|this, _, window, cx| this.add_project_clicked(window, cx)),
+                    ),
             )
             .into_any_element()
     }
 
     /// One project's header: the fold chevron, the name (the chat count
-    /// while folded), a + for a new chat there, and on hover rename and
-    /// remove. The tooltip names the folder.
+    /// while folded), a + for a new chat filed there, and on hover
+    /// rename and remove.
     fn project_header(
         &self,
         project: &gertie_core::Project,
@@ -301,8 +312,7 @@ impl ChatView {
                 .child(Input::new(&self.rename_input).small())
                 .into_any_element();
         }
-        let root = std::path::PathBuf::from(&project.root);
-        let folder = tildify(&root);
+
         let group = SharedString::from(format!("project-row-{id}"));
         let hover_bg = cx.theme().foreground.opacity(0.06);
         let action = |name: String, icon: IconName, tip: &'static str| {
@@ -328,7 +338,6 @@ impl ChatView {
             .rounded(px(6.))
             .cursor_pointer()
             .hover(move |row| row.bg(hover_bg))
-            .tooltip(move |window, cx| Tooltip::new(folder.clone()).build(window, cx))
             .on_click(cx.listener(move |this, _, _, cx| this.toggle_project(id, cx)))
             .child(
                 Icon::new(if project.collapsed {
@@ -394,7 +403,7 @@ impl ChatView {
                 )
                 .on_click(cx.listener(move |this, _, window, cx| {
                     cx.stop_propagation();
-                    this.new_chat_in(root.clone(), id, window, cx);
+                    this.new_chat_in(id, window, cx);
                 })),
             )
             .into_any_element()

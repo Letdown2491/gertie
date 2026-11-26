@@ -268,13 +268,9 @@ pub enum ShellRequest {
     NewChat,
     /// A new chat in its own git worktree of this repo.
     NewWorktreeChat,
-    /// A new chat in a project (rooted in its folder, filed under it),
-    /// asked for when this view can't take it (a turn runs, or it is a
-    /// worktree tab).
-    NewChatIn {
-        root: std::path::PathBuf,
-        project: i64,
-    },
+    /// A new chat filed under a project, asked for when this view
+    /// can't take it (a turn runs, or it is a worktree tab).
+    NewChatIn { project: i64 },
 }
 
 /// The shell hook: weak to the shell, set by tabs.rs. None in tests
@@ -638,6 +634,8 @@ pub struct ChatView {
     /// Which project header is being renamed; it shares the rename
     /// field with the session rows.
     renaming_project: Option<i64>,
+    /// The add button's name field is up (the same rename field).
+    creating_project: bool,
     /// Whether the "Other" group is folded, persisted as a store flag.
     other_collapsed: bool,
     /// The project a blank chat started from: filed there when its
@@ -1043,6 +1041,7 @@ impl ChatView {
             settled_open: false,
             projects,
             renaming_project: None,
+            creating_project: false,
             other_collapsed,
             pending_project: None,
             moving: None,
@@ -2076,10 +2075,7 @@ impl ChatView {
             self.palette_projects = self
                 .projects
                 .iter()
-                .filter(|project| {
-                    project.name.to_lowercase().contains(&needle)
-                        || project.root.to_lowercase().contains(&needle)
-                })
+                .filter(|project| project.name.to_lowercase().contains(&needle))
                 .cloned()
                 .collect();
             let mut hits: Vec<_> = self
@@ -2953,6 +2949,10 @@ impl ChatView {
     /// Puts a sidebar row into rename mode, prefilled with its title.
     fn start_rename(&mut self, session_id: SessionId, window: &mut Window, cx: &mut Context<Self>) {
         self.renaming_project = None;
+        self.creating_project = false;
+        self.rename_input.update(cx, |state, cx| {
+            state.set_placeholder("New title…", window, cx)
+        });
         self.renaming = Some(session_id);
         let title = self
             .sessions
@@ -2970,6 +2970,18 @@ impl ChatView {
     /// Enter in the rename field: persist the title, refresh the sidebar.
     /// Empty input cancels, an unnamed session is worse than a stale title.
     fn commit_rename(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if std::mem::take(&mut self.creating_project) {
+            // A blank name makes nothing: Enter on an empty field is
+            // the cancel.
+            let name = self.rename_input.read(cx).value().to_string();
+            if let Err(error) = self.store.add_project(&name) {
+                self.push_notice(format!("Project not added, {error}."), cx);
+            }
+            self.reload_lists();
+            window.focus(&self.input.read(cx).focus_handle(cx), cx);
+            cx.notify();
+            return;
+        }
         if let Some(project) = self.renaming_project.take() {
             // A blank name is ignored by the store: the old one stays.
             let name = self.rename_input.read(cx).value().to_string();
@@ -3372,6 +3384,7 @@ impl ChatView {
         cx: &mut Context<Self>,
     ) {
         self.renaming = None;
+        self.creating_project = false;
         self.renaming_project = Some(id);
         let name = self
             .projects
@@ -3379,45 +3392,26 @@ impl ChatView {
             .find(|project| project.id == id)
             .map(|project| project.name.clone())
             .unwrap_or_default();
-        self.rename_input
-            .update(cx, |state, cx| state.set_value(name, window, cx));
+        self.rename_input.update(cx, |state, cx| {
+            state.set_placeholder("Project name", window, cx);
+            state.set_value(name, window, cx);
+        });
         window.focus(&self.rename_input.read(cx).focus_handle(cx), cx);
         cx.notify();
     }
 
-    /// The sidebar's add: a folder picker, and the folder joins the
-    /// list (named after itself; rename it in place).
-    pub(super) fn add_project_clicked(&mut self, cx: &mut Context<Self>) {
-        let picker = cx.prompt_for_paths(gpui_kit::PathPromptOptions {
-            files: false,
-            directories: true,
-            multiple: false,
-            prompt: Some("Choose a project folder".into()),
+    /// The sidebar's add: a name field at the top of the list; Enter
+    /// makes the project, Enter on an empty field cancels.
+    pub(super) fn add_project_clicked(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.renaming = None;
+        self.renaming_project = None;
+        self.creating_project = true;
+        self.rename_input.update(cx, |state, cx| {
+            state.set_placeholder("Project name", window, cx);
+            state.set_value("", window, cx);
         });
-        cx.spawn(async move |this, cx| {
-            let Ok(Ok(Some(paths))) = picker.await else {
-                return; // cancelled, or the portal is missing
-            };
-            let Some(root) = paths.first().cloned() else {
-                return;
-            };
-            let _ = this.update(cx, |this, cx| this.add_project(&root, cx));
-        })
-        .detach();
-    }
-
-    /// Adds a folder as a project and opens its group.
-    pub fn add_project(&mut self, root: &std::path::Path, cx: &mut Context<Self>) {
-        match self.store.add_project(root, None) {
-            Ok(project) => {
-                if project.collapsed {
-                    let _ = self.store.set_project_collapsed(project.id, false);
-                }
-                self.reload_lists();
-                cx.notify();
-            }
-            Err(error) => self.push_notice(format!("Project not added, {error}."), cx),
-        }
+        window.focus(&self.rename_input.read(cx).focus_handle(cx), cx);
+        cx.notify();
     }
 
     /// The palette's project jump: open the group (persisted, like a
@@ -3440,7 +3434,8 @@ impl ChatView {
     /// the list header, then each earlier group's header and open rows.
     /// Mirrors `grouped_rows`.
     fn project_row_index(&self, id: i64) -> Option<usize> {
-        let mut index = 3 + usize::from(self.shell_ask.is_some());
+        let mut index =
+            3 + usize::from(self.shell_ask.is_some()) + usize::from(self.creating_project);
         let visible = self.visible_sessions();
         for project in &self.projects {
             if project.id == id {
@@ -3529,42 +3524,19 @@ impl ChatView {
         );
     }
 
-    /// A project's +: a blank chat rooted in its folder, filed under
-    /// the project when its first message creates it. This view
-    /// takes it when it can; a running turn or a worktree tab (whose
-    /// root is its checkout) hands it to a new view instead.
-    pub fn new_chat_in(
-        &mut self,
-        root: std::path::PathBuf,
-        project: i64,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    /// A project's +: a blank chat in the current folder, filed under
+    /// the project when its first message creates it. This view takes
+    /// it when it can; a running turn or a worktree tab (whose root is
+    /// its checkout) hands it to a new view instead.
+    pub fn new_chat_in(&mut self, project: i64, window: &mut Window, cx: &mut Context<Self>) {
         if self.streaming || self.branch_naming.is_some() {
             if let Some(ask) = self.shell_ask.clone() {
-                ask(ShellRequest::NewChatIn { root, project }, window, cx);
+                ask(ShellRequest::NewChatIn { project }, window, cx);
             }
             return;
         }
         self.new_session(window, cx);
         self.pending_project = Some(project);
-        let same = root == self.workspace_root
-            || matches!(
-                (root.canonicalize(), self.workspace_root.canonicalize()),
-                (Ok(a), Ok(b)) if a == b
-            );
-        if !same {
-            match (self.switch)(&root) {
-                Ok(switched) => self.apply_switch(switched, cx),
-                Err(error) => self.push_notice(
-                    format!(
-                        "The chat stays in {}, {error}.",
-                        tildify(&self.workspace_root)
-                    ),
-                    cx,
-                ),
-            }
-        }
     }
 
     /// Lands a rebuilt workspace in this chat. The running turn is

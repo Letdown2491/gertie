@@ -651,15 +651,16 @@ conversation's row, a finish seen by nobody a blue one, a rate-limit pause the p
 icon.
 
 **Projects** group the sidebar, and only the human files anything into one. A project
-is a name and a default folder in the session store (`projects`); membership is a
-column on the session (`project_id`), set by the row's move list or by starting a chat
-from the project's +, never inferred from where a chat runs: a folder is not a
-project, and two unrelated chats in one folder stay unrelated until filed. The folder
-only says where the project's + roots new chats. Removing a project is list-only (its
-chats go back to Other; no session, file, or folder is deleted). Each group folds, and
-the fold persists; with no projects the sidebar is the old flat list. A view that cannot
-take a project's new chat (a turn running, a worktree tab) asks the shell for a new
-one. The palette matches project names and folders above history hits.
+is a name in the session store (`projects`), not a folder or a workspace: where a chat
+runs stays the chat's own (`workspace_root`, the header's folder switch). Membership is
+a column on the session (`project_id`, one project at most), set by the row's move list
+or by starting a chat from the project's +, never inferred: two chats in one folder stay
+unrelated until filed. The + starts a blank chat in the current folder, filed when its
+first message creates it; plain New chat files nothing. Removing a project is list-only
+(its chats go back to Other; no session is deleted). Each group folds, and the fold
+persists; with no projects the sidebar is the old flat list. A view that cannot take a
+project's new chat (a turn running, a worktree tab) asks the shell for a new one. The
+palette matches project names above history hits.
 
 The window shell has no tab bar: two lists of the same conversations was one
 too many. The shell keeps one chat view per conversation that has something to say (a
