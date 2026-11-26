@@ -168,11 +168,15 @@ impl Tool for Memory {
             let path = resolve_in(&root, rel, &args.path)?;
             match args.command.as_str() {
                 "view" => view(tier, &path, args.view_range.as_deref()),
-                "create" => mutate(&store, tier, &args.path, "create", || create(&path, &args)),
-                "str_replace" => mutate(&store, tier, &args.path, "str_replace", || {
-                    str_replace(&path, &args)
+                "create" => mutate(&store, tier, &args.path, "create", || {
+                    create(&store, tier, &path, &args)
                 }),
-                "insert" => mutate(&store, tier, &args.path, "insert", || insert(&path, &args)),
+                "str_replace" => mutate(&store, tier, &args.path, "str_replace", || {
+                    str_replace(&store, tier, &path, &args)
+                }),
+                "insert" => mutate(&store, tier, &args.path, "insert", || {
+                    insert(&store, tier, &path, &args)
+                }),
                 "delete" => mutate(&store, tier, &args.path, "delete", || delete(&path)),
                 "rename" => mutate(&store, tier, &args.path, "rename", || {
                     rename(&store, tier, &path, &args)
@@ -254,7 +258,41 @@ fn parse_view_range(range: &str, len: usize) -> Result<(usize, usize), String> {
 
 /// create: the file must not exist yet, parents are created, the whole
 /// content passes the sanitizer (one entrance, one cap).
-fn create(path: &Path, args: &MemoryArgs) -> ToolResult {
+
+/// Every content line the model adds becomes entry grammar: lines
+/// that already carry the `- [id]` prefix pass through, the rest are
+/// wrapped by the store (fresh id, counters, provenance, date). This
+/// keeps the tool path and the ops path producing the same shaped
+/// store.
+fn ensure_grammar(
+    store: &gertie_core::MemoryStore,
+    tier: Tier,
+    text: &str,
+) -> Result<Vec<String>, String> {
+    // The batch form: one scan for the whole text, ids minted
+    // sequentially (the per-line form minted duplicates — the hand
+    // test's ["g1","g2","g1"] finding).
+    let mut out = Vec::new();
+    for line in store
+        .entry_lines(tier, text)
+        .map_err(|error| format!("memory: {error}"))?
+    {
+        let trimmed = line.trim_start();
+        if trimmed.is_empty() {
+            out.push(String::new());
+        } else {
+            out.push(line);
+        }
+    }
+    Ok(out)
+}
+
+fn create(
+    store: &gertie_core::MemoryStore,
+    tier: Tier,
+    path: &Path,
+    args: &MemoryArgs,
+) -> ToolResult {
     refuse_memory_md(path)?;
     let content = args
         .content
@@ -263,7 +301,8 @@ fn create(path: &Path, args: &MemoryArgs) -> ToolResult {
     if path.exists() {
         return Err(format!("memory: {} already exists", path.display()));
     }
-    let content = gertie_core::sanitize_untrusted(content, 8192);
+    let lines = ensure_grammar(store, tier, content)?;
+    let content = lines.join("\n");
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
             .map_err(|error| format!("memory: {}: {error}", parent.display()))?;
@@ -275,7 +314,12 @@ fn create(path: &Path, args: &MemoryArgs) -> ToolResult {
 
 /// str_replace: the anchor must occur exactly once, so the edit can
 /// never land somewhere the model did not look at.
-fn str_replace(path: &Path, args: &MemoryArgs) -> ToolResult {
+fn str_replace(
+    store: &gertie_core::MemoryStore,
+    tier: Tier,
+    path: &Path,
+    args: &MemoryArgs,
+) -> ToolResult {
     refuse_memory_md(path)?;
     let old_str = args
         .old_str
@@ -303,7 +347,12 @@ fn str_replace(path: &Path, args: &MemoryArgs) -> ToolResult {
             path.display()
         ));
     }
-    let edited = text.replacen(old_str, &gertie_core::sanitize_untrusted(new_str, 8192), 1);
+    // The replacement wraps too: a str_replace that adds content is
+    // a memory action and must land as grammar (the last unwrapped
+    // command; the per-line mint form would collide on multi-line
+    // replacements, so this rides the batch).
+    let wrapped = ensure_grammar(store, tier, new_str)?;
+    let edited = text.replacen(old_str, &wrapped.join("\n"), 1);
     std::fs::write(path, &edited)
         .map_err(|error| format!("memory: {}: {error}", path.display()))?;
     Ok(format!("edited {}", path.display()))
@@ -311,7 +360,12 @@ fn str_replace(path: &Path, args: &MemoryArgs) -> ToolResult {
 
 /// insert: the new text lands after the given 1-based line, so a
 /// merge is always a splice, never a whole-file rewrite.
-fn insert(path: &Path, args: &MemoryArgs) -> ToolResult {
+fn insert(
+    store: &gertie_core::MemoryStore,
+    tier: Tier,
+    path: &Path,
+    args: &MemoryArgs,
+) -> ToolResult {
     refuse_memory_md(path)?;
     let new_str = args
         .new_str
@@ -330,16 +384,16 @@ fn insert(path: &Path, args: &MemoryArgs) -> ToolResult {
             lines.len()
         ));
     }
-    let new_str = gertie_core::sanitize_untrusted(new_str, 8192);
-    let inserted: Vec<&str> = if new_str.is_empty() {
-        vec![""]
+    let wrapped = ensure_grammar(store, tier, new_str)?;
+    let inserted: Vec<String> = if wrapped.is_empty() {
+        vec![String::new()]
     } else {
-        new_str.lines().collect()
+        wrapped
     };
-    let mut edited: Vec<&str> = Vec::with_capacity(lines.len() + inserted.len());
-    edited.extend_from_slice(&lines[..at]);
-    edited.extend_from_slice(&inserted);
-    edited.extend_from_slice(&lines[at..]);
+    let mut edited: Vec<String> = Vec::with_capacity(lines.len() + inserted.len());
+    edited.extend(lines[..at].iter().map(|line| line.to_string()));
+    edited.extend(inserted.iter().cloned());
+    edited.extend(lines[at..].iter().map(|line| line.to_string()));
     let mut out = edited.join("\n");
     if text.ends_with('\n') {
         out.push('\n');
@@ -605,6 +659,154 @@ mod tests {
         let text = arguments.to_string();
         let mut future = tool.run(&text);
         settle(&mut future)
+    }
+
+    #[test]
+    fn the_round_trip_sequence_mints_unique_ids() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Arc::new(gertie_core::MemoryStore::open(
+            tmp.path().join("project"),
+            tmp.path().join("global"),
+            Arc::new(gertie_core::SessionStore::open(std::path::Path::new(":memory:")).unwrap()),
+        ));
+        let tool = Memory::new(store.clone());
+        // The exact sequence: create (two lines -> two entries), then
+        // insert one more between them.
+        let _ = run_tool(
+            &tool,
+            json!({"command": "create", "path": "global/notes.md", "content": "first\nsecond\n"}),
+        );
+        for line in std::fs::read_to_string(tmp.path().join("global/notes.md"))
+            .unwrap()
+            .lines()
+        {
+            eprintln!("after create: {line}");
+        }
+        let _ = run_tool(
+            &tool,
+            json!({"command": "insert", "path": "global/notes.md", "insert_line": 1, "new_str": "between"}),
+        );
+        let after_insert = std::fs::read_to_string(tmp.path().join("global/notes.md")).unwrap();
+        // The ids in the file after create+insert: three entries, all
+        // distinct. The round-trip's UNIQUE failure claimed a repeat.
+        let ids: Vec<String> = after_insert
+            .lines()
+            .filter_map(|line| {
+                let rest = line.trim_start().strip_prefix("- [")?;
+                rest.split(']').next().map(|id| id.to_string())
+            })
+            .collect();
+        let mut sorted = ids.clone();
+        sorted.sort();
+        sorted.dedup();
+        assert_eq!(ids.len(), sorted.len(), "duplicate ids: {ids:?}");
+        // The round-trip's remaining steps: rename, then delete. The
+        // UNIQUE failure fired at one of these syncs.
+        // Back-to-back mints go through the batch (one scan,
+        // sequential ids); the per-line form is single-shot by
+        // contract and would collide here.
+        let minted = store
+            .entry_lines(gertie_core::Tier::Global, "direct a\ndirect b")
+            .unwrap();
+        let a_id = minted[0].split(']').next().unwrap().to_string();
+        let b_id = minted[1].split(']').next().unwrap().to_string();
+        assert_ne!(a_id, b_id, "batch mints collided: {minted:?}");
+        run_tool(
+            &tool,
+            json!({"command": "rename", "path": "global/notes.md", "new_path": "memo.md"}),
+        )
+        .unwrap_or_else(|error| panic!("rename failed: {error}"));
+        run_tool(
+            &tool,
+            json!({"command": "delete", "path": "global/memo.md"}),
+        )
+        .unwrap_or_else(|error| panic!("delete failed: {error}"));
+    }
+
+    #[test]
+    fn rename_then_delete_never_collide() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Arc::new(gertie_core::MemoryStore::open(
+            tmp.path().join("project"),
+            tmp.path().join("global"),
+            Arc::new(gertie_core::SessionStore::open(std::path::Path::new(":memory:")).unwrap()),
+        ));
+        let tool = Memory::new(store.clone());
+        run_tool(
+            &tool,
+            json!({"command": "create", "path": "global/notes.md", "content": "first\nsecond\n"}),
+        )
+        .unwrap_or_else(|error| panic!("create: {error}"));
+        run_tool(&tool, json!({"command": "insert", "path": "global/notes.md", "insert_line": 1, "new_str": "between"}))
+            .unwrap_or_else(|error| panic!("insert: {error}"));
+        // The two steps after, exactly as the round-trip runs them.
+        run_tool(
+            &tool,
+            json!({"command": "rename", "path": "global/notes.md", "new_path": "memo.md"}),
+        )
+        .unwrap_or_else(|error| panic!("rename: {error}"));
+        run_tool(
+            &tool,
+            json!({"command": "delete", "path": "global/memo.md"}),
+        )
+        .unwrap_or_else(|error| panic!("delete: {error}"));
+    }
+
+    /// The tool path and the ops path produce the same shaped store:
+    /// a model that hand-writes lines through the memory tool gets
+    /// grammar-wrapped entries (fresh id, counters, provenance, date),
+    /// not prose the store cannot index. Found live when the first
+    /// hand-made supersede produced grammar-less tombstones.
+    #[test]
+    fn tool_writes_carry_the_entry_grammar() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = Arc::new(gertie_core::MemoryStore::open(
+            tmp.path().join("p"),
+            tmp.path().join("g"),
+            Arc::new(gertie_core::SessionStore::open(std::path::Path::new(":memory:")).unwrap()),
+        ));
+        let tool = Memory::new(store.clone());
+        let path = tmp.path().join("p/gotchas.md");
+        // The model's raw prose, no grammar: exactly what the live
+        // session wrote before this fix.
+        let out = run_tool(
+            &tool,
+            json!({"command": "create", "path": "project/gotchas.md",
+                   "content": "# Gotchas\n\nthe flake hides in the teardown order"}),
+        )
+        .unwrap();
+        assert!(out.contains("created"));
+        let text = std::fs::read_to_string(&path).unwrap();
+        // The prose line became a grammar entry; the heading survives.
+        let entry = text
+            .lines()
+            .find(|line| line.contains("flake hides"))
+            .unwrap();
+        assert!(entry.starts_with("- [p"), "wrapped in grammar: {entry}");
+        assert!(entry.contains("helpful=0"), "counters ride: {entry}");
+        assert!(entry.contains("added:"), "the date rides: {entry}");
+        // And the store can see it: search finds the wrapped text.
+        let hits = store.search("flake hides", 5).unwrap();
+        assert_eq!(hits.len(), 1, "indexable, not prose: {hits:?}");
+        // Grammar lines the model DID write pass through untouched.
+        std::fs::write(&path, "- [p42] helpful=1 harmful=0 hand-written\n").unwrap();
+        let out = run_tool(
+            &tool,
+            json!({"command": "insert", "path": "project/gotchas.md",
+                   "new_str": "another raw line", "insert_line": 1}),
+        )
+        .unwrap();
+        assert!(out.contains("inserted"));
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            text.contains("- [p42] helpful=1 harmful=0 hand-written"),
+            "the model's own grammar survives: {text}"
+        );
+        assert!(
+            text.lines()
+                .any(|line| line.starts_with("- [p") && line.contains("another raw line")),
+            "the raw line wrapped too: {text}"
+        );
     }
 
     #[test]

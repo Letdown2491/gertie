@@ -318,6 +318,63 @@ impl MemoryStore {
             .collect()
     }
 
+    /// Wraps raw model text in the entry grammar: fresh id, zeroed
+    /// counters, provenance, date. **Single-line writes only**: the
+    /// id mints against a fresh scan, so two calls in one breath (the
+    /// file not yet written) collide — the probe caught g4 twice.
+    /// Multi-line content goes through [`entry_lines`](Self::entry_lines),
+    /// which scans once and increments.
+    pub fn entry_line(&self, tier: Tier, text: &str) -> rusqlite::Result<String> {
+        self.entry_lines(tier, text).map(|mut lines| {
+            assert_eq!(lines.len(), 1, "entry_line is single-line");
+            lines.pop().expect("one line")
+        })
+    }
+
+    /// The batch form of [`entry_line`](Self::entry_line): one scan
+    /// for the whole batch, ids minted sequentially against it. The
+    /// per-line form re-scans per line, so a create of N lines — none
+    /// on disk yet — minted the SAME id N times (the hand test's
+    /// duplicate-ids finding); the batch scans once and increments
+    /// past every id it has claimed in this call.
+    pub fn entry_lines(&self, tier: Tier, text: &str) -> rusqlite::Result<Vec<String>> {
+        let prefix = tier.prefix();
+        let mut next = self
+            .scan()
+            .iter()
+            .filter_map(|entry| entry.id.strip_prefix(prefix)?.parse::<u32>().ok())
+            .max()
+            .unwrap_or(0)
+            + 1;
+        let date = self.today()?;
+        let mut out = Vec::new();
+        for line in text.lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                out.push(String::new());
+                continue;
+            }
+            let text = sanitize_untrusted(trimmed, 512);
+            let id = format!("{prefix}{next}");
+            next += 1;
+            out.push(render_line(&MemoryEntry {
+                id,
+                file: String::new(),
+                text,
+                helpful: 0,
+                harmful: 0,
+                source_session: None,
+                added_at: Some(date.clone()),
+                valid_until: None,
+                superseded_by: None,
+                links: Vec::new(),
+                evidence: Vec::new(),
+                recheck: Vec::new(),
+            }));
+        }
+        Ok(out)
+    }
+
     pub fn today(&self) -> rusqlite::Result<String> {
         self.store.with_connection(|connection| {
             connection.query_row("SELECT strftime('%Y-%m-%d','now')", [], |row| {
@@ -459,6 +516,34 @@ impl MemoryStore {
                 }
             }
 
+            for known_path in known.keys() {
+                let still_there = on_disk
+                    .iter()
+                    .any(|(_, path, _, _)| path.display().to_string() == *known_path);
+                if still_there {
+                    continue;
+                }
+                // The tier comes from the stored rows themselves, not
+                // a guess from the path: a tempdir test root (or any
+                // global root without the XDG marker in its path) made
+                // the guess say project while the rows say global, the
+                // delete matched nothing, and the rename's re-insert
+                // fired UNIQUE. file_name is unique per tier root, so
+                // tier='global' OR tier='project' is exact.
+                let file = file_name(Path::new(known_path));
+                connection.execute(
+                    "DELETE FROM memories_fts WHERE id IN
+                         (SELECT id FROM memories WHERE file = ?1
+                          AND tier IN ('global', 'project'))",
+                    rusqlite::params![file],
+                )?;
+                connection.execute(
+                    "DELETE FROM memories WHERE file = ?1
+                          AND tier IN ('global', 'project')",
+                    rusqlite::params![file],
+                )?;
+                connection.execute("DELETE FROM memory_files WHERE path = ?1", [known_path])?;
+            }
             for (tier, path, hash, entries) in &on_disk {
                 let path_string = path.display().to_string();
                 if known
@@ -520,29 +605,6 @@ impl MemoryStore {
 
             // Rows whose file left the disk: gone from every table, the
             // index must not recall what no longer exists.
-            for known_path in known.keys() {
-                let still_there = on_disk
-                    .iter()
-                    .any(|(_, path, _, _)| path.display().to_string() == *known_path);
-                if still_there {
-                    continue;
-                }
-                let tier = if known_path.contains("/.local/share/") {
-                    Tier::Global
-                } else {
-                    Tier::Project
-                };
-                connection.execute(
-                    "DELETE FROM memories_fts WHERE id IN
-                         (SELECT id FROM memories WHERE tier = ?1 AND file = ?2)",
-                    rusqlite::params![tier.name(), file_name(Path::new(known_path))],
-                )?;
-                connection.execute(
-                    "DELETE FROM memories WHERE tier = ?1 AND file = ?2",
-                    rusqlite::params![tier.name(), file_name(Path::new(known_path))],
-                )?;
-                connection.execute("DELETE FROM memory_files WHERE path = ?1", [known_path])?;
-            }
 
             connection.execute("DELETE FROM memory_links", [])?;
             for (_, _, _, entries) in &on_disk {
