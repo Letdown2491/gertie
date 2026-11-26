@@ -1715,3 +1715,33 @@ mod gate_tests {
         std::fs::remove_dir_all(root).ok();
     }
 }
+
+#[cfg(test)]
+mod grep_repro_tests {
+    use super::*;
+
+    /// The hand test's garbage rows, reproduced: grep patterns with
+    /// dots/slashes pass looks_like_path and (pre-gate) landed as
+    /// "read" rows. The existence gate should kill every one.
+    #[test]
+    fn grep_patterns_never_land_as_paths() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        std::fs::write(root.join("real.md"), "x").unwrap();
+        // The exact commands from the 584-row session.
+        for command in [
+            r#"grep -n '"FILES"\|TOUCHED' gertie/src/chat/status.rs | head -6"#,
+            r#"grep -n "FAILED\|FAILED\." /tmp/t.log | head -6"#,
+            r#"grep -n "4.5\|budget" research/M6-PLAN.md"#,
+            r#"grep -n "text.replace(old2," gertie/src/chat.rs"#,
+        ] {
+            let targets = bash_file_targets(command, root);
+            for (path, _) in &targets {
+                assert!(
+                    path.contains("status.rs") || path.contains("M6-PLAN"),
+                    "a grep fragment landed as a path: {path:?} from {command}"
+                );
+            }
+        }
+    }
+}
