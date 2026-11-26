@@ -175,7 +175,7 @@ jobs:
         with:
           files: |
             bundles/*.flatpak
-            SHA256SUMS-${{ matrix.arch }}.txt
+            bundles/SHA256SUMS-${{ matrix.arch }}.txt
           generate_release_notes: true
 
       - name: Save the staged tree for the publish job
