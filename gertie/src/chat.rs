@@ -4836,15 +4836,22 @@ impl ChatView {
                 .child(tildify(&self.workspace_root))
                 .into_any_element()
         } else {
-            div()
+            // The folder icon leads, so a bare `~` still reads as a
+            // place; the hover is a background, since the text is
+            // already at full strength.
+            h_flex()
                 .id("workspace-word")
+                .gap_1()
+                .px_1()
+                .rounded_sm()
                 .cursor_pointer()
-                .hover(|style| style.text_color(cx.theme().foreground))
+                .hover(|style| style.bg(cx.theme().secondary_hover))
                 .tooltip(|window, cx| {
                     Tooltip::new("Workspace, click to move the agent to another folder")
                         .build(window, cx)
                 })
                 .on_click(cx.listener(|this, _, _, cx| this.switch_workspace(cx)))
+                .child(Icon::new(IconName::Folder).with_size(px(12.)))
                 .child(tildify(&self.workspace_root))
                 .test_support()
                 .into_any_element()
@@ -4868,7 +4875,7 @@ impl ChatView {
                             .max_w(px(360.))
                             .truncate()
                             .text_size(px(11.5))
-                            .text_color(theme.muted_foreground)
+                            .text_color(theme.foreground)
                             .child(folder),
                     )
                     .into_any_element(),

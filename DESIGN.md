@@ -654,8 +654,9 @@ turn's fork and rewind stay visible (hiding rewind behind hover made it
 undiscoverable); an assistant's copy and quote show ghosted on the reply that ends a
 turn and only on hover for the narration before it, so a long turn is not dotted
 with icons. A conversation header names the open conversation (click to rename) and
-the folder its tools run in (click to switch workspace; a worktree chat shows its
-checkout with the branch icon, fixed), the orientation the tab bar used to give; the
+the folder its tools run in (behind a folder icon, at full text strength so a bare `~`
+still reads as a place; click to switch workspace; a worktree chat shows its checkout
+with the branch icon, fixed), the orientation the tab bar used to give; the
 footer under the composer keeps the ledger and the endpoint. The
 composer is one rounded box: attach on the left, the field, and send (or Stop) on the
 right; its idle ghost text is "Message Gertie, or type / for commands". List markers
