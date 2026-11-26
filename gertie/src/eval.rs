@@ -37,6 +37,10 @@ pub struct Outcome {
     pub tokens: (u64, u64),
     pub lint: usize,
     pub error: Option<String>,
+    /// The fixture, alive until the outcome is dropped: scorers read
+    /// its files after the turn (deleting it first scored every heed
+    /// run against an empty file).
+    _fixture: Option<tempfile::TempDir>,
 }
 
 impl Outcome {
@@ -178,6 +182,7 @@ fn run_scenario(scenario: &Scenario, config: &Path) -> Outcome {
         tokens: (0, 0),
         lint: 0,
         error: Some(error),
+        _fixture: None,
     };
     if let Err(error) = lay_out(scenario, &root) {
         return failed(root, error.to_string());
@@ -240,7 +245,7 @@ fn run_scenario(scenario: &Scenario, config: &Path) -> Outcome {
         .unwrap_or_default();
     let lint = gertie_core::memory::lint_tier(&tier, gertie_core::Tier::Project, Some(&root)).len();
     let (input, output, _) = boot.store.total_usage();
-    let outcome = Outcome {
+    Outcome {
         root: root.clone(),
         calls,
         text,
@@ -248,10 +253,8 @@ fn run_scenario(scenario: &Scenario, config: &Path) -> Outcome {
         tokens: (input, output),
         lint,
         error,
-    };
-    // The dir is dropped (deleted) with the outcome's read already done.
-    drop(dir);
-    outcome
+        _fixture: Some(dir),
+    }
 }
 
 /// One endpoint's row.
@@ -493,6 +496,7 @@ mod tests {
             )
             .len(),
             error: None,
+            _fixture: None,
         }
     }
 
@@ -644,6 +648,19 @@ mod tests {
             supersede.2.error
         );
         assert_eq!(supersede.2.calls[0].0, "remember");
+        // The scripted model never edits src/pool.rs, so heed passes:
+        // the scorer reads the fixture after the turn, which must still
+        // exist (it did not, and every live heed failed).
+        let heed = rows[0]
+            .results
+            .iter()
+            .find(|(name, _, _)| *name == "heed")
+            .unwrap();
+        assert!(
+            heed.1,
+            "an untouched constraint passes heed: {:?}",
+            heed.2.error
+        );
         let table = render(&rows);
         assert!(
             table.contains("scripted") && table.contains("supersede"),
