@@ -1296,6 +1296,77 @@ fn parse_ids(list: &str) -> Option<Vec<String>> {
 }
 
 /// An entry's source sessions: a merge joins them with ", ".
+/// One hop of a correction walk, the reason a `[recheck: ...]` flag
+/// exists: `corrected` was superseded (by `replaced_by`, when the
+/// supersede named one), and `flagged` rested on it through
+/// `relation` (`builds_on`, `solves`, or a shared source session).
+/// The walk is only as good as its model-proposed edges; showing it
+/// makes a wrong edge auditable instead of a mystery.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CorrectionStep {
+    pub corrected: String,
+    pub replaced_by: Option<String>,
+    pub relation: String,
+    pub flagged: String,
+}
+
+impl CorrectionStep {
+    /// The walk in one sentence: `flagged because p12 was corrected
+    /// (replaced by p31); p20 builds_on p12`.
+    pub fn sentence(&self) -> String {
+        let replaced = self
+            .replaced_by
+            .as_deref()
+            .map(|by| format!(" (replaced by {by})"))
+            .unwrap_or_default();
+        format!(
+            "flagged because {} was corrected{replaced}; {} {} {}",
+            self.corrected, self.flagged, self.relation, self.corrected
+        )
+    }
+}
+
+/// Why `id` carries its recheck flags: one step per corrected entry
+/// it names, reconstructed from the files the way `flag_dependents`
+/// decided it (a `builds_on`/`solves` link first, a shared source
+/// session otherwise). A corrected id no longer on disk still gets a
+/// step, with the relation unknown, so the flag never goes
+/// unexplained.
+pub fn correction_walk(entries: &[MemoryEntry], id: &str) -> Vec<CorrectionStep> {
+    let Some(entry) = entries.iter().find(|entry| entry.id == id) else {
+        return Vec::new();
+    };
+    entry
+        .recheck
+        .iter()
+        .map(|corrected_id| {
+            let corrected = entries.iter().find(|other| &other.id == corrected_id);
+            let relation = entry
+                .links
+                .iter()
+                .find(|link| {
+                    &link.to == corrected_id
+                        && (link.relation == "builds_on" || link.relation == "solves")
+                })
+                .map(|link| link.relation.clone())
+                .or_else(|| {
+                    let theirs = corrected.map(source_sessions).unwrap_or_default();
+                    source_sessions(entry)
+                        .iter()
+                        .any(|session| theirs.contains(session))
+                        .then(|| "shares a source session with".to_string())
+                })
+                .unwrap_or_else(|| "rests on".to_string());
+            CorrectionStep {
+                corrected: corrected_id.clone(),
+                replaced_by: corrected.and_then(|c| c.superseded_by.clone()),
+                relation,
+                flagged: entry.id.clone(),
+            }
+        })
+        .collect()
+}
+
 fn source_sessions(entry: &MemoryEntry) -> Vec<String> {
     entry
         .source_session
@@ -1577,6 +1648,59 @@ mod tests {
             ),
             store,
         )
+    }
+
+    #[test]
+    fn the_correction_walk_names_the_edge_behind_a_flag() {
+        let entry = |id: &str, source: &str| MemoryEntry {
+            id: id.into(),
+            file: "notes.md".into(),
+            text: format!("entry {id}"),
+            helpful: 0,
+            harmful: 0,
+            source_session: Some(source.into()),
+            added_at: None,
+            valid_until: None,
+            superseded_by: None,
+            links: Vec::new(),
+            evidence: Vec::new(),
+            recheck: Vec::new(),
+        };
+        let corrected = MemoryEntry {
+            superseded_by: Some("p31".into()),
+            valid_until: Some("2026-11-26".into()),
+            ..entry("p12", "4")
+        };
+        let linked = MemoryEntry {
+            links: vec![Link {
+                relation: "builds_on".into(),
+                to: "p12".into(),
+            }],
+            recheck: vec!["p12".into()],
+            ..entry("p20", "9")
+        };
+        let sibling = MemoryEntry {
+            recheck: vec!["p12".into(), "p99".into()],
+            ..entry("p21", "4")
+        };
+        let entries = vec![corrected, linked, sibling];
+
+        let walk = correction_walk(&entries, "p20");
+        assert_eq!(walk.len(), 1);
+        assert_eq!(
+            walk[0].sentence(),
+            "flagged because p12 was corrected (replaced by p31); p20 builds_on p12"
+        );
+        let walk = correction_walk(&entries, "p21");
+        assert_eq!(walk[0].relation, "shares a source session with");
+        assert_eq!(
+            walk[1].relation, "rests on",
+            "a vanished entry still explains the flag"
+        );
+        assert!(
+            correction_walk(&entries, "p12").is_empty(),
+            "no flag, no walk"
+        );
     }
 
     #[test]

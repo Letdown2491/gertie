@@ -22,7 +22,9 @@ pub use agent_loop::{
     ToolRegistry, TurnSpec, close_unanswered_calls, run_turn,
 };
 pub use directory_instructions::INSTRUCTIONS_CAP;
-pub use memory::{Link, MemoryEntry, MemoryHit, MemoryStore, Op, Tier};
+pub use memory::{
+    CorrectionStep, Link, MemoryEntry, MemoryHit, MemoryStore, Op, Tier, correction_walk,
+};
 pub use permissions::{
     AskFilter, ModeScope, PendingAsk, PermissionBroker, PermissionMode, PromptSource, TurnToken,
 };

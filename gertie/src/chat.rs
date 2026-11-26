@@ -2844,46 +2844,62 @@ impl ChatView {
                         .when(!entry.recheck.is_empty() && entry.valid_until.is_none(), |row| {
                             let keep = format!("memory-keep-{id}");
                             let archive = format!("memory-archive-{id}");
+                            // The walk behind the flag on its own line
+                            // (it can run long), keep and archive under it.
                             row.child(
-                                h_flex()
-                                    .gap_2()
+                                v_flex()
+                                    .gap_0p5()
                                     .text_size(px(10.5))
                                     .child(
+                                        // The walk behind the flag (#27):
+                                        // which correction, through which
+                                        // edge, so a wrong model-proposed
+                                        // link is auditable.
                                         div()
                                             .text_color(cx.theme().warning)
-                                            .child(format!("{} was corrected", entry.recheck.join(", "))),
+                                            .child(
+                                                gertie_core::correction_walk(&self.memory_rows, &entry.id)
+                                                    .iter()
+                                                    .map(|step| step.sentence())
+                                                    .collect::<Vec<_>>()
+                                                    .join(" · "),
+                                            ),
                                     )
                                     .child(
-                                        div()
-                                            .id(SharedString::from(keep))
-                                            .cursor_pointer()
-                                            .text_color(cx.theme().muted_foreground)
-                                            .hover(|style| style.text_color(cx.theme().foreground))
-                                            .tooltip(|window, cx| {
-                                                Tooltip::new("Still holds: clear the flag").build(window, cx)
-                                            })
-                                            .on_click(cx.listener({
-                                                let id = id.clone();
-                                                move |this, _, _, cx| this.settle_recheck(id.clone(), true, cx)
-                                            }))
-                                            .child("keep")
-                                            .test_support(),
-                                    )
-                                    .child(
-                                        div()
-                                            .id(SharedString::from(archive))
-                                            .cursor_pointer()
-                                            .text_color(cx.theme().muted_foreground)
-                                            .hover(|style| style.text_color(cx.theme().foreground))
-                                            .tooltip(|window, cx| {
-                                                Tooltip::new("No longer holds: archive it").build(window, cx)
-                                            })
-                                            .on_click(cx.listener({
-                                                let id = id.clone();
-                                                move |this, _, _, cx| this.settle_recheck(id.clone(), false, cx)
-                                            }))
-                                            .child("archive")
-                                            .test_support(),
+                                        h_flex()
+                                            .gap_2()
+                                            .child(
+                                                div()
+                                                    .id(SharedString::from(keep))
+                                                    .cursor_pointer()
+                                                    .text_color(cx.theme().muted_foreground)
+                                                    .hover(|style| style.text_color(cx.theme().foreground))
+                                                    .tooltip(|window, cx| {
+                                                        Tooltip::new("Still holds: clear the flag").build(window, cx)
+                                                    })
+                                                    .on_click(cx.listener({
+                                                        let id = id.clone();
+                                                        move |this, _, _, cx| this.settle_recheck(id.clone(), true, cx)
+                                                    }))
+                                                    .child("keep")
+                                                    .test_support(),
+                                            )
+                                            .child(
+                                                div()
+                                                    .id(SharedString::from(archive))
+                                                    .cursor_pointer()
+                                                    .text_color(cx.theme().muted_foreground)
+                                                    .hover(|style| style.text_color(cx.theme().foreground))
+                                                    .tooltip(|window, cx| {
+                                                        Tooltip::new("No longer holds: archive it").build(window, cx)
+                                                    })
+                                                    .on_click(cx.listener({
+                                                        let id = id.clone();
+                                                        move |this, _, _, cx| this.settle_recheck(id.clone(), false, cx)
+                                                    }))
+                                                    .child("archive")
+                                                    .test_support(),
+                                            ),
                                     ),
                             )
                         })
