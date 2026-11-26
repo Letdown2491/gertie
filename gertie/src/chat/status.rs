@@ -1475,6 +1475,8 @@ fn root_fixture() -> (tempfile::TempDir, std::path::PathBuf) {
     std::fs::write(root.join("src/teardown.rs"), "fn t() {}").unwrap();
     (tmp, root)
 }
+
+#[cfg(test)]
 mod tests {
     #[test]
     fn the_rail_words_fit_the_rail() {
