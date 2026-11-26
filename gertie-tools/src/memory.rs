@@ -258,7 +258,7 @@ fn parse_view_range(range: &str, len: usize) -> Result<(usize, usize), String> {
 
 /// create: the file must not exist yet, parents are created, the whole
 /// content passes the sanitizer (one entrance, one cap).
-
+///
 /// Every content line the model adds becomes entry grammar: lines
 /// that already carry the `- [id]` prefix pass through, the rest are
 /// wrapped by the store (fresh id, counters, provenance, date). This
