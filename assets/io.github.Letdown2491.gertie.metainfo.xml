@@ -25,6 +25,13 @@
   <launchable type="desktop-id">io.github.Letdown2491.gertie.desktop</launchable>
   <url type="homepage">https://github.com/Letdown2491/gertie</url>
   <releases>
+    <release version="1.2.0" date="2026-11-26">
+      <description>
+        <p>Projects: named groups in the sidebar to file conversations under, one project per chat, filed by hand.</p>
+        <p>Memory you can trust longer: entries cite the files they came from and are flagged when those files change, a superseded entry records its replacement, and correcting an entry flags the ones that rested on it for you to keep or archive.</p>
+        <p>An AGENTS.md in a subdirectory applies when the agent works under it. A worker's approval request now reaches only the chat that started it.</p>
+      </description>
+    </release>
     <release version="1.1.0" date="2026-11-25">
       <description>
         <p>A UX pass: the sidebar drives parallel chats (no tab bar), a Stop button for running turns, settings that save as you go, and a header for each conversation.</p>

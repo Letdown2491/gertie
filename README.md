@@ -127,8 +127,8 @@ version of this whole list.
 
 ## Status
 
-**1.1.0**: the sidebar drives parallel chats (no tab bar), Stop, settings that save
-as you go, and a round of security hardening. Feature-complete against [DESIGN.md](DESIGN.md) (see "The original 'Deferred'
+**1.2.0**: projects to organize conversations, memory entries that cite their sources
+and flag what a correction touches, and per-directory `AGENTS.md`. Feature-complete against [DESIGN.md](DESIGN.md) (see "The original 'Deferred'
 row" for every decision and its rationale). New to the tool? [The tour](docs/TOUR.md)
 walks the whole surface in ten minutes.
 
