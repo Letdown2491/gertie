@@ -1491,7 +1491,6 @@ mod tests {
     }
 
     use super::*;
-    use std::path::Path;
 
     #[test]
     fn touched_files_fold_with_edited_winning_and_failures_ignored() {
