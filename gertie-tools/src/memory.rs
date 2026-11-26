@@ -539,6 +539,11 @@ impl Tool for SearchMemory {
                         .join(", ");
                     out.push_str(&format!("   links: {links}\n"));
                 }
+                if let Some(successor) = &hit.superseded_by {
+                    out.push_str(&format!(
+                        "   superseded by [{successor}]: prefer that entry\n"
+                    ));
+                }
                 if !hit.recheck.is_empty() {
                     out.push_str(&format!(
                         "   rested on {}, since corrected (re-check before relying on it)\n",
@@ -836,12 +841,50 @@ mod tests {
                 4096,
             )
             .unwrap();
-        let tool = SearchMemory::new(memory);
+        let tool = SearchMemory::new(memory.clone());
         let out = run_search(&tool, json!({"query": "teardown"})).unwrap();
         assert!(out.contains("[p1]"));
         assert!(out.contains("gotchas.md"));
         assert!(out.contains("the flake is the teardown"));
         let none = run_search(&tool, json!({"query": "xyzzynope"})).unwrap();
         assert!(none.contains("no memory matches"));
+
+        // A superseded entry still matches, with its successor named:
+        // the model retrieves the stale belief *and the way out*.
+        // The successor must exist: supersede records a replacement,
+        // not a dangling pointer.
+        memory
+            .apply(
+                &[gertie_core::Op::Add {
+                    file: "decisions.md".into(),
+                    text: "the teardown hook owns the retry window".into(),
+                    source: Some("12".into()),
+                    evidence: Vec::new(),
+                }],
+                4096,
+            )
+            .unwrap();
+        let successor = {
+            let facts = memory.scan();
+            facts
+                .iter()
+                .find(|entry| entry.text.contains("retry window"))
+                .map(|entry| entry.id.clone())
+                .expect("the successor entry exists")
+        };
+        memory
+            .apply(
+                &[gertie_core::Op::Supersede {
+                    id: "p1".into(),
+                    by: Some(successor),
+                }],
+                4096,
+            )
+            .unwrap();
+        let stale = run_search(&tool, json!({"query": "teardown"})).unwrap();
+        assert!(
+            stale.contains("superseded by"),
+            "the readout must ride the hit: {stale}"
+        );
     }
 }

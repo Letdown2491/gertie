@@ -147,6 +147,11 @@ pub const RELATIONS: [&str; 5] = ["relates_to", "solves", "causes", "builds_on",
 #[derive(Debug, Clone)]
 pub struct MemoryHit {
     pub id: String,
+    /// Set when the hit was superseded: the entry is history, and the
+    /// model should prefer this successor instead (CUPMem's pattern:
+    /// stale knowledge retrieved with a pointer beats stale knowledge
+    /// retrieved bare, and beats it not being retrieved at all).
+    pub superseded_by: Option<String>,
     pub tier: Tier,
     pub file: String,
     pub text: String,
@@ -592,10 +597,15 @@ impl MemoryStore {
             .with_connection(|connection| {
                 let mut statement = connection.prepare(
                     "SELECT memories.id, memories.tier, memories.file, memories.content,
-                        memories.added_at
+                        memories.added_at, memories.superseded_by
                  FROM memories_fts
                  JOIN memories ON memories.id = memories_fts.id
-                 WHERE memories_fts MATCH ?1 AND memories.valid_until IS NULL
+                 WHERE memories_fts MATCH ?1
+                   -- Superseded entries still match, with a pointer to
+                   -- their successor: stale knowledge retrieved with an
+                   -- address beats stale knowledge retrieved bare, and
+                   -- beats it not being retrieved at all (CUPMem).
+                   AND (memories.valid_until IS NULL OR memories.superseded_by IS NOT NULL)
                  ORDER BY rank
                  LIMIT ?2",
                 )?;
@@ -606,6 +616,7 @@ impl MemoryStore {
                         file: row.get(2)?,
                         text: row.get(3)?,
                         added_at: row.get(4)?,
+                        superseded_by: row.get(5)?,
                         links: Vec::new(),
                         evidence_changed: Vec::new(),
                         recheck: Vec::new(),
