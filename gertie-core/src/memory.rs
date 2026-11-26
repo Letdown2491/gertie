@@ -813,7 +813,9 @@ impl MemoryStore {
     }
 
     pub fn search(&self, query: &str, limit: usize) -> rusqlite::Result<Vec<MemoryHit>> {
-        let query = sanitize_untrusted(query, 256);
+        let Some(query) = fts_query(&sanitize_untrusted(query, 256)) else {
+            return Ok(Vec::new());
+        };
         self.store
             .with_connection(|connection| {
                 let mut statement = connection.prepare(
@@ -1397,6 +1399,46 @@ impl MemoryStore {
         }
         index
     }
+}
+
+/// Words that carry no meaning in a memory query; matching them would
+/// rank every entry.
+const STOPWORDS: &[&str] = &[
+    "a", "an", "and", "are", "as", "at", "be", "by", "do", "does", "for", "from", "how", "in",
+    "is", "it", "of", "on", "or", "should", "that", "the", "this", "to", "was", "we", "what",
+    "when", "where", "which", "why", "with", "you",
+];
+
+/// A model's natural-language query as an FTS5 expression: each word
+/// a quoted prefix term (so no word is ever parsed as syntax), common
+/// endings cut so `signing` finds `signed`, joined with OR and left to
+/// bm25 to rank: the entry matching most words, rarest first, wins.
+/// None when nothing searchable is left.
+fn fts_query(raw: &str) -> Option<String> {
+    let mut terms: Vec<String> = Vec::new();
+    for word in raw
+        .split(|c: char| !c.is_alphanumeric())
+        .map(str::to_lowercase)
+        .filter(|word| word.len() > 1 && !STOPWORDS.contains(&word.as_str()))
+    {
+        let mut stem = word.as_str();
+        for suffix in ["ing", "ed", "es", "s"] {
+            if let Some(cut) = stem.strip_suffix(suffix)
+                && cut.chars().count() >= 3
+            {
+                stem = cut;
+                break;
+            }
+        }
+        let term = format!("\"{stem}\"*");
+        if !terms.contains(&term) {
+            terms.push(term);
+        }
+        if terms.len() == 16 {
+            break;
+        }
+    }
+    (!terms.is_empty()).then(|| terms.join(" OR "))
 }
 
 /// One lint finding (#38): where, and what to do about it.
@@ -3051,6 +3093,56 @@ mod tests {
                 .all(|finding| finding.file == "bad.md" || finding.message.contains("p1"))
         );
         assert!(findings.iter().all(|finding| finding.line > 0));
+    }
+
+    /// Models search in natural language: other word forms, extra
+    /// words, punctuation. The eval caught every query missing seeded
+    /// entries, because MATCH took the raw text: all words required,
+    /// no stemming, punctuation parsed as FTS syntax.
+    #[test]
+    fn natural_queries_find_entries_in_other_word_forms() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project = tmp.path().join("project-memory");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(
+            project.join("decisions.md"),
+            "- [p1] helpful=0 harmful=0 release artifacts are signed with the maintainer's local GPG key [source: added: 2026-11-01]\n\
+             - [p2] helpful=0 harmful=0 POOL_SIZE in src/pool.rs must stay 8: a larger pool deadlocks the teardown [source: added: 2026-11-01]\n\
+             - [p3] helpful=0 harmful=0 the docs site builds with mdbook [source: added: 2026-11-01]\n",
+        )
+        .unwrap();
+        let store = MemoryStore::open(
+            project,
+            tmp.path().join("global"),
+            std::sync::Arc::new(crate::SessionStore::open(Path::new(":memory:")).unwrap()),
+        );
+        store.sync().unwrap();
+        let first = |query: &str| {
+            store
+                .search(query, 10)
+                .unwrap_or_else(|error| panic!("{query:?}: {error}"))
+                .first()
+                .map(|hit| hit.id.clone())
+        };
+        assert_eq!(first("release signing GPG key").as_deref(), Some("p1"));
+        assert_eq!(first("how are releases signed?").as_deref(), Some("p1"));
+        assert_eq!(first("POOL_SIZE throughput limit").as_deref(), Some("p2"));
+        assert_eq!(first("pool size: deadlock (CI)").as_deref(), Some("p2"));
+        assert_eq!(first("src/pool.rs").as_deref(), Some("p2"));
+        // Syntax and noise never error, and stopwords alone match nothing.
+        for query in [
+            "AND OR NOT",
+            "\"unbalanced",
+            "a-b*c^d",
+            "the of and",
+            "",
+            "NEAR(x y)",
+        ] {
+            store
+                .search(query, 10)
+                .unwrap_or_else(|error| panic!("{query:?}: {error}"));
+        }
+        assert!(store.search("the of and", 10).unwrap().is_empty());
     }
 
     #[test]

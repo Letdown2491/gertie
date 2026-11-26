@@ -113,7 +113,13 @@ fn scenarios() -> Vec<Scenario> {
                     let text = entry.text.to_lowercase();
                     text.contains("sigstore") || text.contains(" ci")
                 });
-                let stale_alive = outcome.live().any(|entry| entry.text.contains("GPG"));
+                // Still asserting the old fact: GPG with no word of the
+                // new one. A replacement that names the key it retires
+                // ("the local GPG key is retired") is not stale.
+                let stale_alive = outcome.live().any(|entry| {
+                    let text = entry.text.to_lowercase();
+                    text.contains("gpg") && !text.contains("sigstore")
+                });
                 retired && replaced && !stale_alive && outcome.lint == 0
             },
         },
@@ -254,6 +260,7 @@ fn run_scenario(scenario: &Scenario, config: &Path) -> Outcome {
 /// One endpoint's row.
 pub struct Row {
     pub endpoint: String,
+    pub model: String,
     pub results: Vec<(&'static str, bool, Outcome)>,
 }
 
@@ -277,13 +284,14 @@ pub fn evaluate(config_path: &Path, endpoints: &[String]) -> Result<Vec<Row>, St
     }
     let mut rows = Vec::new();
     for name in names {
-        if !config
+        let Some(model) = config
             .endpoints
             .iter()
-            .any(|endpoint| endpoint.name == name)
-        {
+            .find(|endpoint| endpoint.name == name)
+            .map(|endpoint| endpoint.model.clone())
+        else {
             return Err(format!("no endpoint named {name:?} in the config"));
-        }
+        };
         let dir = tempfile::tempdir().map_err(|error| error.to_string())?;
         let config = config_for(&raw, &name, dir.path())?;
         let mut results = Vec::new();
@@ -295,6 +303,7 @@ pub fn evaluate(config_path: &Path, endpoints: &[String]) -> Result<Vec<Row>, St
         }
         rows.push(Row {
             endpoint: name,
+            model,
             results,
         });
     }
@@ -365,6 +374,63 @@ pub fn render(rows: &[Row]) -> String {
     out
 }
 
+/// One JSON line per row, the record later runs and per-model
+/// profiles (#42) read: date, endpoint, model, each scenario's mark,
+/// the tools it used, and the tokens.
+pub fn record(rows: &[Row], date: &str) -> Vec<String> {
+    rows.iter()
+        .map(|row| {
+            let scenarios: serde_json::Map<String, serde_json::Value> = row
+                .results
+                .iter()
+                .map(|(name, passed, outcome)| {
+                    let tools: Vec<&str> = outcome
+                        .calls
+                        .iter()
+                        .map(|(tool, _, _)| tool.as_str())
+                        .collect();
+                    (
+                        name.to_string(),
+                        serde_json::json!({
+                            "passed": passed,
+                            "tools": tools,
+                            "tokens_in": outcome.tokens.0,
+                            "tokens_out": outcome.tokens.1,
+                            "lint": outcome.lint,
+                            "error": outcome.error,
+                        }),
+                    )
+                })
+                .collect();
+            serde_json::json!({
+                "suite": "memory",
+                "date": date,
+                "version": crate::cli::VERSION,
+                "endpoint": row.endpoint,
+                "model": row.model,
+                "scenarios": scenarios,
+            })
+            .to_string()
+        })
+        .collect()
+}
+
+/// Today in UTC, from SQLite's clock (the one memory dates use).
+fn today() -> String {
+    gertie_core::SessionStore::open(Path::new(":memory:"))
+        .ok()
+        .and_then(|store| {
+            store
+                .with_connection(|connection| {
+                    connection.query_row("SELECT strftime('%Y-%m-%d','now')", [], |row| {
+                        row.get::<_, String>(0)
+                    })
+                })
+                .ok()
+        })
+        .unwrap_or_default()
+}
+
 /// `gertie eval memory`.
 pub fn run(config_path: Option<PathBuf>, endpoints: Vec<String>) -> i32 {
     let Some(config_path) = config_path.or_else(crate::config::Config::path) else {
@@ -374,6 +440,25 @@ pub fn run(config_path: Option<PathBuf>, endpoints: Vec<String>) -> i32 {
     match evaluate(&config_path, &endpoints) {
         Ok(rows) => {
             print!("{}", render(&rows));
+            if let Some(dir) = crate::config::Config::data_dir().map(|dir| dir.join("eval")) {
+                let path = dir.join("memory.jsonl");
+                let lines: String = record(&rows, &today())
+                    .into_iter()
+                    .map(|line| line + "\n")
+                    .collect();
+                let written = std::fs::create_dir_all(&dir).and_then(|_| {
+                    use std::io::Write as _;
+                    std::fs::OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open(&path)?
+                        .write_all(lines.as_bytes())
+                });
+                match written {
+                    Ok(()) => println!("\nrecorded in {}", path.display()),
+                    Err(error) => eprintln!("warning: could not record results: {error}"),
+                }
+            }
             0
         }
         Err(error) => {
@@ -486,6 +571,26 @@ mod tests {
         )
         .unwrap();
         assert!((supersede.score)(&outcome(tmp.path(), &["remember"], "")));
+        // What ppq actually wrote on the first live run: the replacement
+        // names the retired key. That is a pass.
+        std::fs::write(
+            &tier,
+            "- [p1] helpful=1 harmful=0 release artifacts are signed with the maintainer's local GPG key \
+             [source: added: 2026-11-01] [superseded by: p2; valid until: 2026-11-26]\n\
+             - [p2] helpful=0 harmful=0 release artifacts are signed in CI with sigstore, and the local GPG key is retired [source: added: 2026-11-26]\n",
+        )
+        .unwrap();
+        assert!((supersede.score)(&outcome(tmp.path(), &["remember"], "")));
+        // A duplicate that still asserts GPG alongside the new fact fails.
+        std::fs::write(
+            &tier,
+            "- [p1] helpful=1 harmful=0 release artifacts are signed with the maintainer's local GPG key \
+             [source: added: 2026-11-01] [superseded by: p2; valid until: 2026-11-26]\n\
+             - [p2] helpful=0 harmful=0 releases are signed in CI with sigstore [source: added: 2026-11-26]\n\
+             - [p3] helpful=0 harmful=0 the GPG key signs release artifacts [source: added: 2026-11-26]\n",
+        )
+        .unwrap();
+        assert!(!(supersede.score)(&outcome(tmp.path(), &["remember"], "")));
     }
 
     #[test]
@@ -544,5 +649,10 @@ mod tests {
             table.contains("scripted") && table.contains("supersede"),
             "{table}"
         );
+        let line: serde_json::Value =
+            serde_json::from_str(&record(&rows, "2026-11-26")[0]).unwrap();
+        assert_eq!(line["model"], "scripted");
+        assert_eq!(line["scenarios"]["supersede"]["passed"], true);
+        assert_eq!(line["scenarios"]["supersede"]["tools"][0], "remember");
     }
 }
