@@ -61,6 +61,13 @@ base64 = "0.22"
 directories = "6"
 futures-util = { version = "0.3", default-features = false, features = ["alloc"] }
 gpui-kit = "=0.11.0"
+# The kit's icon catalog (gpui-kit-assets) is a rust-embed folder. In a
+# debug build rust-embed does not embed: it reads the files at runtime
+# from the absolute path the crate had at compile time, which for
+# scripts/build.sh is inside the build container. On the host every
+# icon then loads as nothing and paints blank. debug-embed (unified
+# into the kit's rust-embed) embeds in every profile.
+rust-embed = { version = "8.7.2", features = ["debug-embed"] }
 serde = { version = "1", features = ["derive"] }
 sha2 = "0.10"
 serde_json = "1"

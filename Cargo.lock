@@ -2079,6 +2079,7 @@ dependencies = [
  "gertie-tools",
  "gpui-kit",
  "gpui-pre-reqwest",
+ "rust-embed",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -3211,6 +3212,8 @@ dependencies = [
 [[package]]
 name = "gpui-pre-wgpu"
 version = "0.3.14"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2bbfee2ae183cf4bf5b1ee3a73f2b8fd726f0b78861b0c950308f6e9d0a33f2c"
 dependencies = [
  "anyhow",
  "bytemuck",
