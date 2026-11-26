@@ -190,6 +190,10 @@ pub struct TurnSpec {
     /// cache for the whole session (research/MEMORY-RESEARCH.md,
     /// finding 5). Mutations land next session's snapshot.
     pub memory_index: Option<String>,
+    /// The memory store, for recall on touch (#36): a call that touches
+    /// a file some live entry cites carries those entries in its
+    /// result. None (workers, memory off) recalls nothing.
+    pub memory: Option<std::sync::Arc<crate::MemoryStore>>,
     /// Mid-run steering: user messages typed while the turn is already
     /// running. Drained at round boundaries, each becomes a user push
     /// plus a `LoopEvent::Steered`, and a steer landing on what would
@@ -250,6 +254,7 @@ pub fn run_turn(spec: TurnSpec) -> BoxStream<'static, LoopEvent> {
         system_prompt,
         instructions,
         memory_index,
+        memory,
         steer,
         user_attachments,
         max_tool_rounds,
@@ -626,6 +631,19 @@ pub fn run_turn(spec: TurnSpec) -> BoxStream<'static, LoopEvent> {
                     );
                     if let Some(blocks) = blocks {
                         result.push_str(&blocks);
+                    }
+                    // Recall on touch (#36): the entries citing this
+                    // file, once per session, on a call that worked.
+                    if let Some(memory) = memory.as_deref()
+                        && !result.starts_with("error:")
+                        && let Some(block) = crate::memory_recall::block_for(
+                            memory,
+                            root,
+                            &target,
+                            &history.lock().await,
+                        )
+                    {
+                        result.push_str(&block);
                     }
                 }
 
@@ -1532,6 +1550,7 @@ mod tests {
                 system_prompt: None,
                 instructions: None,
                 memory_index: None,
+                memory: None,
                 steer: None,
                 user_attachments: Vec::new(),
                 max_tool_rounds: None,

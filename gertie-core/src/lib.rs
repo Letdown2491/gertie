@@ -9,6 +9,7 @@ pub mod agent_loop;
 pub mod directory_instructions;
 pub mod memory;
 pub mod memory_extract;
+pub mod memory_recall;
 pub mod permissions;
 pub mod projects;
 pub mod provider;

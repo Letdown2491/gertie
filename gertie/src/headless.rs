@@ -126,6 +126,7 @@ pub fn run(
         system_prompt: boot.system_prompt.clone(),
         instructions: boot.instructions.clone(),
         memory_index: boot.memory_index.clone(),
+        memory: boot.memory.clone(),
         // One-shot prompt mode: no steering, nothing queues.
         steer: None,
         user_attachments: Vec::new(),
@@ -663,6 +664,7 @@ mod tests {
             system_prompt: None,
             instructions: None,
             memory_index: None,
+            memory: None,
             steer: None,
             user_attachments: Vec::new(),
             max_tool_rounds: None,
@@ -747,6 +749,7 @@ mod tests {
             system_prompt: None,
             instructions: None,
             memory_index: None,
+            memory: None,
             steer: None,
             user_attachments: Vec::new(),
             max_tool_rounds: None,

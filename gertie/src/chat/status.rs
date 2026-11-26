@@ -97,6 +97,14 @@ impl StatusFacts {
         if failed(result) {
             return;
         }
+        // Recall on touch (#36): what the harness put in front of the
+        // model is consulted, whichever tool carried it and whether or
+        // not the model ever searched.
+        for id in gertie_core::memory_recall::recalled_ids(result) {
+            if !self.consulted.contains(&id) {
+                self.consulted.push(id);
+            }
+        }
         let args: serde_json::Value = serde_json::from_str(arguments).unwrap_or_default();
         let field = |key: &str| {
             args.get(key)
@@ -1500,6 +1508,12 @@ impl ChatView {
     /// card's positive-path test.
     pub fn fold_status_tool_for_test(&mut self, name: &str, arguments: &str, result: &str) {
         self.fold_status_tool(name, arguments, result);
+    }
+
+    /// Turns memory on for this view (the fixtures build it off), so
+    /// recall on touch rides the turn.
+    pub fn enable_memory_for_test(&mut self) {
+        self.memory_enabled = true;
     }
 
     /// How many cards here were answered from another chat's column.

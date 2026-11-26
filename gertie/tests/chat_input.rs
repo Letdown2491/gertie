@@ -5556,6 +5556,95 @@ fn the_gate_kills_the_hand_tests_garbage() {
     }
 }
 
+/// Recall on touch (#36): a model that never searches memory still
+/// gets the entries citing the file it reads, in that read's result,
+/// and the column counts them as consulted, so GROUNDED IN and the
+/// riding card fire with any model.
+#[test]
+fn reading_a_cited_file_recalls_its_memory_without_a_search() {
+    let dir = tempfile::tempdir().expect("workspace");
+    let root = dir.path().canonicalize().expect("root");
+    std::fs::write(root.join("teardown.rs"), "fn teardown() {}\n").expect("cited file");
+    std::fs::create_dir_all(root.join(".gertie/memory")).expect("tier root");
+    let hash = gertie_core::blob_hash(b"fn teardown() {}\n");
+    std::fs::write(
+        root.join(".gertie/memory/gotchas.md"),
+        format!(
+            "- [p12] helpful=0 harmful=0 cite the flake before blaming the test \
+             [evidence: teardown.rs@{hash}] [source: added: 2026-11-01]\n"
+        ),
+    )
+    .expect("topic file");
+    let store = Arc::new(SessionStore::open(Path::new(":memory:")).expect("session store"));
+    let memory = Arc::new(gertie_core::MemoryStore::open(
+        root.join(".gertie/memory"),
+        root.join("global"),
+        store.clone(),
+    ));
+    memory.sync().expect("sidecar sync");
+    let (provider, scenarios) = replay_provider(
+        "[[steps]]\ntext = ''\n\n\
+         [[steps.tool_calls]]\nname = \"read_file\"\n\
+         arguments = '{\"path\": \"teardown.rs\"}'\n\n\
+         [[steps]]\ntext = 'done'\n",
+    );
+    let mut fixture = fixture_built(
+        store.clone(),
+        None,
+        Some(root.clone()),
+        None,
+        Some(provider),
+        None,
+        vec![],
+        Some(memory),
+        None,
+    );
+    fixture.hold = vec![scenarios, dir];
+    fixture.cx.update(|cx| {
+        fixture
+            .view
+            .upgrade()
+            .expect("view alive")
+            .update(cx, |view, _| view.enable_memory_for_test());
+    });
+    fixture.act(|window, cx| {
+        window.input("why does the widget test flake", cx);
+        window.press("enter", cx);
+    });
+    let view = fixture.view.clone();
+    pump_until(
+        &mut fixture,
+        200,
+        |fixture| {
+            fixture
+                .cx
+                .update(|cx| !view.upgrade().expect("view alive").read(cx).is_streaming())
+        },
+        "the scripted turn",
+    );
+    let (ground, riding) = fixture.cx.update(|cx| {
+        let view = view.upgrade().expect("view alive").read(cx);
+        (view.status_for_test().3, view.riding_for_test())
+    });
+    assert_eq!(ground, vec!["p12".to_string()], "recalled is consulted");
+    assert_eq!(riding.map(|(id, _)| id).as_deref(), Some("p12"));
+    let session = fixture
+        .cx
+        .update(|cx| view.upgrade().expect("view alive").read(cx).session_id())
+        .expect("session");
+    let rows = store.load_messages(session).expect("rows");
+    let read = rows
+        .iter()
+        .find(|row| row.tool_name.as_deref() == Some("read_file"))
+        .expect("the read row");
+    assert!(
+        read.content
+            .contains("[memory: entries citing teardown.rs]"),
+        "the recall rides the read's result: {}",
+        read.content
+    );
+}
+
 /// The riding card (#33 decision 1, #34): one line, verb + why, on
 /// the transcript's latest row while the run lives. The why is the
 /// memory entry the work consulted; its moved evidence puts the full

@@ -67,6 +67,7 @@ impl ChatView {
             system_prompt: self.system_prompt.clone(),
             instructions: self.instructions.clone(),
             memory_index: self.memory_index.clone(),
+            memory: self.memory_store.clone().filter(|_| self.memory_enabled),
         });
         self.streaming = true;
         self.streaming_assistant = None;
