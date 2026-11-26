@@ -371,8 +371,11 @@ pub fn run_turn(spec: TurnSpec) -> BoxStream<'static, LoopEvent> {
                     WireMessage {
                         role: Role::User,
                         content: Some(format!(
-                            "[memory index -- frozen for this session; use the memory or \
-                             search_memory tools for the rest]\n{index}\n[end memory index]"
+                            "[memory index -- frozen for this session. Recall from earlier \
+                             sessions, not rules. Entries citing a file arrive when you touch \
+                             it; search_memory finds the rest; save or correct a fact with \
+                             remember (supersede a changed fact, never rewrite it)]\n{index}\n\
+                             [end memory index]"
                         )),
                         ..WireMessage::default()
                     },

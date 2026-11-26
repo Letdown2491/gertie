@@ -609,6 +609,35 @@ fn parse_view_range(range: &str, len: usize) -> Result<(usize, usize), String> {
     Ok((start, end.min(len)))
 }
 
+/// What a file write did to the entries, for its result: the model
+/// reads exactly which ids it created or changed (#37).
+fn landed(tier: Tier, before: &str, after: &str) -> String {
+    let before = gertie_core::memory::entries_in(before, tier);
+    let after = gertie_core::memory::entries_in(after, tier);
+    let new: Vec<&str> = after
+        .iter()
+        .filter(|(id, _)| !before.iter().any(|(old, _)| old == id))
+        .map(|(id, _)| id.as_str())
+        .collect();
+    let edited: Vec<&str> = after
+        .iter()
+        .filter(|(id, line)| before.iter().any(|(old, was)| old == id && was != line))
+        .map(|(id, _)| id.as_str())
+        .collect();
+    let mut words = Vec::new();
+    if !new.is_empty() {
+        words.push(format!("new entries {}", new.join(", ")));
+    }
+    if !edited.is_empty() {
+        words.push(format!("edited {}", edited.join(", ")));
+    }
+    if words.is_empty() {
+        String::new()
+    } else {
+        format!(": {}", words.join("; "))
+    }
+}
+
 /// The file name the store records entries under.
 fn file_label(path: &Path) -> String {
     path.file_name()
@@ -640,7 +669,11 @@ fn create(
     }
     std::fs::write(path, &content)
         .map_err(|error| format!("memory: {}: {error}", path.display()))?;
-    Ok(format!("created {}", path.display()))
+    Ok(format!(
+        "created {}{}",
+        path.display(),
+        landed(tier, "", &content)
+    ))
 }
 
 /// str_replace: the anchor must occur exactly once, so the edit can
@@ -686,7 +719,11 @@ fn str_replace(
     let edited = store.normalize_edit(tier, &file_label(path), &text, &raw)?;
     std::fs::write(path, &edited)
         .map_err(|error| format!("memory: {}: {error}", path.display()))?;
-    Ok(format!("edited {}", path.display()))
+    Ok(format!(
+        "edited {}{}",
+        path.display(),
+        landed(tier, &text, &edited)
+    ))
 }
 
 /// insert: the new text lands after the given 1-based line, so a
@@ -731,8 +768,11 @@ fn insert(
         raw.push('\n');
     }
     let out = store.normalize_edit(tier, &file_label(path), &text, &raw)?;
-    std::fs::write(path, out).map_err(|error| format!("memory: {}: {error}", path.display()))?;
-    Ok(format!("inserted after line {at}"))
+    std::fs::write(path, &out).map_err(|error| format!("memory: {}: {error}", path.display()))?;
+    Ok(format!(
+        "inserted after line {at}{}",
+        landed(tier, &text, &out)
+    ))
 }
 
 /// delete: remove one file, the index is untouchable.
@@ -872,9 +912,14 @@ impl Tool for SearchMemory {
     }
 
     fn description(&self) -> String {
-        "Search long-term memory (decisions, gotchas, preferences, \
-         workflows across sessions). Returns id, file, and date \
-         pointers; read the file for the full entry."
+        "Search long-term memory: decisions, gotchas, conventions and \
+         preferences from earlier sessions. Search before deciding \
+         something the project may have settled already, and before \
+         remembering a fact (so you supersede the old entry instead of \
+         adding a duplicate). Entries citing a file also arrive on \
+         their own when you read or edit that file. Returns each hit's \
+         id, file, date and text; an entry marked superseded names the \
+         entry to prefer."
             .into()
     }
 
@@ -1444,6 +1489,26 @@ mod tests {
             .lines()
             .map(str::to_string)
             .collect()
+    }
+
+    #[test]
+    fn file_writes_name_the_entries_they_landed() {
+        let (tmp, _store, tool) = grammar_fixture();
+        let out = run_tool(
+            &tool,
+            json!({"command": "create", "path": "project/gotchas.md",
+                   "content": "# Gotchas\n\nfirst fact\nsecond fact\n"}),
+        )
+        .unwrap();
+        assert!(out.contains("new entries p1, p2"), "{out}");
+        let out = run_tool(
+            &tool,
+            json!({"command": "str_replace", "path": "project/gotchas.md",
+                   "old_str": "first fact", "new_str": "first fact, refined"}),
+        )
+        .unwrap();
+        assert!(out.contains("edited p1"), "{out}");
+        let _ = tmp;
     }
 
     #[test]

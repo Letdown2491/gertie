@@ -1270,7 +1270,9 @@ impl MemoryStore {
     /// other topic file follows alphabetically, so a custom file is
     /// indexed too, just last in line for the budget.
     pub fn render_index(&self, budget_tokens: usize) -> String {
-        let mut sections: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        let cost = |line: &str| line.len() / 4 + 1;
+        let mut sections: BTreeMap<String, Vec<(i64, u32, String)>> = BTreeMap::new();
+        let mut tiers: BTreeMap<String, Tier> = BTreeMap::new();
         let mut any_changed = false;
         for entry in self.scan() {
             if entry.valid_until.is_some() {
@@ -1285,10 +1287,16 @@ impl MemoryStore {
                 any_changed = true;
                 mark.push_str(&format!(" [recheck: {}]", entry.recheck.join(", ")));
             }
-            sections
-                .entry(entry.file.clone())
-                .or_default()
-                .push(format!("- [{}] {}{mark}", entry.id, entry.text));
+            tiers.insert(entry.file.clone(), tier_of(&entry.id));
+            sections.entry(entry.file.clone()).or_default().push((
+                entry.helpful as i64 - entry.harmful as i64,
+                entry.id[1..].parse().unwrap_or(0),
+                format!("- [{}] {}{mark}", entry.id, entry.text),
+            ));
+        }
+        // Within a file, the strongest first: votes, then the newest.
+        for lines in sections.values_mut() {
+            lines.sort_by(|a, b| b.0.cmp(&a.0).then(b.1.cmp(&a.1)));
         }
         let priority = [
             "workflows.md",
@@ -1307,6 +1315,31 @@ impl MemoryStore {
                 order.push(file);
             }
         }
+        // Every file has a one-line form: its name, its size, and its
+        // heading, the topic in the author's own words. Room for that
+        // line is reserved for every file still to come, so the index
+        // is a map of the whole store, never a silent truncation.
+        let summary = |file: &str| -> String {
+            let count = sections[file].len();
+            let heading = tiers
+                .get(file)
+                .and_then(|tier| std::fs::read_to_string(self.root(*tier).join(file)).ok())
+                .and_then(|text| {
+                    text.lines().find_map(|line| {
+                        line.strip_prefix("# ")
+                            .map(|title| title.trim().to_string())
+                    })
+                })
+                .map(|title| format!(": {}", sanitize_untrusted(&title, 120)))
+                .unwrap_or_default();
+            format!(
+                "- {file} ({count} entr{}){heading}",
+                if count == 1 { "y" } else { "ies" }
+            )
+        };
+        let summaries: Vec<String> = order.iter().map(|file| summary(file)).collect();
+        let mut reserve: usize = summaries.iter().map(|line| cost(line)).sum::<usize>() + 12;
+
         let mut index = String::from("# Memory\n");
         let mut spent = 3usize; // the header
         if any_changed {
@@ -1318,21 +1351,62 @@ impl MemoryStore {
             );
             spent += 20;
         }
-        for file in order {
+        let mut elsewhere: Vec<&str> = Vec::new();
+        for (file, line_of_file) in order.iter().zip(&summaries) {
+            reserve -= cost(line_of_file);
             let lines = &sections[file.as_str()];
-            let cost = lines.iter().map(|line| line.len() / 4 + 1).sum::<usize>() + 1;
-            if spent + cost > budget_tokens {
+            let room = budget_tokens.saturating_sub(spent + reserve);
+            let head = format!("\n## {file}\n");
+            let mut used = cost(&head);
+            let mut shown = 0usize;
+            for (_, _, line) in lines {
+                // A partial file keeps room for its "more" line.
+                let tail = if shown + 1 < lines.len() { 12 } else { 0 };
+                if used + cost(line) + tail > room {
+                    break;
+                }
+                used += cost(line);
+                shown += 1;
+            }
+            if shown == 0 {
+                elsewhere.push(line_of_file);
+                spent += cost(line_of_file);
                 continue;
             }
-            spent += cost;
-            index.push_str(&format!("\n## {}\n", file));
-            for line in lines {
+            index.push_str(&head);
+            for (_, _, line) in lines.iter().take(shown) {
+                index.push_str(line);
+                index.push('\n');
+            }
+            if shown < lines.len() {
+                let more = format!(
+                    "- ({} more in {file}: search_memory, or memory view)\n",
+                    lines.len() - shown
+                );
+                used += cost(&more);
+                index.push_str(&more);
+            }
+            spent += used;
+        }
+        if !elsewhere.is_empty() {
+            index.push_str("\n## Also in memory (search_memory or memory view to read)\n");
+            for line in elsewhere {
                 index.push_str(line);
                 index.push('\n');
             }
         }
         index
     }
+}
+
+/// The entries a topic file's text holds, as (id, line): what a write
+/// can report back so the model knows exactly what landed.
+pub fn entries_in(text: &str, tier: Tier) -> Vec<(String, String)> {
+    text.lines()
+        .filter_map(|line| {
+            parse_entry(line, tier, "").map(|entry| (entry.id, line.trim().to_string()))
+        })
+        .collect()
 }
 
 /// Adds to the global tier (the user's cross-project posture). Same
@@ -2725,6 +2799,52 @@ mod tests {
             "the overflowing section drops whole"
         );
         assert!(index.starts_with("# Memory"));
+    }
+
+    /// The index is a map (#37): every topic file appears, either with
+    /// its strongest entries or as one line naming it, so the model
+    /// knows what exists to search for.
+    #[test]
+    fn the_index_maps_every_file_and_orders_by_votes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (store, _session) = store_with_roots(&tmp);
+        let root = tmp.path().join("project-memory");
+        std::fs::create_dir_all(&root).unwrap();
+        let many: String = (1..=30)
+            .map(|index| {
+                let helpful = if index == 3 { 5 } else { 0 };
+                format!(
+                    "- [p{index}] helpful={helpful} harmful=0 gotcha number {index} about the build \
+                     [source: added: 2026-11-01]\n"
+                )
+            })
+            .collect();
+        std::fs::write(root.join("gotchas.md"), format!("# Gotchas\n\n{many}")).unwrap();
+        std::fs::write(
+            root.join("status-column.md"),
+            "# The status column and the riding card\n\n\
+             - [p40] helpful=0 harmful=0 the riding card is one line [source: added: 2026-11-01]\n\
+             - [p41] helpful=0 harmful=0 TOUCHED folds bash too [source: added: 2026-11-01]\n",
+        )
+        .unwrap();
+        store.sync().unwrap();
+        let index = store.render_index(200);
+        let gotchas = index.find("## gotchas.md").expect("gotchas partly fits");
+        let first = &index[gotchas..].lines().nth(1).unwrap();
+        assert!(first.starts_with("- [p3]"), "votes first: {first}");
+        assert!(
+            index.contains("more in gotchas.md"),
+            "the partial file says so:\n{index}"
+        );
+        assert!(
+            index.contains("status-column.md (2 entries): The status column and the riding card"),
+            "the file that did not fit is named with its heading:\n{index}"
+        );
+        assert!(
+            index.len() / 4 <= 220,
+            "the budget holds: {}",
+            index.len() / 4
+        );
     }
 
     #[test]
