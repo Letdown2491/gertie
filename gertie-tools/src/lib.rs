@@ -146,7 +146,9 @@ const READ_FILE_CAP: u64 = 10 * 1024 * 1024;
 fn check_readable_size(path: &Path, label: &str) -> Result<(), String> {
     let meta = std::fs::metadata(path).map_err(|error| format!("{label}: {error}"))?;
     if !meta.is_file() {
-        return Err(format!("{label}: not a regular file, gertie does not block on it"));
+        return Err(format!(
+            "{label}: not a regular file, gertie does not block on it"
+        ));
     }
     if meta.len() > READ_FILE_CAP {
         return Err(format!(
@@ -376,12 +378,6 @@ const DENY_PATTERNS: &[(&str, &str)] = &[
     ),
 ];
 
-/// The deny list, compiled once. The vet runs on every bash call (the
-/// hottest security path in the app), and `Regex::new` is not cheap:
-/// a process-lifetime `OnceLock` buys lock-free reads after the first
-/// call. A malformed pattern here is a compile-time review failure
-/// anyway; the lock panics loudly rather than silently disabling the
-/// guard.
 /// Writes through a final component that is guaranteed not to be a
 /// symlink at open time: `O_NOFOLLOW` makes the refusal atomic with
 /// the open, closing the window between `resolve()`'s canonicalization
@@ -404,6 +400,12 @@ fn open_write_trunc_nofollow(path: &Path, label: &str) -> Result<std::fs::File, 
         })
 }
 
+/// The deny list, compiled once. The vet runs on every bash call (the
+/// hottest security path in the app), and `Regex::new` is not cheap:
+/// a process-lifetime `OnceLock` buys lock-free reads after the first
+/// call. A malformed pattern here is a compile-time review failure
+/// anyway; the lock panics loudly rather than silently disabling the
+/// guard.
 fn deny_patterns() -> &'static [(regex::Regex, &'static str)] {
     static PATTERNS: OnceLock<Vec<(regex::Regex, &'static str)>> = OnceLock::new();
     PATTERNS.get_or_init(|| {
@@ -1016,10 +1018,9 @@ mod tests {
 
         // edit_file reads the whole file too, same ceiling.
         let editor = EditFile::new(dir.path().into());
-        let edit_refused = await_sync(
-            editor.run(r#"{"path": "big.log", "old_text": "a", "new_text": "b"}"#),
-        )
-        .unwrap_err();
+        let edit_refused =
+            await_sync(editor.run(r#"{"path": "big.log", "old_text": "a", "new_text": "b"}"#))
+                .unwrap_err();
         assert!(edit_refused.contains("too large"), "{edit_refused}");
     }
 
