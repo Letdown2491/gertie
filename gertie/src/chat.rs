@@ -1451,7 +1451,7 @@ impl ChatView {
                 "question {index} {}",
                 "q".repeat(chars)
             )));
-            history.push(gertie_core::request::WireMessage::assistant(&format!(
+            history.push(gertie_core::request::WireMessage::assistant(format!(
                 "answer {index} {}",
                 "a".repeat(chars)
             )));
