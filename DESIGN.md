@@ -290,7 +290,11 @@ is pre-approved by nothing), the user is the capability system.
 
 ## Context management
 
-Boring and correct, no RAG in v1: token-budget-aware, triggered at ~80% of the model window;
+Boring and correct, no RAG in v1: token-budget-aware, triggered at ~80% of the model window,
+capped by `[turn] compact_at_tokens` (default 160k, what a 200k window gets anyway). A 1M
+window without the cap let a session reach 405k tokens with no compaction, and a minute to
+first token on every question; the selection is sized against half the capped window, so it
+lands well under the trigger;
 compaction is a **budgeted selection, not a summary**, the original request verbatim, then
 verbatim 240-char prefixes of the omitted turns (newest-first within a budget that reserves
 max(16k, window/4) tokens for the work to come), plus the kept tail, all inside one system

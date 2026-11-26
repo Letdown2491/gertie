@@ -84,7 +84,7 @@ pub fn run(
     {
         return 1;
     }
-    let context_window = provider.context_window();
+    let context_window = boot.compaction_window(provider.context_window());
     let provider: Arc<dyn gertie_core::Provider> = provider;
 
     // Same title rule as the GUI: the first user words name the session.

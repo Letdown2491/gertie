@@ -505,7 +505,8 @@ impl AgentTool {
                 snapshots: self.snapshots.clone(),
                 checkpoint_session: run,
                 workspace_root: Some(self.workspace_root.clone()),
-                context_window: self.context_window,
+                // Workers compact like the leader, at the default ceiling.
+                context_window: crate::agent_loop::compaction_window(self.context_window, None),
                 permission_broker: Some(self.broker.clone()),
                 // The worker runs under the posture its leader's turn
                 // was built with, read once at dispatch, never again.

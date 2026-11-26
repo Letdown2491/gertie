@@ -165,3 +165,9 @@ api_key_env = "MY_API_KEY"
 #[turn]
 #max_tool_rounds = 60
 #grace_rounds = 10
+# Compact when the context passes this many tokens, whatever the
+# model advertises: a 1M window otherwise grows a session to 800k
+# before its first compaction, every request re-sending all of it
+# (slow to first token, costly per turn). Default 160000; 0 = only
+# the window's 80% decides.
+#compact_at_tokens = 160000

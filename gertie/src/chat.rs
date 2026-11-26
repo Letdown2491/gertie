@@ -564,6 +564,8 @@ pub struct ChatView {
     verify: Option<String>,
     /// How much the tool definitions coach the model (#42).
     tool_guidance: gertie_core::ToolGuidance,
+    /// The compaction ceiling in tokens (config: [turn] compact_at_tokens).
+    compact_at: Option<u64>,
     /// The command palette (Ctrl+K): the kit's field + keyboard nav,
     /// pointed at the store's FTS index by the callbacks in render.
     palette: Entity<CommandState>,
@@ -774,6 +776,8 @@ pub struct ChatViewConfig {
     pub verify: Option<String>,
     // How much the tool definitions coach the model (#42).
     pub tool_guidance: gertie_core::ToolGuidance,
+    // The compaction ceiling in tokens (config: [turn] compact_at_tokens).
+    pub compact_at: Option<u64>,
     pub broker: Arc<PermissionBroker>,
     pub session_scope: gertie_core::SessionScope,
     // Worker dispatch reads this turn's posture; the chat sets it
@@ -829,6 +833,7 @@ impl ChatView {
             settle_command,
             verify,
             tool_guidance,
+            compact_at,
             broker,
             session_scope,
             mode_scope,
@@ -1000,7 +1005,12 @@ impl ChatView {
             })
             .unwrap_or(((0, 0, 0), 0));
         let total_usage = store.total_usage();
-        let context_window = provider.as_ref().and_then(|p| p.context_window());
+        // The gauge and /compact read the window compaction works
+        // against, the model's capped by the ceiling.
+        let context_window = gertie_core::agent_loop::compaction_window(
+            provider.as_ref().and_then(|p| p.context_window()),
+            compact_at,
+        );
 
         let mut view = Self {
             session_router,
@@ -1034,6 +1044,7 @@ impl ChatView {
             settle_command,
             verify,
             tool_guidance,
+            compact_at,
             palette,
             palette_open: false,
             palette_hits: Vec::new(),
@@ -4305,7 +4316,7 @@ impl ChatView {
             self.push_notice("Nothing to compact, the history is already short.", cx);
             return;
         }
-        let budget = gertie_core::agent_loop::selection_budget(self.context_window);
+        let budget = gertie_core::agent_loop::compaction_budget(self.context_window);
         cx.spawn(async move |this, cx| {
             let result = gertie_core::agent_loop::compact_history(history, budget).await;
             let _ = this.update(cx, |this, cx| match result {

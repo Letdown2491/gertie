@@ -370,6 +370,7 @@ impl WorkspaceView {
                     settle_command: self.boot.settle_command(),
                     verify: self.boot.verify_command(),
                     tool_guidance: self.boot.tool_guidance(),
+                    compact_at: self.boot.live_config().resolve_compact_at(),
                     broker: self.boot.broker.clone(),
                     session_scope: self.boot.session_scope.clone(),
                     mode_scope: self.boot.mode_scope.clone(),

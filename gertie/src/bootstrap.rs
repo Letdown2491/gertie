@@ -229,6 +229,12 @@ impl Bootstrap {
         self.live_config().resolve_max_tool_rounds()
     }
 
+    /// The window compaction works against for `window` (the
+    /// provider's), capped by the configured ceiling.
+    pub fn compaction_window(&self, window: Option<u64>) -> Option<u64> {
+        gertie_core::agent_loop::compaction_window(window, self.live_config().resolve_compact_at())
+    }
+
     pub fn grace_rounds(&self) -> Option<usize> {
         self.live_config().resolve_grace_rounds()
     }

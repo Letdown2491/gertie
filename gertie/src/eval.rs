@@ -270,7 +270,7 @@ fn run_scenario(scenario: &Scenario, config: &Path) -> Outcome {
     let Some(provider) = boot.provider() else {
         return failed(root, "no endpoint".into());
     };
-    let context_window = provider.context_window();
+    let context_window = boot.compaction_window(provider.context_window());
     let provider: std::sync::Arc<dyn gertie_core::Provider> = provider;
     let session = match boot.store.create_session(scenario.name) {
         Ok(session) => session,

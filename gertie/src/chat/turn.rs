@@ -27,7 +27,8 @@ impl ChatView {
             return;
         };
 
-        let context_window = provider.context_window();
+        let context_window =
+            gertie_core::agent_loop::compaction_window(provider.context_window(), self.compact_at);
         self.context_window = context_window;
         let provider: Arc<dyn gertie_core::Provider> = provider;
         // Subagent dispatch reads this to link its runs to this chat.

@@ -329,7 +329,7 @@ pub fn run_turn(spec: TurnSpec) -> BoxStream<'static, LoopEvent> {
                     // "fails" is nothing to select, which changes
                     // nothing.
                     if let Some((kept, total)) =
-                        compact_history(history.clone(), selection_budget(context_window)).await
+                        compact_history(history.clone(), compaction_budget(context_window)).await
                     {
                         // The old observation describes the pre-compact
                         // prompt; don't let it re-trigger.
@@ -897,6 +897,37 @@ const MIN_SELECTION_TOKENS: u64 = 4_000;
 /// `/compact` budgets against this assumption, t3code's stand-in for
 /// unknown capacity.
 const ASSUMED_WINDOW_TOKENS: u64 = 128_000;
+
+/// The compaction ceiling when the config names none: what a 200k
+/// window gets at 80%. A model advertising a 1M window used to grow a
+/// session to 400k tokens before its first compaction, every request
+/// re-sending all of it: slow to first token and costly per turn.
+pub const DEFAULT_COMPACT_AT_TOKENS: u64 = 160_000;
+
+/// The window compaction works against: the model's own, capped so
+/// the 80% trigger lands at `compact_at` tokens (None = the default
+/// ceiling, Some(0) = no ceiling). With no model window the ceiling
+/// alone sets it, so compaction runs instead of never.
+pub fn compaction_window(window: Option<u64>, compact_at: Option<u64>) -> Option<u64> {
+    let ceiling = match compact_at {
+        Some(0) => None,
+        Some(tokens) => Some(tokens),
+        None => Some(DEFAULT_COMPACT_AT_TOKENS),
+    }
+    .map(|tokens| tokens * 100 / 80);
+    match (window, ceiling) {
+        (Some(window), Some(ceiling)) => Some(window.min(ceiling)),
+        (window, ceiling) => window.or(ceiling),
+    }
+}
+
+/// The selection budget a compaction uses: sized against half the
+/// window, so the compacted history lands well under the trigger. A
+/// selection sized against the whole window (75% of it, against an 80%
+/// trigger) could refill to the trigger and compact again rounds later.
+pub fn compaction_budget(window: Option<u64>) -> usize {
+    selection_budget(window.map(|window| window / 2))
+}
 
 /// The character budget for a compaction's selection: the window minus
 /// the reserve, in chars at the bytes/4 estimate, floored so a tiny
@@ -2810,6 +2841,36 @@ mod tests {
             &reads[0][..60]
         );
         assert_eq!(reads[1], body, "the latest read stays whole");
+    }
+
+    /// The compaction window: a huge model window is capped at the
+    /// ceiling, a small one stands, 0 lifts the ceiling, and with no
+    /// window the ceiling alone turns compaction on.
+    #[test]
+    fn a_large_window_compacts_at_the_ceiling() {
+        let default_trigger = DEFAULT_COMPACT_AT_TOKENS * 100 / 80;
+        assert_eq!(
+            compaction_window(Some(1_046_576), None),
+            Some(default_trigger)
+        );
+        assert_eq!(compaction_window(Some(128_000), None), Some(128_000));
+        assert_eq!(compaction_window(Some(1_000_000), Some(0)), Some(1_000_000));
+        assert_eq!(compaction_window(None, None), Some(default_trigger));
+        assert_eq!(compaction_window(None, Some(0)), None);
+        assert_eq!(
+            compaction_window(Some(1_000_000), Some(80_000)),
+            Some(100_000)
+        );
+        // The trigger is 80% of the window: 160k for the default.
+        assert_eq!(default_trigger * 80 / 100, DEFAULT_COMPACT_AT_TOKENS);
+        // The selection lands well under the trigger, in tokens.
+        let window = compaction_window(Some(1_046_576), None).unwrap();
+        let selected_tokens = compaction_budget(Some(window)) as u64 / 4;
+        assert!(
+            selected_tokens * 2 <= window * 80 / 100,
+            "selection {selected_tokens} vs trigger {}",
+            window * 80 / 100
+        );
     }
 
     #[test]

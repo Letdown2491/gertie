@@ -85,6 +85,10 @@ pub struct TurnConfig {
     /// built-in default.
     #[serde(default)]
     pub grace_rounds: Option<usize>,
+    /// Compact when the context passes this many tokens, whatever the
+    /// model's window. Absent = 160k; 0 = only the window's 80% decides.
+    #[serde(default)]
+    pub compact_at_tokens: Option<u64>,
 }
 
 #[derive(Deserialize, Debug, Clone, Default)]
@@ -952,6 +956,11 @@ impl Config {
     /// The grace window after the wrap-up nudge, same pattern.
     pub fn resolve_grace_rounds(&self) -> Option<usize> {
         self.turn.as_ref().and_then(|t| t.grace_rounds)
+    }
+
+    /// The compaction ceiling in tokens (None = the loop's default).
+    pub fn resolve_compact_at(&self) -> Option<u64> {
+        self.turn.as_ref().and_then(|t| t.compact_at_tokens)
     }
 
     pub fn resolve_auto_settle_days(
