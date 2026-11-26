@@ -108,12 +108,35 @@ impl StatusFacts {
                 let Some(path) = field("path").and_then(|raw| normalize_path(root, &raw)) else {
                     return;
                 };
+                // The existence gate, resolved against the workspace
+                // root (never the process CWD: normalize_path returns
+                // a root-relative display string, and a relative
+                // is_file() asks the wrong directory — the probe
+                // caught a real file reporting false). A read or edit
+                // needs the file real; write_file creates its target.
+                let real = resolve_tool_path(root, std::path::Path::new(&path)).is_file();
+                if !real && name != "write_file" {
+                    return;
+                }
                 let touch = if name == "read_file" {
                     Touch::Read
                 } else {
                     Touch::Edited
                 };
-                self.touch(path, touch);
+                self.touch(path.clone(), touch);
+                // Reading a memory topic file IS a consultation: the
+                // model's natural path (it reads the files; it does
+                // not call search_memory). The read result carries the
+                // entry lines, so the ids come free. This is what
+                // makes GROUNDED IN and the riding card fire on the
+                // natural path — the live session's gap.
+                if path.contains(".gertie/memory") {
+                    for id in memory_hit_ids(result) {
+                        if !self.consulted.contains(&id) {
+                            self.consulted.push(id);
+                        }
+                    }
+                }
             }
             // The memory tool's actions are state changes worth
             // surfacing: create/str_replace/insert/delete/rename and
@@ -1440,6 +1463,18 @@ fn status_flag(session: SessionId) -> String {
 }
 
 #[cfg(test)]
+/// A tempdir root carrying the real files the tests' folds name:
+/// the existence gates demand them (a constant `/work/repo` root
+/// turned every fold into a no-op when the gates landed).
+fn root_fixture() -> (tempfile::TempDir, std::path::PathBuf) {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("repo");
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(root.join("src/a.rs"), "fn a() {}").unwrap();
+    std::fs::write(root.join("src/b.rs"), "fn b() {}").unwrap();
+    std::fs::write(root.join("src/teardown.rs"), "fn t() {}").unwrap();
+    (tmp, root)
+}
 mod tests {
     #[test]
     fn the_rail_words_fit_the_rail() {
@@ -1458,35 +1493,32 @@ mod tests {
     use super::*;
     use std::path::Path;
 
-    fn root() -> &'static Path {
-        Path::new("/work/repo")
-    }
-
     #[test]
     fn touched_files_fold_with_edited_winning_and_failures_ignored() {
+        let (_tmp, root) = root_fixture();
         let mut facts = StatusFacts::default();
-        facts.fold_tool("read_file", r#"{"path":"src/a.rs"}"#, "fn a() {}", root());
-        facts.fold_tool("read_file", r#"{"path":"./src/b.rs"}"#, "fn b() {}", root());
+        facts.fold_tool("read_file", r#"{"path":"src/a.rs"}"#, "fn a() {}", &root);
+        facts.fold_tool("read_file", r#"{"path":"./src/b.rs"}"#, "fn b() {}", &root);
         facts.fold_tool(
             "edit_file",
-            r#"{"path":"/work/repo/src/a.rs"}"#,
+            &format!(r#"{{"path":"{}"}}"#, root.join("src/a.rs").display()),
             "edited",
-            root(),
+            &root,
         );
-        facts.fold_tool("read_file", r#"{"path":"src/a.rs"}"#, "fn a() {}", root());
+        facts.fold_tool("read_file", r#"{"path":"src/a.rs"}"#, "fn a() {}", &root);
         facts.fold_tool(
             "write_file",
             r#"{"path":"src/c.rs"}"#,
             "error: denied by user",
-            root(),
+            &root,
         );
         facts.fold_tool(
             "edit_file",
             r#"{"path":"src/b.rs"}"#,
             "denied by user",
-            root(),
+            &root,
         );
-        facts.fold_tool("grep", r#"{"path":"src"}"#, "hits", root());
+        facts.fold_tool("grep", r#"{"path":"src"}"#, "hits", &root);
         assert_eq!(
             facts.touched,
             vec![
@@ -1498,6 +1530,7 @@ mod tests {
 
     #[test]
     fn the_status_tool_sets_goal_and_next_and_the_prompt_is_the_fallback() {
+        let (_tmp, root) = root_fixture();
         let mut facts = StatusFacts::default();
         facts.fold_user("\n  Fix the widget_test flake\nmore detail");
         assert_eq!(facts.goal_text(), Some("Fix the widget_test flake"));
@@ -1506,35 +1539,36 @@ mod tests {
             "status",
             r#"{"goal":"Fix the teardown race","next":"re-run the suite"}"#,
             "status noted",
-            root(),
+            &root,
         );
         facts.fold_user("Makes sense, go ahead");
         assert_eq!(facts.goal_text(), Some("Fix the teardown race"));
-        facts.fold_tool("status", r#"{"next":"commit"}"#, "status noted", root());
+        facts.fold_tool("status", r#"{"next":"commit"}"#, "status noted", &root);
         assert_eq!(facts.goal.as_deref(), Some("Fix the teardown race"));
         assert_eq!(facts.next.as_deref(), Some("commit"));
-        facts.fold_tool("status", r#"{}"#, "error: status: give a goal", root());
+        facts.fold_tool("status", r#"{}"#, "error: status: give a goal", &root);
         assert_eq!(facts.next.as_deref(), Some("commit"));
     }
 
     #[test]
     fn search_memory_hits_are_what_the_work_consulted() {
+        let (_tmp, root) = root_fixture();
         let result = "[p12] gotchas.md, added 2026-11-01\n   cite the flake\n   links: builds_on p7\n\n[g3] prefs.md, added -\n   tabs\n";
         assert_eq!(memory_hit_ids(result), vec!["p12", "g3"]);
         let mut facts = StatusFacts::default();
-        facts.fold_tool("search_memory", r#"{"query":"flake"}"#, result, root());
+        facts.fold_tool("search_memory", r#"{"query":"flake"}"#, result, &root);
         facts.fold_tool(
             "search_memory",
             r#"{"query":"x"}"#,
             "[p12] a.md, added -\n",
-            root(),
+            &root,
         );
         assert_eq!(facts.consulted, vec!["p12", "g3"]);
         facts.fold_tool(
             "search_memory",
             r#"{"query":"y"}"#,
             "no memory matches",
-            root(),
+            &root,
         );
         assert_eq!(facts.consulted.len(), 2);
     }
@@ -1564,8 +1598,9 @@ mod tests {
 
     #[test]
     fn grounding_lists_consulted_entries_then_file_level_overlap() {
+        let (_tmp, root) = root_fixture();
         let mut facts = StatusFacts::default();
-        facts.fold_tool("read_file", r#"{"path":"src/teardown.rs"}"#, "x", root());
+        facts.fold_tool("read_file", r#"{"path":"src/teardown.rs"}"#, "x", &root);
         facts.consulted = vec!["p12".into()];
         let entries = vec![
             entry("p12", &["src/teardown.rs"]),
@@ -1782,6 +1817,19 @@ fn is_scratch(token: &str) -> bool {
     token.starts_with("/dev/") || token.starts_with("/tmp/") || token.starts_with("/var/tmp/")
 }
 
+#[test]
+fn newest_wins_ordering_moves_retouched_files_front() {
+    let (_tmp, root) = root_fixture();
+    let mut facts = StatusFacts::default();
+    facts.fold_tool("read_file", r#"{"path":"src/a.rs"}"#, "ok", &root);
+    facts.fold_tool("read_file", r#"{"path":"src/b.rs"}"#, "ok", &root);
+    // b is newest: it renders first.
+    assert_eq!(facts.touched[0].0, "src/b.rs");
+    facts.fold_tool("edit_file", r#"{"path":"src/a.rs"}"#, "ok", &root);
+    // a was re-touched (edited): front, and upgraded.
+    assert_eq!(facts.touched[0].0, "src/a.rs");
+    assert_eq!(facts.touched[0].1, Touch::Edited);
+}
 #[cfg(test)]
 mod bash_tests {
     use super::*;
@@ -1817,19 +1865,6 @@ mod bash_tests {
         // Flags, bare words, and URLs are not files.
         assert!(bash_file_targets("cargo build --release", root).is_empty());
         assert!(bash_file_targets("curl https://example.com/x", root).is_empty());
-    }
-
-    #[test]
-    fn newest_wins_ordering_moves_retouched_files_front() {
-        let mut facts = StatusFacts::default();
-        facts.fold_tool("read_file", r#"{"path":"a.md"}"#, "ok", P::new("/w"));
-        facts.fold_tool("read_file", r#"{"path":"b.md"}"#, "ok", P::new("/w"));
-        // b is newest: it renders first.
-        assert_eq!(facts.touched[0].0, "b.md");
-        facts.fold_tool("edit_file", r#"{"path":"a.md"}"#, "ok", P::new("/w"));
-        // a was re-touched (edited): front, and upgraded.
-        assert_eq!(facts.touched[0].0, "a.md");
-        assert_eq!(facts.touched[0].1, Touch::Edited);
     }
 }
 

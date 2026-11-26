@@ -1,0 +1,34 @@
+ARM ARM ARM ARM read_fileread_fileread_fileread_file args= args= args= args=""""{{{{\"\"\"\"pathpathpath\"path\"\":\"::\":\"\"FAILED\"FAILEDFAILED\\FAILED\\\\.\\..\".\"}\"}""
+
+}"
+\"}"
+ARM ARM edit_fileedit_file args= args=ARM ARM ""edit_fileedit_file{{ args= args=\"\"""pathpath{{\"\"\"\"::pathpath\"\"\"\"text.replace(anchor,text.replace(anchor,::\"\"\"\"}}text.replace(anchor,text.replace(anchor,""\"
+
+}"
+\"}"
+edit_fileedit_fileedit_file path= path=edit_file path="" path="text.replace(anchor,text.replace(anchor,"text.replace(anchor,""text.replace(anchor," real= real=" real=falsefalse real=false
+
+false
+
+ARM ARM read_fileread_file args=ARM  args="ARM read_file"{read_file args={\" args="\"path"{path\"{\"\":\"path:\"path\"\"real.md\":real.md\":\"\"}\"real.md}"real.md\""
+\"}
+}""read_file
+
+read_file path= path="read_file"real.mdread_file path=real.md" path="" real="real.md real=truereal.md"true
+" real=
+ real=truetrue
+
+ARM read_file args="{\"path\":\"a.md\"}"
+ARM read_file args="{\"path\":\"src/teardown.rs\"}"
+read_file path="src/teardown.rs" real=false
+read_file path="a.md" real=false
+ARM read_file args="{\"path\":\"b.md\"}"
+read_file path="b.md" real=false
+ARM read_file args="{\"path\":\"src/a.rs\"}"
+read_file path="src/a.rs" real=false
+ARM read_file args="{\"path\":\"./src/b.rs\"}"
+read_file path="src/b.rs" real=false
+ARM edit_file args="{\"path\":\"/work/repo/src/a.rs\"}"
+edit_file path="src/a.rs" real=false
+ARM read_file args="{\"path\":\"src/a.rs\"}"
+read_file path="src/a.rs" real=false
