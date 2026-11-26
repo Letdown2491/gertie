@@ -889,6 +889,42 @@ fn the_panel_shows_the_replacement_chain_and_links() {
     assert!(shown.1, "a linked entry shows its links");
 }
 
+/// An entry whose cited file changed since it was written says so in
+/// the panel; one whose file still matches says nothing.
+#[test]
+fn the_panel_flags_an_entry_whose_evidence_changed() {
+    let (mut fixture, dir) = fixture_with_memory();
+    std::fs::create_dir_all(dir.path().join("project")).expect("tier root");
+    std::fs::write(dir.path().join("pool.rs"), "const SIZE: u32 = 16;\n").expect("cited file");
+    let current = gertie_core::memory::blob_hash(b"const SIZE: u32 = 16;\n");
+    std::fs::write(
+        dir.path().join("project").join("decisions.md"),
+        format!(
+            "- [p1] helpful=0 harmful=0 eight connections [evidence: pool.rs@000000000000]\n\
+             - [p2] helpful=0 harmful=0 sixteen connections [evidence: pool.rs@{current}]\n"
+        ),
+    )
+    .expect("topic file");
+    fixture.act(|window, cx| {
+        window.input("hello", cx);
+        window.press("enter", cx);
+    });
+    fixture.act(|window, cx| {
+        window.click("memory-chip", cx);
+    });
+    let mut shown = (false, false, false);
+    fixture.act(|window, _| {
+        shown = (
+            window.try_find("memory-vote-up-p1").is_some(),
+            window.try_find("memory-drift-p1").is_some(),
+            window.try_find("memory-drift-p2").is_some(),
+        );
+    });
+    assert!(shown.0, "the panel is open with its rows");
+    assert!(shown.1, "the stale entry is flagged");
+    assert!(!shown.2, "the current entry is not");
+}
+
 #[test]
 fn voting_through_the_panel_writes_the_counters() {
     let (mut fixture, dir) = fixture_with_memory();

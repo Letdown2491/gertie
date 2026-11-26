@@ -317,6 +317,17 @@ the files (a clone, a wiped sidecar), and `memory_links` is rebuilt from them on
 Links that once lived only in the sidecar moved onto their lines once, on the first sync
 after upgrade.
 
+**Evidence that knows it is stale.** An entry may cite the files that supported it,
+`[evidence: src/pool.rs@3f2a1c9e0b12]`: workspace-relative path and git blob id (computed
+in-process, so non-git workspaces work too, and `git log --find-object` finds the state).
+Extraction sees the list of files the session's tool calls touched and may cite only
+those; anything else is dropped before the card. Whether a cited file moved is computed on
+read (a hash per cited file, no stored state), and a moved or missing file flags the entry
+in the panel, the frozen index and `search_memory`. Flag only: ranking is untouched,
+because a changed file does not make a belief wrong, it makes it unverified, and the
+human decides. Age-based decay was rejected for the same reason (no schedule has survived
+validation); this marks *which* beliefs the code moved under, not how old they are.
+
 **Read path: frozen index, fetched body.** Cache prefixes build tools→system→messages, and any
 byte change busts everything after the change, a mutable index inside the system prompt is a
 cache bomb (the pi-context experiment watched a memory layer cost 2.34× tokens this way). So

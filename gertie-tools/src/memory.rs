@@ -539,6 +539,12 @@ impl Tool for SearchMemory {
                         .join(", ");
                     out.push_str(&format!("   links: {links}\n"));
                 }
+                if !hit.evidence_changed.is_empty() {
+                    out.push_str(&format!(
+                        "   evidence changed since written: {} (re-check before relying on it)\n",
+                        hit.evidence_changed.join(", ")
+                    ));
+                }
                 out.push('\n');
             }
             Ok(out)
@@ -819,6 +825,7 @@ mod tests {
                     file: "gotchas.md".into(),
                     text: "the flake is the teardown".into(),
                     source: Some("12".into()),
+                    evidence: Vec::new(),
                 }],
                 4096,
             )

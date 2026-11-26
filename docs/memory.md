@@ -58,14 +58,26 @@ superseded entries gain a marker and stay in the file for history.
 An entry is one line, with its markers in brackets at the end:
 
 ```
-- [p12] helpful=2 harmful=0 the pool is sized for postgres [links: builds_on p7] [source: 388; added: 2026-07-11] [superseded by: p31; valid until: 2026-11-20]
+- [p12] helpful=2 harmful=0 the pool is sized for postgres [links: builds_on p7] [evidence: src/pool.rs@3f2a1c9e0b12] [source: 388; added: 2026-07-11] [superseded by: p31; valid until: 2026-11-20]
 ```
 
 - `[links: ...]` connects an entry to others: `relates_to`, `solves`, `causes`,
   `builds_on` or `replaces`, then the other entry's id.
+- `[evidence: ...]` lists the files that supported the entry when it was written,
+  each with its content hash (git's blob id, shortened). Only files the session
+  actually read or wrote can be cited.
 - `[superseded by: p31; valid until: ...]` says what replaced an entry and when. An
   entry retired with nothing to replace it says only `[valid until: ...]`.
 
 Because these live in the file, they travel with the repo and survive a rebuilt
 database. The memory panel shows each superseded entry's chain ("replaced by p31 →
 p40") and each entry's links. Edit them by hand like anything else in the file.
+
+## When the code moves out from under a memory
+
+If a file an entry cites has changed since the entry was written, or is gone, the
+entry is marked **evidence changed**: in the memory panel, in the index the model
+sees, and in its search results, where the model is told to re-check before relying
+on it. Nothing else happens on its own. The entry keeps its place and its votes; you
+decide whether it still holds (vote, edit, or supersede it). Put the file back and
+the mark goes away.

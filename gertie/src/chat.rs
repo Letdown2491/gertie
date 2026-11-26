@@ -422,6 +422,9 @@ pub struct ChatView {
     /// vote. Empty when there is no store (headless, tests) or the
     /// store is empty; the panel and the footer word both hide then.
     memory_rows: Vec<gertie_core::MemoryEntry>,
+    /// Per row id, the cited files that changed since the entry was
+    /// written: computed with the rows, read by the panel.
+    memory_drift: std::collections::HashMap<String, Vec<String>>,
     /// The turn's round budgets, resolved from config at boot (None =
     /// the loop's built-in defaults). Every TurnSpec carries them.
     max_tool_rounds: Option<usize>,
@@ -956,6 +959,7 @@ impl ChatView {
             grace_rounds,
             last_memory_extract: std::collections::HashMap::new(),
             memory_rows: Vec::new(),
+            memory_drift: std::collections::HashMap::new(),
             pending_memory_apply: std::collections::HashMap::new(),
             pending_mode_confirm: None,
             find: None,
@@ -2620,6 +2624,17 @@ impl ChatView {
             .as_ref()
             .map(|store| store.scan())
             .unwrap_or_default();
+        self.memory_drift = self
+            .memory_store
+            .as_ref()
+            .map(|store| {
+                self.memory_rows
+                    .iter()
+                    .map(|entry| (entry.id.clone(), store.changed_evidence(entry)))
+                    .filter(|(_, changed)| !changed.is_empty())
+                    .collect()
+            })
+            .unwrap_or_default();
     }
 
     /// One vote: writes through the store, refreshes the rows. The
@@ -2679,6 +2694,10 @@ impl ChatView {
                         structure.push(format!("{} {}", link.relation.replace('_', " "), link.to));
                     }
                     let structure = structure.join(" · ");
+                    let drift = self
+                        .memory_drift
+                        .get(&entry.id)
+                        .map(|changed| format!("evidence changed: {}", changed.join(", ")));
                     h_flex()
                         .id(SharedString::from(format!("memory-row-{id}")))
                         .gap_2()
@@ -2739,6 +2758,16 @@ impl ChatView {
                                     .text_size(px(10.5))
                                     .text_color(cx.theme().muted_foreground)
                                     .child(provenance),
+                            )
+                        })
+                        .when_some(drift, |row, drift| {
+                            row.child(
+                                div()
+                                    .id(SharedString::from(format!("memory-drift-{id}")))
+                                    .text_size(px(10.5))
+                                    .text_color(cx.theme().warning)
+                                    .child(drift)
+                                    .test_support(),
                             )
                         })
                         .when(!structure.is_empty(), |row| {
@@ -2861,6 +2890,7 @@ impl ChatView {
             return;
         }
         let digest = gertie_core::memory_extract::digest_from(&messages, 12_000);
+        let touched = gertie_core::memory_extract::touched_files(&messages);
         let digest_hash = format!("{:x}", sha2::Sha256::digest(digest.as_bytes()));
         // The once-per-digest gate: the same record never proposes
         // twice. A denied proposal is marked consumed too: a deny is
@@ -2883,16 +2913,22 @@ impl ChatView {
             .insert(session_id.0, Instant::now());
         let store = store.clone();
         cx.spawn(async move |this, cx| {
-            let raw = gertie_core::memory_extract::run_extraction(provider, &digest, &index).await;
+            let raw =
+                gertie_core::memory_extract::run_extraction(provider, &digest, &index, &touched)
+                    .await;
             let proposal: Result<Option<gertie_core::memory_extract::Proposal>, String> = match raw
             {
                 Ok(raw) => match gertie_core::memory_extract::parse_ops(&raw) {
                     Ok(ops) if ops.is_empty() => Ok(None),
-                    Ok(ops) => Ok(Some(gertie_core::memory_extract::Proposal {
-                        ops,
-                        flagged,
-                        digest_hash: digest_hash.clone(),
-                    })),
+                    Ok(mut ops) => {
+                        // Only files the session touched count as evidence.
+                        gertie_core::memory_extract::restrict_evidence(&mut ops, &touched);
+                        Ok(Some(gertie_core::memory_extract::Proposal {
+                            ops,
+                            flagged,
+                            digest_hash: digest_hash.clone(),
+                        }))
+                    }
                     Err(error) => Err(error),
                 },
                 Err(error) => Err(error),
@@ -2929,9 +2965,15 @@ impl ChatView {
             .ops
             .iter()
             .map(|op| match op {
-                gertie_core::Op::Add { file, text, .. } => {
-                    format!("add {} :: {text}", file)
+                gertie_core::Op::Add {
+                    file,
+                    text,
+                    evidence,
+                    ..
+                } if !evidence.is_empty() => {
+                    format!("add {file} :: {text} (evidence: {})", evidence.join(", "))
                 }
+                gertie_core::Op::Add { file, text, .. } => format!("add {file} :: {text}"),
                 gertie_core::Op::Update { id, text } => format!("update {id} :: {text}"),
                 gertie_core::Op::Supersede { id, by: Some(by) } => {
                     format!("supersede {id} (replaced by {by})")

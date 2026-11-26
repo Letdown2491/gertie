@@ -46,15 +46,68 @@ pub fn digest_from(messages: &[crate::Message], max_chars: usize) -> String {
     format!("{head}\n\n[middle omitted]\n\n{tail}")
 }
 
+/// The files a session read or wrote, from its tool rows: every
+/// call whose arguments name a `path` (or `file_path`), in first-touch
+/// order, deduplicated, at most 40. Extraction may cite only these as
+/// evidence, so a cited file is one the session actually looked at.
+/// Paths are as the model wrote them; the store resolves and checks
+/// them when it hashes.
+pub fn touched_files(messages: &[crate::Message]) -> Vec<String> {
+    let mut touched: Vec<String> = Vec::new();
+    for message in messages {
+        if message.role != crate::Role::Tool {
+            continue;
+        }
+        let Some(arguments) = message.tool_arguments.as_deref() else {
+            continue;
+        };
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(arguments) else {
+            continue;
+        };
+        let Some(path) = value
+            .get("path")
+            .or_else(|| value.get("file_path"))
+            .and_then(|path| path.as_str())
+        else {
+            continue;
+        };
+        let path = path.trim().trim_start_matches("./").to_string();
+        if path.is_empty() || touched.contains(&path) {
+            continue;
+        }
+        touched.push(path);
+        if touched.len() == 40 {
+            break;
+        }
+    }
+    touched
+}
+
+/// Drops every evidence path an add cites that is not in `touched`:
+/// a model can name a file, only the session's own reads make it
+/// evidence.
+pub fn restrict_evidence(ops: &mut [Op], touched: &[String]) {
+    for op in ops {
+        if let Op::Add { evidence, .. } = op {
+            evidence.retain(|path| touched.contains(path));
+        }
+    }
+}
+
 /// The extraction prompt: small, flat, ACE-shaped. The schema is the
 /// ops JSON the store already understands; counters and ids stay out
 /// of the model's hands (the merge assigns them).
-pub fn extraction_prompt(digest: &str, index: &str) -> String {
+pub fn extraction_prompt(digest: &str, index: &str, touched: &[String]) -> String {
+    let files = if touched.is_empty() {
+        "(none)".to_string()
+    } else {
+        touched.join("\n")
+    };
     format!(
         "You are extracting durable memory from a coding-agent session. \
 Propose changes to a long-term memory store as a JSON array of ops. \
 Ops:\n\
-- {{\"op\":\"add\",\"file\":\"<topic-file>.md\",\"text\":\"<one-line entry>\",\"source\":\"<session ref>\"}}\n\
+- {{\"op\":\"add\",\"file\":\"<topic-file>.md\",\"text\":\"<one-line entry>\",\"source\":\"<session ref>\",\"evidence\":[\"<file from the list below>\"]}}\n\
 - {{\"op\":\"update\",\"id\":\"<entry id>\",\"text\":\"<one-line replacement>\"}}\n\
 - {{\"op\":\"supersede\",\"id\":\"<entry id>\",\"by\":\"<id of the existing entry that replaces it, if any>\"}}\n\
 - {{\"op\":\"archive\",\"id\":\"<entry id>\"}}\n\
@@ -63,7 +116,10 @@ Rules: one line per entry, under 160 chars. Facts and preferences only, \
 never task narration. Supersede an existing entry when the new fact \
 replaces it: pair the supersede with the add that states the new fact \
 (with exactly one add in the array, the pair is linked automatically), \
-or name an existing replacement in by. Existing memory (do not repeat it):\n{index}\n\n\
+or name an existing replacement in by. For a fact about the code, cite \
+in evidence the files from this list that support it (at most 8, only \
+these; omit evidence otherwise):\n{files}\n\n\
+Existing memory (do not repeat it):\n{index}\n\n\
 Return ONLY the JSON array, no prose.\n\nSession:\n{digest}"
     )
 }
@@ -125,6 +181,18 @@ pub fn parse_ops(raw: &str) -> Result<Vec<Op>, String> {
                     .get("source")
                     .and_then(|value| value.as_str())
                     .map(|value| sanitize_untrusted(value, 64).to_string()),
+                evidence: obj
+                    .get("evidence")
+                    .and_then(|value| value.as_array())
+                    .map(|paths| {
+                        paths
+                            .iter()
+                            .filter_map(|path| path.as_str())
+                            .take(crate::memory::EVIDENCE_LIMIT)
+                            .map(|path| sanitize_untrusted(path, 256))
+                            .collect()
+                    })
+                    .unwrap_or_default(),
             },
             "update" => Op::Update {
                 id: text_field("id")?,
@@ -165,8 +233,9 @@ pub async fn run_extraction(
     provider: Arc<dyn Provider>,
     digest: &str,
     index: &str,
+    touched: &[String],
 ) -> Result<String, String> {
-    let prompt = extraction_prompt(digest, index);
+    let prompt = extraction_prompt(digest, index, touched);
     let request = Request {
         messages: vec![crate::request::WireMessage::user(&prompt)],
         tools: Vec::new(),
@@ -251,8 +320,46 @@ mod tests {
 
     #[test]
     fn extraction_prompt_carries_the_schema_and_index() {
-        let prompt = extraction_prompt("digest text", "existing memory");
+        let prompt = extraction_prompt("digest text", "existing memory", &["src/a.rs".into()]);
         assert!(prompt.contains("\"op\":\"add\""));
         assert!(prompt.contains("existing memory"));
+        assert!(prompt.contains("\nsrc/a.rs\n"));
+        assert!(extraction_prompt("d", "i", &[]).contains("(none)"));
+    }
+
+    fn tool_row(arguments: &str) -> crate::Message {
+        crate::Message {
+            id: crate::MessageId(1),
+            parent_id: None,
+            role: crate::Role::Tool,
+            content: "ok".into(),
+            tool_call_id: Some("c".into()),
+            tool_name: Some("read_file".into()),
+            tool_arguments: Some(arguments.into()),
+        }
+    }
+
+    #[test]
+    fn touched_files_come_from_path_arguments_once_each() {
+        let messages = vec![
+            tool_row(r#"{"path": "./src/a.rs"}"#),
+            tool_row(r#"{"file_path": "src/b.rs"}"#),
+            tool_row(r#"{"path": "src/a.rs"}"#),
+            tool_row(r#"{"command": "ls"}"#),
+            tool_row("not json"),
+        ];
+        assert_eq!(touched_files(&messages), vec!["src/a.rs", "src/b.rs"]);
+    }
+
+    #[test]
+    fn evidence_is_limited_to_what_the_session_touched() {
+        let mut ops = parse_ops(
+            r#"[{"op":"add","file":"gotchas.md","text":"t","evidence":["src/a.rs","/etc/passwd"]}]"#,
+        )
+        .unwrap();
+        restrict_evidence(&mut ops, &["src/a.rs".into()]);
+        assert!(
+            matches!(&ops[0], Op::Add { evidence, .. } if evidence == &vec!["src/a.rs".to_string()])
+        );
     }
 }

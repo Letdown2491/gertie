@@ -196,6 +196,7 @@ mod tests {
             valid_until: by.map(|_| "2026-11-26".into()),
             superseded_by: by.map(Into::into),
             links: Vec::new(),
+            evidence: Vec::new(),
         }
     }
 

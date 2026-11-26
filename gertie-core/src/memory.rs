@@ -21,6 +21,13 @@
 //! `[links: builds_on p7, solves p9]`: the files carry the whole
 //! structure, and the sidecar's `memory_links` is rebuilt from them on
 //! every sync, like everything else it holds.
+//!
+//! An entry can cite the files that support it,
+//! `[evidence: src/auth.rs@3f2a1c9e0b12]`: a workspace-relative path and
+//! the file's git blob id (12 hex digits) when the entry was written.
+//! Whether a cited file has changed since is computed on read, never
+//! stored: an entry whose evidence moved is flagged for the human and
+//! the model, and its ranking is left alone.
 
 use crate::agent::sanitize_untrusted;
 use rusqlite::Connection;
@@ -81,6 +88,37 @@ pub struct MemoryEntry {
     pub superseded_by: Option<String>,
     /// Typed links from this entry to others, in line order.
     pub links: Vec<Link>,
+    /// The files that supported this entry when it was written.
+    pub evidence: Vec<Evidence>,
+}
+
+/// One cited file: a workspace-relative path (`/`-separated) and its
+/// git blob id, shortened to [`EVIDENCE_HASH_LEN`] hex digits.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Evidence {
+    pub path: String,
+    pub hash: String,
+}
+
+/// Hex digits kept of an evidence hash: enough that a collision
+/// between two states of one file is not a practical concern, short
+/// enough to keep the line readable, and still a valid abbreviation
+/// for `git log --find-object`.
+pub const EVIDENCE_HASH_LEN: usize = 12;
+
+/// How many files one entry may cite.
+pub const EVIDENCE_LIMIT: usize = 8;
+
+/// The git blob id of `bytes` (what `git hash-object` prints),
+/// shortened. Computed here, so it works in a workspace that is not a
+/// git repository too.
+pub fn blob_hash(bytes: &[u8]) -> String {
+    let mut hasher = sha1_smol::Sha1::new();
+    hasher.update(format!("blob {}\0", bytes.len()).as_bytes());
+    hasher.update(bytes);
+    let mut hex = hasher.digest().to_string();
+    hex.truncate(EVIDENCE_HASH_LEN);
+    hex
 }
 
 /// A typed link from one entry to another, stored on the `from`
@@ -107,6 +145,9 @@ pub struct MemoryHit {
     pub added_at: Option<String>,
     /// The hit's typed links, so the model can follow them by id.
     pub links: Vec<Link>,
+    /// Cited files that changed (or vanished) since the entry was
+    /// written. Non-empty means: re-check before relying on it.
+    pub evidence_changed: Vec<String>,
 }
 
 /// A delta operation, the only way memory changes under harness hands.
@@ -121,6 +162,10 @@ pub enum Op {
         file: String,
         text: String,
         source: Option<String>,
+        /// Workspace-relative paths that support the entry; each is
+        /// hashed as it is written. Paths that do not resolve to a
+        /// file inside the workspace are dropped.
+        evidence: Vec<String>,
     },
     /// Replace an entry's text, counters and provenance preserved.
     Update { id: String, text: String },
@@ -187,6 +232,72 @@ impl MemoryStore {
             Tier::Project => self.project_root.clone(),
             Tier::Global => self.global_root.clone(),
         }
+    }
+
+    /// The workspace the project tier belongs to, which evidence paths
+    /// are relative to: the tier lives at `<workspace>/.gertie/memory`;
+    /// any other layout (tests) counts the tier root's parent.
+    pub fn workspace_root(&self) -> Option<PathBuf> {
+        if self.project_root.ends_with(".gertie/memory") {
+            self.project_root.parent()?.parent().map(Path::to_path_buf)
+        } else {
+            self.project_root.parent().map(Path::to_path_buf)
+        }
+    }
+
+    /// Hashes the named files as they are now. A path is kept only if
+    /// it resolves (symlinks included) to a regular file inside the
+    /// workspace; it is stored workspace-relative, `/`-separated.
+    /// Duplicates collapse; at most [`EVIDENCE_LIMIT`] survive.
+    pub fn evidence_for(&self, paths: &[String]) -> Vec<Evidence> {
+        let Some(root) = self
+            .workspace_root()
+            .and_then(|root| root.canonicalize().ok())
+        else {
+            return Vec::new();
+        };
+        let mut evidence: Vec<Evidence> = Vec::new();
+        for path in paths {
+            let Some(relative) = resolve_evidence(&root, path) else {
+                continue;
+            };
+            if evidence.iter().any(|known| known.path == relative) {
+                continue;
+            }
+            let Ok(bytes) = std::fs::read(root.join(&relative)) else {
+                continue;
+            };
+            evidence.push(Evidence {
+                path: relative,
+                hash: blob_hash(&bytes),
+            });
+            if evidence.len() == EVIDENCE_LIMIT {
+                break;
+            }
+        }
+        evidence
+    }
+
+    /// The cited files of `entry` whose content no longer matches the
+    /// recorded hash, or that are gone. Empty for an entry with no
+    /// evidence, and for a retired entry (history is not re-checked).
+    pub fn changed_evidence(&self, entry: &MemoryEntry) -> Vec<String> {
+        if entry.evidence.is_empty() || entry.valid_until.is_some() {
+            return Vec::new();
+        }
+        let Some(root) = self.workspace_root() else {
+            return Vec::new();
+        };
+        entry
+            .evidence
+            .iter()
+            .filter(|cited| {
+                std::fs::read(root.join(&cited.path))
+                    .map(|bytes| blob_hash(&bytes) != cited.hash)
+                    .unwrap_or(true)
+            })
+            .map(|cited| cited.path.clone())
+            .collect()
     }
 
     pub fn today(&self) -> rusqlite::Result<String> {
@@ -464,43 +575,57 @@ impl MemoryStore {
 
     pub fn search(&self, query: &str, limit: usize) -> rusqlite::Result<Vec<MemoryHit>> {
         let query = sanitize_untrusted(query, 256);
-        self.store.with_connection(|connection| {
-            let mut statement = connection.prepare(
-                "SELECT memories.id, memories.tier, memories.file, memories.content,
+        self.store
+            .with_connection(|connection| {
+                let mut statement = connection.prepare(
+                    "SELECT memories.id, memories.tier, memories.file, memories.content,
                         memories.added_at
                  FROM memories_fts
                  JOIN memories ON memories.id = memories_fts.id
                  WHERE memories_fts MATCH ?1 AND memories.valid_until IS NULL
                  ORDER BY rank
                  LIMIT ?2",
-            )?;
-            let rows = statement.query_map(rusqlite::params![query, limit as i64], |row| {
-                Ok(MemoryHit {
-                    id: row.get(0)?,
-                    tier: Tier::from_name(&row.get::<_, String>(1)?),
-                    file: row.get(2)?,
-                    text: row.get(3)?,
-                    added_at: row.get(4)?,
-                    links: Vec::new(),
-                })
-            })?;
-            let mut hits = rows.collect::<rusqlite::Result<Vec<_>>>()?;
-            let mut links = connection.prepare(
-                "SELECT relation, to_id FROM memory_links WHERE from_id = ?1
+                )?;
+                let rows = statement.query_map(rusqlite::params![query, limit as i64], |row| {
+                    Ok(MemoryHit {
+                        id: row.get(0)?,
+                        tier: Tier::from_name(&row.get::<_, String>(1)?),
+                        file: row.get(2)?,
+                        text: row.get(3)?,
+                        added_at: row.get(4)?,
+                        links: Vec::new(),
+                        evidence_changed: Vec::new(),
+                    })
+                })?;
+                let mut hits = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+                let mut links = connection.prepare(
+                    "SELECT relation, to_id FROM memory_links WHERE from_id = ?1
                  ORDER BY rowid",
-            )?;
-            for hit in &mut hits {
-                hit.links = links
-                    .query_map([&hit.id], |row| {
-                        Ok(Link {
-                            relation: row.get(0)?,
-                            to: row.get(1)?,
-                        })
-                    })?
-                    .collect::<rusqlite::Result<Vec<_>>>()?;
-            }
-            Ok(hits)
-        })
+                )?;
+                for hit in &mut hits {
+                    hit.links = links
+                        .query_map([&hit.id], |row| {
+                            Ok(Link {
+                                relation: row.get(0)?,
+                                to: row.get(1)?,
+                            })
+                        })?
+                        .collect::<rusqlite::Result<Vec<_>>>()?;
+                }
+                Ok(hits)
+            })
+            .map(|mut hits: Vec<MemoryHit>| {
+                if hits.is_empty() {
+                    return hits;
+                }
+                let entries = self.scan();
+                for hit in &mut hits {
+                    if let Some(entry) = entries.iter().find(|entry| entry.id == hit.id) {
+                        hit.evidence_changed = self.changed_evidence(entry);
+                    }
+                }
+                hits
+            })
     }
 
     /// Entries current as of a date (the bi-temporal read): the ids and
@@ -526,6 +651,7 @@ impl MemoryStore {
                     valid_until: row.get(8)?,
                     superseded_by: row.get(9)?,
                     links: Vec::new(),
+                    evidence: Vec::new(),
                 })
             })?;
             rows.collect()
@@ -556,11 +682,16 @@ impl MemoryStore {
                 continue;
             }
             let result = match op {
-                Op::Add { file, text, source } => {
-                    self.add_entry(file, text, source.clone()).map(|id| {
+                Op::Add {
+                    file,
+                    text,
+                    source,
+                    evidence,
+                } => self
+                    .add_entry(file, text, source.clone(), evidence)
+                    .map(|id| {
                         added = Some(id);
-                    })
-                }
+                    }),
                 Op::Update { id, text } => self.update_entry(id, text),
                 Op::Supersede { id, by } => {
                     let by = by.clone().or_else(|| added.clone().filter(|_| lone_add));
@@ -590,6 +721,7 @@ impl MemoryStore {
         file: &str,
         text: &str,
         source: Option<String>,
+        evidence: &[String],
     ) -> rusqlite::Result<String> {
         let file = sanitize_untrusted(file, 64);
         if !valid_topic_name(&file) {
@@ -609,6 +741,7 @@ impl MemoryStore {
             valid_until: None,
             superseded_by: None,
             links: Vec::new(),
+            evidence: self.evidence_for(evidence),
         });
         append_line(self.root(Tier::Project).join(&file), &line)?;
         Ok(id)
@@ -657,8 +790,17 @@ impl MemoryStore {
         if let Some(source) = &gone.source_session {
             sources.push(source.clone());
         }
+        let mut evidence = survivor.evidence.clone();
+        for cited in &gone.evidence {
+            if evidence.len() < EVIDENCE_LIMIT
+                && !evidence.iter().any(|known| known.path == cited.path)
+            {
+                evidence.push(cited.clone());
+            }
+        }
         let merged = render_line(&MemoryEntry {
             text,
+            evidence,
             helpful: survivor.helpful.max(gone.helpful),
             harmful: survivor.harmful + gone.harmful,
             source_session: if sources.is_empty() {
@@ -808,14 +950,21 @@ impl MemoryStore {
     /// indexed too, just last in line for the budget.
     pub fn render_index(&self, budget_tokens: usize) -> String {
         let mut sections: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        let mut any_changed = false;
         for entry in self.scan() {
             if entry.valid_until.is_some() {
                 continue;
             }
+            let mark = if self.changed_evidence(&entry).is_empty() {
+                ""
+            } else {
+                any_changed = true;
+                " [evidence changed]"
+            };
             sections
                 .entry(entry.file.clone())
                 .or_default()
-                .push(format!("- [{}] {}", entry.id, entry.text));
+                .push(format!("- [{}] {}{mark}", entry.id, entry.text));
         }
         let priority = [
             "workflows.md",
@@ -836,6 +985,14 @@ impl MemoryStore {
         }
         let mut index = String::from("# Memory\n");
         let mut spent = 3usize; // the header
+        if any_changed {
+            // One line, only when it applies: the mark's meaning.
+            index.push_str(
+                "\nEntries marked [evidence changed] cite files that changed since; \
+                 re-check before relying on them.\n",
+            );
+            spent += 20;
+        }
         for file in order {
             let lines = &sections[file.as_str()];
             let cost = lines.iter().map(|line| line.len() / 4 + 1).sum::<usize>() + 1;
@@ -879,6 +1036,8 @@ pub fn add_global(
         valid_until: None,
         superseded_by: None,
         links: Vec::new(),
+        // Global entries span projects: no one workspace to cite.
+        evidence: Vec::new(),
     });
     append_line(store.global_root.join(&file), &line)
 }
@@ -959,6 +1118,7 @@ fn parse_entry(line: &str, tier: Tier, file: &str) -> Option<MemoryEntry> {
     let mut valid_until = None;
     let mut superseded_by = None;
     let mut links = Vec::new();
+    let mut evidence = Vec::new();
     loop {
         let trimmed = text.trim_end();
         if !trimmed.ends_with(']') {
@@ -983,6 +1143,10 @@ fn parse_entry(line: &str, tier: Tier, file: &str) -> Option<MemoryEntry> {
             && let Some(parsed) = parse_links(list)
         {
             links = parsed;
+        } else if let Some(list) = inner.strip_prefix("evidence:")
+            && let Some(parsed) = parse_evidence(list)
+        {
+            evidence = parsed;
         } else if let Some(date) = inner.strip_prefix("archived:") {
             valid_until = Some(date.trim().to_string());
         } else if inner.starts_with("source:") || inner.starts_with("added:") {
@@ -1013,7 +1177,54 @@ fn parse_entry(line: &str, tier: Tier, file: &str) -> Option<MemoryEntry> {
         valid_until,
         superseded_by,
         links,
+        evidence,
     })
+}
+
+/// `src/a.rs@3f2a1c9e0b12, b.rs@...` into evidence; None (the bracket
+/// stays text) when any item is not `path@hex`.
+fn parse_evidence(list: &str) -> Option<Vec<Evidence>> {
+    list.split(", ")
+        .map(|item| {
+            let (path, hash) = item.trim().rsplit_once('@')?;
+            if path.is_empty() || hash.is_empty() || !hash.chars().all(|c| c.is_ascii_hexdigit()) {
+                return None;
+            }
+            Some(Evidence {
+                path: path.to_string(),
+                hash: hash.to_string(),
+            })
+        })
+        .collect()
+}
+
+/// A cited path made workspace-relative and checked: relative or
+/// absolute-inside, no escape (symlinks resolved), a regular file.
+/// A path holding the list separator, or a bracket, could not round
+/// trip through the line, so it is refused.
+fn resolve_evidence(root: &Path, path: &str) -> Option<String> {
+    let path = path.trim();
+    if path.is_empty() || path.contains(", ") || path.contains(']') || path.contains('[') {
+        return None;
+    }
+    let candidate = Path::new(path);
+    let joined = if candidate.is_absolute() {
+        candidate.to_path_buf()
+    } else {
+        root.join(candidate)
+    };
+    let resolved = joined.canonicalize().ok()?;
+    if !resolved.starts_with(root) || !resolved.is_file() {
+        return None;
+    }
+    let relative = resolved.strip_prefix(root).ok()?;
+    Some(
+        relative
+            .components()
+            .map(|part| part.as_os_str().to_string_lossy())
+            .collect::<Vec<_>>()
+            .join("/"),
+    )
 }
 
 /// `builds_on p7, solves p9` into links; None (the bracket stays
@@ -1050,6 +1261,15 @@ fn render_line(entry: &MemoryEntry) -> String {
             .collect::<Vec<_>>()
             .join(", ");
         line.push_str(&format!(" [links: {list}]"));
+    }
+    if !entry.evidence.is_empty() {
+        let list = entry
+            .evidence
+            .iter()
+            .map(|cited| format!("{}@{}", cited.path, cited.hash))
+            .collect::<Vec<_>>()
+            .join(", ");
+        line.push_str(&format!(" [evidence: {list}]"));
     }
     if entry.source_session.is_some() || entry.added_at.is_some() {
         line.push_str(" [source: ");
@@ -1292,11 +1512,13 @@ mod tests {
                         file: "gotchas.md".into(),
                         text: "the flake is the teardown, not the test".into(),
                         source: Some("12".into()),
+                        evidence: Vec::new(),
                     },
                     Op::Add {
                         file: "gotchas.md".into(),
                         text: "x".repeat(4096),
                         source: None,
+                        evidence: Vec::new(),
                     },
                 ],
                 256,
@@ -1365,6 +1587,7 @@ mod tests {
                     file: "decisions.md".into(),
                     text: text.into(),
                     source: None,
+                    evidence: Vec::new(),
                 }],
                 4096,
             )
@@ -1529,6 +1752,7 @@ mod tests {
                         file: "decisions.md".into(),
                         text: "use spaces".into(),
                         source: None,
+                        evidence: Vec::new(),
                     },
                     Op::Supersede {
                         id: "p1".into(),
@@ -1548,11 +1772,13 @@ mod tests {
                         file: "decisions.md".into(),
                         text: "a".into(),
                         source: None,
+                        evidence: Vec::new(),
                     },
                     Op::Add {
                         file: "decisions.md".into(),
                         text: "b".into(),
                         source: None,
+                        evidence: Vec::new(),
                     },
                     Op::Supersede {
                         id: "p2".into(),
@@ -1586,6 +1812,128 @@ mod tests {
         let entry = parse_entry(odd, Tier::Project, "decisions.md").unwrap();
         assert_eq!(entry.text, "see [links: inspired p1]");
         assert!(entry.links.is_empty());
+    }
+
+    #[test]
+    fn the_evidence_hash_is_gits_blob_id() {
+        // `printf 'hello\n' | git hash-object --stdin`
+        assert_eq!(blob_hash(b"hello\n"), "ce013625030b");
+        assert_eq!(blob_hash(b""), "e69de29bb2d1");
+    }
+
+    fn add_with_evidence(store: &MemoryStore, text: &str, evidence: &[&str]) -> ApplyReport {
+        store
+            .apply(
+                &[Op::Add {
+                    file: "decisions.md".into(),
+                    text: text.into(),
+                    source: None,
+                    evidence: evidence.iter().map(|path| path.to_string()).collect(),
+                }],
+                4096,
+            )
+            .unwrap()
+    }
+
+    #[test]
+    fn an_entry_cites_its_files_and_knows_when_they_change() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (store, _session) = store_with_roots(&tmp);
+        std::fs::create_dir_all(tmp.path().join("src")).unwrap();
+        std::fs::write(tmp.path().join("src/pool.rs"), "const SIZE: u32 = 8;\n").unwrap();
+        std::fs::write(tmp.path().join("README.md"), "readme\n").unwrap();
+        add_with_evidence(
+            &store,
+            "the pool holds eight connections",
+            &[
+                "src/pool.rs",
+                "./README.md",
+                "../outside.rs",
+                "src/missing.rs",
+                "src/pool.rs",
+            ],
+        );
+        let entry = store.scan().remove(0);
+        assert_eq!(
+            entry.evidence,
+            vec![
+                Evidence {
+                    path: "src/pool.rs".into(),
+                    hash: blob_hash(b"const SIZE: u32 = 8;\n"),
+                },
+                Evidence {
+                    path: "README.md".into(),
+                    hash: blob_hash(b"readme\n"),
+                },
+            ],
+            "escaping, missing and repeated paths are dropped"
+        );
+        let line = std::fs::read_to_string(tmp.path().join("project-memory/decisions.md")).unwrap();
+        assert!(line.contains(&format!(
+            "[evidence: src/pool.rs@{}, README.md@{}]",
+            blob_hash(b"const SIZE: u32 = 8;\n"),
+            blob_hash(b"readme\n")
+        )));
+        assert!(store.changed_evidence(&entry).is_empty());
+        assert!(!store.render_index(600).contains("evidence changed"));
+
+        // The code moves: the entry is flagged, everywhere it is read.
+        std::fs::write(tmp.path().join("src/pool.rs"), "const SIZE: u32 = 16;\n").unwrap();
+        assert_eq!(store.changed_evidence(&entry), vec!["src/pool.rs"]);
+        let index = store.render_index(600);
+        assert!(index.contains("- [p1] the pool holds eight connections [evidence changed]"));
+        assert!(index.contains("re-check before relying on them"));
+        let hits = store.search("pool", 10).unwrap();
+        assert_eq!(hits[0].evidence_changed, vec!["src/pool.rs"]);
+
+        // Put back, the flag clears; deleted, it returns.
+        std::fs::write(tmp.path().join("src/pool.rs"), "const SIZE: u32 = 8;\n").unwrap();
+        assert!(store.changed_evidence(&entry).is_empty());
+        std::fs::remove_file(tmp.path().join("README.md")).unwrap();
+        assert_eq!(store.changed_evidence(&entry), vec!["README.md"]);
+    }
+
+    #[test]
+    fn a_retired_entry_is_not_rechecked_and_a_merge_keeps_both_citations() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (store, _session) = store_with_roots(&tmp);
+        std::fs::write(tmp.path().join("a.rs"), "a\n").unwrap();
+        std::fs::write(tmp.path().join("b.rs"), "b\n").unwrap();
+        add_with_evidence(&store, "first", &["a.rs"]);
+        add_with_evidence(&store, "second", &["b.rs"]);
+        store
+            .apply(
+                &[Op::Merge {
+                    keep: "p1".into(),
+                    drop: "p2".into(),
+                    text: "both".into(),
+                }],
+                4096,
+            )
+            .unwrap();
+        let entries = store.scan();
+        let paths: Vec<&str> = entries[0]
+            .evidence
+            .iter()
+            .map(|cited| cited.path.as_str())
+            .collect();
+        assert_eq!(paths, vec!["a.rs", "b.rs"]);
+        // p2 is archived: its moved file is history, not a flag.
+        std::fs::write(tmp.path().join("b.rs"), "changed\n").unwrap();
+        assert!(store.changed_evidence(&entries[1]).is_empty());
+        assert_eq!(store.changed_evidence(&entries[0]), vec!["b.rs"]);
+    }
+
+    #[test]
+    fn a_hand_written_evidence_marker_parses_and_a_bad_one_stays_text() {
+        let line = "- [p2] helpful=0 harmful=0 tuned [evidence: src/a.rs@ce013625030b, b.rs@e69de29bb2d1] [source: added: 2026-11-26]";
+        let entry = parse_entry(line, Tier::Project, "decisions.md").unwrap();
+        assert_eq!(entry.evidence.len(), 2);
+        assert_eq!(render_line(&entry), line);
+        let odd = "- [p3] helpful=0 harmful=0 see [evidence: just words]";
+        let entry = parse_entry(odd, Tier::Project, "decisions.md").unwrap();
+        assert!(entry.evidence.is_empty());
+        assert_eq!(entry.text, "see [evidence: just words]");
     }
 
     #[test]
@@ -1634,6 +1982,7 @@ mod tests {
                     file: "gotchas.md".into(),
                     text: "here today".into(),
                     source: None,
+                    evidence: Vec::new(),
                 }],
                 4096,
             )
@@ -1666,11 +2015,13 @@ mod tests {
                         file: "preferences.md".into(),
                         text: "tabs over spaces".into(),
                         source: None,
+                        evidence: Vec::new(),
                     },
                     Op::Add {
                         file: "workflows.md".into(),
                         text: long,
                         source: None,
+                        evidence: Vec::new(),
                     },
                 ],
                 4096,
@@ -1695,6 +2046,7 @@ mod tests {
                     file: "project-layout.md".into(),
                     text: "the tests live beside the code".into(),
                     source: None,
+                    evidence: Vec::new(),
                 }],
                 4096,
             )
@@ -1713,11 +2065,13 @@ mod tests {
                         file: "gotchas.md".into(),
                         text: "cite the flake before blaming the test".into(),
                         source: Some("388".into()),
+                        evidence: Vec::new(),
                     },
                     Op::Add {
                         file: "gotchas.md".into(),
                         text: "cite the flake before you blame the test".into(),
                         source: Some("401".into()),
+                        evidence: Vec::new(),
                     },
                 ],
                 10_000,
@@ -1772,6 +2126,7 @@ mod tests {
                     file: "gotchas.md".into(),
                     text: "cite the flake first".into(),
                     source: Some("401".into()),
+                    evidence: Vec::new(),
                 }],
                 10_000,
             )
@@ -1808,6 +2163,7 @@ mod tests {
                     file: "conventions.md".into(),
                     text: "project fact".into(),
                     source: None,
+                    evidence: Vec::new(),
                 }],
                 4096,
             )
@@ -1833,6 +2189,7 @@ mod tests {
                         file: hostile.into(),
                         text: "x".into(),
                         source: None,
+                        evidence: Vec::new(),
                     }],
                     4096,
                 )
