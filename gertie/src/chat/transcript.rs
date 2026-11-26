@@ -57,7 +57,29 @@ impl ChatView {
             self.approval_reply_for(index, window, cx);
         }
         let inner = match &self.turns[index] {
-            Turn::Message { role, text, .. } => self.render_message(role, text, index as u64, cx),
+            Turn::Message { role, text, .. } => {
+                let message = self.render_message(role, text, index as u64, cx);
+                // The riding status card (#34): the latest assistant
+                // turn carries the momentary state — goal, next, the
+                // grounding "why" — while the column carries the
+                // durable detail. Latest-turn-only by construction:
+                // the index must be the last message in the list.
+                let is_latest_assistant = *role == Role::Assistant
+                    && !self.turns.iter().skip(index + 1).any(|turn| {
+                        matches!(
+                            turn,
+                            Turn::Message {
+                                role: Role::Assistant,
+                                ..
+                            }
+                        )
+                    });
+                if is_latest_assistant {
+                    self.render_status_card(message, cx)
+                } else {
+                    message
+                }
+            }
             Turn::Tool {
                 call,
                 status,

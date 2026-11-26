@@ -5210,6 +5210,87 @@ fn replay_provider(scenario: &str) -> (Arc<gertie_providers::AnyProvider>, tempf
 /// the rail and the header chip, and the fold is stored per
 /// conversation.
 #[test]
+/// The riding status card (#34): latest-turn-only, and the
+/// empty-sections gate. The full render is window-bound; the
+/// fixture-observable halves are the grounding tuple (the card's
+/// "why") and the latest-turn condition the renderer checks.
+#[test]
+fn the_riding_card_gates_on_something_to_say() {
+    let store = Arc::new(SessionStore::open(Path::new(":memory:")).expect("store"));
+    let mut fixture = fixture_with_store(store);
+    // A plain session: user turn only, no memory consultation, no
+    // model-stated status.
+    fixture.act(|window, cx| {
+        window.input("hello there", cx);
+        window.press("enter", cx);
+    });
+    pump(&mut fixture, 10);
+    let riding = fixture.cx.update(|cx| {
+        fixture
+            .view
+            .upgrade()
+            .expect("view alive")
+            .read(cx)
+            .riding_for_test()
+    });
+    assert!(
+        riding.is_none(),
+        "a plain session's grounding is none: {riding:?}"
+    );
+    // The status facts carry no model-stated goal (no `status` tool
+    // call) — the gate's other half.
+    // The gate reads the model-stated goal field, not goal_text()
+    // (which falls back to the prompt). No `status` call yet means
+    // the field is None even though goal_text() returns the prompt.
+    let model_stated = fixture.cx.update(|cx| {
+        fixture
+            .view
+            .upgrade()
+            .expect("view alive")
+            .read(cx)
+            .model_goal_for_test()
+    });
+    assert!(
+        model_stated.is_none(),
+        "the prompt fallback must not count as model-stated: {model_stated:?}"
+    );
+    let gated = fixture.cx.update(|cx| {
+        fixture
+            .view
+            .upgrade()
+            .expect("view alive")
+            .read(cx)
+            .riding_card_gated_for_test()
+    });
+    assert!(!gated, "noise must not earn the card");
+
+    // The positive path: the model states a goal (the `status` tool's
+    // fold) — the gate opens.
+    fixture.cx.update(|cx| {
+        fixture
+            .view
+            .upgrade()
+            .expect("view alive")
+            .update(cx, |view, cx| {
+                view.fold_status_tool_for_test(
+                    "status",
+                    r#"{"goal": "Fix the teardown race", "next": "re-run"}"#,
+                    "ok",
+                );
+                cx.notify();
+            });
+    });
+    let gated = fixture.cx.update(|cx| {
+        fixture
+            .view
+            .upgrade()
+            .expect("view alive")
+            .read(cx)
+            .riding_card_gated_for_test()
+    });
+    assert!(gated, "a model-stated goal earns the card");
+}
+
 fn the_status_column_shows_the_session_state_and_folds_to_a_rail() {
     let dir = tempfile::tempdir().expect("workspace");
     std::fs::write(dir.path().join("teardown.rs"), "fn teardown() {}\n").expect("cited file");

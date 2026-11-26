@@ -1227,6 +1227,122 @@ impl ChatView {
     /// The riding line's grounding: the newest consulted entry, and,
     /// when a correction or evidence flag is in play on it, the flag's
     /// words for the full form. None when the work consulted nothing.
+    /// The riding status card (#34): the momentary state on the
+    /// latest assistant turn. Division of labor with the column: the
+    /// column carries the durable detail, the card is the glance —
+    /// goal, next, and the grounding "why" adjacent to the turn it
+    /// explains. None when there is nothing to say (the prompt-as-goal
+    /// plus no grounding and no model-stated next is just noise).
+    pub(crate) fn render_status_card(&self, inner: AnyElement, cx: &Context<Self>) -> AnyElement {
+        use gpui_kit::component::ActiveTheme as _;
+        let theme = cx.theme();
+        let facts = &self.status_facts;
+
+        // The grounding "why": the card's reason to exist.
+        let grounding = self.riding_grounding();
+        // The empty-sections rule: the prompt-as-goal is noise, a
+        // model-stated goal or an active grounding earns the card.
+        let model_stated_goal = facts.goal.is_some();
+        let next = facts.next.as_ref();
+        if !model_stated_goal && grounding.is_none() && next.is_none() {
+            return inner;
+        }
+        let running = self.is_streaming() && !self.waiting_on_human();
+        let verb = if running { "WORKING" } else { "WAITING ON YOU" };
+        let run_clock = self.run_started.map(|started| {
+            let elapsed = started.elapsed();
+            format!(
+                "run {}:{:02}",
+                elapsed.as_secs() / 60,
+                elapsed.as_secs() % 60
+            )
+        });
+
+        let mut card = v_flex()
+            .mt_2()
+            .px_3()
+            .py_2()
+            .rounded_sm()
+            .bg(theme.secondary.opacity(0.6))
+            .border_l_2()
+            .border_color(if running {
+                theme.accent
+            } else {
+                theme.muted_foreground
+            })
+            .gap_1();
+
+        // Header: dot + verb + run clock.
+        card = card.child(
+            h_flex()
+                .gap_2()
+                .items_center()
+                .child(if running {
+                    div().size(px(6.)).rounded_full().bg(theme.accent)
+                } else {
+                    div().size(px(6.)).rounded_full().bg(theme.muted_foreground)
+                })
+                .child(
+                    div()
+                        .text_size(px(10.))
+                        .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                        .text_color(if running {
+                            theme.accent
+                        } else {
+                            theme.muted_foreground
+                        })
+                        .child(verb),
+                )
+                .when_some(run_clock, |head, clock| {
+                    head.child(
+                        div()
+                            .text_size(px(10.))
+                            .text_color(theme.muted_foreground)
+                            .child(clock),
+                    )
+                }),
+        );
+
+        // GOAL: the model's statement wins; the prompt renders only
+        // when a grounding makes the card worth its space.
+        let goal = facts.goal.clone().or_else(|| {
+            grounding
+                .as_ref()
+                .map(|_| facts.last_prompt.clone().unwrap_or_default())
+        });
+        if let Some(goal) = goal {
+            card = card.child(
+                div()
+                    .text_size(px(12.))
+                    .text_color(theme.foreground)
+                    .child(goal),
+            );
+        }
+        // NEXT, compact.
+        if let Some(next) = next {
+            card = card.child(
+                div()
+                    .text_size(px(11.))
+                    .text_color(theme.muted_foreground)
+                    .child(format!("next: {next}")),
+            );
+        }
+        // The "why" line: the correction showcase, in the reading flow.
+        if let Some((id, sentence, flag)) = grounding {
+            let text = match flag {
+                Some(flag) => format!("grounded in [{id}] — {flag}: {sentence}"),
+                None => format!("grounded in [{id}] — {sentence}"),
+            };
+            card = card.child(
+                div()
+                    .text_size(px(11.))
+                    .text_color(theme.warning)
+                    .child(text),
+            );
+        }
+        v_flex().child(inner).child(card).into_any_element()
+    }
+
     pub(crate) fn riding_grounding(&self) -> Option<(String, String, Option<String>)> {
         let ground = self.ground_rows();
         let row = self
@@ -1284,6 +1400,27 @@ impl ChatView {
                 .collect(),
             self.ground_rows().into_iter().map(|row| row.id).collect(),
         )
+    }
+
+    /// The riding card's gate, as the renderer computes it: true
+    /// when the card would render on the latest assistant turn. The
+    /// positive-path half of the empty-sections test.
+    pub fn riding_card_gated_for_test(&self) -> bool {
+        let model_stated_goal = self.status_facts.goal.is_some();
+        let next = self.status_facts.next.is_some();
+        model_stated_goal || next || self.riding_grounding().is_some()
+    }
+
+    /// The model-stated goal field, for the riding card's gate test:
+    /// distinct from goal_text(), which falls back to the prompt.
+    pub fn model_goal_for_test(&self) -> Option<String> {
+        self.status_facts.goal.clone()
+    }
+
+    /// Folds a tool result the way a live turn does, for the riding
+    /// card's positive-path test.
+    pub fn fold_status_tool_for_test(&mut self, name: &str, arguments: &str, result: &str) {
+        self.fold_status_tool(name, arguments, result);
     }
 
     /// How many cards here were answered from another chat's column.
