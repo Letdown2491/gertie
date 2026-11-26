@@ -1339,6 +1339,17 @@ fn system_prompt_for(root: &Path, skill_index: &str, instructions: Option<&str>)
     );
     prompt.push_str("\n\n");
     prompt.push_str(VOICE_SECTION);
+    // The status tool feeds the live column beside the transcript:
+    // without a nudge the model never discovers it (the hand test
+    // found NEXT empty on a real session). Call when the goal
+    // sharpens or the next step changes, not per-turn boilerplate.
+    prompt.push_str(
+        "\n\nAs you work, call the `status` tool whenever your goal \
+         sharpens or your next step changes (goal: what you're doing \
+         and why; next: what you'll do after the current step). It is \
+         cheap, read-only, and keeps the user's status column honest; \
+         skip it if the goal hasn't changed.",
+    );
     if !skill_index.is_empty() {
         prompt.push_str("\n\n");
         prompt.push_str(skill_index);

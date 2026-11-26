@@ -509,8 +509,12 @@ impl ChatView {
             }
         }
         // The status column's facts: touched files, consulted memory,
-        // the model's stated goal and next step.
+        // the model's stated goal and next step. The fold bumps the
+        // facts version; without a notify the column keeps its
+        // last-rendered state until some other repaint happens (the
+        // live-update bug the hand test caught).
         self.fold_status_tool(name, arguments, result);
+        cx.notify();
 
         if let Some(session_id) = self.session_id
             && let Ok(db_id) = self.store.append_tool_result(
@@ -568,6 +572,7 @@ impl ChatView {
         // but the quiet gauge restarts all the same: something happened.
         self.last_event_at = Instant::now();
         self.fold_status_user(text);
+        cx.notify();
         let db_id = match self.session_id {
             Some(session_id) => {
                 let db_id = self

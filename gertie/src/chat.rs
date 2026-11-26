@@ -4162,6 +4162,8 @@ impl ChatView {
                 .detach();
         }
         self.fold_status_user(&text);
+        cx.notify();
+        self.fold_status_user(&text);
         let db_id = self
             .store
             .append_message(session_id, self.last_db_id, Role::User, &stored)

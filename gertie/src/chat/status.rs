@@ -110,14 +110,7 @@ impl StatusFacts {
                 } else {
                     Touch::Edited
                 };
-                match self.touched.iter_mut().find(|(seen, _)| *seen == path) {
-                    Some((_, seen)) => {
-                        if touch == Touch::Edited {
-                            *seen = Touch::Edited;
-                        }
-                    }
-                    None => self.touched.push((path, touch)),
-                }
+                self.touch(path, touch);
             }
             "search_memory" => {
                 for id in memory_hit_ids(result) {
@@ -134,7 +127,40 @@ impl StatusFacts {
                     self.next = Some(clip(&next, 160));
                 }
             }
+            // Bash touches files too, and in agent sessions it is the
+            // most common way: `sed -i`, redirects, `mv`/`cp`. The
+            // extraction is a heuristic on the command text, so it
+            // misses indirect writes (a script's inner redirect) and
+            // over-captures a word that merely looks like a path; a
+            // wrong row in a status list costs a glance, not an
+            // action, so the trade favors recall.
+            "bash" => {
+                let Some(command) = field("command") else {
+                    return;
+                };
+                for (path, touch) in bash_file_targets(&command, root) {
+                    self.touch(path, touch);
+                }
+            }
             _ => {}
+        }
+    }
+
+    /// One touch, newest-wins ordering: a re-touch moves the file to
+    /// the front (the list is rendered top-down, and the file the
+    /// agent touched ten seconds ago is the one the user wants
+    /// first), and an edit outranks a read.
+    fn touch(&mut self, path: String, touch: Touch) {
+        match self.touched.iter().position(|(seen, _)| *seen == path) {
+            Some(index) => {
+                let (_, existing) = &mut self.touched[index];
+                if touch == Touch::Edited {
+                    *existing = Touch::Edited;
+                }
+                let entry = self.touched.remove(index);
+                self.touched.insert(0, entry);
+            }
+            None => self.touched.insert(0, (path, touch)),
         }
     }
 
@@ -375,8 +401,10 @@ pub fn project_asks_for(
         .collect()
 }
 
-/// The collapsed summary, `run 12:30 · 3 touched · 1 ask`: the rail's
-/// stacked words and the header chip read the same parts.
+/// The collapsed summary, `run 12:30 · 3 touched · 1 ask`: the header
+/// chip reads these parts verbatim. The rail renders a rail-specific
+/// form (see [`rail_words`]): words longer than the 34px rail wrap
+/// mid-word at this size, so long labels shorten for the rail only.
 pub fn summary_parts(run: Option<String>, touched: usize, asks: usize) -> Vec<String> {
     let mut parts = Vec::new();
     if let Some(run) = run {
@@ -389,6 +417,34 @@ pub fn summary_parts(run: Option<String>, touched: usize, asks: usize) -> Vec<St
         parts.push(format!("{asks} ask{}", if asks == 1 { "" } else { "s" }));
     }
     parts
+}
+
+/// The rail's stacked words, from the same summary: every word is
+/// chosen to fit 34px at the rail's 9.5px semibold (measured: ~4.2px
+/// per char, so eight characters is the honest ceiling; "TOUCHED" at
+/// seven was already too wide and wrapped into TOUC/HED). Numbers
+/// shrink to digits-plus-unit ("12:30" → "12:30" fits, but "48s"
+/// already does; the label word "RUN" fits).
+pub fn rail_words(parts: &[String]) -> Vec<String> {
+    parts
+        .iter()
+        .flat_map(|part| match part.as_str() {
+            // The touched line: "3 touched" is two words, one too
+            // wide; the rail reads "3" over "EDIT".
+            s if s.ends_with(" touched") => vec![
+                s.trim_end_matches(" touched").to_string(),
+                "EDIT".to_string(),
+            ],
+            // The ask line: "ASKS"/"ASK" both fit (4 chars).
+            s if s.ends_with(" ask") || s.ends_with(" asks") => {
+                let count = s.split(' ').next().unwrap_or(s).to_string();
+                let unit = if s.starts_with('1') { "ASK" } else { "ASKS" };
+                vec![count, unit.to_string()]
+            }
+            // Run and anything else: split as before.
+            s => s.split(' ').map(|w| w.to_string()).collect(),
+        })
+        .collect()
 }
 
 impl ChatView {
@@ -670,33 +726,37 @@ impl ChatView {
 
         if !facts.touched.is_empty() {
             let count = facts.touched.len();
-            let rows = facts
-                .touched
-                .iter()
-                .take(TOUCHED_SHOWN)
-                .map(|(path, touch)| {
-                    let (word, color) = match touch {
-                        Touch::Edited => ("edited", theme.warning),
-                        Touch::Read => ("read", theme.muted_foreground),
-                    };
-                    h_flex()
-                        .gap_2()
-                        .px_2()
-                        .py_1()
-                        .rounded_sm()
-                        .bg(theme.secondary)
-                        .font_family(theme.mono_font_family.clone())
-                        .text_size(px(11.5))
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_w_0()
-                                .truncate()
-                                .text_color(theme.foreground)
-                                .child(SharedString::from(path.clone())),
-                        )
-                        .child(div().flex_shrink_0().text_color(color).child(word))
-                });
+            let touched_rows = |take: Option<usize>| {
+                facts
+                    .touched
+                    .iter()
+                    .take(take.unwrap_or(usize::MAX))
+                    .map(|(path, touch)| {
+                        let (word, color) = match touch {
+                            Touch::Edited => ("edited", theme.warning),
+                            Touch::Read => ("read", theme.muted_foreground),
+                        };
+                        h_flex()
+                            .gap_2()
+                            .px_2()
+                            .py_1()
+                            .rounded_sm()
+                            .bg(theme.secondary)
+                            .font_family(theme.mono_font_family.clone())
+                            .text_size(px(11.5))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .truncate()
+                                    .text_color(theme.foreground)
+                                    .child(SharedString::from(path.clone())),
+                            )
+                            .child(div().flex_shrink_0().text_color(color).child(word))
+                    })
+            };
+            let rows: Vec<_> = touched_rows(Some(TOUCHED_SHOWN)).collect();
+            let remaining: Vec<_> = touched_rows(None).skip(TOUCHED_SHOWN).collect();
             sections.push(
                 v_flex()
                     .gap_1()
@@ -706,11 +766,18 @@ impl ChatView {
                     )))
                     .children(rows)
                     .when(count > TOUCHED_SHOWN, |list| {
+                        // The rest scrolls, it never truncates: a
+                        // "+N more" label reads as a control that
+                        // isn't (the hand test caught it), and a
+                        // 53-file session is where TOUCHED is most
+                        // worth having.
                         list.child(
-                            div()
-                                .text_size(px(11.))
-                                .text_color(theme.muted_foreground)
-                                .child(format!("+{} more", count - TOUCHED_SHOWN)),
+                            v_flex()
+                                .id("touched-more")
+                                .max_h(px(240.))
+                                .overflow_y_scroll()
+                                .gap_1()
+                                .children(remaining),
                         )
                     })
                     .into_any_element(),
@@ -1015,24 +1082,17 @@ impl ChatView {
                         .on_click(cx.listener(|this, _, _, cx| this.toggle_status_column(cx))),
                 ),
             )
-            .child(
-                v_flex()
-                    .pt_2()
-                    .gap_3()
-                    .items_center()
-                    .children(parts.into_iter().map(|part| {
-                        v_flex()
-                            .items_center()
-                            .text_size(px(9.5))
-                            .font_weight(gpui_kit::FontWeight::SEMIBOLD)
-                            .text_color(theme.muted_foreground)
-                            .children(
-                                part.split(' ')
-                                    .map(|word| word.to_uppercase())
-                                    .collect::<Vec<_>>(),
-                            )
-                    })),
-            )
+            .child(v_flex().pt_2().gap_3().items_center().children(
+                rail_words(&parts).into_iter().map(|word| {
+                    div()
+                        .max_w_full()
+                        .overflow_hidden()
+                        .text_size(px(9.5))
+                        .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                        .text_color(theme.muted_foreground)
+                        .child(word)
+                }),
+            ))
             .test_support()
             .into_any_element()
     }
@@ -1149,6 +1209,20 @@ fn status_flag(session: SessionId) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_rail_words_fit_the_rail() {
+        // The words the screenshot wrapped: "TOUCHED" at 7 chars was
+        // wider than the 34px rail and broke into TOUC/HED.
+        let words = rail_words(&summary_parts(Some("48s".into()), 53, 1));
+        assert_eq!(words, vec!["run", "48s", "53", "EDIT", "1", "ASK"]);
+        assert!(
+            words.iter().all(|w| w.chars().count() <= 5),
+            "every rail word must fit 34px at 9.5px: {words:?}"
+        );
+        // Zero states produce no words (empty sections stay silent).
+        assert!(rail_words(&summary_parts(None, 0, 0)).is_empty());
+    }
+
     use super::*;
     use std::path::Path;
 
@@ -1350,5 +1424,111 @@ mod tests {
         );
         assert_eq!(summary_parts(None, 0, 2), vec!["2 asks"]);
         assert!(summary_parts(None, 0, 0).is_empty());
+    }
+}
+
+/// File targets a bash command touches, as `(path, touch)` pairs. The
+/// heuristic reads the command's operators: redirects and edit-in-place
+/// commands mark edited, plain file arguments mark read. Quoted paths
+/// with spaces are handled by the token pattern; a path is only
+/// accepted when it names something under the workspace root after
+/// normalization (absolute or relative), so `/usr/bin/env bash` never
+/// lands in the list.
+fn bash_file_targets(command: &str, root: &std::path::Path) -> Vec<(String, Touch)> {
+    let mut out: Vec<(String, Touch)> = Vec::new();
+    // Left-to-right with a pending classification: an operator names
+    // what the NEXT path-like token is (edited for writers, read for
+    // readers). `sed -i X` and `> X` put their target one or two
+    // tokens after the operator; a scan keyed on "what came before
+    // this token" misses both.
+    let mut pending: Option<Touch> = None;
+    for token in command.split_whitespace() {
+        let quoted = token.starts_with('"') || token.starts_with('\'');
+        let cleaned = token.trim_matches(|c| c == '"' || c == '\'');
+        let glued = cleaned.trim_start_matches(['>', '&', '2']);
+        if glued != cleaned && glued.len() >= 2 && glued.contains('/') {
+            if let Some(normalized) = normalize_path(root, glued) {
+                push_unique(&mut out, normalized, Touch::Edited);
+            }
+            pending = None;
+            continue;
+        }
+        match cleaned {
+            ">" | ">>" | "tee" | "sed" | "mv" | "cp" | "rm" | "touch" => {
+                pending = Some(Touch::Edited)
+            }
+            "cat" | "head" | "tail" | "less" | "grep" | "stat" | "wc" => {
+                pending = Some(Touch::Read)
+            }
+            _ if cleaned.starts_with('-') => {}
+            // A quoted token is an expression for editor ops (sed's
+            // s/a/b/ looks like a path but never is one); it stays a
+            // candidate for reader ops (cat "my file.md"). Pending
+            // survives the skip: the real target follows.
+            _ if quoted && pending != Some(Touch::Read) => {}
+            _ => {
+                if let (Some(touch), true) = (pending, looks_like_path(cleaned)) {
+                    if let Some(normalized) = normalize_path(root, cleaned) {
+                        push_unique(&mut out, normalized, touch);
+                    }
+                    pending = None;
+                }
+            }
+        }
+    }
+    out
+}
+
+/// A token is plausibly a path: it carries a slash or a dot. Flags,
+/// URLs, and bare words are not.
+fn looks_like_path(token: &str) -> bool {
+    !token.starts_with('-')
+        && !token.contains("://")
+        && (token.contains('/') || token.contains('.'))
+}
+
+fn push_unique(out: &mut Vec<(String, Touch)>, path: String, touch: Touch) {
+    if !out.iter().any(|(seen, _)| *seen == path) {
+        out.push((path, touch));
+    }
+}
+
+#[cfg(test)]
+mod bash_tests {
+    use super::*;
+    use std::path::Path as P;
+
+    #[test]
+    fn redirects_and_edits_classify_as_edited() {
+        let root = P::new("/w");
+        let targets = bash_file_targets("echo hi > out.txt", root);
+        assert_eq!(targets.len(), 1);
+        assert_eq!(targets[0].1, Touch::Edited);
+        let targets = bash_file_targets("sed -i 's/a/b/' src/main.rs", root);
+        assert_eq!(targets[0].1, Touch::Edited);
+        assert!(targets[0].0.contains("src/main.rs"));
+    }
+
+    #[test]
+    fn reads_classify_as_read_and_noise_is_ignored() {
+        let root = P::new("/w");
+        let targets = bash_file_targets("cat README.md", root);
+        assert_eq!(targets[0].1, Touch::Read);
+        // Flags, bare words, and URLs are not files.
+        assert!(bash_file_targets("cargo build --release", root).is_empty());
+        assert!(bash_file_targets("curl https://example.com/x", root).is_empty());
+    }
+
+    #[test]
+    fn newest_wins_ordering_moves_retouched_files_front() {
+        let mut facts = StatusFacts::default();
+        facts.fold_tool("read_file", r#"{"path":"a.md"}"#, "ok", P::new("/w"));
+        facts.fold_tool("read_file", r#"{"path":"b.md"}"#, "ok", P::new("/w"));
+        // b is newest: it renders first.
+        assert_eq!(facts.touched[0].0, "b.md");
+        facts.fold_tool("edit_file", r#"{"path":"a.md"}"#, "ok", P::new("/w"));
+        // a was re-touched (edited): front, and upgraded.
+        assert_eq!(facts.touched[0].0, "a.md");
+        assert_eq!(facts.touched[0].1, Touch::Edited);
     }
 }
