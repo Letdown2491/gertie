@@ -296,6 +296,16 @@ left out, the SQLite wire record is never rewritten. No summarizer model, no inv
 state, nothing that can fail on the provider. Hard-truncate oversized tool outputs with a
 "truncated" marker and re-read hint. Measure before building anything fancier.
 
+## Projects
+
+A project is a name, not a folder: chats belong to a project only when
+you put them there, and the sidebar groups by that name. Deliberately
+**pure grouping**: projects carry no memory tier, no instruction files,
+and no per-project configuration. Memory keys on workspace scope, and
+instructions on AGENTS.md; if a project-scoped context need shows up in
+real use, it is a design decision to make then, not a default to grow
+into by accident.
+
 ## Memory
 
 Long-term memory is plain markdown plus a derived SQLite index. The field's convergent

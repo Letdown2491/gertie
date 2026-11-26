@@ -113,7 +113,7 @@ const QUIET_AFTER: std::time::Duration = std::time::Duration::from_secs(20);
 const SPINNER_FRAMES: [&str; 4] = ["◐", "◓", "◑", "◒"];
 
 /// The composer's ghost text at rest.
-const IDLE_PLACEHOLDER: &str = "Message Gertie, or type / for commands";
+const IDLE_PLACEHOLDER: &str = "Message Gertie, or type / for commands, @ for files";
 
 /// The conversation's reading width: past this, lines get too long to
 /// follow. The transcript and the composer share it, centered.
@@ -5409,7 +5409,11 @@ impl ChatView {
         let word = if entries > 0 {
             Some(format!("memory {entries}"))
         } else if files > 0 {
-            Some(format!("memory ({files} files)"))
+            Some(format!(
+                "memory ({} file{})",
+                files,
+                if files == 1 { "" } else { "s" }
+            ))
         } else {
             None
         };
