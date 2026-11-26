@@ -16,6 +16,7 @@
 
 use super::*;
 use gertie_core::{CorrectionStep, MemoryEntry};
+use gpui_kit::{Div, Hsla, relative};
 
 /// The column's width, the mockup's: wide enough for a path and its
 /// status on one line, narrow enough that the reading column keeps
@@ -334,6 +335,9 @@ pub struct GroundRow {
     pub superseded: Option<String>,
     /// Why the entry carries recheck flags (the correction walk).
     pub walk: Vec<CorrectionStep>,
+    /// The text of every entry the walk names (corrected, successor,
+    /// flagged), so the chain renders as entries, not bare ids.
+    pub walk_texts: Vec<(String, String)>,
 }
 
 impl GroundRow {
@@ -346,6 +350,13 @@ impl GroundRow {
     /// The evidence line: which cited files moved, and whether the
     /// work has seen them since.
     pub fn evidence_words(&self) -> Option<String> {
+        self.evidence_parts()
+            .map(|(files, rest)| format!("{files} {rest}"))
+    }
+
+    /// The evidence line in its two faces: the moved files (rendered
+    /// mono) and the rest of the sentence.
+    pub fn evidence_parts(&self) -> Option<(String, String)> {
         if self.changed.is_empty() {
             return None;
         }
@@ -368,10 +379,18 @@ impl GroundRow {
         } else {
             "not re-read this session"
         };
-        Some(format!(
-            "{files} moved since [{}] was written, {verdict}",
-            self.id
+        Some((
+            files,
+            format!("moved since [{}] was written, {verdict}", self.id),
         ))
+    }
+
+    /// An entry's text by id, as the walk names it.
+    pub fn text_of(&self, id: &str) -> Option<&str> {
+        self.walk_texts
+            .iter()
+            .find(|(seen, _)| seen == id)
+            .map(|(_, text)| text.as_str())
     }
 }
 
@@ -384,22 +403,42 @@ pub fn grounding(
     facts: &StatusFacts,
     changed: impl Fn(&MemoryEntry) -> Vec<String>,
 ) -> Vec<GroundRow> {
-    let row = |entry: &MemoryEntry, acting: bool| GroundRow {
-        id: entry.id.clone(),
-        text: entry.text.clone(),
-        acting,
-        changed: changed(entry)
-            .into_iter()
-            .map(|path| {
-                let touch = normalize_relative(&path).and_then(|path| facts.touch_of(&path));
-                (path, touch)
-            })
-            .collect(),
-        superseded: entry
-            .valid_until
-            .is_some()
-            .then(|| entry.superseded_by.clone().unwrap_or_default()),
-        walk: gertie_core::correction_walk(entries, &entry.id),
+    let row = |entry: &MemoryEntry, acting: bool| {
+        let walk = gertie_core::correction_walk(entries, &entry.id);
+        let mut walk_texts: Vec<(String, String)> = Vec::new();
+        for step in &walk {
+            let ids = [
+                Some(&step.corrected),
+                step.replaced_by.as_ref(),
+                Some(&step.flagged),
+            ];
+            for id in ids.into_iter().flatten() {
+                if walk_texts.iter().any(|(seen, _)| seen == id) {
+                    continue;
+                }
+                if let Some(named) = entries.iter().find(|other| &other.id == id) {
+                    walk_texts.push((id.clone(), named.text.clone()));
+                }
+            }
+        }
+        GroundRow {
+            id: entry.id.clone(),
+            text: entry.text.clone(),
+            acting,
+            changed: changed(entry)
+                .into_iter()
+                .map(|path| {
+                    let touch = normalize_relative(&path).and_then(|path| facts.touch_of(&path));
+                    (path, touch)
+                })
+                .collect(),
+            superseded: entry
+                .valid_until
+                .is_some()
+                .then(|| entry.superseded_by.clone().unwrap_or_default()),
+            walk,
+            walk_texts,
+        }
     };
     let mut rows: Vec<GroundRow> = facts
         .consulted
@@ -750,7 +789,10 @@ impl ChatView {
         true
     }
 
-    /// The column, open or folded to its rail.
+    /// The column, open or folded to its rail. The visual spec is the
+    /// #33 mockup (`.status-card-mockup.html`, the gist): 10px muted
+    /// section labels, panel2 chips, the blue accent on what the work
+    /// acts on now, the flag red on corrections and changed evidence.
     pub(super) fn render_status_column(&self, cx: &Context<Self>) -> AnyElement {
         if self.status_collapsed {
             return self.render_status_rail(cx);
@@ -759,302 +801,286 @@ impl ChatView {
         let facts = &self.status_facts;
         let ground = self.ground_rows();
         let asks = self.column_asks();
-        let label = |text: String| {
+        // The section label: the dot (when live) leads, as in the
+        // mockup's `GOAL · run 12:30` and `WAITING ON YOU`.
+        let label = |dot: Option<Hsla>, text: String| {
             h_flex()
                 .gap_1p5()
                 .items_center()
-                .text_size(px(10.5))
-                .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                .text_size(px(10.))
                 .text_color(theme.muted_foreground)
+                .when_some(dot, |head, color| {
+                    head.child(div().size(px(6.)).flex_shrink_0().rounded_full().bg(color))
+                })
                 .child(text)
+        };
+        let section = |head: Div, body: Vec<AnyElement>| {
+            v_flex()
+                .gap_1p5()
+                .child(head)
+                .children(body)
+                .into_any_element()
         };
         let mut sections: Vec<AnyElement> = Vec::new();
 
         if let Some(goal) = facts.goal_text() {
-            let mut head = label(match self.status_run_words() {
-                Some(run) => format!("GOAL · run {run}"),
-                None => "GOAL".into(),
-            });
-            if self.streaming {
-                head = head.child(div().size(px(6.)).rounded_full().bg(theme.success));
-            }
-            sections.push(
-                v_flex()
-                    .gap_1()
-                    .child(head)
-                    .child(
-                        div()
-                            .text_size(px(12.5))
-                            .text_color(theme.foreground)
-                            .child(SharedString::from(goal.to_string())),
-                    )
-                    .into_any_element(),
+            let head = label(
+                self.streaming.then_some(theme.success),
+                match self.status_run_words() {
+                    Some(run) => format!("GOAL · run {run}"),
+                    None => "GOAL".into(),
+                },
             );
+            sections.push(section(
+                head,
+                vec![
+                    div()
+                        .text_size(px(13.))
+                        .text_color(theme.foreground)
+                        .child(SharedString::from(goal.to_string()))
+                        .into_any_element(),
+                ],
+            ));
         }
 
         if !facts.memory_actions.is_empty() {
-            let head = label(format!(
-                "MEMORY · {} action{}",
-                facts.memory_actions.len(),
-                if facts.memory_actions.len() == 1 {
-                    ""
-                } else {
-                    "s"
-                }
-            ));
-            // Each action is a chip row, matching FILES and GROUNDED
-            // IN: the verb as the semibold head, the entry's file as
-            // the body, one row per action.
-            let rows = facts.memory_actions.iter().map(|action| {
-                let (verb, file) = match action.split_once(' ') {
-                    Some((verb, rest)) => (verb, rest),
-                    // A clip-truncated action has no space; render it
-                    // whole rather than losing it.
-                    None => (action.as_str(), ""),
-                };
-                // Single-line, the FILES idiom: the entry's file
-                // left (truncated when long), the verb right-aligned
-                // where FILES puts its badge.
-                div()
-                    .id(SharedString::from(format!("status-memory-{action}")))
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .gap_2()
-                    .px_2()
-                    .py_1()
-                    .rounded_sm()
-                    .bg(theme.secondary)
-                    .text_size(px(12.))
-                    .child(
-                        div()
-                            .min_w_0()
-                            .flex_1()
-                            .truncate()
-                            .text_color(theme.foreground)
-                            .child(SharedString::from(file.to_string())),
+            let count = facts.memory_actions.len();
+            // Each action is a chip row in the TOUCHED idiom: the
+            // entry's file left, the verb right where TOUCHED puts its
+            // badge.
+            let rows = facts
+                .memory_actions
+                .iter()
+                .map(|action| {
+                    let (verb, file) = match action.split_once(' ') {
+                        Some((verb, rest)) => (verb, rest),
+                        // A clip-truncated action has no space; render
+                        // it whole rather than losing it.
+                        None => (action.as_str(), ""),
+                    };
+                    let color = match verb {
+                        "created" | "edited" | "renamed" => theme.warning,
+                        _ => theme.muted_foreground,
+                    };
+                    status_file_chip(
+                        SharedString::from(format!("status-memory-{action}")),
+                        file.to_string(),
+                        verb.to_string(),
+                        color,
+                        cx,
                     )
-                    .child({
-                        // The FILES badge's semantic colors: state
-                        // changes (created/edited/renamed) in warning
-                        // amber, consultative ones (superseded's
-                        // audit-trail reads) muted.
-                        let (word, color) = match verb {
-                            "created" | "edited" | "renamed" => (verb, theme.warning),
-                            _ => (verb, theme.muted_foreground),
-                        };
-                        div()
-                            .text_size(px(10.5))
-                            .text_color(color)
-                            .child(word.to_string())
-                    })
-                    .into_any_element()
-            });
-            sections.push(
-                v_flex()
-                    .gap_1()
-                    .child(head)
-                    .children(rows)
-                    .into_any_element(),
-            );
+                })
+                .collect();
+            sections.push(section(
+                label(
+                    None,
+                    format!(
+                        "MEMORY · {count} action{}",
+                        if count == 1 { "" } else { "s" }
+                    ),
+                ),
+                rows,
+            ));
         }
+
         if !facts.touched.is_empty() {
             let count = facts.touched.len();
-            let touched_rows = |take: Option<usize>| {
-                facts
-                    .touched
-                    .iter()
-                    .take(take.unwrap_or(usize::MAX))
-                    .map(|(path, touch)| {
-                        let (word, color) = match touch {
-                            Touch::Edited => ("edited", theme.warning),
-                            Touch::Read => ("read", theme.muted_foreground),
-                        };
-                        h_flex()
-                            .gap_2()
-                            .px_2()
-                            .py_1()
-                            .rounded_sm()
-                            .bg(theme.secondary)
-                            .font_family(theme.mono_font_family.clone())
-                            .text_size(px(11.5))
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .truncate()
-                                    .text_color(theme.foreground)
-                                    .child(SharedString::from(path.clone())),
-                            )
-                            .child(div().flex_shrink_0().text_color(color).child(word))
-                    })
+            let chips = |rows: &mut dyn Iterator<Item = &(String, Touch)>| -> Vec<AnyElement> {
+                rows.map(|(path, touch)| {
+                    let (word, color) = match touch {
+                        Touch::Edited => ("edited", theme.warning),
+                        Touch::Read => ("read", theme.muted_foreground),
+                    };
+                    status_file_chip(
+                        SharedString::from(format!("status-touched-{path}")),
+                        path.clone(),
+                        word.to_string(),
+                        color,
+                        cx,
+                    )
+                })
+                .collect()
             };
-            let rows: Vec<_> = touched_rows(Some(TOUCHED_SHOWN)).collect();
-            let remaining: Vec<_> = touched_rows(None).skip(TOUCHED_SHOWN).collect();
+            let mut body = chips(&mut facts.touched.iter().take(TOUCHED_SHOWN));
+            if count > TOUCHED_SHOWN {
+                // The rest scrolls, it never truncates: a "+N more"
+                // label reads as a control that isn't (the hand test
+                // caught it), and a 53-file session is where TOUCHED
+                // is most worth having.
+                body.push(
+                    v_flex()
+                        .id("touched-more")
+                        .max_h(px(240.))
+                        .overflow_y_scroll()
+                        .gap(px(3.))
+                        .children(chips(&mut facts.touched.iter().skip(TOUCHED_SHOWN)))
+                        .into_any_element(),
+                );
+            }
             sections.push(
                 v_flex()
-                    .gap_1()
-                    .child(label(format!(
-                        "FILES · {count} file{}",
-                        if count == 1 { "" } else { "s" }
-                    )))
-                    .children(rows)
-                    .when(count > TOUCHED_SHOWN, |list| {
-                        // The rest scrolls, it never truncates: a
-                        // "+N more" label reads as a control that
-                        // isn't (the hand test caught it), and a
-                        // 53-file session is where TOUCHED is most
-                        // worth having.
-                        list.child(
-                            v_flex()
-                                .id("touched-more")
-                                .max_h(px(240.))
-                                .overflow_y_scroll()
-                                .gap_1()
-                                .children(remaining),
-                        )
-                    })
+                    .gap_1p5()
+                    .child(label(
+                        None,
+                        format!(
+                            "TOUCHED · {count} file{}",
+                            if count == 1 { "" } else { "s" }
+                        ),
+                    ))
+                    .child(v_flex().gap(px(3.)).children(body))
                     .into_any_element(),
             );
         }
 
         if let Some(next) = &facts.next {
-            sections.push(
-                v_flex()
-                    .gap_1()
-                    .child(label("NEXT".into()))
-                    .child(
-                        div()
-                            .text_size(px(12.5))
-                            .text_color(theme.foreground)
-                            .child(SharedString::from(next.clone())),
-                    )
-                    .into_any_element(),
-            );
+            sections.push(section(
+                label(None, "NEXT".into()),
+                vec![
+                    div()
+                        .text_size(px(12.5))
+                        .text_color(theme.muted_foreground)
+                        .child(SharedString::from(next.clone()))
+                        .into_any_element(),
+                ],
+            ));
         }
 
         if !ground.is_empty() {
-            let rows = ground.iter().map(|row| {
-                let head = if row.acting {
-                    format!("ACTING ON [{}]", row.id)
+            let mut links: Vec<AnyElement> = Vec::new();
+            for row in &ground {
+                // The entry itself: ACTING ON carries the accent edge
+                // (the mockup's `.clink.now`), the file-sharing tier
+                // reads quieter.
+                let (head, color) = if row.acting {
+                    ("ACTING ON", theme.blue)
                 } else {
-                    format!("SHARES FILES [{}]", row.id)
+                    ("SHARES FILES", theme.muted_foreground)
                 };
-                v_flex()
+                links.push(
+                    status_link(
+                        Some((head.to_string(), color)),
+                        Some(format!("[{}]", row.id)),
+                        row.text.clone(),
+                        row.acting,
+                        cx,
+                    )
                     .id(SharedString::from(format!("status-ground-{}", row.id)))
-                    .gap_0p5()
-                    .px_2()
-                    .py_1p5()
-                    .rounded_sm()
-                    .bg(theme.secondary)
-                    .text_size(px(12.))
-                    .child(
-                        div()
-                            .text_size(px(10.5))
-                            .font_weight(gpui_kit::FontWeight::SEMIBOLD)
-                            .text_color(if row.acting {
-                                theme.accent
-                            } else {
-                                theme.muted_foreground
-                            })
-                            .child(head),
-                    )
-                    .child(
-                        div()
-                            .text_color(theme.foreground)
-                            .child(SharedString::from(row.text.clone())),
-                    )
-                    .when_some(row.superseded.as_ref(), |col, by| {
-                        col.child(div().text_size(px(11.)).text_color(theme.danger).child(
-                            if by.is_empty() {
-                                "SUPERSEDED".to_string()
-                            } else {
-                                format!("SUPERSEDED by [{by}]")
-                            },
-                        ))
-                    })
-                    .when_some(row.evidence_words(), |col, words| {
-                        col.child(
-                            div()
-                                .text_size(px(10.5))
-                                .font_weight(gpui_kit::FontWeight::SEMIBOLD)
-                                .text_color(theme.danger)
-                                .child("EVIDENCE CHANGED"),
-                        )
-                        .child(
-                            div()
-                                .text_size(px(11.))
-                                .text_color(theme.muted_foreground)
-                                .child(SharedString::from(words)),
-                        )
-                    })
                     .test_support()
-            });
+                    .into_any_element(),
+                );
+                if let Some(by) = &row.superseded {
+                    let (head, body) = if by.is_empty() {
+                        (
+                            "SUPERSEDED".to_string(),
+                            "no longer the current entry".to_string(),
+                        )
+                    } else {
+                        (
+                            format!("SUPERSEDED by [{by}]"),
+                            format!("[{}] was replaced; follow [{by}] instead", row.id),
+                        )
+                    };
+                    links.push(
+                        status_link(Some((head, theme.danger)), None, body, false, cx)
+                            .into_any_element(),
+                    );
+                }
+                if let Some((files, rest)) = row.evidence_parts() {
+                    links.push(
+                        status_link(
+                            Some(("EVIDENCE CHANGED".to_string(), theme.danger)),
+                            Some(files),
+                            rest,
+                            false,
+                            cx,
+                        )
+                        .into_any_element(),
+                    );
+                }
+            }
             sections.push(
                 v_flex()
-                    .gap_1()
-                    .child(label("GROUNDED IN".into()))
-                    .children(rows)
+                    .gap_1p5()
+                    .child(label(None, "GROUNDED IN".into()))
+                    .child(v_flex().gap_1p5().children(links))
                     .into_any_element(),
             );
         }
 
         if !asks.is_empty() {
-            let rows = asks.iter().map(|ask| self.render_project_ask(ask, cx));
             sections.push(
                 v_flex()
-                    .gap_1()
-                    .child(label(format!("WAITING ON YOU · {}", asks.len())))
-                    .children(rows)
+                    .gap_1p5()
+                    .child(label(Some(theme.danger), "WAITING ON YOU".into()))
+                    .child(
+                        v_flex()
+                            .gap_1p5()
+                            .children(asks.iter().map(|ask| self.render_project_ask(ask, cx))),
+                    )
                     .into_any_element(),
             );
         }
 
-        let walks: Vec<&CorrectionStep> = ground.iter().flat_map(|row| row.walk.iter()).collect();
-        if !walks.is_empty() {
-            let rows = walks.iter().map(|step| {
-                v_flex()
-                    .gap_0p5()
-                    .px_2()
-                    .py_1p5()
-                    .rounded_sm()
-                    .bg(theme.secondary)
-                    .text_size(px(11.5))
-                    .child(
-                        h_flex()
-                            .flex_wrap()
-                            .gap_1()
-                            .font_family(theme.mono_font_family.clone())
-                            .child(
-                                div()
-                                    .text_color(theme.danger)
-                                    .child(format!("[{}] CORRECTED", step.corrected)),
-                            )
-                            .child(div().text_color(theme.muted_foreground).child("→"))
-                            .child(
-                                div()
-                                    .text_color(theme.muted_foreground)
-                                    .child(step.relation.replace('_', " ")),
-                            )
-                            .child(div().text_color(theme.muted_foreground).child("→"))
-                            .child(
-                                div()
-                                    .text_color(theme.warning)
-                                    .child(format!("[{}] FLAGGED", step.flagged)),
+        // The correction chain as the walk it is: CORRECTED, then the
+        // successor the work follows instead (the accent edge), then
+        // the entry the correction flagged and why.
+        let mut walk_links: Vec<AnyElement> = Vec::new();
+        let mut walked: Vec<(String, String)> = Vec::new();
+        for row in &ground {
+            for step in &row.walk {
+                let key = (step.corrected.clone(), step.flagged.clone());
+                if walked.contains(&key) {
+                    continue;
+                }
+                walked.push(key);
+                let text = |id: &str| row.text_of(id).unwrap_or_default().to_string();
+                walk_links.push(
+                    status_link(
+                        Some(("CORRECTED".into(), theme.danger)),
+                        Some(format!("[{}]", step.corrected)),
+                        text(&step.corrected),
+                        false,
+                        cx,
+                    )
+                    .into_any_element(),
+                );
+                if let Some(by) = &step.replaced_by {
+                    walk_links.push(
+                        status_link(
+                            Some(("FOLLOWS INSTEAD".into(), theme.blue)),
+                            Some(format!("[{by}]")),
+                            text(by),
+                            true,
+                            cx,
+                        )
+                        .into_any_element(),
+                    );
+                }
+                walk_links.push(
+                    status_link(
+                        Some((
+                            format!(
+                                "FLAGGED · {} [{}]",
+                                step.relation.replace('_', " "),
+                                step.corrected
                             ),
+                            theme.danger,
+                        )),
+                        Some(format!("[{}]", step.flagged)),
+                        text(&step.flagged),
+                        false,
+                        cx,
                     )
-                    .child(
-                        div()
-                            .text_size(px(11.))
-                            .text_color(theme.muted_foreground)
-                            .child(SharedString::from(step.sentence())),
-                    )
-            });
+                    .into_any_element(),
+                );
+            }
+        }
+        if !walk_links.is_empty() {
             sections.push(
                 v_flex()
-                    .gap_1()
-                    .child(label("CORRECTION CHAIN".into()))
-                    .children(rows)
+                    .gap_1p5()
+                    .child(label(None, "CORRECTION CHAIN · this session".into()))
+                    .child(v_flex().gap_1p5().children(walk_links))
                     .into_any_element(),
             );
         }
@@ -1072,12 +1098,13 @@ impl ChatView {
                 h_flex()
                     .h(px(40.))
                     .flex_shrink_0()
-                    .px_3()
+                    .pl(px(14.))
+                    .pr_2()
                     .gap_2()
                     .items_center()
                     .justify_between()
                     .border_b_1()
-                    .border_color(theme.border.opacity(0.6))
+                    .border_color(theme.border)
                     .child(
                         div()
                             .text_size(px(11.))
@@ -1100,95 +1127,104 @@ impl ChatView {
                     .flex_1()
                     .min_h_0()
                     .overflow_y_scroll()
-                    .px_3()
+                    .px(px(14.))
                     .py_3()
-                    .gap_4()
+                    .gap(px(14.))
                     .children(sections),
             )
             .test_support()
             .into_any_element()
     }
 
-    /// One WAITING ON YOU row: which chat, the question, and either
-    /// its option chips (answered here, applied there) or the jump.
+    /// One WAITING ON YOU ask, the mockup's `.ask`: an accent-bordered
+    /// box, the asking chat and its question on one line, the options
+    /// as chips (answered here, applied there) or, for a permission
+    /// ask, only the jump (see what you approve).
     fn render_project_ask(&self, ask: &ProjectAsk, cx: &Context<Self>) -> AnyElement {
         let theme = cx.theme();
         let session = ask.session;
         let ask_id = ask.ask;
-        let mut row = v_flex()
-            .gap_1()
-            .px_2()
-            .py_1p5()
-            .rounded_sm()
-            .border_1()
-            .border_color(theme.warning.opacity(0.5))
-            .child(
-                div()
-                    .text_size(px(10.5))
-                    .text_color(theme.muted_foreground)
-                    .truncate()
-                    .child(SharedString::from(if ask.worker {
-                        format!("worker in {}", ask.session_title)
-                    } else {
-                        ask.session_title.clone()
-                    })),
-            )
-            .child(
-                div()
-                    .text_size(px(12.))
-                    .text_color(theme.foreground)
-                    .child(crate::markdown::inline_element(&ask.question, cx)),
-            );
-        if ask.is_question() {
-            row =
-                row.child(
-                    h_flex().flex_wrap().gap_1().children(
-                        ask.options
-                            .iter()
-                            .cloned()
-                            .enumerate()
-                            .map(|(index, option)| {
-                                Button::new(SharedString::from(format!(
-                                    "status-ask-{ask_id}-{index}"
-                                )))
-                                .label(option.clone())
-                                .small()
-                                .outline()
-                                .on_click(cx.listener(
-                                    move |this, _, window, cx| {
-                                        if let Some(shell) = this.shell_ask.clone() {
-                                            shell(
-                                                ShellRequest::AnswerAsk {
-                                                    session,
-                                                    ask: ask_id,
-                                                    answer: option.clone(),
-                                                },
-                                                window,
-                                                cx,
-                                            );
-                                        }
-                                    },
-                                ))
-                            }),
-                    ),
-                );
-        }
-        row.child(
-            Button::new(SharedString::from(format!("status-ask-open-{ask_id}")))
-                .label(if ask.is_question() {
-                    "Open chat"
-                } else {
-                    "Review in its chat"
-                })
-                .small()
-                .ghost()
+        let who = if ask.worker {
+            format!("⟡ worker ({})", ask.session_title)
+        } else {
+            ask.session_title.to_string()
+        };
+        let chip = |id: SharedString, text: String| {
+            div()
+                .id(id)
+                .px_2()
+                .py(px(2.))
+                .rounded(px(4.))
+                .border_1()
+                .border_color(theme.border)
+                .text_size(px(11.))
+                .text_color(theme.muted_foreground)
+                .cursor_pointer()
+                .hover(|style| style.text_color(theme.blue).border_color(theme.blue))
+                .child(text)
+        };
+        let mut chips: Vec<AnyElement> = Vec::new();
+        for (index, option) in ask.options.iter().cloned().enumerate() {
+            chips.push(
+                chip(
+                    SharedString::from(format!("status-ask-{ask_id}-{index}")),
+                    option.clone(),
+                )
                 .on_click(cx.listener(move |this, _, window, cx| {
                     if let Some(shell) = this.shell_ask.clone() {
-                        shell(ShellRequest::ShowSession { session }, window, cx);
+                        shell(
+                            ShellRequest::AnswerAsk {
+                                session,
+                                ask: ask_id,
+                                answer: option.clone(),
+                            },
+                            window,
+                            cx,
+                        );
                     }
-                })),
-        )
-        .into_any_element()
+                }))
+                .test_support()
+                .into_any_element(),
+            );
+        }
+        chips.push(
+            chip(
+                SharedString::from(format!("status-ask-open-{ask_id}")),
+                if ask.is_question() {
+                    "open chat".into()
+                } else {
+                    "review in its chat".into()
+                },
+            )
+            .when(!ask.is_question(), |jump| {
+                jump.text_color(theme.blue).border_color(theme.blue)
+            })
+            .on_click(cx.listener(move |this, _, window, cx| {
+                if let Some(shell) = this.shell_ask.clone() {
+                    shell(ShellRequest::ShowSession { session }, window, cx);
+                }
+            }))
+            .test_support()
+            .into_any_element(),
+        );
+        v_flex()
+            .gap_1p5()
+            .px(px(10.))
+            .py_2()
+            .rounded(px(6.))
+            .border_1()
+            .border_color(theme.blue)
+            .text_size(px(12.))
+            .child(
+                div()
+                    .text_color(theme.foreground)
+                    .child(crate::markdown::inline_element(
+                        &format!("{who}: {}", ask.question),
+                        cx,
+                    )),
+            )
+            .child(h_flex().flex_wrap().gap(px(5.)).children(chips))
+            .into_any_element()
     }
 
     /// The folded column: a rail with the summary stacked, one word
@@ -1207,22 +1243,28 @@ impl ChatView {
             .border_color(theme.border)
             .bg(theme.background)
             .child(
-                div().h(px(40.)).flex().items_center().child(
-                    Button::new("status-expand")
-                        .label("‹")
-                        .small()
-                        .ghost()
-                        .tooltip("Open the status column")
-                        .on_click(cx.listener(|this, _, _, cx| this.toggle_status_column(cx))),
-                ),
+                div()
+                    .id("status-expand")
+                    .h(px(40.))
+                    .w_full()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .text_size(px(13.))
+                    .text_color(theme.blue)
+                    .cursor_pointer()
+                    .hover(|style| style.bg(theme.secondary_hover))
+                    .tooltip(|window, cx| Tooltip::new("Open the status column").build(window, cx))
+                    .on_click(cx.listener(|this, _, _, cx| this.toggle_status_column(cx)))
+                    .child("‹"),
             )
             .child(v_flex().pt_2().gap_3().items_center().children(
                 rail_words(&parts).into_iter().map(|word| {
                     div()
                         .max_w_full()
                         .overflow_hidden()
+                        .font_family(theme.mono_font_family.clone())
                         .text_size(px(9.5))
-                        .font_weight(gpui_kit::FontWeight::SEMIBOLD)
                         .text_color(theme.muted_foreground)
                         .child(word)
                 }),
@@ -1232,7 +1274,7 @@ impl ChatView {
     }
 
     /// The header chip while the column is folded: the same summary,
-    /// one line, a click opens the column.
+    /// one line, in the accent, a click opens the column.
     pub(super) fn render_status_chip(&self, cx: &Context<Self>) -> Option<AnyElement> {
         if !self.status_collapsed || !self.status_column_shown() {
             return None;
@@ -1243,145 +1285,132 @@ impl ChatView {
         }
         let theme = cx.theme();
         Some(
-            div()
+            h_flex()
                 .id("status-chip")
                 .flex_shrink_0()
-                .px_2()
-                .py_0p5()
-                .rounded_md()
+                .gap_1p5()
+                .items_center()
+                .px(px(10.))
+                .py(px(2.))
+                .rounded(px(4.))
                 .border_1()
-                .border_color(theme.border)
+                .border_color(theme.blue)
                 .text_size(px(11.))
-                .text_color(theme.muted_foreground)
+                .text_color(theme.blue)
                 .cursor_pointer()
                 .hover(|style| style.bg(theme.secondary_hover))
                 .tooltip(|window, cx| Tooltip::new("Open the status column").build(window, cx))
                 .on_click(cx.listener(|this, _, _, cx| this.toggle_status_column(cx)))
+                .when(self.streaming, |chip| chip.child("⟳"))
                 .child(parts.join(" · "))
                 .test_support()
                 .into_any_element(),
         )
     }
 
-    /// The riding line's grounding: the newest consulted entry, and,
-    /// when a correction or evidence flag is in play on it, the flag's
-    /// words for the full form. None when the work consulted nothing.
-    /// The riding status card (#34): the momentary state on the
-    /// latest assistant turn. Division of labor with the column: the
-    /// column carries the durable detail, the card is the glance —
-    /// goal, next, and the grounding "why" adjacent to the turn it
-    /// explains. None when there is nothing to say (the prompt-as-goal
-    /// plus no grounding and no model-stated next is just noise).
-    pub(crate) fn render_status_card(&self, inner: AnyElement, cx: &Context<Self>) -> AnyElement {
-        use gpui_kit::component::ActiveTheme as _;
+    /// The riding card (#33 decision 1, #34): the latest turn's
+    /// momentary state, the mockup's `.riding`. One line: the pulsing
+    /// dot, the verb (what the work is doing now), and the why (the
+    /// memory entry the work consulted). The full form, a second line
+    /// in the flag color, only while a correction or evidence flag is
+    /// in play on that entry; the card's edge and dot turn the flag
+    /// color with it. Goal and next live in the column, never here:
+    /// the two surfaces do not duplicate.
+    pub(crate) fn render_riding_card(&self, cx: &Context<Self>) -> AnyElement {
         let theme = cx.theme();
-        let facts = &self.status_facts;
-
-        // The grounding "why": the card's reason to exist.
-        let grounding = self.riding_grounding();
-        // The empty-sections rule: the prompt-as-goal is noise, a
-        // model-stated goal or an active grounding earns the card.
-        let model_stated_goal = facts.goal.is_some();
-        let next = facts.next.as_ref();
-        if !model_stated_goal && grounding.is_none() && next.is_none() {
-            return inner;
-        }
-        let running = self.is_streaming() && !self.waiting_on_human();
-        let verb = if running { "WORKING" } else { "WAITING ON YOU" };
-        let run_clock = self.run_started.map(|started| {
-            let elapsed = started.elapsed();
-            format!(
-                "run {}:{:02}",
-                elapsed.as_secs() / 60,
-                elapsed.as_secs() % 60
+        let verb = self.activity_line();
+        let riding = self.riding_grounding();
+        let flag = riding.as_ref().and_then(|(_, _, flag)| flag.clone());
+        let edge = if flag.is_some() {
+            theme.danger
+        } else {
+            theme.blue
+        };
+        // The pulse, time-derived like the spinner it replaces: four
+        // steps on the working tick's 2 fps, one 2s breath, so nothing
+        // animates at rest (the card only renders while a turn runs).
+        const PULSE: [f32; 4] = [1.0, 0.65, 0.3, 0.65];
+        let pulse = PULSE[(self.activity_at.elapsed().as_millis() as usize / 500) % PULSE.len()];
+        let line = h_flex()
+            .gap(px(10.))
+            .items_center()
+            .min_w_0()
+            .child(
+                div()
+                    .size(px(7.))
+                    .flex_shrink_0()
+                    .rounded_full()
+                    .bg(edge)
+                    .opacity(pulse),
             )
-        });
-
-        let mut card = v_flex()
-            .mt_2()
-            .px_3()
-            .py_2()
-            .rounded_sm()
-            .bg(theme.secondary.opacity(0.6))
-            .border_l_2()
-            .border_color(if running {
-                theme.accent
-            } else {
-                theme.muted_foreground
-            })
-            .gap_1();
-
-        // Header: dot + verb + run clock.
-        card = card.child(
-            h_flex()
-                .gap_2()
-                .items_center()
-                .child(if running {
-                    div().size(px(6.)).rounded_full().bg(theme.accent)
-                } else {
-                    div().size(px(6.)).rounded_full().bg(theme.muted_foreground)
-                })
-                .child(
-                    div()
-                        .text_size(px(10.))
-                        .font_weight(gpui_kit::FontWeight::SEMIBOLD)
-                        .text_color(if running {
-                            theme.accent
-                        } else {
-                            theme.muted_foreground
-                        })
-                        .child(verb),
-                )
-                .when_some(run_clock, |head, clock| {
-                    head.child(
-                        div()
-                            .text_size(px(10.))
-                            .text_color(theme.muted_foreground)
-                            .child(clock),
-                    )
-                }),
-        );
-
-        // GOAL: the model's statement wins; the prompt renders only
-        // when a grounding makes the card worth its space.
-        let goal = facts.goal.clone().or_else(|| {
-            grounding
-                .as_ref()
-                .map(|_| facts.last_prompt.clone().unwrap_or_default())
-        });
-        if let Some(goal) = goal {
-            card = card.child(
+            .child(
                 div()
-                    .text_size(px(12.))
+                    .flex_shrink_0()
+                    .max_w(relative(0.6))
+                    .truncate()
+                    .font_weight(gpui_kit::FontWeight::SEMIBOLD)
                     .text_color(theme.foreground)
-                    .child(goal),
-            );
-        }
-        // NEXT, compact.
-        if let Some(next) = next {
-            card = card.child(
-                div()
-                    .text_size(px(11.))
-                    .text_color(theme.muted_foreground)
-                    .child(format!("next: {next}")),
-            );
-        }
-        // The "why" line: the correction showcase, in the reading flow.
-        if let Some((id, sentence, flag)) = grounding {
-            let text = match flag {
-                Some(flag) => format!("grounded in [{id}] — {flag}: {sentence}"),
-                None => format!("grounded in [{id}] — {sentence}"),
-            };
-            card = card.child(
-                div()
-                    .text_size(px(11.))
-                    .text_color(theme.warning)
-                    .child(text),
-            );
-        }
-        v_flex().child(inner).child(card).into_any_element()
+                    // Activity strings carry `code` spans (tool labels
+                    // quote paths and commands), same treatment as
+                    // the cards.
+                    .child(crate::markdown::inline_element(&verb, cx)),
+            )
+            .when_some(riding.as_ref(), |line, (id, text, _)| {
+                line.child(
+                    h_flex()
+                        .flex_1()
+                        .min_w_0()
+                        .gap_1()
+                        .items_center()
+                        .text_color(theme.muted_foreground)
+                        .child(div().flex_shrink_0().child("· grounded in"))
+                        .child(
+                            div()
+                                .flex_shrink_0()
+                                .font_family(theme.mono_font_family.clone())
+                                .text_size(px(11.))
+                                .text_color(theme.foreground)
+                                .child(SharedString::from(format!("[{id}]"))),
+                        )
+                        .child(
+                            div()
+                                .min_w_0()
+                                .truncate()
+                                .child(SharedString::from(format!("\u{201c}{text}\u{201d}"))),
+                        ),
+                )
+            });
+        v_flex()
+            .id("riding-card")
+            .w_full()
+            .mt(px(10.))
+            .gap_1()
+            .px(px(14.))
+            .py_2()
+            .rounded(px(6.))
+            .bg(theme.secondary)
+            .border_l(px(3.))
+            .border_color(edge)
+            .text_size(px(12.5))
+            .child(line)
+            .when_some(flag, |card, flag| {
+                card.child(
+                    div()
+                        .id("riding-flag")
+                        .pl(px(17.))
+                        .text_size(px(12.))
+                        .text_color(theme.danger)
+                        .child(SharedString::from(flag))
+                        .test_support(),
+                )
+            })
+            .test_support()
+            .into_any_element()
     }
 
+    /// The riding card's grounding: the newest consulted entry, and,
+    /// when a correction or evidence flag is in play on it, the flag's
+    /// words for the full form. None when the work consulted nothing.
     pub(crate) fn riding_grounding(&self) -> Option<(String, String, Option<String>)> {
         let ground = self.ground_rows();
         let row = self
@@ -1441,21 +1470,6 @@ impl ChatView {
         )
     }
 
-    /// The riding card's gate, as the renderer computes it: true
-    /// when the card would render on the latest assistant turn. The
-    /// positive-path half of the empty-sections test.
-    pub fn riding_card_gated_for_test(&self) -> bool {
-        let model_stated_goal = self.status_facts.goal.is_some();
-        let next = self.status_facts.next.is_some();
-        model_stated_goal || next || self.riding_grounding().is_some()
-    }
-
-    /// The model-stated goal field, for the riding card's gate test:
-    /// distinct from goal_text(), which falls back to the prompt.
-    pub fn model_goal_for_test(&self) -> Option<String> {
-        self.status_facts.goal.clone()
-    }
-
     /// Folds a tool result the way a live turn does, for the riding
     /// card's positive-path test.
     pub fn fold_status_tool_for_test(&mut self, name: &str, arguments: &str, result: &str) {
@@ -1471,6 +1485,88 @@ impl ChatView {
     pub fn riding_for_test(&self) -> Option<(String, Option<String>)> {
         self.riding_grounding().map(|(id, _, flag)| (id, flag))
     }
+}
+
+/// A TOUCHED-style chip: a mono path left (truncated when long), its
+/// state word right, on the panel2 fill (the mockup's `.fitem`).
+fn status_file_chip(
+    id: SharedString,
+    path: String,
+    word: String,
+    color: Hsla,
+    cx: &App,
+) -> AnyElement {
+    let theme = cx.theme();
+    div()
+        .id(id)
+        .flex()
+        .items_center()
+        .justify_between()
+        .gap_2()
+        .px_2()
+        .py_1()
+        .rounded(px(4.))
+        .bg(theme.secondary)
+        .font_family(theme.mono_font_family.clone())
+        .text_size(px(11.5))
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .truncate()
+                .text_color(theme.foreground)
+                .child(SharedString::from(path)),
+        )
+        .child(div().flex_shrink_0().text_color(color).child(word))
+        .into_any_element()
+}
+
+/// One link of a chain (the mockup's `.clink`): an optional head in
+/// its color, then the mono id and the muted text; `now` marks what
+/// the work acts on with the accent edge.
+fn status_link(
+    head: Option<(String, Hsla)>,
+    id: Option<String>,
+    text: String,
+    now: bool,
+    cx: &App,
+) -> Div {
+    let theme = cx.theme();
+    v_flex()
+        .gap_0p5()
+        .px_2()
+        .py_1p5()
+        .rounded(px(4.))
+        .bg(theme.secondary)
+        .text_size(px(12.))
+        .text_color(theme.muted_foreground)
+        .when(now, |link| link.border_l_2().border_color(theme.blue))
+        .when_some(head, |link, (head, color)| {
+            link.child(
+                div()
+                    .text_size(px(11.))
+                    .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                    .text_color(color)
+                    .child(head),
+            )
+        })
+        .child(
+            h_flex()
+                .items_start()
+                .gap_1p5()
+                .when_some(id, |body, id| {
+                    body.child(
+                        div()
+                            .flex_shrink_0()
+                            .pt(px(1.))
+                            .font_family(theme.mono_font_family.clone())
+                            .text_size(px(11.))
+                            .text_color(theme.foreground)
+                            .child(SharedString::from(id)),
+                    )
+                })
+                .child(div().flex_1().min_w_0().child(SharedString::from(text))),
+        )
 }
 
 /// The store flag holding a conversation's folded column.
@@ -1870,7 +1966,6 @@ fn newest_wins_ordering_moves_retouched_files_front() {
 #[cfg(test)]
 mod bash_tests {
     use super::*;
-    use std::path::Path as P;
 
     #[test]
     fn redirects_and_edits_classify_as_edited() {

@@ -1823,10 +1823,15 @@ impl ChatView {
     /// card is off-screen and the row is the now again: full label,
     /// both clocks. The row's own news, thinking, writing, worker
     /// steps, done labels, never yields at all.
+    /// One exception to the yield: a consulted memory entry. The
+    /// riding card's why is news the running card does not carry, so
+    /// the card stays while the work is grounded.
     fn show_activity_row(&self) -> bool {
         self.streaming
             && !self.waiting_on_human()
-            && !(self.activity_echoes_card && self.tail_following)
+            && !(self.activity_echoes_card
+                && self.tail_following
+                && self.status_facts.consulted.is_empty())
     }
 
     /// Opens the mode menu: the four postures, the current one
@@ -5215,66 +5220,14 @@ impl ChatView {
             .into_any_element()
     }
 
-    /// The quiet-state row: what's happening now, the spinner the
-    /// no-animation doctrine's one carve-out, time-derived so it
-    /// needs no state of its own: it steps at 2 fps on the working
-    /// tick (which only runs while a turn does, nothing animates at
-    /// rest), because "is it stuck or just slow" is a question the
-    /// words alone answer too late.
+    /// The quiet-state row: what's happening now, rendered as the
+    /// riding card (the #33 mockup's `.riding`, see
+    /// `status::render_riding_card`). Its pulse is the no-animation
+    /// doctrine's one carve-out, time-derived on the working tick
+    /// (2 fps, only while a turn runs), because "is it stuck or just
+    /// slow" is a question the words alone answer too late.
     fn render_activity_row(&self, cx: &Context<Self>) -> AnyElement {
-        let frame = SPINNER_FRAMES
-            [(self.activity_at.elapsed().as_millis() as usize / 500) % SPINNER_FRAMES.len()];
-        let line = self.activity_line();
-        // The riding line (issue #33): the verb, then why, the memory
-        // the work consulted. One line normally; a second, in the flag
-        // color, only while a correction or evidence flag is in play.
-        let riding = self.riding_grounding();
-        let row = h_flex()
-            .gap_2()
-            .items_center()
-            .child(
-                div()
-                    .text_size(px(13.))
-                    .text_color(cx.theme().muted_foreground)
-                    .child(frame),
-            )
-            .child(
-                div()
-                    .text_size(px(13.))
-                    .text_color(cx.theme().muted_foreground)
-                    // Activity strings carry `code` spans (tool labels
-                    // quote paths and commands), same treatment as
-                    // the cards.
-                    .child(crate::markdown::inline_element(&line, cx)),
-            )
-            .when_some(riding.as_ref(), |row, (id, text, _)| {
-                row.child(
-                    div()
-                        .min_w_0()
-                        .truncate()
-                        .text_size(px(12.5))
-                        .text_color(cx.theme().muted_foreground)
-                        .child(SharedString::from(format!(
-                            "· grounded in [{id}] \u{201c}{text}\u{201d}"
-                        ))),
-                )
-            });
-        match riding.and_then(|(_, _, flag)| flag) {
-            None => row.into_any_element(),
-            Some(flag) => v_flex()
-                .id("riding-flag")
-                .gap_0p5()
-                .child(row)
-                .child(
-                    div()
-                        .pl_5()
-                        .text_size(px(12.))
-                        .text_color(cx.theme().warning)
-                        .child(SharedString::from(flag)),
-                )
-                .test_support()
-                .into_any_element(),
-        }
+        self.render_riding_card(cx)
     }
 
     /// The footer line under the composer. Left: this session's spend

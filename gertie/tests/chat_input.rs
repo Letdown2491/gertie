@@ -5202,6 +5202,14 @@ fn replay_provider(scenario: &str) -> (Arc<gertie_providers::AnyProvider>, tempf
     (provider, scenarios)
 }
 
+/// The status column (issue #33): a scripted turn reads a file, states
+/// its goal and next step, and consults memory. The column shows the
+/// goal, the touched file, the next step, and the consulted entry with
+/// its moved evidence; the riding line names the entry and, the
+/// evidence having moved, carries the flag. Folding the column leaves
+/// the rail and the header chip, and the fold is stored per
+/// conversation.
+#[test]
 fn the_status_column_shows_the_session_state_and_folds_to_a_rail() {
     let dir = tempfile::tempdir().expect("workspace");
     std::fs::write(dir.path().join("teardown.rs"), "fn teardown() {}\n").expect("cited file");
@@ -5460,26 +5468,6 @@ fn a_question_answered_from_the_column_lands_on_its_own_card() {
     assert_eq!(provenance, 1, "the card names where its answer came from");
 }
 
-/// The status column (issue #33): a scripted turn reads a file, states
-/// its goal and next step, and consults memory. The column shows the
-/// goal, the touched file, the next step, and the consulted entry with
-/// its moved evidence; the riding line names the entry and, the
-/// evidence having moved, carries the flag. Folding the column leaves
-/// the rail and the header chip, and the fold is stored per
-/// conversation.
-#[test]
-/// The riding status card (#34): latest-turn-only, and the
-/// empty-sections gate. The full render is window-bound; the
-/// fixture-observable halves are the grounding tuple (the card's
-/// "why") and the latest-turn condition the renderer checks.
-#[test]
-/// The hand test's garbage rows (`FAILED\.`, `text.replace(anchor,`):
-/// reproducing the fold against the exact command shapes that
-/// produced them. The gate must kill every one.
-#[test]
-/// The file-tool arm gates too: a model-named path that is not a
-/// real file renders no row (write_file excepted: it creates).
-#[test]
 /// The live session's REAL recorded commands (from the session DB):
 /// multi-line heredocs whose interior python lines look like paths.
 /// Today's gates must kill every fragment.
@@ -5515,6 +5503,9 @@ PYEOF"#;
     }
 }
 
+/// The file-tool arm gates too: a model-named path that is not a
+/// real file renders no row (write_file excepted: it creates).
+#[test]
 fn the_file_tool_arm_gates_model_named_paths() {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path().to_path_buf();
@@ -5533,6 +5524,9 @@ fn the_file_tool_arm_gates_model_named_paths() {
     assert!(paths[0].contains("real.md"));
 }
 
+/// The hand test's garbage rows (`FAILED\.`, `text.replace(anchor,`):
+/// reproducing the fold against the exact command shapes that
+/// produced them. The gate must kill every one.
 #[test]
 fn the_gate_kills_the_hand_tests_garbage() {
     let tmp = tempfile::tempdir().unwrap();
@@ -5562,79 +5556,118 @@ fn the_gate_kills_the_hand_tests_garbage() {
     }
 }
 
+/// The riding card (#33 decision 1, #34): one line, verb + why, on
+/// the transcript's latest row while the run lives. The why is the
+/// memory entry the work consulted; its moved evidence puts the full
+/// form (the flag line) in play; and being news no running card
+/// carries, it keeps the card on screen past the card-is-the-now
+/// yield. Goal and next stay the column's. The run's end takes the
+/// card away, so it never stacks on older turns.
 #[test]
-fn the_riding_card_gates_on_something_to_say() {
-    let store = Arc::new(SessionStore::open(Path::new(":memory:")).expect("store"));
-    let mut fixture = fixture_with_store(store);
-    // A plain session: user turn only, no memory consultation, no
-    // model-stated status.
+fn the_riding_card_is_verb_and_why_and_leaves_with_the_run() {
+    let dir = tempfile::tempdir().expect("workspace");
+    std::fs::write(dir.path().join("teardown.rs"), "fn teardown() {}\n").expect("cited file");
+    std::fs::create_dir_all(dir.path().join("project")).expect("tier root");
+    std::fs::write(
+        dir.path().join("project").join("gotchas.md"),
+        "- [p12] helpful=0 harmful=0 cite the flake before blaming the test \
+         [evidence: teardown.rs@000000000000]\n",
+    )
+    .expect("topic file");
+    let store = Arc::new(SessionStore::open(Path::new(":memory:")).expect("session store"));
+    let memory = Arc::new(gertie_core::MemoryStore::open(
+        dir.path().join("project"),
+        dir.path().join("global"),
+        store.clone(),
+    ));
+    memory.sync().expect("sidecar sync");
+    let (provider, scenarios) = replay_provider(
+        "[[steps]]\ntext = ''\n\n\
+         [[steps.tool_calls]]\nname = \"status\"\n\
+         arguments = '{\"goal\": \"Fix the teardown race\", \"next\": \"re-run the suite\"}'\n\n\
+         [[steps.tool_calls]]\nname = \"search_memory\"\n\
+         arguments = '{\"query\": \"flake\"}'\n\n\
+         [[steps.tool_calls]]\nname = \"park\"\narguments = '{}'\n\n\
+         [[steps]]\ntext = 'done'\n",
+    );
+    let (release, park) = tokio::sync::oneshot::channel::<()>();
+    let mut fixture = fixture_built(
+        store,
+        None,
+        Some(dir.path().to_path_buf()),
+        None,
+        Some(provider),
+        None,
+        vec![
+            Arc::new(gertie_tools::Status),
+            Arc::new(gertie_tools::memory::SearchMemory::new(memory.clone())),
+            Arc::new(ParkTool {
+                park: std::sync::Mutex::new(Some(park)),
+            }),
+        ],
+        Some(memory),
+        None,
+    );
+    fixture.hold = vec![scenarios, dir];
+
     fixture.act(|window, cx| {
-        window.input("hello there", cx);
+        window.input("The widget_test keeps flaking", cx);
         window.press("enter", cx);
     });
+    let view = fixture.view.clone();
+    pump_until(
+        &mut fixture,
+        200,
+        |fixture| {
+            fixture.cx.update(|cx| {
+                view.upgrade()
+                    .expect("view alive")
+                    .read(cx)
+                    .riding_for_test()
+                    .is_some()
+            })
+        },
+        "the consultation folds",
+    );
     pump(&mut fixture, 10);
-    let riding = fixture.cx.update(|cx| {
-        fixture
-            .view
-            .upgrade()
-            .expect("view alive")
-            .read(cx)
-            .riding_for_test()
-    });
-    assert!(
-        riding.is_none(),
-        "a plain session's grounding is none: {riding:?}"
-    );
-    // The status facts carry no model-stated goal (no `status` tool
-    // call) — the gate's other half.
-    // The gate reads the model-stated goal field, not goal_text()
-    // (which falls back to the prompt). No `status` call yet means
-    // the field is None even though goal_text() returns the prompt.
-    let model_stated = fixture.cx.update(|cx| {
-        fixture
-            .view
-            .upgrade()
-            .expect("view alive")
-            .read(cx)
-            .model_goal_for_test()
-    });
-    assert!(
-        model_stated.is_none(),
-        "the prompt fallback must not count as model-stated: {model_stated:?}"
-    );
-    let gated = fixture.cx.update(|cx| {
-        fixture
-            .view
-            .upgrade()
-            .expect("view alive")
-            .read(cx)
-            .riding_card_gated_for_test()
-    });
-    assert!(!gated, "noise must not earn the card");
 
-    // The positive path: the model states a goal (the `status` tool's
-    // fold) — the gate opens.
-    fixture.cx.update(|cx| {
-        fixture
-            .view
-            .upgrade()
-            .expect("view alive")
-            .update(cx, |view, cx| {
-                view.fold_status_tool_for_test(
-                    "status",
-                    r#"{"goal": "Fix the teardown race", "next": "re-run"}"#,
-                    "ok",
-                );
-                cx.notify();
-            });
+    // Parked mid-run on a running card, pinned to the bottom: without
+    // a grounding the row would yield; the why keeps the card.
+    let (shown, riding) = fixture.cx.update(|cx| {
+        let view = view.upgrade().expect("view alive").read(cx);
+        (view.show_activity_row_for_test(), view.riding_for_test())
     });
-    let gated = fixture.cx.update(|cx| {
-        fixture
-            .view
-            .upgrade()
-            .expect("view alive")
-            .read(cx)
-            .riding_card_gated_for_test()
+    assert!(shown, "a grounded run keeps its riding card");
+    let (id, flag) = riding.expect("the why names the consulted entry");
+    assert_eq!(id, "p12");
+    let flag = flag.expect("moved evidence puts the full form in play");
+    assert!(
+        flag.contains("not re-read this session"),
+        "the work never read the moved file: {flag}"
+    );
+    fixture.act(|window, _| {
+        assert!(window.try_find("riding-card").is_some(), "the card rides");
+        assert!(
+            window.try_find("riding-flag").is_some(),
+            "the flag line, the full form"
+        );
     });
-    assert!(gated, "a model-stated goal earns the card");
+
+    let _ = release.send(());
+    pump_until(
+        &mut fixture,
+        200,
+        |fixture| {
+            fixture
+                .cx
+                .update(|cx| !view.upgrade().expect("view alive").read(cx).is_streaming())
+        },
+        "the run ends",
+    );
+    fixture.act(|window, _| {
+        assert!(
+            window.try_find("riding-card").is_none(),
+            "the card leaves with the run: no stacking on older turns"
+        );
+    });
 }
