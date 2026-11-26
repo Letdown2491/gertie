@@ -1399,6 +1399,156 @@ impl MemoryStore {
     }
 }
 
+/// One lint finding (#38): where, and what to do about it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LintFinding {
+    pub file: String,
+    /// 1-based.
+    pub line: usize,
+    pub message: String,
+}
+
+/// Lints one tier's topic files: every shape that hides a fact from
+/// the store (prose, malformed lines, the old double-wrap) or breaks
+/// its structure (duplicate ids, links to nothing, cited files that
+/// are gone). Raw files only, no sidecar, so `doctor` can run it on a
+/// store nothing has opened. `workspace` resolves evidence paths;
+/// None skips that check.
+pub fn lint_tier(root: &Path, tier: Tier, workspace: Option<&Path>) -> Vec<LintFinding> {
+    let mut findings = Vec::new();
+    let mut seen: BTreeMap<String, (String, usize)> = BTreeMap::new();
+    let mut parsed: Vec<(String, usize, MemoryEntry)> = Vec::new();
+    for path in topic_files(root) {
+        let file = file_name(&path);
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let mut finding = |line: usize, message: String| {
+            findings.push(LintFinding {
+                file: file.clone(),
+                line,
+                message,
+            })
+        };
+        for (index, raw) in text.lines().enumerate() {
+            let number = index + 1;
+            let line = raw.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            let Some(entry) = parse_entry(line, tier, &file) else {
+                if line.starts_with("- [") {
+                    finding(
+                        number,
+                        "looks like an entry but does not parse (an entry is `- [pN] helpful=N \
+                         harmful=M text [markers]`); fix the line or rewrite it with the \
+                         remember tool"
+                            .into(),
+                    );
+                } else {
+                    finding(
+                        number,
+                        "prose: the index, search and voting cannot see it; make it an entry \
+                         (remember add, or a `- ` line through the memory tool)"
+                            .into(),
+                    );
+                }
+                continue;
+            };
+            if entry.text.starts_with("- [") || has_counters(&entry.text) {
+                finding(
+                    number,
+                    format!(
+                        "[{}] is wrapped twice (an entry inside an entry, the pre-fix tool \
+                         path); keep one id and one set of markers",
+                        entry.id
+                    ),
+                );
+            }
+            if entry.text.starts_with('#') {
+                finding(
+                    number,
+                    format!(
+                        "[{}] is a heading stored as an entry; make it a plain `# ` line",
+                        entry.id
+                    ),
+                );
+            }
+            match seen.get(&entry.id) {
+                Some((other, at)) => finding(
+                    number,
+                    format!(
+                        "duplicate id {} (also {other}:{at}); give one of them a fresh id",
+                        entry.id
+                    ),
+                ),
+                None => {
+                    seen.insert(entry.id.clone(), (file.clone(), number));
+                }
+            }
+            if let Some(workspace) = workspace {
+                for cited in &entry.evidence {
+                    if !workspace.join(&cited.path).is_file() {
+                        finding(
+                            number,
+                            format!(
+                                "[{}] cites {}, which is gone; re-check the fact and supersede \
+                                 or archive it",
+                                entry.id, cited.path
+                            ),
+                        );
+                    }
+                }
+            }
+            parsed.push((file.clone(), number, entry));
+        }
+    }
+    // References need the whole tier first. Ids of the other tier are
+    // out of reach here, so only this tier's prefix is checked.
+    for (file, number, entry) in &parsed {
+        let mut targets: Vec<(&str, &str)> = entry
+            .links
+            .iter()
+            .map(|link| ("links to", link.to.as_str()))
+            .chain(
+                entry
+                    .recheck
+                    .iter()
+                    .map(|id| ("is flagged by", id.as_str())),
+            )
+            .collect();
+        if let Some(by) = entry.superseded_by.as_deref().filter(|by| !by.is_empty()) {
+            targets.push(("is superseded by", by));
+        }
+        for (relation, target) in targets {
+            if target.starts_with(tier.prefix()) && !seen.contains_key(target) {
+                findings.push(LintFinding {
+                    file: file.clone(),
+                    line: *number,
+                    message: format!(
+                        "[{}] {relation} {target}, which no entry has; fix the id or drop the \
+                         marker",
+                        entry.id
+                    ),
+                });
+            }
+        }
+    }
+    findings.sort_by(|a, b| a.file.cmp(&b.file).then(a.line.cmp(&b.line)));
+    findings
+}
+
+/// Whether text carries real counters (`helpful=3 harmful=0`), the
+/// mark of an entry wrapped inside another; a fact that merely
+/// describes the grammar (`helpful=N`) does not.
+fn has_counters(text: &str) -> bool {
+    text.match_indices("helpful=").any(|(at, _)| {
+        let rest = &text[at + "helpful=".len()..];
+        let digits = rest.chars().take_while(char::is_ascii_digit).count();
+        digits > 0 && rest[digits..].trim_start().starts_with("harmful=")
+    })
+}
+
 /// The entries a topic file's text holds, as (id, line): what a write
 /// can report back so the model knows exactly what landed.
 pub fn entries_in(text: &str, tier: Tier) -> Vec<(String, String)> {
@@ -2845,6 +2995,62 @@ mod tests {
             "the budget holds: {}",
             index.len() / 4
         );
+    }
+
+    /// The lint (#38): every shape that hides a fact from the store or
+    /// breaks its structure is a finding with its file, line and fix.
+    #[test]
+    fn the_lint_names_every_bad_shape_and_passes_a_clean_tier() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("memory");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(tmp.path().join("real.rs"), "x").unwrap();
+        std::fs::write(
+            root.join("clean.md"),
+            "# Clean\n\n- [p1] helpful=0 harmful=0 a fact [evidence: real.rs@000000000000] [source: added: 2026-11-01]\n\
+             - [p8] helpful=0 harmful=0 the grammar is `- [pN] helpful=N harmful=M text` [source: added: 2026-11-01]\n\
+             - [p2] helpful=0 harmful=0 another [links: builds_on p1] [source: added: 2026-11-01]\n",
+        )
+        .unwrap();
+        assert!(lint_tier(&root, Tier::Project, Some(tmp.path())).is_empty());
+
+        std::fs::write(
+            root.join("bad.md"),
+            "# Bad\n\
+             - [p3] the counters are missing\n\
+             - [p4] helpful=0 harmful=0 - [v1] helpful=0 harmful=0 wrapped twice [source: added: 2026-11-01]\n\
+             - [p5] helpful=0 harmful=0 # A heading [source: added: 2026-11-01]\n\
+             some prose the index cannot see\n\
+             - [p1] helpful=0 harmful=0 a duplicate id [source: added: 2026-11-01]\n\
+             - [p6] helpful=0 harmful=0 dangling [links: builds_on p99] [recheck: p98] [source: added: 2026-11-01] [superseded by: p97; valid until: 2026-11-02]\n\
+             - [p7] helpful=0 harmful=0 cites a ghost [evidence: gone.rs@000000000000] [source: added: 2026-11-01]\n",
+        )
+        .unwrap();
+        let findings = lint_tier(&root, Tier::Project, Some(tmp.path()));
+        let said = |needle: &str| {
+            findings
+                .iter()
+                .any(|finding| finding.message.contains(needle))
+        };
+        for needle in [
+            "does not parse",
+            "wrapped twice",
+            "heading stored as an entry",
+            "prose",
+            "duplicate id p1",
+            "p99",
+            "p98",
+            "p97",
+            "gone.rs",
+        ] {
+            assert!(said(needle), "missing {needle:?} in {findings:#?}");
+        }
+        assert!(
+            findings
+                .iter()
+                .all(|finding| finding.file == "bad.md" || finding.message.contains("p1"))
+        );
+        assert!(findings.iter().all(|finding| finding.line > 0));
     }
 
     #[test]

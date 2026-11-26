@@ -281,6 +281,46 @@ pub fn run(config_override: Option<PathBuf>, clean_worktrees: bool, check_update
         println!("sessions    (no data dir found)");
     }
 
+    // The memory lint (#38): shapes that hide a fact from the store or
+    // break its structure, whoever wrote them (a model, the human, an
+    // outside agent). Report-only, never a readiness failure.
+    let tiers = [
+        (
+            "project",
+            workspace_root.join(".gertie/memory"),
+            gertie_core::Tier::Project,
+        ),
+        (
+            "global",
+            crate::config::Config::data_dir()
+                .map(|dir| dir.join("memory"))
+                .unwrap_or_default(),
+            gertie_core::Tier::Global,
+        ),
+    ];
+    for (name, root, tier) in tiers {
+        if !root.is_dir() {
+            continue;
+        }
+        let findings = gertie_core::memory::lint_tier(&root, tier, Some(workspace_root.as_path()));
+        if findings.is_empty() {
+            println!("memory      ✓ {name} tier clean ({})", root.display());
+        } else {
+            println!(
+                "memory      {} finding{} in the {name} tier ({}), not blocking",
+                findings.len(),
+                if findings.len() == 1 { "" } else { "s" },
+                root.display()
+            );
+            for finding in findings.iter().take(20) {
+                println!("  {}:{} {}", finding.file, finding.line, finding.message);
+            }
+            if findings.len() > 20 {
+                println!("  ... and {} more", findings.len() - 20);
+            }
+        }
+    }
+
     // The worktree ledger: every gertie-made worktree of this repo,
     // removed or kept and why. Report-only until --clean-worktrees,
     // a diagnostic never deletes; the flag is a deliberate choice.
