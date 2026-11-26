@@ -114,7 +114,7 @@ struct TabState {
     /// What the shell last saw of this view (streaming, limited, open
     /// session): a repaint that changes none of it is not the shell's
     /// business.
-    seen: Option<(bool, bool, Option<gertie_core::SessionId>)>,
+    seen: Option<(bool, bool, Option<gertie_core::SessionId>, usize)>,
     /// A turn finished (or the run limited) while another tab was up.
     /// The dot on this tab's label; cleared when the tab activates.
     done_unseen: bool,
@@ -247,10 +247,13 @@ impl WorkspaceView {
         // must not redraw the window.
         cx.observe(&view, |this, view, cx| {
             let chat = view.read(cx);
+            // The pending-card count too: an ask arriving here must
+            // reach the status column of the chat on screen.
             let seen = (
                 chat.is_streaming(),
                 chat.open_session_limited(),
                 chat.session_id(),
+                chat.pending_ask_count(),
             );
             if let Some(tab) = this.tabs.iter_mut().find(|tab| tab.view == view)
                 && tab.seen != Some(seen)
@@ -696,9 +699,28 @@ impl Render for WorkspaceView {
             })
             .collect();
         let view = self.tabs[self.active].view.clone();
+        // The status column's WAITING ON YOU: pending asks in the other
+        // open chats of the shown chat's project (issue #33). The shown
+        // view's list answers which project each chat is in, its
+        // sidebar is where moves happen. No project, no reach: an
+        // unfiled chat shows only its own asks, in its transcript.
+        let asks = {
+            let shown = view.read(cx);
+            let others = self
+                .tabs
+                .iter()
+                .filter(|tab| tab.view != view)
+                .filter_map(|tab| {
+                    let other = tab.view.read(cx);
+                    let id = other.session_id()?;
+                    Some((shown.project_of(id), other.pending_asks()))
+                });
+            crate::chat::status::project_asks_for(shown.project_id(), others)
+        };
         let switched = self.shown != Some(view.entity_id());
         self.shown = Some(view.entity_id());
         view.update(cx, |chat, cx| {
+            chat.set_project_asks(asks);
             chat.set_session_marks(marks);
             if switched {
                 chat.refresh_sessions(cx);
