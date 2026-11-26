@@ -332,7 +332,10 @@ impl AgentTool {
             return None;
         }
         let text = std::fs::read_to_string(&path).ok()?;
-        Some(sanitize_untrusted(&text, 2048))
+        Some(sanitize_untrusted(
+            &text,
+            crate::directory_instructions::INSTRUCTIONS_CAP,
+        ))
     }
 
     /// The agent type's name, for run titles: `agent_explore` → `explore`.

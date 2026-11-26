@@ -6,6 +6,7 @@
 
 pub mod agent;
 pub mod agent_loop;
+pub mod directory_instructions;
 pub mod memory;
 pub mod memory_extract;
 pub mod permissions;
@@ -19,6 +20,7 @@ pub use agent_loop::{
     DEFAULT_GRACE_ROUNDS, DEFAULT_MAX_TOOL_ROUNDS, LoopEvent, PermissionDecision, SharedHistory,
     ToolRegistry, TurnSpec, close_unanswered_calls, run_turn,
 };
+pub use directory_instructions::INSTRUCTIONS_CAP;
 pub use memory::{MemoryEntry, MemoryHit, MemoryStore, Op, Tier};
 pub use permissions::{
     AskFilter, ModeScope, PendingAsk, PermissionBroker, PermissionMode, PromptSource, TurnToken,

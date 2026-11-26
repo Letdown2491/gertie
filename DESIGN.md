@@ -361,6 +361,12 @@ waiting to happen).
 
 **Posture**: memory is advisory. Instruction files and AGENTS.md stay the source of record
 for rules that must always apply; memory is recall, and Codex's own docs draw the same line.
+A nested AGENTS.md (below the root) is not framing: it rides the result of the first tool
+call that touches a path under its directory, so the cached prefix never changes, and
+"already loaded" is a scan of the history for its marker, so a compaction that drops the
+block lets the next touch load it again (`gertie-core/src/directory_instructions.rs`).
+Every instruction file, global, root or nested, is sanitized and capped at 2048
+characters on its own.
 Wrong entries are corrected by the human in an editor, because the store is files. The
 memory surface (M7): a footer word and a right-column panel make the store visible and give
 the counters their writer, because a shipped feature with no surface is invisible.

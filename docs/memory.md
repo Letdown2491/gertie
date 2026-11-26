@@ -40,7 +40,10 @@ back to the session that produced it, so a wrong memory shows its receipt.
 
 Things that must always apply belong in `AGENTS.md` files (`~/.config/gertie/` for
 your rules, the repo root for project rules), not memory. Gertie reads those every
-turn; memory is recall it consults when relevant. Keep keys and credentials in config
+turn. An `AGENTS.md` in a subdirectory (`docs/AGENTS.md`, `migrations/AGENTS.md`)
+holds rules for that part of the tree: it is loaded the first time a tool reads or
+edits a file under it, and shows up in that tool's result in the transcript. Each file
+is capped at 2048 characters. Memory is recall it consults when relevant. Keep keys and credentials in config
 or env, never in either.
 
 ## Under the hood, briefly

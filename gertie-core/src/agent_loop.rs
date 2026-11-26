@@ -607,10 +607,27 @@ pub fn run_turn(spec: TurnSpec) -> BoxStream<'static, LoopEvent> {
                         }
                     }
                 };
-                let result = match result {
+                let mut result = match result {
                     Ok(text) => crate::strip_invisible(&text),
                     Err(text) => format!("error: {}", crate::strip_invisible(&text)),
                 };
+                // Directory instructions: the first call that reaches
+                // under a nested AGENTS.md carries it in its result
+                // (directory_instructions.rs has the why). Any tool
+                // whose arguments name a path counts, read or write,
+                // run or refused: the rules apply to what comes next.
+                if let Some(root) = workspace_root.as_deref()
+                    && let Some(target) = checkpoint_path(&call.arguments, Some(root))
+                {
+                    let blocks = crate::directory_instructions::blocks_for(
+                        root,
+                        &target,
+                        &history.lock().await,
+                    );
+                    if let Some(blocks) = blocks {
+                        result.push_str(&blocks);
+                    }
+                }
 
                 // The strip above is the prompt boundary: tool output,
                 // a web page, an MCP payload, anything the world sent
@@ -1950,6 +1967,47 @@ mod tests {
         assert_eq!(history.len(), 2);
         assert_eq!(history[0], WireMessage::user("hello"));
         assert_eq!(history[1], WireMessage::assistant("hi"));
+    }
+
+    #[test]
+    fn a_nested_agents_md_rides_the_first_result_under_it() {
+        let workspace = tempfile::tempdir().unwrap();
+        std::fs::create_dir(workspace.path().join("docs")).unwrap();
+        std::fs::write(workspace.path().join("docs/AGENTS.md"), "no em dashes\n").unwrap();
+        let call = |id: &str| Event::ToolCall {
+            id: id.into(),
+            name: "peek".into(),
+            arguments: r#"{"path": "docs/guide.md"}"#.into(),
+        };
+        let provider = Arc::new(ScriptedProvider {
+            seen: std::sync::Mutex::new(Vec::new()),
+            scripts: std::sync::Mutex::new(vec![
+                vec![call("c1"), Event::Done],
+                vec![call("c2"), Event::Done],
+                vec![Event::Token { delta: "ok".into() }, Event::Done],
+            ]),
+        });
+        let peek: Arc<dyn Tool> = Arc::new(StubTool::new("peek", false, "peeked"));
+        let history: SharedHistory = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let (mut spec, broker) = turn(provider, registry(&[peek]), history.clone(), "look");
+        spec.workspace_root = Some(workspace.path().to_path_buf());
+        let events = drain(run_turn(spec), &broker, |_| panic!("reads never prompt"));
+
+        let results: Vec<&String> = events
+            .iter()
+            .filter_map(|event| match event {
+                LoopEvent::ToolResult { result, .. } => Some(result),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(results.len(), 2);
+        // The first touch carries the file, in the transcript's record
+        // and in the model's history alike; the second owes nothing.
+        assert!(results[0].starts_with("peeked\n\n[directory instructions: docs/AGENTS.md]\n"));
+        assert!(results[0].contains("no em dashes"));
+        assert_eq!(results[1], "peeked");
+        let history = history.blocking_lock();
+        assert_eq!(history[2].content.as_deref(), Some(results[0].as_str()));
     }
 
     #[test]

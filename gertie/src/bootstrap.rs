@@ -897,8 +897,8 @@ impl Bootstrap {
         }
 
         // Instructions: the global tier once, the project tier per
-        // root. Both sanitized at the entrance (agent.rs's
-        // sanitize_untrusted), 2048 characters total.
+        // root. Each sanitized at the entrance (agent.rs's
+        // sanitize_untrusted), 2048 characters per file.
         let global = load_global_instructions();
         let project = load_project_instructions(&root);
         let instructions = join_instructions(global.as_deref(), project.as_deref());
@@ -996,10 +996,14 @@ impl Bootstrap {
                 map.insert(name, tool);
             }
         }
-        // Per-root instructions: the project tier only, the global
-        // tier is shared with the boot and rides along.
+        // Per-root instructions: the global tier plus this root's own
+        // project tier. Never the boot's joined text: that already
+        // carries the boot root's project file, which would then ride
+        // every other root's sessions (twice, in a worktree of the
+        // same repo).
+        let global = load_global_instructions();
         let project = load_project_instructions(root);
-        let instructions = join_instructions(self.instructions.as_deref(), project.as_deref());
+        let instructions = join_instructions(global.as_deref(), project.as_deref());
         let system_prompt = system_prompt_for(root, &self.skill_index, project.as_deref());
         (
             tools,
@@ -1061,22 +1065,21 @@ fn load_project_instructions(root: &Path) -> Option<String> {
     std::fs::read_to_string(&path).ok()
 }
 
+/// Each tier is sanitized and capped on its own (the same
+/// `INSTRUCTIONS_CAP` a nested directory file gets), so a long global
+/// file never crowds the project's rules out of the join.
 fn join_instructions(global: Option<&str>, project: Option<&str>) -> Option<String> {
     let mut joined = String::new();
-    if let Some(text) = global {
+    for text in [global, project].into_iter().flatten() {
+        let clean = gertie_core::agent::sanitize_untrusted(text, gertie_core::INSTRUCTIONS_CAP);
         joined.push_str("## Instructions\n\n");
-        joined.push_str(text.trim_end());
-        joined.push('\n');
-    }
-    if let Some(text) = project {
-        joined.push_str("## Instructions\n\n");
-        joined.push_str(text.trim_end());
+        joined.push_str(clean.trim_end());
         joined.push('\n');
     }
     if joined.is_empty() {
         return None;
     }
-    Some(gertie_core::agent::sanitize_untrusted(&joined, 2048))
+    Some(joined)
 }
 
 /// The provider over every configured endpoint (selected first, then
@@ -1550,6 +1553,12 @@ mod tests {
         // MCP and skill text.
         let dirty = join_instructions(Some("a\u{200B}b"), None).unwrap();
         assert_eq!(dirty, "## Instructions\n\nab\n");
+        // The cap is per file: a global file at the cap leaves the
+        // project's rules whole.
+        let long = "g".repeat(5000);
+        let capped = join_instructions(Some(&long), Some("project rules")).unwrap();
+        assert!(capped.contains("project rules"));
+        assert_eq!(capped.matches('g').count(), gertie_core::INSTRUCTIONS_CAP);
     }
 
     /// Council seats resolve to their pinned endpoint; a pin to an

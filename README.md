@@ -92,8 +92,10 @@ no key at all.
 
 **Memory and instructions**: Gertie remembers across sessions. Facts it proposes at
 session end land as review cards you approve or deny; rules that must always apply go
-in `AGENTS.md` at the repo root (or `~/.config/gertie/AGENTS.md` for global ones).
-Both are plain markdown you can edit by hand. [docs/memory.md](docs/memory.md)
+in `AGENTS.md` at the repo root (or `~/.config/gertie/AGENTS.md` for global ones). An
+`AGENTS.md` in a subdirectory scopes its rules to that part of the tree: Gertie loads it
+the first time it reads or edits a file under it. All are plain markdown you can edit by
+hand. [docs/memory.md](docs/memory.md)
 explains the whole system, including the weekly cleanup pass ("dreaming").
 
 `config.example.toml` documents everything else: wire selection (`openai` |
