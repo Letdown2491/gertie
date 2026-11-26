@@ -9,7 +9,7 @@
 //! file for you to fix; an unparseable file falls back to the
 //! defaults entirely, also without touching the file.
 
-use gpui_kit::{App, KeyBinding};
+use gpui_kit::{Action, App, KeyBinding, KeyBindingContextPredicate, OperatingSystem};
 use serde::{Deserialize, Serialize};
 
 /// The keymap file's rules, as written.
@@ -90,12 +90,16 @@ fn rule_is_valid(rule: &Rule) -> bool {
         .as_deref()
         .map(|when| WHEN_CONTEXTS.iter().any(|(name, _)| *name == when))
         .unwrap_or(true);
-    command_ok && when_ok && gpui_kit::Keystroke::parse(&rule.key).is_ok()
+    // The key comes from the user's file, so the dynamic parser:
+    // `Keystroke::parse` takes only `'static` strings since gpui-kit 0.11.
+    command_ok
+        && when_ok
+        && gpui_kit::Keystroke::parse_with_os(&rule.key, OperatingSystem::Linux).is_ok()
 }
 
-/// The binding a rule produces, None for a rule that binds nothing
-/// ("none") or one that failed validation (ignored).
-fn rule_to_binding(rule: &Rule) -> Option<KeyBinding> {
+/// The action a rule binds and its context, None for a rule that binds
+/// nothing ("none") or one that failed validation (ignored).
+fn rule_action(rule: &Rule) -> Option<(Box<dyn Action>, Option<&'static str>)> {
     if !rule_is_valid(rule) || rule.command == "none" {
         return None;
     }
@@ -104,26 +108,37 @@ fn rule_to_binding(rule: &Rule) -> Option<KeyBinding> {
         .as_deref()
         .and_then(|when| WHEN_CONTEXTS.iter().find(|(name, _)| *name == when))
         .map(|(_, context)| *context);
-    let key = rule.key.as_str();
-    Some(match rule.command.as_str() {
-        "palette" => KeyBinding::new(key, crate::palette::OpenPalette, context),
-        "find-transcript" => KeyBinding::new(key, crate::chat::FindInTranscript, context),
-        "find-close" => KeyBinding::new(key, crate::chat::FindClose, context),
-        "close-turn-diff" => KeyBinding::new(key, crate::chat::CloseTurnDiff, context),
-        "undo-delete-session" => KeyBinding::new(key, crate::chat::UndoDeleteSession, context),
-        "recall-up" => KeyBinding::new(key, crate::chat::RecallUp, context),
-        "recall-down" => KeyBinding::new(key, crate::chat::RecallDown, context),
-        "cycle-focus" => KeyBinding::new(key, crate::chat::CycleFocus, context),
-        "cycle-focus-back" => KeyBinding::new(key, crate::chat::CycleFocusBack, context),
+    let action: Box<dyn Action> = match rule.command.as_str() {
+        "palette" => Box::new(crate::palette::OpenPalette),
+        "find-transcript" => Box::new(crate::chat::FindInTranscript),
+        "find-close" => Box::new(crate::chat::FindClose),
+        "close-turn-diff" => Box::new(crate::chat::CloseTurnDiff),
+        "undo-delete-session" => Box::new(crate::chat::UndoDeleteSession),
+        "recall-up" => Box::new(crate::chat::RecallUp),
+        "recall-down" => Box::new(crate::chat::RecallDown),
+        "cycle-focus" => Box::new(crate::chat::CycleFocus),
+        "cycle-focus-back" => Box::new(crate::chat::CycleFocusBack),
         _ => return None,
-    })
+    };
+    Some((action, context))
+}
+
+/// The binding a rule produces. `KeyBinding::load` takes the key as
+/// read from the file (`KeyBinding::new` wants a `'static` string).
+fn rule_to_binding(rule: &Rule, cx: &App) -> Option<KeyBinding> {
+    let (action, context) = rule_action(rule)?;
+    let predicate = match context {
+        Some(context) => Some(KeyBindingContextPredicate::parse(context).ok()?.into()),
+        None => None,
+    };
+    KeyBinding::load(&rule.key, action, predicate, false, None, cx).ok()
 }
 
 /// Binds the rules in order, later rules outrank earlier ones at the
 /// same context depth (gpui resolves a tie by the binding added
 /// later).
 pub fn bind_rules(rules: &[Rule], cx: &mut App) {
-    let bindings: Vec<KeyBinding> = rules.iter().filter_map(rule_to_binding).collect();
+    let bindings: Vec<KeyBinding> = rules.iter().filter_map(|rule| rule_to_binding(rule, cx)).collect();
     cx.bind_keys(bindings);
 }
 
@@ -302,7 +317,7 @@ command = "palette"
         let rules = parse_rules(source).expect("structurally fine");
         assert_eq!(rules.len(), 1, "only the valid rule survives parsing");
         assert_eq!(rules[0].key, "ctrl-p");
-        assert!(rule_to_binding(&rules[0]).is_some(), "and it binds");
+        assert!(rule_action(&rules[0]).is_some(), "and it binds");
     }
 
     #[test]
@@ -313,7 +328,7 @@ command = "palette"
             when: None,
         };
         assert!(rule_is_valid(&rule), "none is a valid command");
-        assert!(rule_to_binding(&rule).is_none(), "but it binds nothing");
+        assert!(rule_action(&rule).is_none(), "but it binds nothing");
     }
 
     #[test]

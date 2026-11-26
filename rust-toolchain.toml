@@ -1,5 +1,5 @@
 # gpui-kit's GPUI family (gpui-pre) tracks Zed's toolchain; keep in sync with
-# the toolchain gpui-kit 0.7 / gpui-pre 0.3.x was built against.
+# the toolchain gpui-kit 0.11 / gpui-pre 0.3.14 builds with (checked 2026-11-25).
 [toolchain]
 channel = "1.97.1"
 profile = "minimal"

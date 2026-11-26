@@ -46,7 +46,7 @@ Rules:
 
 ## UI framework
 
-**gpui-kit** (Longbridge's `gpui-pre` namespace + gpui-component widgets), version line 0.7.x,
+**gpui-kit** (Longbridge's `gpui-pre` namespace + gpui-component widgets), version line 0.11.x,
 the distribution proven in `~/Documents/riddim`. Chosen over vendoring zed main (the
 `~/Documents/kumaui` approach: 95 MB vendor, hand-mirrored `[patch.crates-io]`, toolchain
 lockstep) because a text-heavy workbench is exactly what gpui-component ships widgets for.
