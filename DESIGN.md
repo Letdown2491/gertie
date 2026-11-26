@@ -650,18 +650,15 @@ are. The sidebar carries the working marker: a live turn shows a green dot on it
 conversation's row, a finish seen by nobody a blue one, a rate-limit pause the pause
 icon.
 
-**Projects** group the sidebar. A project is a folder and a name in the session store
-(`projects`), nothing more: no settings ride on it yet. A conversation belongs to the
-project whose folder is the longest component-wise prefix of its recorded
-`workspace_root`, so membership is derived, never stored per chat: a worktree chat
-(its checkout sits under `<repo>/.gertie/worktrees/`) lands under its repo for free,
-and adding or removing a project re-sorts history without touching a session row.
-Removing is list-only (the folder and the chats stay; the chats fall into Other).
-Each group folds, and the fold persists. With no projects the sidebar is the old flat
-list. The first launch after the upgrade makes one project per folder existing chats
-ran in, minus the home folder and worktree checkouts, once per store, so a removed
-project is never resurrected. A project's + opens a blank chat rooted in its folder;
-a view that cannot take it (a turn running, a worktree tab) asks the shell for a new
+**Projects** group the sidebar, and only the human files anything into one. A project
+is a name and a default folder in the session store (`projects`); membership is a
+column on the session (`project_id`), set by the row's move list or by starting a chat
+from the project's +, never inferred from where a chat runs: a folder is not a
+project, and two unrelated chats in one folder stay unrelated until filed. The folder
+only says where the project's + roots new chats. Removing a project is list-only (its
+chats go back to Other; no session, file, or folder is deleted). Each group folds, and
+the fold persists; with no projects the sidebar is the old flat list. A view that cannot
+take a project's new chat (a turn running, a worktree tab) asks the shell for a new
 one. The palette matches project names and folders above history hits.
 
 The window shell has no tab bar: two lists of the same conversations was one

@@ -26,7 +26,7 @@ pub use memory::{Link, MemoryEntry, MemoryHit, MemoryStore, Op, Tier};
 pub use permissions::{
     AskFilter, ModeScope, PendingAsk, PermissionBroker, PermissionMode, PromptSource, TurnToken,
 };
-pub use projects::{Project, project_for};
+pub use projects::{Project, project_of};
 pub use provider::Provider;
 pub use request::{
     IMAGE_MARKER_PREFIX, Request, ToolCall, ToolSpec, WireMessage, data_url_parts,
@@ -199,6 +199,10 @@ pub struct SessionSummary {
     /// resume matches on it. The store is one global memory, but a
     /// chat opened in a folder is that folder's chat.
     pub workspace_root: Option<String>,
+    /// The project the human put this conversation in, if any. Never
+    /// inferred: a chat joins a project by being moved there or by
+    /// starting from the project's +.
+    pub project_id: Option<i64>,
 }
 
 /// One full-text search hit: which session, what role, and a marked
@@ -332,6 +336,8 @@ impl SessionStore {
             // here (a rewind's abandoned branch, rows never deleted,
             // drops off the walk instead of interleaving).
             ("tip_id", "INTEGER"),
+            // The project the human filed the conversation under.
+            ("project_id", "INTEGER"),
         ] {
             if !session_columns.contains(&column.to_string()) {
                 connection.execute(
@@ -434,6 +440,7 @@ impl SessionStore {
                         .and_then(|raw| raw.parse::<PermissionMode>().ok())
                         .unwrap_or_default(),
                     workspace_root: row.get::<_, Option<String>>(8).ok().flatten(),
+                    project_id: None,
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -511,7 +518,8 @@ impl SessionStore {
         let mut statement = connection.prepare(
             "SELECT s.id, s.title, s.input_tokens, s.output_tokens, s.cached_input_tokens,
                     s.last_context_tokens,
-                    s.settled_at IS NOT NULL, s.limited_at IS NOT NULL, s.mode, s.workspace_root
+                    s.settled_at IS NOT NULL, s.limited_at IS NOT NULL, s.mode, s.workspace_root,
+                    s.project_id
              FROM sessions s
              LEFT JOIN messages m ON m.session_id = s.id
              WHERE s.kind = 'chat'
@@ -534,6 +542,7 @@ impl SessionStore {
                     .and_then(|raw| raw.parse::<PermissionMode>().ok())
                     .unwrap_or_default(),
                 workspace_root: row.get::<_, Option<String>>(9).ok().flatten(),
+                project_id: row.get::<_, Option<i64>>(10).ok().flatten(),
             })
         })?;
         rows.collect()

@@ -1904,14 +1904,18 @@ fn two_session_store() -> Arc<SessionStore> {
     store
 }
 
-/// Two chats in two folders, one of them a project.
+/// Two chats, both run in the project's folder, only the first filed
+/// under it: where a chat runs never files it.
 fn project_store() -> (Arc<SessionStore>, i64) {
     let store = two_session_store();
     store.set_session_workspace(gertie_core::SessionId(1), Path::new("/w/alpha"));
-    store.set_session_workspace(gertie_core::SessionId(2), Path::new("/w/beta"));
+    store.set_session_workspace(gertie_core::SessionId(2), Path::new("/w/alpha"));
     let project = store
         .add_project(Path::new("/w/alpha"), None)
         .expect("project");
+    store
+        .set_session_project(gertie_core::SessionId(1), Some(project.id))
+        .expect("file");
     (store, project.id)
 }
 
@@ -1926,8 +1930,8 @@ fn shown(fixture: &mut Fixture, ids: &[&str]) -> Vec<bool> {
     out
 }
 
-/// Projects group the sidebar: a chat sits under the project its
-/// folder is in, the rest under Other, and both groups fold, the
+/// Projects group the sidebar: a chat filed under a project sits in
+/// its group, the rest under Other, and both groups fold, the
 /// project's fold persisting in the store.
 #[test]
 fn chats_group_under_their_project_and_the_rest_under_other() {
@@ -1956,8 +1960,8 @@ fn chats_group_under_their_project_and_the_rest_under_other() {
     assert!(store.store_flag("other_collapsed"));
 }
 
-/// Removing a project only takes it off the list: its chat stays, now
-/// under the flat list (no projects left), and keeps its folder.
+/// Removing a project only takes it off the list: its chat stays, back
+/// in the flat list (no projects left), and keeps its folder.
 #[test]
 fn removing_a_project_keeps_its_chats_and_their_folder() {
     let (store, id) = project_store();
@@ -1978,14 +1982,55 @@ fn removing_a_project_keeps_its_chats_and_their_folder() {
             .as_deref(),
         Some("/w/alpha")
     );
+    assert!(
+        store
+            .list_sessions()
+            .unwrap()
+            .iter()
+            .all(|summary| summary.project_id.is_none())
+    );
 }
 
-/// A project's + opens a blank chat rooted in its folder.
+/// A chat moves in through its row's move list and out the same way.
+#[test]
+fn a_chat_moves_into_a_project_and_back_out() {
+    let (store, id) = project_store();
+    let mut fixture = fixture_with_store(store.clone());
+    let filed = |store: &SessionStore| {
+        store
+            .list_sessions()
+            .unwrap()
+            .into_iter()
+            .find(|summary| summary.id.0 == 2)
+            .unwrap()
+            .project_id
+    };
+    fixture.act(|window, cx| window.click("move-2", cx));
+    assert_eq!(
+        shown(&mut fixture, &[&format!("move-2-to-{id}"), "move-2-out"]),
+        vec![true, false],
+        "an unfiled chat is offered the project, not a way out"
+    );
+    fixture.act(|window, cx| window.click(format!("move-2-to-{id}"), cx));
+    assert_eq!(filed(&store), Some(id));
+    assert_eq!(
+        shown(&mut fixture, &["project-other"]),
+        vec![false],
+        "Other emptied"
+    );
+    fixture.act(|window, cx| window.click("move-2", cx));
+    fixture.act(|window, cx| window.click("move-2-out", cx));
+    assert_eq!(filed(&store), None);
+}
+
+/// A project's + opens a blank chat rooted in its folder, filed under
+/// the project when the first message creates it.
 #[test]
 fn a_projects_plus_starts_a_chat_in_its_folder() {
     let store = Arc::new(SessionStore::open(Path::new(":memory:")).expect("memory store"));
     let folder = tempfile::tempdir().expect("project folder");
     let project = store.add_project(folder.path(), None).expect("project");
+    let store_handle = store.clone();
     let mut fixture = fixture_with_store(store);
     fixture.act(|window, cx| window.click(format!("project-new-{}", project.id), cx));
     let (root, session) = fixture.cx.update(|cx| {
@@ -1997,6 +2042,13 @@ fn a_projects_plus_starts_a_chat_in_its_folder() {
         folder.path().canonicalize().unwrap()
     );
     assert_eq!(session, None, "a blank chat, created by its first message");
+    fixture.act(|window, cx| {
+        window.input("hello", cx);
+        window.press("enter", cx);
+    });
+    let sessions = store_handle.list_sessions().unwrap();
+    assert_eq!(sessions.len(), 1);
+    assert_eq!(sessions[0].project_id, Some(project.id));
 }
 
 /// The palette finds a project by name; confirming it opens the group.

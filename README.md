@@ -26,10 +26,10 @@ fronts, nothing shared over the network.
   test, debug, review, research, librarian) dispatched by the leader; define your own in
   TOML, pinned to any configured endpoint: a council of three models can review one diff
   (the bundled `council` skill runs the loop). Workers never spawn workers.
-- **Projects**: name a folder and its chats group under it in the sidebar, each group
-  folding on its own; a project's + starts a chat rooted there, worktree chats land under
-  their repo, and everything else sits in Other. Removing a project only takes it off
-  the list. Ctrl+K finds projects by name.
+- **Projects**: make a project (a name and a default folder) and file conversations
+  under it from their row's move button; a project's + starts a chat already filed there,
+  rooted in its folder. Chats you haven't filed sit in Other. Each group folds, removing
+  a project only takes it off the list, and Ctrl+K finds projects by name.
 - **Parallel and worktree chats**: a running turn keeps going while you open another
   conversation from the sidebar, which marks it running or finished. New worktree chat
   starts a chat in its own `git worktree`, so two agents can edit the

@@ -387,12 +387,6 @@ impl Bootstrap {
                 .map_err(|error| eprintln!("warning: ephemeral store: {error}"))
                 .ok()
         } else {
-            // Projects arrive with 1.2.0: the folders existing chats
-            // ran in become projects, once per store.
-            if let Some(store) = &store {
-                let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
-                let _ = store.seed_projects(home.as_deref());
-            }
             store
         };
         let Some(store) = store else {

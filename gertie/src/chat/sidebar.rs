@@ -220,8 +220,7 @@ impl ChatView {
             return rows;
         }
         let owner = |summary: &gertie_core::SessionSummary| {
-            gertie_core::project_for(&self.projects, summary.workspace_root.as_deref())
-                .map(|project| project.id)
+            gertie_core::project_of(&self.projects, summary).map(|project| project.id)
         };
         for project in &self.projects {
             let chats: Vec<_> = active
@@ -395,13 +394,13 @@ impl ChatView {
                 )
                 .on_click(cx.listener(move |this, _, window, cx| {
                     cx.stop_propagation();
-                    this.new_chat_in(root.clone(), window, cx);
+                    this.new_chat_in(root.clone(), id, window, cx);
                 })),
             )
             .into_any_element()
     }
 
-    /// The "Other" group's header: chats whose folder is in no project.
+    /// The "Other" group's header: chats not filed under any project.
     fn other_header(&self, chats: usize, cx: &mut Context<Self>) -> AnyElement {
         let hover_bg = cx.theme().foreground.opacity(0.06);
         div()
@@ -418,9 +417,7 @@ impl ChatView {
             .rounded(px(6.))
             .cursor_pointer()
             .hover(move |row| row.bg(hover_bg))
-            .tooltip(|window, cx| {
-                Tooltip::new("Chats whose folder is in no project").build(window, cx)
-            })
+            .tooltip(|window, cx| Tooltip::new("Chats not in any project").build(window, cx))
             .on_click(cx.listener(|this, _, _, cx| this.toggle_other(cx)))
             .child(
                 Icon::new(if self.other_collapsed {

@@ -268,9 +268,13 @@ pub enum ShellRequest {
     NewChat,
     /// A new chat in its own git worktree of this repo.
     NewWorktreeChat,
-    /// A new chat rooted in a project's folder, asked for when this
-    /// view can't take it (a turn runs, or it is a worktree tab).
-    NewChatIn(std::path::PathBuf),
+    /// A new chat in a project (rooted in its folder, filed under it),
+    /// asked for when this view can't take it (a turn runs, or it is a
+    /// worktree tab).
+    NewChatIn {
+        root: std::path::PathBuf,
+        project: i64,
+    },
 }
 
 /// The shell hook: weak to the shell, set by tabs.rs. None in tests
@@ -636,6 +640,11 @@ pub struct ChatView {
     renaming_project: Option<i64>,
     /// Whether the "Other" group is folded, persisted as a store flag.
     other_collapsed: bool,
+    /// The project a blank chat started from: filed there when its
+    /// first message creates the session.
+    pending_project: Option<i64>,
+    /// The conversation whose "move to project" list is open.
+    moving: Option<SessionId>,
     /// The right column: the settings view.
     panel: Panel,
     /// The settings editor (summary + form), its Saved event bubbles
@@ -1035,6 +1044,8 @@ impl ChatView {
             projects,
             renaming_project: None,
             other_collapsed,
+            pending_project: None,
+            moving: None,
             panel: Panel::None,
             settings_panel,
             // Tail: follow new content while pinned to the bottom, stop
@@ -1866,6 +1877,7 @@ impl ChatView {
         // Sessions are created lazily by the first message; "New chat" just
         // blanks the transcript until then.
         self.session_id = None;
+        self.pending_project = None;
         self.session_scope.set(None);
         // A fresh chat starts at the configured posture again.
         self.mode = self.default_mode;
@@ -3440,16 +3452,39 @@ impl ChatView {
                     .iter()
                     .filter(|summary| {
                         !summary.settled
-                            && gertie_core::project_for(
-                                &self.projects,
-                                summary.workspace_root.as_deref(),
-                            )
-                            .is_some_and(|owner| owner.id == project.id)
+                            && gertie_core::project_of(&self.projects, summary)
+                                .is_some_and(|owner| owner.id == project.id)
                     })
                     .count();
             }
         }
         None
+    }
+
+    /// Opens or closes a conversation's "move to project" list.
+    pub(super) fn toggle_moving(&mut self, session_id: SessionId, cx: &mut Context<Self>) {
+        self.moving = if self.moving == Some(session_id) {
+            None
+        } else {
+            Some(session_id)
+        };
+        cx.notify();
+    }
+
+    /// Files a conversation under a project, or out of every one.
+    pub(super) fn move_session(
+        &mut self,
+        session_id: SessionId,
+        project: Option<i64>,
+        cx: &mut Context<Self>,
+    ) {
+        self.moving = None;
+        if let Err(error) = self.store.set_session_project(session_id, project) {
+            self.push_notice(format!("The chat stays where it is, {error}."), cx);
+            return;
+        }
+        self.reload_lists();
+        cx.notify();
     }
 
     /// Folds or opens a project's group; the state persists.
@@ -3487,27 +3522,32 @@ impl ChatView {
         }
         self.reload_lists();
         self.push_notice(
-            format!("{name} is off the list. Its chats are under Other; the folder is untouched."),
+            format!(
+                "{name} is off the list. Its chats are back in the main list; nothing was deleted."
+            ),
             cx,
         );
     }
 
-    /// A project's +: a blank chat rooted in its folder. This view
+    /// A project's +: a blank chat rooted in its folder, filed under
+    /// the project when its first message creates it. This view
     /// takes it when it can; a running turn or a worktree tab (whose
     /// root is its checkout) hands it to a new view instead.
     pub fn new_chat_in(
         &mut self,
         root: std::path::PathBuf,
+        project: i64,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         if self.streaming || self.branch_naming.is_some() {
             if let Some(ask) = self.shell_ask.clone() {
-                ask(ShellRequest::NewChatIn(root), window, cx);
+                ask(ShellRequest::NewChatIn { root, project }, window, cx);
             }
             return;
         }
         self.new_session(window, cx);
+        self.pending_project = Some(project);
         let same = root == self.workspace_root
             || matches!(
                 (root.canonicalize(), self.workspace_root.canonicalize()),
@@ -4034,6 +4074,9 @@ impl ChatView {
                 // workspace rides in with `deliver_message`'s re-root
                 // check (a fresh session's root reads None → written).
                 let _ = self.store.set_session_mode(session_id, self.mode);
+                if let Some(project) = self.pending_project.take() {
+                    let _ = self.store.set_session_project(session_id, Some(project));
+                }
                 self.session_id = Some(session_id);
                 self.reload_lists();
                 session_id
@@ -5631,7 +5674,7 @@ impl ChatView {
                 .ghost()
                 .tooltip(tip)
         };
-        div()
+        let row = div()
             .id(SharedString::from(format!("session-{}", session_id.0)))
             // Observed so the harness can click the row; a no-op
             // outside test-support builds.
@@ -5724,6 +5767,22 @@ impl ChatView {
                             },
                         )),
                     )
+                    .when(!self.projects.is_empty(), |actions| {
+                        actions.child(
+                            action(
+                                format!("move-{}", session_id.0),
+                                IconName::FolderInput,
+                                "Move to a project",
+                            )
+                            .on_click(cx.listener(
+                                move |this, _, _, cx| {
+                                    // The row opens the session; its tools must not.
+                                    cx.stop_propagation();
+                                    this.toggle_moving(session_id, cx);
+                                },
+                            )),
+                        )
+                    })
                     .child(
                         action(
                             format!("settle-{}", session_id.0),
@@ -5758,8 +5817,51 @@ impl ChatView {
                             },
                         )),
                     ),
-            )
-            .into_any_element()
+            );
+        if self.moving != Some(session_id) {
+            return row.into_any_element();
+        }
+        // The move list: every project but the current one, and a way
+        // out of projects for a filed chat.
+        let target = |id: String, label: String, project: Option<i64>, cx: &mut Context<Self>| {
+            div()
+                .id(SharedString::from(id))
+                .test_support()
+                .h(px(26.))
+                .pl_3()
+                .flex()
+                .items_center()
+                .rounded(px(6.))
+                .cursor_pointer()
+                .text_size(px(12.))
+                .text_color(muted)
+                .hover(move |item| item.bg(hover_bg).text_color(foreground))
+                .on_click(
+                    cx.listener(move |this, _, _, cx| this.move_session(session_id, project, cx)),
+                )
+                .child(label)
+        };
+        let mut list = v_flex().pl_3().pb_1();
+        for project in &self.projects {
+            if summary.project_id == Some(project.id) {
+                continue;
+            }
+            list = list.child(target(
+                format!("move-{}-to-{}", session_id.0, project.id),
+                format!("→ {}", project.name),
+                Some(project.id),
+                cx,
+            ));
+        }
+        if summary.project_id.is_some() {
+            list = list.child(target(
+                format!("move-{}-out", session_id.0),
+                "→ No project".to_string(),
+                None,
+                cx,
+            ));
+        }
+        v_flex().w_full().child(row).child(list).into_any_element()
     }
 }
 

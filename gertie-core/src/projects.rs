@@ -1,15 +1,14 @@
-//! Projects: named folders the sidebar groups conversations under.
+//! Projects: groups the human makes and files conversations into.
 //!
-//! A project is a folder and a name, nothing more. A conversation
-//! belongs to the project whose root is the longest prefix of the
-//! conversation's `workspace_root`, so a worktree chat (its checkout
-//! lives under `<repo>/.gertie/worktrees/`) lands under its repo with
-//! no bookkeeping, and a folder nested inside another project's folder
-//! can be its own project. Removing a project only takes it off the
-//! list: no session, file or folder is touched, and its conversations
-//! fall back to the "Other" group.
+//! A project is a name and a folder. Membership is explicit, recorded
+//! on the session (`sessions.project_id`): a conversation is in a
+//! project only because it was moved there or started from the
+//! project's +. Where a chat happens to run decides nothing. The folder
+//! is the project's default workspace, where its + starts new chats.
+//! Removing a project takes it off the list and lets its chats go back
+//! to the ungrouped list; no session, file or folder is deleted.
 
-use crate::{SessionStore, SessionSummary};
+use crate::{SessionId, SessionStore, SessionSummary};
 use rusqlite::Connection;
 use std::path::{Path, PathBuf};
 
@@ -17,7 +16,8 @@ use std::path::{Path, PathBuf};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Project {
     pub id: i64,
-    /// The folder, as recorded (absolute, canonicalized when added).
+    /// The default workspace for the project's new chats (absolute,
+    /// canonicalized when added).
     pub root: String,
     pub name: String,
     pub collapsed: bool,
@@ -32,11 +32,37 @@ pub(crate) fn migrate(connection: &Connection) -> rusqlite::Result<()> {
              position INTEGER NOT NULL,
              collapsed INTEGER NOT NULL DEFAULT 0
          );
-         -- One-time store steps, by name (the projects seed today).
+         -- Named one-bit settings (the Other group's fold).
          CREATE TABLE IF NOT EXISTS store_flags (
              name TEXT PRIMARY KEY
          );",
-    )
+    )?;
+    undo_folder_seed(connection)
+}
+
+/// A pre-release build made one project per folder that existing chats
+/// ran in, flagged `projects_seeded`. Projects are the human's to make,
+/// so those go: every project still carrying its folder's own name
+/// (a renamed one was adopted and stays), then the flag.
+fn undo_folder_seed(connection: &Connection) -> rusqlite::Result<()> {
+    let seeded = connection
+        .prepare("SELECT 1 FROM store_flags WHERE name = 'projects_seeded'")?
+        .exists([])?;
+    if !seeded {
+        return Ok(());
+    }
+    let rows: Vec<(i64, String, String)> = {
+        let mut statement = connection.prepare("SELECT id, root, name FROM projects")?;
+        let rows = statement.query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?;
+        rows.collect::<rusqlite::Result<_>>()?
+    };
+    for (id, root, name) in rows {
+        if name == default_name(Path::new(&root)) {
+            connection.execute("DELETE FROM projects WHERE id = ?1", [id])?;
+        }
+    }
+    connection.execute("DELETE FROM store_flags WHERE name = 'projects_seeded'", [])?;
+    Ok(())
 }
 
 /// The default name for a folder: its last component, or the whole
@@ -47,18 +73,10 @@ pub fn default_name(root: &Path) -> String {
         .unwrap_or_else(|| root.display().to_string())
 }
 
-/// Which project a conversation belongs to: the project whose root is
-/// the longest component-wise prefix of `workspace_root`. None for a
-/// conversation with no recorded folder or one outside every project.
-pub fn project_for<'a>(
-    projects: &'a [Project],
-    workspace_root: Option<&str>,
-) -> Option<&'a Project> {
-    let root = Path::new(workspace_root?);
-    projects
-        .iter()
-        .filter(|project| root.starts_with(&project.root))
-        .max_by_key(|project| Path::new(&project.root).components().count())
+/// The project a conversation was filed under, if it still exists.
+pub fn project_of<'a>(projects: &'a [Project], summary: &SessionSummary) -> Option<&'a Project> {
+    let id = summary.project_id?;
+    projects.iter().find(|project| project.id == id)
 }
 
 impl SessionStore {
@@ -79,7 +97,7 @@ impl SessionStore {
         })
     }
 
-    /// Adds a folder as a project, last in order, named after the
+    /// Adds a project for a folder, last in order, named after the
     /// folder unless a name is given. The root is canonicalized when it
     /// exists, so the same folder reached two ways is one project; a
     /// folder that is already a project returns the existing row.
@@ -139,11 +157,31 @@ impl SessionStore {
         })
     }
 
-    /// Takes a project off the list. Sessions, files and the folder are
-    /// untouched; the conversations show under "Other" until the folder
-    /// is added again.
+    /// Files a conversation under a project, or takes it out of one
+    /// (`None`).
+    pub fn set_session_project(
+        &self,
+        session: SessionId,
+        project: Option<i64>,
+    ) -> rusqlite::Result<()> {
+        self.with_connection(|connection| {
+            connection
+                .execute(
+                    "UPDATE sessions SET project_id = ?2 WHERE id = ?1",
+                    rusqlite::params![session.0 as i64, project],
+                )
+                .map(|_| ())
+        })
+    }
+
+    /// Takes a project off the list. Its conversations go back to the
+    /// ungrouped list; sessions, files and the folder are untouched.
     pub fn remove_project(&self, id: i64) -> rusqlite::Result<()> {
         self.with_connection(|connection| {
+            connection.execute(
+                "UPDATE sessions SET project_id = NULL WHERE project_id = ?1",
+                [id],
+            )?;
             connection
                 .execute("DELETE FROM projects WHERE id = ?1", [id])
                 .map(|_| ())
@@ -174,91 +212,30 @@ impl SessionStore {
             .map(|_| ())
         })
     }
-
-    /// The upgrade step, once per store: every distinct folder the
-    /// existing conversations ran in becomes its own project, oldest
-    /// first, except `home` (a chat that ran in the home folder is not
-    /// a project, it stays under "Other") and worktree checkouts (they
-    /// belong to their repo). Returns how many projects it created.
-    pub fn seed_projects(&self, home: Option<&Path>) -> rusqlite::Result<usize> {
-        let seeded: bool = self.with_connection(|connection| {
-            connection
-                .prepare("SELECT 1 FROM store_flags WHERE name = 'projects_seeded'")?
-                .exists([])
-        })?;
-        if seeded {
-            return Ok(0);
-        }
-        let mut roots: Vec<String> = Vec::new();
-        let mut sessions = self.list_sessions()?;
-        // list_sessions is newest first; seed in the order work began.
-        sessions.reverse();
-        for SessionSummary { workspace_root, .. } in sessions {
-            let Some(root) = workspace_root else {
-                continue;
-            };
-            let path = Path::new(&root);
-            // The home folder reached through a symlink (/home vs
-            // /var/home) is still the home folder.
-            let is_home = home.is_some_and(|home| {
-                path == home
-                    || matches!(
-                        (path.canonicalize(), home.canonicalize()),
-                        (Ok(a), Ok(b)) if a == b
-                    )
-            });
-            if is_home || root.contains("/.gertie/worktrees/") {
-                continue;
-            }
-            if !roots.contains(&root) {
-                roots.push(root);
-            }
-        }
-        let mut created = 0;
-        for root in &roots {
-            let before = self.list_projects()?.len();
-            self.add_project(Path::new(root), None)?;
-            if self.list_projects()?.len() > before {
-                created += 1;
-            }
-        }
-        self.with_connection(|connection| {
-            connection.execute(
-                "INSERT OR IGNORE INTO store_flags (name) VALUES ('projects_seeded')",
-                [],
-            )
-        })?;
-        Ok(created)
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn project(id: i64, root: &str) -> Project {
-        Project {
-            id,
-            root: root.into(),
-            name: default_name(Path::new(root)),
-            collapsed: false,
-        }
-    }
-
     #[test]
-    fn a_chat_belongs_to_the_longest_matching_root() {
-        let projects = vec![
-            project(1, "/w/repo"),
-            project(2, "/w/repo/sub"),
-            project(3, "/w/other"),
-        ];
-        let id = |root: Option<&str>| project_for(&projects, root).map(|project| project.id);
-        assert_eq!(id(Some("/w/repo")), Some(1));
-        assert_eq!(id(Some("/w/repo/.gertie/worktrees/tab-1")), Some(1));
-        assert_eq!(id(Some("/w/repo/sub/x")), Some(2));
-        // Component-wise: /w/repository is not under /w/repo.
-        assert_eq!(id(Some("/w/repository")), None);
-        assert_eq!(id(None), None);
+    fn membership_is_explicit_and_running_in_the_folder_files_nothing() {
+        let store = SessionStore::open(Path::new(":memory:")).unwrap();
+        let project = store.add_project(Path::new("/w/alpha"), None).unwrap();
+        let inside = store.create_session("filed").unwrap();
+        let outside = store.create_session("loose").unwrap();
+        store.set_session_workspace(outside, Path::new("/w/alpha"));
+        store.set_session_project(inside, Some(project.id)).unwrap();
+        let projects = store.list_projects().unwrap();
+        let owner = |id: SessionId| {
+            let sessions = store.list_sessions().unwrap();
+            let summary = sessions.iter().find(|summary| summary.id == id).unwrap();
+            project_of(&projects, summary).map(|project| project.id)
+        };
+        assert_eq!(owner(inside), Some(project.id));
+        assert_eq!(owner(outside), None);
+        store.set_session_project(inside, None).unwrap();
+        assert_eq!(owner(inside), None);
     }
 
     #[test]
@@ -289,41 +266,44 @@ mod tests {
 
         let session = store.create_session("chat").unwrap();
         store.set_session_workspace(session, Path::new("/no/such/folder"));
+        store.set_session_project(session, Some(second.id)).unwrap();
         store.remove_project(second.id).unwrap();
         assert_eq!(store.list_projects().unwrap().len(), 1);
-        assert_eq!(
-            store.session_workspace(session).as_deref(),
-            Some("/no/such/folder"),
-            "the conversation keeps its folder"
-        );
+        let summary = store.list_sessions().unwrap().pop().unwrap();
+        assert_eq!(summary.project_id, None, "the chat is ungrouped again");
+        assert_eq!(summary.workspace_root.as_deref(), Some("/no/such/folder"));
     }
 
     #[test]
-    fn the_seed_makes_one_project_per_folder_once() {
-        let store = SessionStore::open(Path::new(":memory:")).unwrap();
-        for root in [
-            "/w/noscat",
-            "/w/gertie",
-            "/w/noscat",
-            "/home/me",
-            "/w/gertie/.gertie/worktrees/tab-2",
-        ] {
-            let session = store.create_session("chat").unwrap();
-            store.set_session_workspace(session, Path::new(root));
+    fn the_pre_release_folder_seed_is_undone_once_keeping_renamed_ones() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sessions.db");
+        {
+            let store = SessionStore::open(&path).unwrap();
+            store.add_project(Path::new("/w/noscat"), None).unwrap();
+            let kept = store.add_project(Path::new("/w/gertie"), None).unwrap();
+            store.rename_project(kept.id, "Gertie app").unwrap();
+            store.set_store_flag("projects_seeded", true).unwrap();
         }
-        store.create_session("never sent").unwrap();
-        assert_eq!(store.seed_projects(Some(Path::new("/home/me"))).unwrap(), 2);
+        let store = SessionStore::open(&path).unwrap();
         let names: Vec<String> = store
             .list_projects()
             .unwrap()
             .into_iter()
             .map(|project| project.name)
             .collect();
-        assert_eq!(names, vec!["noscat", "gertie"]);
-        // Once: a removed project is not resurrected by the next launch.
-        let noscat = store.list_projects().unwrap()[0].id;
-        store.remove_project(noscat).unwrap();
-        assert_eq!(store.seed_projects(Some(Path::new("/home/me"))).unwrap(), 0);
-        assert_eq!(store.list_projects().unwrap().len(), 1);
+        assert_eq!(names, vec!["Gertie app"]);
+        assert!(!store.store_flag("projects_seeded"));
+        // Once: a project added afterwards under its folder's name stays.
+        store.add_project(Path::new("/w/noscat"), None).unwrap();
+        drop(store);
+        assert_eq!(
+            SessionStore::open(&path)
+                .unwrap()
+                .list_projects()
+                .unwrap()
+                .len(),
+            2
+        );
     }
 }
