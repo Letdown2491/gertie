@@ -533,9 +533,27 @@ impl Bootstrap {
         // when memory is on. The changelog lands in the tier's dreams/.
         if config.memory_enabled()
             && config.memory_dream_days() > 0
-            && let Some(changelog) = dream(&memory, &workspace_root.join(".gertie/memory"))
         {
-            eprintln!("{changelog}");
+            // The idle clock: dream_days is a *cadence*, not a
+            // boot-time constant. The stamp lives beside the
+            // changelogs it gates; its absence (first run) dreams
+            // immediately, which is also the migration path for
+            // stores that predate the clock.
+            let tier = workspace_root.join(".gertie/memory");
+            let stamp = tier.join("dreams/.last-dream");
+            let due = std::fs::metadata(&stamp)
+                .and_then(|meta| meta.modified())
+                .map(|modified| modified.elapsed().is_ok_and(|age| {
+                    age.as_secs() >= config.memory_dream_days() * 86_400
+                }))
+                .unwrap_or(true);
+            if due
+                && let Some(changelog) = dream(&memory, &tier)
+            {
+                eprintln!("{changelog}");
+                let _ = std::fs::create_dir_all(stamp.parent().unwrap());
+                let _ = std::fs::write(&stamp, b"");
+            }
         }
         let memory_index = render_memory_index(&memory);
         let memory_extract_provider: Option<Arc<dyn gertie_core::Provider>> = config
