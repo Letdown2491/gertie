@@ -1089,15 +1089,19 @@ mod tests {
     ) -> ToolResult {
         let waker = std::task::Waker::noop();
         let mut cx = std::task::Context::from_waker(waker);
-        match future.as_mut().poll(&mut cx) {
-            std::task::Poll::Ready(result) => result,
-            std::task::Poll::Pending => {
-                std::thread::sleep(std::time::Duration::from_millis(10));
-                match future.as_mut().poll(&mut cx) {
-                    std::task::Poll::Ready(result) => result,
-                    std::task::Poll::Pending => panic!("tool future never settled"),
-                }
+        // A loaded machine (the whole workspace testing in parallel)
+        // can take longer than one short sleep: keep polling, with a
+        // ceiling that still catches a future that never settles.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            if let std::task::Poll::Ready(result) = future.as_mut().poll(&mut cx) {
+                return result;
             }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "tool future never settled"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
         }
     }
 

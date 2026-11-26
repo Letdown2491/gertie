@@ -1447,7 +1447,7 @@ impl ChatView {
     pub fn fill_history_for_test(&mut self, pairs: usize, chars: usize) {
         let mut history = self.history.blocking_lock();
         for index in 0..pairs {
-            history.push(gertie_core::request::WireMessage::user(&format!(
+            history.push(gertie_core::request::WireMessage::user(format!(
                 "question {index} {}",
                 "q".repeat(chars)
             )));
