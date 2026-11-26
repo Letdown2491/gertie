@@ -5182,3 +5182,288 @@ fn a_real_sidebar_click_loads_a_same_root_session() {
     assert_eq!(loaded, Some(session), "the clicked session loads");
     assert_eq!(tabs, 1, "rule 1: the same-root click never opens a tab");
 }
+
+/// A replay provider over one scenario file, the scripted-turn helper
+/// the status column tests share.
+fn replay_provider(scenario: &str) -> (Arc<gertie_providers::AnyProvider>, tempfile::TempDir) {
+    let scenarios = tempfile::tempdir().expect("scenario dir");
+    std::fs::write(scenarios.path().join("status.toml"), scenario).expect("scenario file");
+    let endpoint = gertie_providers::Endpoint {
+        name: "replay".into(),
+        base_url: scenarios.path().to_string_lossy().into_owned(),
+        model: "status".into(),
+        api_key: None,
+        context_window: None,
+        wire: gertie_providers::Wire::Replay,
+    };
+    let provider = Arc::new(
+        gertie_providers::AnyProvider::with_endpoints(vec![endpoint]).expect("replay provider"),
+    );
+    (provider, scenarios)
+}
+
+/// The status column (issue #33): a scripted turn reads a file, states
+/// its goal and next step, and consults memory. The column shows the
+/// goal, the touched file, the next step, and the consulted entry with
+/// its moved evidence; the riding line names the entry and, the
+/// evidence having moved, carries the flag. Folding the column leaves
+/// the rail and the header chip, and the fold is stored per
+/// conversation.
+#[test]
+fn the_status_column_shows_the_session_state_and_folds_to_a_rail() {
+    let dir = tempfile::tempdir().expect("workspace");
+    std::fs::write(dir.path().join("teardown.rs"), "fn teardown() {}\n").expect("cited file");
+    std::fs::create_dir_all(dir.path().join("project")).expect("tier root");
+    std::fs::write(
+        dir.path().join("project").join("gotchas.md"),
+        "- [p12] helpful=0 harmful=0 cite the flake before blaming the test \
+         [evidence: teardown.rs@000000000000]\n",
+    )
+    .expect("topic file");
+    let store = Arc::new(SessionStore::open(Path::new(":memory:")).expect("session store"));
+    let memory = Arc::new(gertie_core::MemoryStore::open(
+        dir.path().join("project"),
+        dir.path().join("global"),
+        store.clone(),
+    ));
+    memory.sync().expect("sidecar sync");
+    let (provider, scenarios) = replay_provider(
+        "[[steps]]\ntext = ''\n\n\
+         [[steps.tool_calls]]\nname = \"status\"\n\
+         arguments = '{\"goal\": \"Fix the teardown race\", \"next\": \"re-run the suite\"}'\n\n\
+         [[steps.tool_calls]]\nname = \"search_memory\"\n\
+         arguments = '{\"query\": \"flake\"}'\n\n\
+         [[steps.tool_calls]]\nname = \"read_file\"\n\
+         arguments = '{\"path\": \"teardown.rs\"}'\n\n\
+         [[steps]]\ntext = 'done'\n",
+    );
+    let mut fixture = fixture_built(
+        store.clone(),
+        None,
+        Some(dir.path().to_path_buf()),
+        None,
+        Some(provider),
+        None,
+        vec![
+            Arc::new(gertie_tools::Status),
+            Arc::new(gertie_tools::memory::SearchMemory::new(memory.clone())),
+        ],
+        Some(memory),
+        None,
+    );
+    fixture.hold = vec![scenarios, dir];
+
+    fixture.act(|window, _| {
+        assert!(
+            window.try_find("status-column").is_none(),
+            "a fresh chat has nothing to show"
+        );
+    });
+    fixture.act(|window, cx| {
+        window.input("The widget_test keeps flaking", cx);
+        window.press("enter", cx);
+    });
+    pump_until(
+        &mut fixture,
+        200,
+        |fixture| {
+            fixture.cx.update(|cx| {
+                !fixture
+                    .view
+                    .upgrade()
+                    .expect("view alive")
+                    .read(cx)
+                    .is_streaming()
+            })
+        },
+        "the scripted turn",
+    );
+    let (goal, next, touched, ground) = fixture.cx.update(|cx| {
+        fixture
+            .view
+            .upgrade()
+            .expect("view alive")
+            .read(cx)
+            .status_for_test()
+    });
+    assert_eq!(goal.as_deref(), Some("Fix the teardown race"));
+    assert_eq!(next.as_deref(), Some("re-run the suite"));
+    assert_eq!(touched, vec![("teardown.rs".to_string(), "read")]);
+    assert_eq!(ground, vec!["p12".to_string()]);
+    let riding = fixture.cx.update(|cx| {
+        fixture
+            .view
+            .upgrade()
+            .expect("view alive")
+            .read(cx)
+            .riding_for_test()
+    });
+    let (id, flag) = riding.expect("the riding line names the consulted entry");
+    assert_eq!(id, "p12");
+    let flag = flag.expect("moved evidence puts the full form in play");
+    assert!(
+        flag.contains("verified current before acting"),
+        "the work read the moved file: {flag}"
+    );
+    // The sizing spike, kept as a guard: a permanent right column in
+    // the flex row must take its width and stay inside the window, the
+    // transcript yielding, not overflowing (the memory panel's
+    // zero-extent lesson came from this same row).
+    fixture.act(|window, _| {
+        let column = window
+            .try_find("status-column")
+            .map(|found| found.bounds())
+            .expect("the column is laid out");
+        eprintln!("status column bounds: {column:?}");
+        assert!(
+            column.size.width > px(299.) && column.size.width < px(301.),
+            "the column keeps its width: {column:?}"
+        );
+        assert!(
+            column.right() <= px(900.5),
+            "the column stays inside the window: {column:?}"
+        );
+        assert!(
+            column.size.height > px(100.),
+            "the column has height: {column:?}"
+        );
+    });
+    fixture.act(|window, _| {
+        assert!(
+            window.try_find("status-column").is_some(),
+            "the column shows"
+        );
+        assert!(
+            window.try_find("status-ground-p12").is_some(),
+            "GROUNDED IN lists the entry"
+        );
+    });
+
+    // Fold: the rail and the header chip replace the column, stored.
+    fixture.act(|window, cx| window.click("status-collapse", cx));
+    fixture.act(|window, _| {
+        assert!(window.try_find("status-column").is_none(), "folded");
+        assert!(window.try_find("status-rail").is_some(), "the rail stays");
+        assert!(window.try_find("status-chip").is_some(), "the header chip");
+    });
+    let session = fixture
+        .cx
+        .update(|cx| {
+            fixture
+                .view
+                .upgrade()
+                .expect("view alive")
+                .read(cx)
+                .session_id()
+        })
+        .expect("session");
+    assert!(
+        store.store_flag(&format!("status_collapsed:{}", session.0)),
+        "the fold is stored for this conversation"
+    );
+    fixture.act(|window, cx| window.click("status-chip", cx));
+    fixture.act(|window, _| {
+        assert!(window.try_find("status-column").is_some(), "unfolded");
+    });
+    assert!(!store.store_flag(&format!("status_collapsed:{}", session.0)));
+}
+
+/// An ask answered from another chat's status column lands on the
+/// owning card through the card's own path: the tool result is the
+/// option, the turn completes, and the card says where the answer came
+/// from. A permission ask cannot be answered that way.
+#[test]
+fn a_question_answered_from_the_column_lands_on_its_own_card() {
+    let (provider, scenarios) = replay_provider(
+        "[[steps]]\ntext = ''\n\n\
+         [[steps.tool_calls]]\nname = \"ask_user\"\n\
+         arguments = '{\"question\": \"Which database?\", \"options\": \
+                      [\"postgres\", \"sqlite\"], \"allow_custom\": false}'\n\n\
+         [[steps]]\ntext = ''\n",
+    );
+    let store = Arc::new(SessionStore::open(Path::new(":memory:")).expect("memory store"));
+    let mut fixture = fixture_built(
+        store.clone(),
+        None,
+        None,
+        None,
+        Some(provider),
+        None,
+        vec![Arc::new(gertie_tools::AskUser)],
+        None,
+        None,
+    );
+    fixture.hold = vec![scenarios];
+    fixture.act(|window, cx| {
+        window.input("go", cx);
+        window.press("enter", cx);
+    });
+    pump(&mut fixture, 30);
+    let asks = fixture.cx.update(|cx| {
+        fixture
+            .view
+            .upgrade()
+            .expect("view alive")
+            .read(cx)
+            .pending_asks()
+    });
+    assert_eq!(
+        asks.len(),
+        1,
+        "the pending question is offered to the project"
+    );
+    assert_eq!(asks[0].question, "Which database?");
+    assert_eq!(asks[0].options, vec!["postgres", "sqlite"]);
+    let ask = asks[0].ask;
+
+    let applied = fixture.cx.update(|cx| {
+        fixture
+            .view
+            .upgrade()
+            .expect("view alive")
+            .update(cx, |chat, cx| {
+                chat.answer_from_column(ask, "sqlite".into(), cx)
+            })
+    });
+    assert!(applied, "the owning card took the answer");
+    pump(&mut fixture, 40);
+    let again = fixture.cx.update(|cx| {
+        fixture
+            .view
+            .upgrade()
+            .expect("view alive")
+            .update(cx, |chat, cx| {
+                chat.answer_from_column(ask, "postgres".into(), cx)
+            })
+    });
+    assert!(!again, "an answered ask takes no second answer");
+    let session = fixture
+        .cx
+        .update(|cx| {
+            fixture
+                .view
+                .upgrade()
+                .expect("view alive")
+                .read(cx)
+                .session_id()
+        })
+        .expect("session");
+    let rows = store.load_messages(session).expect("rows");
+    assert!(
+        rows.iter()
+            .any(|row| row.tool_name.as_deref() == Some("ask_user") && row.content == "sqlite"),
+        "the record is the one a click on the card makes: {:?}",
+        rows.iter()
+            .map(|row| row.content.clone())
+            .collect::<Vec<_>>()
+    );
+    let provenance = fixture.cx.update(|cx| {
+        fixture
+            .view
+            .upgrade()
+            .expect("view alive")
+            .read(cx)
+            .answered_from_column_for_test()
+    });
+    assert_eq!(provenance, 1, "the card names where its answer came from");
+}

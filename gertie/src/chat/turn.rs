@@ -508,6 +508,9 @@ impl ChatView {
                 done_index = Some(index);
             }
         }
+        // The status column's facts: touched files, consulted memory,
+        // the model's stated goal and next step.
+        self.fold_status_tool(name, arguments, result);
 
         if let Some(session_id) = self.session_id
             && let Ok(db_id) = self.store.append_tool_result(
@@ -564,6 +567,7 @@ impl ChatView {
         // No activity change, a steer doesn't alter what's happening,
         // but the quiet gauge restarts all the same: something happened.
         self.last_event_at = Instant::now();
+        self.fold_status_user(text);
         let db_id = match self.session_id {
             Some(session_id) => {
                 let db_id = self

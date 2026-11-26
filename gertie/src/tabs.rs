@@ -273,6 +273,31 @@ impl WorkspaceView {
                     let view = shell.tabs[shell.active].view.clone();
                     view.update(cx, |view, cx| view.new_chat_in(project, window, cx));
                 }
+                ShellRequest::AnswerAsk {
+                    session,
+                    ask,
+                    answer,
+                } => {
+                    // The owning chat applies the answer to its own
+                    // card: the record is the one a click there makes.
+                    if let Some(owner) = shell.view_of(session, cx) {
+                        let applied =
+                            owner.update(cx, |owner, cx| owner.answer_from_column(ask, answer, cx));
+                        if !applied {
+                            shell.tell_active("That question was already answered.".into(), cx);
+                        }
+                    }
+                    cx.notify();
+                }
+                ShellRequest::ShowSession { session } => {
+                    if let Some(index) = shell
+                        .tabs
+                        .iter()
+                        .position(|tab| tab.view.read(cx).session_id() == Some(session))
+                    {
+                        shell.activate(index, cx);
+                    }
+                }
             });
         });
         view.update(cx, |view, _| view.set_shell_ask(ask));
@@ -593,6 +618,18 @@ impl WorkspaceView {
         });
         self.push_view(view, window, cx);
         crate::chat::SessionRouting::Elsewhere
+    }
+
+    /// The open view holding a conversation, if any.
+    fn view_of(
+        &self,
+        session: gertie_core::SessionId,
+        cx: &gpui_kit::App,
+    ) -> Option<Entity<ChatView>> {
+        self.tabs
+            .iter()
+            .map(|tab| tab.view.clone())
+            .find(|view| view.read(cx).session_id() == Some(session))
     }
 
     /// Shows the view at `index`: its unseen finish is now seen.

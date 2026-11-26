@@ -4,6 +4,7 @@
 pub mod aux;
 pub mod composer;
 pub mod sidebar;
+pub mod status;
 pub mod transcript;
 pub mod turn;
 
@@ -271,6 +272,16 @@ pub enum ShellRequest {
     /// A new chat filed under a project, asked for when this view
     /// can't take it (a turn runs, or it is a worktree tab).
     NewChatIn { project: i64 },
+    /// The status column answered another open chat's question: the
+    /// owning view applies it to its own card (issue #33).
+    AnswerAsk {
+        session: SessionId,
+        ask: u64,
+        answer: String,
+    },
+    /// Show another open chat (a permission ask is reviewed where its
+    /// diff is).
+    ShowSession { session: SessionId },
 }
 
 /// The shell hook: weak to the shell, set by tabs.rs. None in tests
@@ -711,6 +722,23 @@ pub struct ChatView {
     /// The last repaint a streaming delta asked for, deltas coalesce
     /// to [`STREAM_NOTIFY_CADENCE`].
     stream_notify: Option<std::time::Instant>,
+    /// The status column's facts for the open session (issue #33),
+    /// folded from its rows on open and from live events after.
+    status_facts: status::StatusFacts,
+    /// Bumped whenever the facts change or the tab comes back: the
+    /// grounding cache's key, with the memory store's fingerprint.
+    status_version: u64,
+    /// GROUNDED IN, cached (the evidence check hashes files).
+    status_ground: std::cell::RefCell<Option<status::GroundCache>>,
+    /// Whether the column is folded to its rail, persisted per
+    /// conversation as a store flag.
+    status_collapsed: bool,
+    /// Pending asks in the other open chats of this chat's project,
+    /// pushed by the shell every frame.
+    project_asks: Vec<status::ProjectAsk>,
+    /// Ask cards answered from another chat's status column, by wire
+    /// call id: the card says where its answer came from.
+    answered_from_column: std::collections::HashSet<String>,
 }
 
 /// Everything ChatView::new needs besides the window and its
@@ -1075,6 +1103,12 @@ impl ChatView {
             tool_face: Default::default(),
             stream_notify: None,
             approval_replies: Default::default(),
+            status_facts: Default::default(),
+            status_version: 0,
+            status_ground: Default::default(),
+            status_collapsed: false,
+            project_asks: Vec::new(),
+            answered_from_column: Default::default(),
         };
         view.reload_session(cx);
         window.focus(&view.input.read(cx).focus_handle(cx), cx);
@@ -1107,6 +1141,9 @@ impl ChatView {
     /// renamed a conversation while this one was off screen.
     pub fn refresh_sessions(&mut self, cx: &mut Context<Self>) {
         self.reload_lists();
+        // The tab came back into view: cited files may have moved
+        // while it was away, the grounding re-checks once.
+        self.invalidate_grounding();
         cx.notify();
     }
 
@@ -1635,6 +1672,8 @@ impl ChatView {
         self.approval_replies.clear();
         // Queued follow-ups are rows: they come back with the session.
         self.sync_queue();
+        self.answered_from_column.clear();
+        self.rebuild_status_facts(cx);
         self.sync_list(cx);
     }
 
@@ -1883,6 +1922,7 @@ impl ChatView {
         self.usage = (0, 0, 0);
         self.context_used = 0;
         self.turns.clear();
+        self.rebuild_status_facts(cx);
         self.approval_replies.clear();
         self.last_db_id = None;
         self.streaming_assistant = None;
@@ -3215,6 +3255,7 @@ impl ChatView {
             // not after the purge, the view never contradicts ✕.
             self.session_id = None;
             self.turns.clear();
+            self.rebuild_status_facts(cx);
             self.approval_replies.clear();
             self.last_db_id = None;
             self.streaming_assistant = None;
@@ -4120,6 +4161,7 @@ impl ChatView {
                 })
                 .detach();
         }
+        self.fold_status_user(&text);
         let db_id = self
             .store
             .append_message(session_id, self.last_db_id, Role::User, &stored)
@@ -5181,7 +5223,11 @@ impl ChatView {
         let frame = SPINNER_FRAMES
             [(self.activity_at.elapsed().as_millis() as usize / 500) % SPINNER_FRAMES.len()];
         let line = self.activity_line();
-        h_flex()
+        // The riding line (issue #33): the verb, then why, the memory
+        // the work consulted. One line normally; a second, in the flag
+        // color, only while a correction or evidence flag is in play.
+        let riding = self.riding_grounding();
+        let row = h_flex()
             .gap_2()
             .items_center()
             .child(
@@ -5199,7 +5245,34 @@ impl ChatView {
                     // the cards.
                     .child(crate::markdown::inline_element(&line, cx)),
             )
-            .into_any_element()
+            .when_some(riding.as_ref(), |row, (id, text, _)| {
+                row.child(
+                    div()
+                        .min_w_0()
+                        .truncate()
+                        .text_size(px(12.5))
+                        .text_color(cx.theme().muted_foreground)
+                        .child(SharedString::from(format!(
+                            "· grounded in [{id}] \u{201c}{text}\u{201d}"
+                        ))),
+                )
+            });
+        match riding.and_then(|(_, _, flag)| flag) {
+            None => row.into_any_element(),
+            Some(flag) => v_flex()
+                .id("riding-flag")
+                .gap_0p5()
+                .child(row)
+                .child(
+                    div()
+                        .pl_5()
+                        .text_size(px(12.))
+                        .text_color(cx.theme().warning)
+                        .child(SharedString::from(flag)),
+                )
+                .test_support()
+                .into_any_element(),
+        }
     }
 
     /// The footer line under the composer. Left: this session's spend
@@ -5280,6 +5353,7 @@ impl ChatView {
                     .gap_4()
                     .justify_between()
                     .child(title)
+                    .children(self.render_status_chip(cx))
                     .child(
                         div()
                             .flex_shrink_0()
@@ -5936,6 +6010,12 @@ impl Render for ChatView {
                 h_flex()
                     .flex_1()
                     .min_h_0()
+                    // Zero minimum width, here and on the transcript:
+                    // a right column (status, settings, memory) takes
+                    // its fixed width and the transcript yields, instead
+                    // of the row overflowing the window and clipping
+                    // the column off its right edge.
+                    .min_w_0()
                     .items_stretch()
                     .child(
                         // The transcript: horizontal padding is
@@ -5945,6 +6025,7 @@ impl Render for ChatView {
                         v_flex()
                             .flex_1()
                             .min_h_0()
+                            .min_w_0()
                             .relative()
                             .child(self.render_conversation_header(cx))
                             .child(
@@ -6583,6 +6664,12 @@ impl Render for ChatView {
                                     .child(self.render_token_footer(cx)),
                             ),
                     )
+                    // The status column (issue #33): only while no
+                    // other side panel holds the right edge, and only
+                    // when the session has state to show.
+                    .when(self.status_column_shown(), |row| {
+                        row.child(self.render_status_column(cx))
+                    })
                     .when(self.panel == Panel::Settings, |row| {
                         row.child(
                             div()

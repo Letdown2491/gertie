@@ -454,6 +454,16 @@ impl ChatView {
                                 format!("worker · {worker_clock}")
                             }),
                     )
+                })
+                // Provenance: the answer came from another chat's
+                // status column (issue #33), not a click here.
+                .when(self.answered_from_column.contains(&call.id), |row| {
+                    row.child(
+                        div()
+                            .text_size(px(11.))
+                            .text_color(cx.theme().muted_foreground)
+                            .child("answered from the status column"),
+                    )
                 }),
         );
 
@@ -766,7 +776,7 @@ impl ChatView {
 /// call the loop built. The loop already sanitized every string; this
 /// only unpacks. Pure: the card cache holds it, elements rebuild per
 /// frame.
-fn ask_face(call: &ToolCall) -> Option<AskFace> {
+pub(crate) fn ask_face(call: &ToolCall) -> Option<AskFace> {
     let value: serde_json::Value = serde_json::from_str(&call.arguments).ok()?;
     let question = value.get("question")?.as_str()?.to_string();
     let options = value
@@ -789,10 +799,10 @@ fn ask_face(call: &ToolCall) -> Option<AskFace> {
     })
 }
 
-struct AskFace {
-    question: String,
-    options: Vec<String>,
-    allow_custom: bool,
+pub(crate) struct AskFace {
+    pub(crate) question: String,
+    pub(crate) options: Vec<String>,
+    pub(crate) allow_custom: bool,
 }
 
 /// Context lines a card's diff keeps on each side of a change when it

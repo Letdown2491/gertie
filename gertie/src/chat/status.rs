@@ -1,0 +1,1354 @@
+//! The status column (issue #33): the open session's durable state
+//! beside the transcript, and the riding line's grounding on the
+//! activity row (momentary state, latest turn only).
+//!
+//! Sections, in column order, each rendered only when it has
+//! something to say: GOAL (the model's `status` goal, else the latest
+//! prompt) with the run clock, TOUCHED (read/edited per file, from the
+//! session's tool calls, edited wins), NEXT (the model's `status` next
+//! step), GROUNDED IN (memory the work consulted, then entries whose
+//! evidence shares a file with the work), WAITING ON YOU (asks from
+//! the other open chats of this chat's project), CORRECTION CHAIN
+//! (the walk behind a flagged grounding entry).
+//!
+//! The facts fold from the session's rows (a background load on open)
+//! and then from live events; nothing here asks the model anything.
+
+use super::*;
+use gertie_core::{CorrectionStep, MemoryEntry};
+
+/// The column's width, the mockup's: wide enough for a path and its
+/// status on one line, narrow enough that the reading column keeps
+/// its measure on a laptop screen.
+pub(crate) const STATUS_WIDTH: f32 = 300.;
+
+/// The collapsed rail's width.
+pub(crate) const RAIL_WIDTH: f32 = 34.;
+
+/// How many touched files list before the rest fold into a count.
+const TOUCHED_SHOWN: usize = 12;
+
+/// Grounding rows per tier: the consulted entries, then the
+/// file-sharing ones (the weaker signal, so fewer).
+const ACTING_SHOWN: usize = 6;
+const SHARING_SHOWN: usize = 4;
+
+/// What a session did to a file. Edited wins: a file read and then
+/// edited is edited.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Touch {
+    Read,
+    Edited,
+}
+
+/// The session's durable state, folded from its rows and live events.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct StatusFacts {
+    /// The model's stated goal (the `status` tool), the latest one.
+    pub goal: Option<String>,
+    /// The model's stated next step (the `status` tool).
+    pub next: Option<String>,
+    /// The latest user prompt's first line: the goal's fallback.
+    pub last_prompt: Option<String>,
+    /// Files in first-touch order, workspace-relative.
+    pub touched: Vec<(String, Touch)>,
+    /// Memory ids the session's `search_memory` calls returned, in
+    /// first-seen order: what the work consulted ("acting on").
+    pub consulted: Vec<String>,
+}
+
+impl StatusFacts {
+    /// Every row of a session, oldest first.
+    pub fn from_rows(rows: &[gertie_core::Message], root: &std::path::Path) -> Self {
+        let mut facts = Self::default();
+        for row in rows {
+            match row.role {
+                Role::User => facts.fold_user(&row.content),
+                Role::Tool => facts.fold_tool(
+                    row.tool_name.as_deref().unwrap_or_default(),
+                    row.tool_arguments.as_deref().unwrap_or_default(),
+                    &row.content,
+                    root,
+                ),
+                _ => {}
+            }
+        }
+        facts
+    }
+
+    pub fn fold_user(&mut self, text: &str) {
+        let line = display_text(text)
+            .lines()
+            .map(str::trim)
+            .find(|line| !line.is_empty())
+            .map(|line| clip(line, 160));
+        if line.is_some() {
+            self.last_prompt = line;
+        }
+    }
+
+    /// One finished tool call. A failed or denied call touched
+    /// nothing and said nothing.
+    pub fn fold_tool(&mut self, name: &str, arguments: &str, result: &str, root: &std::path::Path) {
+        if failed(result) {
+            return;
+        }
+        let args: serde_json::Value = serde_json::from_str(arguments).unwrap_or_default();
+        let field = |key: &str| {
+            args.get(key)
+                .and_then(|value| value.as_str())
+                .map(|text| gertie_core::strip_invisible(text).trim().to_string())
+                .filter(|text| !text.is_empty())
+        };
+        match name {
+            "read_file" | "edit_file" | "write_file" => {
+                let Some(path) = field("path").and_then(|raw| normalize_path(root, &raw)) else {
+                    return;
+                };
+                let touch = if name == "read_file" {
+                    Touch::Read
+                } else {
+                    Touch::Edited
+                };
+                match self.touched.iter_mut().find(|(seen, _)| *seen == path) {
+                    Some((_, seen)) => {
+                        if touch == Touch::Edited {
+                            *seen = Touch::Edited;
+                        }
+                    }
+                    None => self.touched.push((path, touch)),
+                }
+            }
+            "search_memory" => {
+                for id in memory_hit_ids(result) {
+                    if !self.consulted.contains(&id) {
+                        self.consulted.push(id);
+                    }
+                }
+            }
+            "status" => {
+                if let Some(goal) = field("goal") {
+                    self.goal = Some(clip(&goal, 240));
+                }
+                if let Some(next) = field("next") {
+                    self.next = Some(clip(&next, 160));
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// GOAL's text: the model's own statement wins, the prompt is the
+    /// fallback.
+    pub fn goal_text(&self) -> Option<&str> {
+        self.goal.as_deref().or(self.last_prompt.as_deref())
+    }
+
+    pub fn touch_of(&self, path: &str) -> Option<Touch> {
+        self.touched
+            .iter()
+            .find(|(seen, _)| seen == path)
+            .map(|(_, touch)| *touch)
+    }
+}
+
+/// A tool result that did nothing: the loop's error and denial shapes.
+fn failed(result: &str) -> bool {
+    result.starts_with("error:") || result.starts_with("denied by user")
+}
+
+/// The ids a `search_memory` result names, its `[p12] file, added …`
+/// hit lines (the format the tool writes, `gertie-tools` memory.rs).
+pub fn memory_hit_ids(result: &str) -> Vec<String> {
+    result
+        .lines()
+        .filter_map(|line| {
+            let rest = line.strip_prefix('[')?;
+            let (id, after) = rest.split_once(']')?;
+            let valid =
+                !id.is_empty() && id.len() <= 16 && id.chars().all(|c| c.is_ascii_alphanumeric());
+            (valid && after.starts_with(' ')).then(|| id.to_string())
+        })
+        .collect()
+}
+
+/// A tool path as a normalized workspace-relative path: `./a/../b.rs`
+/// and `/root/b.rs` both read `b.rs`. Paths outside the workspace keep
+/// their absolute form. Lexical only (no filesystem reads), so a file
+/// that no longer exists still normalizes.
+pub fn normalize_path(root: &std::path::Path, raw: &str) -> Option<String> {
+    use std::path::Component;
+    let joined = resolve_tool_path(root, std::path::Path::new(raw));
+    let mut clean = std::path::PathBuf::new();
+    for component in joined.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                clean.pop();
+            }
+            other => clean.push(other.as_os_str()),
+        }
+    }
+    let root_clean = {
+        let mut clean_root = std::path::PathBuf::new();
+        for component in root.components() {
+            match component {
+                Component::CurDir => {}
+                Component::ParentDir => {
+                    clean_root.pop();
+                }
+                other => clean_root.push(other.as_os_str()),
+            }
+        }
+        clean_root
+    };
+    let shown = match clean.strip_prefix(&root_clean) {
+        Ok(relative) => relative.to_path_buf(),
+        Err(_) => clean,
+    };
+    let text = shown.to_string_lossy().into_owned();
+    (!text.is_empty()).then_some(text)
+}
+
+fn clip(text: &str, cap: usize) -> String {
+    if text.chars().count() <= cap {
+        text.to_string()
+    } else {
+        let mut clipped: String = text.chars().take(cap.saturating_sub(1)).collect();
+        clipped.push('…');
+        clipped
+    }
+}
+
+/// GROUNDED IN's cache: the rows, keyed by the memory store's
+/// fingerprint and the facts' version.
+pub(crate) type GroundCache = ((u64, u64), Vec<GroundRow>);
+
+/// One GROUNDED IN row.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GroundRow {
+    pub id: String,
+    pub text: String,
+    /// The work consulted it (a `search_memory` hit). False: its
+    /// evidence shares a file with the work.
+    pub acting: bool,
+    /// Cited files that changed since the entry was written, each
+    /// with what this session did to it: a file the session read or
+    /// edited is current in the model's context.
+    pub changed: Vec<(String, Option<Touch>)>,
+    /// The entry was superseded, by this id when the supersede named one.
+    pub superseded: Option<String>,
+    /// Why the entry carries recheck flags (the correction walk).
+    pub walk: Vec<CorrectionStep>,
+}
+
+impl GroundRow {
+    /// Whether a correction or an evidence flag is in play: the riding
+    /// line's full form and the column's flag color.
+    pub fn flagged(&self) -> bool {
+        !self.changed.is_empty() || !self.walk.is_empty() || self.superseded.is_some()
+    }
+
+    /// The evidence line: which cited files moved, and whether the
+    /// work has seen them since.
+    pub fn evidence_words(&self) -> Option<String> {
+        if self.changed.is_empty() {
+            return None;
+        }
+        let files = self
+            .changed
+            .iter()
+            .map(|(path, _)| path.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        let verdict = if self.changed.iter().all(|(_, touch)| touch.is_some()) {
+            if self
+                .changed
+                .iter()
+                .any(|(_, touch)| *touch == Some(Touch::Edited))
+            {
+                "edited this session"
+            } else {
+                "verified current before acting"
+            }
+        } else {
+            "not re-read this session"
+        };
+        Some(format!(
+            "{files} moved since [{}] was written, {verdict}",
+            self.id
+        ))
+    }
+}
+
+/// The GROUNDED IN rows: consulted entries first (in consult order),
+/// then live entries whose evidence names a touched file. `changed`
+/// is the store's evidence check (`MemoryStore::changed_evidence`),
+/// injected so the rule is testable without files.
+pub fn grounding(
+    entries: &[MemoryEntry],
+    facts: &StatusFacts,
+    changed: impl Fn(&MemoryEntry) -> Vec<String>,
+) -> Vec<GroundRow> {
+    let row = |entry: &MemoryEntry, acting: bool| GroundRow {
+        id: entry.id.clone(),
+        text: entry.text.clone(),
+        acting,
+        changed: changed(entry)
+            .into_iter()
+            .map(|path| {
+                let touch = normalize_relative(&path).and_then(|path| facts.touch_of(&path));
+                (path, touch)
+            })
+            .collect(),
+        superseded: entry
+            .valid_until
+            .is_some()
+            .then(|| entry.superseded_by.clone().unwrap_or_default()),
+        walk: gertie_core::correction_walk(entries, &entry.id),
+    };
+    let mut rows: Vec<GroundRow> = facts
+        .consulted
+        .iter()
+        .filter_map(|id| entries.iter().find(|entry| &entry.id == id))
+        .take(ACTING_SHOWN)
+        .map(|entry| row(entry, true))
+        .collect();
+    let sharing = entries
+        .iter()
+        .filter(|entry| entry.valid_until.is_none())
+        .filter(|entry| !facts.consulted.contains(&entry.id))
+        .filter(|entry| {
+            entry.evidence.iter().any(|cited| {
+                normalize_relative(&cited.path).is_some_and(|path| facts.touch_of(&path).is_some())
+            })
+        })
+        .take(SHARING_SHOWN)
+        .map(|entry| row(entry, false));
+    rows.extend(sharing);
+    rows
+}
+
+/// An evidence path (already workspace-relative) in the same lexical
+/// form `normalize_path` gives tool paths: file-level equality, never
+/// a prefix match.
+fn normalize_relative(path: &str) -> Option<String> {
+    normalize_path(std::path::Path::new(""), path)
+}
+
+/// An ask pending in another open chat of this chat's project, as the
+/// column shows it. Questions answer inline; permission asks only
+/// jump to their chat (see what you approve).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProjectAsk {
+    pub session: SessionId,
+    pub session_title: String,
+    pub ask: u64,
+    /// The question, or the permission card's action label.
+    pub question: String,
+    /// The clickable answers; empty for a permission ask.
+    pub options: Vec<String>,
+    pub worker: bool,
+}
+
+impl ProjectAsk {
+    pub fn is_question(&self) -> bool {
+        !self.options.is_empty()
+    }
+}
+
+/// WAITING ON YOU's reach: the other open chats' asks, kept only for
+/// chats filed in the shown chat's project. An unfiled chat reaches
+/// nothing (projects are optional; the sidebar marks cover the rest).
+/// Each other chat comes as its project and its pending asks.
+pub fn project_asks_for(
+    shown_project: Option<i64>,
+    others: impl IntoIterator<Item = (Option<i64>, Vec<ProjectAsk>)>,
+) -> Vec<ProjectAsk> {
+    let Some(project) = shown_project else {
+        return Vec::new();
+    };
+    others
+        .into_iter()
+        .filter(|(theirs, _)| *theirs == Some(project))
+        .flat_map(|(_, asks)| asks)
+        .collect()
+}
+
+/// The collapsed summary, `run 12:30 · 3 touched · 1 ask`: the rail's
+/// stacked words and the header chip read the same parts.
+pub fn summary_parts(run: Option<String>, touched: usize, asks: usize) -> Vec<String> {
+    let mut parts = Vec::new();
+    if let Some(run) = run {
+        parts.push(format!("run {run}"));
+    }
+    if touched > 0 {
+        parts.push(format!("{touched} touched"));
+    }
+    if asks > 0 {
+        parts.push(format!("{asks} ask{}", if asks == 1 { "" } else { "s" }));
+    }
+    parts
+}
+
+impl ChatView {
+    /// Rebuilds the facts from the open session's rows, off the frame:
+    /// the whole session, not the transcript's loaded page.
+    pub(super) fn rebuild_status_facts(&mut self, cx: &mut Context<Self>) {
+        self.status_facts = StatusFacts::default();
+        self.status_version += 1;
+        self.status_collapsed = self
+            .session_id
+            .map(|id| self.store.store_flag(&status_flag(id)))
+            .unwrap_or(self.status_collapsed);
+        let Some(session_id) = self.session_id else {
+            return;
+        };
+        let store = self.store.clone();
+        let root = self.workspace_root.clone();
+        cx.spawn(async move |this, cx| {
+            let rows = store.load_messages(session_id).unwrap_or_default();
+            let facts = StatusFacts::from_rows(&rows, &root);
+            let _ = this.update(cx, |this, cx| {
+                // A switch away meanwhile: the facts are someone else's.
+                if this.session_id == Some(session_id) {
+                    this.status_facts = facts;
+                    this.status_version += 1;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// A live tool result, folded in (the rebuild covers reloads).
+    pub(super) fn fold_status_tool(&mut self, name: &str, arguments: &str, result: &str) {
+        let root = self.workspace_root.clone();
+        self.status_facts.fold_tool(name, arguments, result, &root);
+        self.status_version += 1;
+    }
+
+    pub(super) fn fold_status_user(&mut self, text: &str) {
+        self.status_facts.fold_user(text);
+        self.status_version += 1;
+    }
+
+    /// Re-checks the evidence on the next frame: the tab came back
+    /// into view (files may have moved while it was away).
+    pub(super) fn invalidate_grounding(&mut self) {
+        self.status_version += 1;
+    }
+
+    /// The GROUNDED IN rows, cached: the evidence check hashes files,
+    /// so it runs when the facts or the store change (a tool finished,
+    /// the tab came back, a memory write), never per frame.
+    pub(crate) fn ground_rows(&self) -> Vec<GroundRow> {
+        let Some(store) = self.memory_store.as_ref() else {
+            return Vec::new();
+        };
+        if self.status_facts.consulted.is_empty() && self.status_facts.touched.is_empty() {
+            return Vec::new();
+        }
+        let key = (store.fingerprint(), self.status_version);
+        if let Some((seen, rows)) = self.status_ground.borrow().as_ref()
+            && *seen == key
+        {
+            return rows.clone();
+        }
+        let entries = store.scan();
+        let rows = grounding(&entries, &self.status_facts, |entry| {
+            store.changed_evidence(entry)
+        });
+        self.status_ground.replace(Some((key, rows.clone())));
+        rows
+    }
+
+    /// The run clock's words while a run has time on it.
+    fn status_run_words(&self) -> Option<String> {
+        let total = self.run_elapsed_total();
+        (self.run_started.is_some() || !total.is_zero()).then(|| clock(total))
+    }
+
+    /// Asks the column shows: the project's other chats, never this
+    /// chat's own (its cards already sit in the transcript).
+    fn column_asks(&self) -> Vec<ProjectAsk> {
+        self.project_asks
+            .iter()
+            .filter(|ask| Some(ask.session) != self.session_id)
+            .cloned()
+            .collect()
+    }
+
+    pub(crate) fn status_summary(&self) -> Vec<String> {
+        summary_parts(
+            self.status_run_words(),
+            self.status_facts.touched.len(),
+            self.column_asks().len(),
+        )
+    }
+
+    /// Whether any section has something to say. The column (and its
+    /// rail) render only then: a fresh chat has no state to show.
+    pub(crate) fn status_has_content(&self) -> bool {
+        self.status_facts.goal_text().is_some()
+            || !self.status_facts.touched.is_empty()
+            || self.status_facts.next.is_some()
+            || !self.column_asks().is_empty()
+            || !self.ground_rows().is_empty()
+    }
+
+    /// Whether the column (or its rail) is on screen: a session with
+    /// state, and no other side panel claiming the right edge.
+    pub(crate) fn status_column_shown(&self) -> bool {
+        self.panel == Panel::None && self.status_has_content()
+    }
+
+    pub(crate) fn toggle_status_column(&mut self, cx: &mut Context<Self>) {
+        self.status_collapsed = !self.status_collapsed;
+        if let Some(id) = self.session_id {
+            let _ = self
+                .store
+                .set_store_flag(&status_flag(id), self.status_collapsed);
+        }
+        cx.notify();
+    }
+
+    /// This chat's pending cards, for the shell to show in the other
+    /// chats of the project. The mode confirm is this chat's own
+    /// business and never leaves it.
+    pub fn pending_asks(&self) -> Vec<ProjectAsk> {
+        let Some(session) = self.session_id else {
+            return Vec::new();
+        };
+        let title = self.tab_title().to_string();
+        self.turns
+            .iter()
+            .filter_map(|turn| match turn {
+                Turn::Tool {
+                    call,
+                    status: ToolStatus::Pending(ask),
+                    worker,
+                    ..
+                } if call.name != "mode_confirm" => {
+                    let (question, options) = match transcript::ask_face(call) {
+                        Some(face) if call.name == "ask_user" && !face.options.is_empty() => {
+                            (face.question, face.options)
+                        }
+                        _ => (
+                            crate::tools_ui::action_label(&call.name, &call.arguments, true),
+                            Vec::new(),
+                        ),
+                    };
+                    Some(ProjectAsk {
+                        session,
+                        session_title: title.clone(),
+                        ask: *ask,
+                        question,
+                        options,
+                        worker: *worker,
+                    })
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// How many cards wait on the human here: the shell's cue to
+    /// repaint the other chats' columns.
+    pub fn pending_ask_count(&self) -> usize {
+        self.turns
+            .iter()
+            .filter(|turn| {
+                matches!(
+                    turn,
+                    Turn::Tool {
+                        status: ToolStatus::Pending(_),
+                        ..
+                    }
+                )
+            })
+            .count()
+    }
+
+    /// The project a conversation is filed in, as this view's list
+    /// knows it (the shell asks the view on screen, whose list is the
+    /// freshest: moves happen in its sidebar).
+    pub fn project_of(&self, session: SessionId) -> Option<i64> {
+        self.sessions
+            .iter()
+            .find(|summary| summary.id == session)
+            .and_then(|summary| summary.project_id)
+    }
+
+    /// This chat's own project: the session's, or the project a blank
+    /// chat will be filed in.
+    pub fn project_id(&self) -> Option<i64> {
+        match self.session_id {
+            Some(id) => self.project_of(id),
+            None => self.pending_project,
+        }
+    }
+
+    /// The shell's push: the project's pending asks, every frame.
+    pub fn set_project_asks(&mut self, asks: Vec<ProjectAsk>) {
+        self.project_asks = asks;
+    }
+
+    /// An answer clicked in another chat's column, applied here, to
+    /// the owning card: the same `decide_tool` path a click on the
+    /// card takes, so the tool result (the record) is identical. The
+    /// card says where the answer came from. Questions only: a
+    /// permission ask is never approved from elsewhere.
+    pub fn answer_from_column(&mut self, ask: u64, answer: String, cx: &mut Context<Self>) -> bool {
+        let found = self
+            .turns
+            .iter()
+            .enumerate()
+            .find_map(|(index, turn)| match turn {
+                Turn::Tool {
+                    call,
+                    status: ToolStatus::Pending(id),
+                    ..
+                } if *id == ask && call.name == "ask_user" => Some((index, call.id.clone())),
+                _ => None,
+            });
+        let Some((index, call_id)) = found else {
+            return false;
+        };
+        self.answered_from_column.insert(call_id);
+        self.decide_tool(
+            index,
+            PermissionDecision::Deny {
+                feedback: Some(answer),
+            },
+            cx,
+        );
+        true
+    }
+
+    /// The column, open or folded to its rail.
+    pub(super) fn render_status_column(&self, cx: &Context<Self>) -> AnyElement {
+        if self.status_collapsed {
+            return self.render_status_rail(cx);
+        }
+        let theme = cx.theme();
+        let facts = &self.status_facts;
+        let ground = self.ground_rows();
+        let asks = self.column_asks();
+        let label = |text: String| {
+            h_flex()
+                .gap_1p5()
+                .items_center()
+                .text_size(px(10.5))
+                .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                .text_color(theme.muted_foreground)
+                .child(text)
+        };
+        let mut sections: Vec<AnyElement> = Vec::new();
+
+        if let Some(goal) = facts.goal_text() {
+            let mut head = label(match self.status_run_words() {
+                Some(run) => format!("GOAL · run {run}"),
+                None => "GOAL".into(),
+            });
+            if self.streaming {
+                head = head.child(div().size(px(6.)).rounded_full().bg(theme.success));
+            }
+            sections.push(
+                v_flex()
+                    .gap_1()
+                    .child(head)
+                    .child(
+                        div()
+                            .text_size(px(12.5))
+                            .text_color(theme.foreground)
+                            .child(SharedString::from(goal.to_string())),
+                    )
+                    .into_any_element(),
+            );
+        }
+
+        if !facts.touched.is_empty() {
+            let count = facts.touched.len();
+            let rows = facts
+                .touched
+                .iter()
+                .take(TOUCHED_SHOWN)
+                .map(|(path, touch)| {
+                    let (word, color) = match touch {
+                        Touch::Edited => ("edited", theme.warning),
+                        Touch::Read => ("read", theme.muted_foreground),
+                    };
+                    h_flex()
+                        .gap_2()
+                        .px_2()
+                        .py_1()
+                        .rounded_sm()
+                        .bg(theme.secondary)
+                        .font_family(theme.mono_font_family.clone())
+                        .text_size(px(11.5))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .truncate()
+                                .text_color(theme.foreground)
+                                .child(SharedString::from(path.clone())),
+                        )
+                        .child(div().flex_shrink_0().text_color(color).child(word))
+                });
+            sections.push(
+                v_flex()
+                    .gap_1()
+                    .child(label(format!(
+                        "TOUCHED · {count} file{}",
+                        if count == 1 { "" } else { "s" }
+                    )))
+                    .children(rows)
+                    .when(count > TOUCHED_SHOWN, |list| {
+                        list.child(
+                            div()
+                                .text_size(px(11.))
+                                .text_color(theme.muted_foreground)
+                                .child(format!("+{} more", count - TOUCHED_SHOWN)),
+                        )
+                    })
+                    .into_any_element(),
+            );
+        }
+
+        if let Some(next) = &facts.next {
+            sections.push(
+                v_flex()
+                    .gap_1()
+                    .child(label("NEXT".into()))
+                    .child(
+                        div()
+                            .text_size(px(12.5))
+                            .text_color(theme.foreground)
+                            .child(SharedString::from(next.clone())),
+                    )
+                    .into_any_element(),
+            );
+        }
+
+        if !ground.is_empty() {
+            let rows = ground.iter().map(|row| {
+                let head = if row.acting {
+                    format!("ACTING ON [{}]", row.id)
+                } else {
+                    format!("SHARES FILES [{}]", row.id)
+                };
+                v_flex()
+                    .id(SharedString::from(format!("status-ground-{}", row.id)))
+                    .gap_0p5()
+                    .px_2()
+                    .py_1p5()
+                    .rounded_sm()
+                    .bg(theme.secondary)
+                    .text_size(px(12.))
+                    .child(
+                        div()
+                            .text_size(px(10.5))
+                            .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                            .text_color(if row.acting {
+                                theme.accent
+                            } else {
+                                theme.muted_foreground
+                            })
+                            .child(head),
+                    )
+                    .child(
+                        div()
+                            .text_color(theme.foreground)
+                            .child(SharedString::from(row.text.clone())),
+                    )
+                    .when_some(row.superseded.as_ref(), |col, by| {
+                        col.child(div().text_size(px(11.)).text_color(theme.danger).child(
+                            if by.is_empty() {
+                                "SUPERSEDED".to_string()
+                            } else {
+                                format!("SUPERSEDED by [{by}]")
+                            },
+                        ))
+                    })
+                    .when_some(row.evidence_words(), |col, words| {
+                        col.child(
+                            div()
+                                .text_size(px(10.5))
+                                .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                                .text_color(theme.danger)
+                                .child("EVIDENCE CHANGED"),
+                        )
+                        .child(
+                            div()
+                                .text_size(px(11.))
+                                .text_color(theme.muted_foreground)
+                                .child(SharedString::from(words)),
+                        )
+                    })
+                    .test_support()
+            });
+            sections.push(
+                v_flex()
+                    .gap_1()
+                    .child(label("GROUNDED IN".into()))
+                    .children(rows)
+                    .into_any_element(),
+            );
+        }
+
+        if !asks.is_empty() {
+            let rows = asks.iter().map(|ask| self.render_project_ask(ask, cx));
+            sections.push(
+                v_flex()
+                    .gap_1()
+                    .child(label(format!("WAITING ON YOU · {}", asks.len())))
+                    .children(rows)
+                    .into_any_element(),
+            );
+        }
+
+        let walks: Vec<&CorrectionStep> = ground.iter().flat_map(|row| row.walk.iter()).collect();
+        if !walks.is_empty() {
+            let rows = walks.iter().map(|step| {
+                v_flex()
+                    .gap_0p5()
+                    .px_2()
+                    .py_1p5()
+                    .rounded_sm()
+                    .bg(theme.secondary)
+                    .text_size(px(11.5))
+                    .child(
+                        h_flex()
+                            .flex_wrap()
+                            .gap_1()
+                            .font_family(theme.mono_font_family.clone())
+                            .child(
+                                div()
+                                    .text_color(theme.danger)
+                                    .child(format!("[{}] CORRECTED", step.corrected)),
+                            )
+                            .child(div().text_color(theme.muted_foreground).child("→"))
+                            .child(
+                                div()
+                                    .text_color(theme.muted_foreground)
+                                    .child(step.relation.replace('_', " ")),
+                            )
+                            .child(div().text_color(theme.muted_foreground).child("→"))
+                            .child(
+                                div()
+                                    .text_color(theme.warning)
+                                    .child(format!("[{}] FLAGGED", step.flagged)),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(11.))
+                            .text_color(theme.muted_foreground)
+                            .child(SharedString::from(step.sentence())),
+                    )
+            });
+            sections.push(
+                v_flex()
+                    .gap_1()
+                    .child(label("CORRECTION CHAIN".into()))
+                    .children(rows)
+                    .into_any_element(),
+            );
+        }
+
+        v_flex()
+            .id("status-column")
+            .w(px(STATUS_WIDTH))
+            .h_full()
+            .flex_shrink_0()
+            .min_h_0()
+            .border_l_1()
+            .border_color(theme.border)
+            .bg(theme.background)
+            .child(
+                h_flex()
+                    .h(px(40.))
+                    .flex_shrink_0()
+                    .px_3()
+                    .gap_2()
+                    .items_center()
+                    .justify_between()
+                    .border_b_1()
+                    .border_color(theme.border.opacity(0.6))
+                    .child(
+                        div()
+                            .text_size(px(11.))
+                            .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                            .text_color(theme.muted_foreground)
+                            .child("STATUS"),
+                    )
+                    .child(
+                        Button::new("status-collapse")
+                            .label("›")
+                            .small()
+                            .ghost()
+                            .tooltip("Fold the status column")
+                            .on_click(cx.listener(|this, _, _, cx| this.toggle_status_column(cx))),
+                    ),
+            )
+            .child(
+                v_flex()
+                    .id("status-sections")
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .px_3()
+                    .py_3()
+                    .gap_4()
+                    .children(sections),
+            )
+            .test_support()
+            .into_any_element()
+    }
+
+    /// One WAITING ON YOU row: which chat, the question, and either
+    /// its option chips (answered here, applied there) or the jump.
+    fn render_project_ask(&self, ask: &ProjectAsk, cx: &Context<Self>) -> AnyElement {
+        let theme = cx.theme();
+        let session = ask.session;
+        let ask_id = ask.ask;
+        let mut row = v_flex()
+            .gap_1()
+            .px_2()
+            .py_1p5()
+            .rounded_sm()
+            .border_1()
+            .border_color(theme.warning.opacity(0.5))
+            .child(
+                div()
+                    .text_size(px(10.5))
+                    .text_color(theme.muted_foreground)
+                    .truncate()
+                    .child(SharedString::from(if ask.worker {
+                        format!("worker in {}", ask.session_title)
+                    } else {
+                        ask.session_title.clone()
+                    })),
+            )
+            .child(
+                div()
+                    .text_size(px(12.))
+                    .text_color(theme.foreground)
+                    .child(crate::markdown::inline_element(&ask.question, cx)),
+            );
+        if ask.is_question() {
+            row =
+                row.child(
+                    h_flex().flex_wrap().gap_1().children(
+                        ask.options
+                            .iter()
+                            .cloned()
+                            .enumerate()
+                            .map(|(index, option)| {
+                                Button::new(SharedString::from(format!(
+                                    "status-ask-{ask_id}-{index}"
+                                )))
+                                .label(option.clone())
+                                .small()
+                                .outline()
+                                .on_click(cx.listener(
+                                    move |this, _, window, cx| {
+                                        if let Some(shell) = this.shell_ask.clone() {
+                                            shell(
+                                                ShellRequest::AnswerAsk {
+                                                    session,
+                                                    ask: ask_id,
+                                                    answer: option.clone(),
+                                                },
+                                                window,
+                                                cx,
+                                            );
+                                        }
+                                    },
+                                ))
+                            }),
+                    ),
+                );
+        }
+        row.child(
+            Button::new(SharedString::from(format!("status-ask-open-{ask_id}")))
+                .label(if ask.is_question() {
+                    "Open chat"
+                } else {
+                    "Review in its chat"
+                })
+                .small()
+                .ghost()
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    if let Some(shell) = this.shell_ask.clone() {
+                        shell(ShellRequest::ShowSession { session }, window, cx);
+                    }
+                })),
+        )
+        .into_any_element()
+    }
+
+    /// The folded column: a rail with the summary stacked, one word
+    /// group per line, and the chevron that opens it again.
+    fn render_status_rail(&self, cx: &Context<Self>) -> AnyElement {
+        let theme = cx.theme();
+        let parts = self.status_summary();
+        v_flex()
+            .id("status-rail")
+            .w(px(RAIL_WIDTH))
+            .h_full()
+            .flex_shrink_0()
+            .min_h_0()
+            .items_center()
+            .border_l_1()
+            .border_color(theme.border)
+            .bg(theme.background)
+            .child(
+                div().h(px(40.)).flex().items_center().child(
+                    Button::new("status-expand")
+                        .label("‹")
+                        .small()
+                        .ghost()
+                        .tooltip("Open the status column")
+                        .on_click(cx.listener(|this, _, _, cx| this.toggle_status_column(cx))),
+                ),
+            )
+            .child(
+                v_flex()
+                    .pt_2()
+                    .gap_3()
+                    .items_center()
+                    .children(parts.into_iter().map(|part| {
+                        v_flex()
+                            .items_center()
+                            .text_size(px(9.5))
+                            .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                            .text_color(theme.muted_foreground)
+                            .children(
+                                part.split(' ')
+                                    .map(|word| word.to_uppercase())
+                                    .collect::<Vec<_>>(),
+                            )
+                    })),
+            )
+            .test_support()
+            .into_any_element()
+    }
+
+    /// The header chip while the column is folded: the same summary,
+    /// one line, a click opens the column.
+    pub(super) fn render_status_chip(&self, cx: &Context<Self>) -> Option<AnyElement> {
+        if !self.status_collapsed || !self.status_column_shown() {
+            return None;
+        }
+        let parts = self.status_summary();
+        if parts.is_empty() {
+            return None;
+        }
+        let theme = cx.theme();
+        Some(
+            div()
+                .id("status-chip")
+                .flex_shrink_0()
+                .px_2()
+                .py_0p5()
+                .rounded_md()
+                .border_1()
+                .border_color(theme.border)
+                .text_size(px(11.))
+                .text_color(theme.muted_foreground)
+                .cursor_pointer()
+                .hover(|style| style.bg(theme.secondary_hover))
+                .tooltip(|window, cx| Tooltip::new("Open the status column").build(window, cx))
+                .on_click(cx.listener(|this, _, _, cx| this.toggle_status_column(cx)))
+                .child(parts.join(" · "))
+                .test_support()
+                .into_any_element(),
+        )
+    }
+
+    /// The riding line's grounding: the newest consulted entry, and,
+    /// when a correction or evidence flag is in play on it, the flag's
+    /// words for the full form. None when the work consulted nothing.
+    pub(crate) fn riding_grounding(&self) -> Option<(String, String, Option<String>)> {
+        let ground = self.ground_rows();
+        let row = self
+            .status_facts
+            .consulted
+            .iter()
+            .rev()
+            .find_map(|id| ground.iter().find(|row| row.acting && &row.id == id))?;
+        let flag = if !row.flagged() {
+            None
+        } else if let Some(step) = row.walk.first() {
+            Some(step.sentence())
+        } else if let Some(words) = row.evidence_words() {
+            Some(format!("evidence changed: {words}"))
+        } else {
+            row.superseded.as_ref().map(|by| {
+                if by.is_empty() {
+                    format!("[{}] was superseded", row.id)
+                } else {
+                    format!("[{}] was superseded by [{by}]", row.id)
+                }
+            })
+        };
+        Some((row.id.clone(), clip(&row.text, 80), flag))
+    }
+}
+
+impl ChatView {
+    /// The column's facts as the tests read them: the goal text, the
+    /// next step, touched files with their word, GROUNDED IN's ids.
+    #[allow(clippy::type_complexity)]
+    pub fn status_for_test(
+        &self,
+    ) -> (
+        Option<String>,
+        Option<String>,
+        Vec<(String, &'static str)>,
+        Vec<String>,
+    ) {
+        (
+            self.status_facts.goal_text().map(str::to_string),
+            self.status_facts.next.clone(),
+            self.status_facts
+                .touched
+                .iter()
+                .map(|(path, touch)| {
+                    (
+                        path.clone(),
+                        match touch {
+                            Touch::Read => "read",
+                            Touch::Edited => "edited",
+                        },
+                    )
+                })
+                .collect(),
+            self.ground_rows().into_iter().map(|row| row.id).collect(),
+        )
+    }
+
+    /// How many cards here were answered from another chat's column.
+    pub fn answered_from_column_for_test(&self) -> usize {
+        self.answered_from_column.len()
+    }
+
+    /// The riding line's grounding id and its flag words, if any.
+    pub fn riding_for_test(&self) -> Option<(String, Option<String>)> {
+        self.riding_grounding().map(|(id, _, flag)| (id, flag))
+    }
+}
+
+/// The store flag holding a conversation's folded column.
+fn status_flag(session: SessionId) -> String {
+    format!("status_collapsed:{}", session.0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+
+    fn root() -> &'static Path {
+        Path::new("/work/repo")
+    }
+
+    #[test]
+    fn touched_files_fold_with_edited_winning_and_failures_ignored() {
+        let mut facts = StatusFacts::default();
+        facts.fold_tool("read_file", r#"{"path":"src/a.rs"}"#, "fn a() {}", root());
+        facts.fold_tool("read_file", r#"{"path":"./src/b.rs"}"#, "fn b() {}", root());
+        facts.fold_tool(
+            "edit_file",
+            r#"{"path":"/work/repo/src/a.rs"}"#,
+            "edited",
+            root(),
+        );
+        facts.fold_tool("read_file", r#"{"path":"src/a.rs"}"#, "fn a() {}", root());
+        facts.fold_tool(
+            "write_file",
+            r#"{"path":"src/c.rs"}"#,
+            "error: denied by user",
+            root(),
+        );
+        facts.fold_tool(
+            "edit_file",
+            r#"{"path":"src/b.rs"}"#,
+            "denied by user",
+            root(),
+        );
+        facts.fold_tool("grep", r#"{"path":"src"}"#, "hits", root());
+        assert_eq!(
+            facts.touched,
+            vec![
+                ("src/a.rs".to_string(), Touch::Edited),
+                ("src/b.rs".to_string(), Touch::Read),
+            ]
+        );
+    }
+
+    #[test]
+    fn the_status_tool_sets_goal_and_next_and_the_prompt_is_the_fallback() {
+        let mut facts = StatusFacts::default();
+        facts.fold_user("\n  Fix the widget_test flake\nmore detail");
+        assert_eq!(facts.goal_text(), Some("Fix the widget_test flake"));
+        assert_eq!(facts.next, None, "no next step until the model states one");
+        facts.fold_tool(
+            "status",
+            r#"{"goal":"Fix the teardown race","next":"re-run the suite"}"#,
+            "status noted",
+            root(),
+        );
+        facts.fold_user("Makes sense, go ahead");
+        assert_eq!(facts.goal_text(), Some("Fix the teardown race"));
+        facts.fold_tool("status", r#"{"next":"commit"}"#, "status noted", root());
+        assert_eq!(facts.goal.as_deref(), Some("Fix the teardown race"));
+        assert_eq!(facts.next.as_deref(), Some("commit"));
+        facts.fold_tool("status", r#"{}"#, "error: status: give a goal", root());
+        assert_eq!(facts.next.as_deref(), Some("commit"));
+    }
+
+    #[test]
+    fn search_memory_hits_are_what_the_work_consulted() {
+        let result = "[p12] gotchas.md, added 2026-11-01\n   cite the flake\n   links: builds_on p7\n\n[g3] prefs.md, added -\n   tabs\n";
+        assert_eq!(memory_hit_ids(result), vec!["p12", "g3"]);
+        let mut facts = StatusFacts::default();
+        facts.fold_tool("search_memory", r#"{"query":"flake"}"#, result, root());
+        facts.fold_tool(
+            "search_memory",
+            r#"{"query":"x"}"#,
+            "[p12] a.md, added -\n",
+            root(),
+        );
+        assert_eq!(facts.consulted, vec!["p12", "g3"]);
+        facts.fold_tool(
+            "search_memory",
+            r#"{"query":"y"}"#,
+            "no memory matches",
+            root(),
+        );
+        assert_eq!(facts.consulted.len(), 2);
+    }
+
+    fn entry(id: &str, evidence: &[&str]) -> MemoryEntry {
+        MemoryEntry {
+            id: id.into(),
+            file: "notes.md".into(),
+            text: format!("entry {id}"),
+            helpful: 0,
+            harmful: 0,
+            source_session: None,
+            added_at: None,
+            valid_until: None,
+            superseded_by: None,
+            links: Vec::new(),
+            evidence: evidence
+                .iter()
+                .map(|path| gertie_core::memory::Evidence {
+                    path: path.to_string(),
+                    hash: "000000000000".into(),
+                })
+                .collect(),
+            recheck: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn grounding_lists_consulted_entries_then_file_level_overlap() {
+        let mut facts = StatusFacts::default();
+        facts.fold_tool("read_file", r#"{"path":"src/teardown.rs"}"#, "x", root());
+        facts.consulted = vec!["p12".into()];
+        let entries = vec![
+            entry("p12", &["src/teardown.rs"]),
+            entry("p20", &["src/teardown.rs"]),
+            // A prefix of a touched path is not the same file.
+            entry("p21", &["src/tear"]),
+            entry("p22", &["src"]),
+            entry("p23", &[]),
+        ];
+        let rows = grounding(&entries, &facts, |entry| {
+            if entry.id == "p12" {
+                vec!["src/teardown.rs".into()]
+            } else {
+                Vec::new()
+            }
+        });
+        let ids: Vec<(&str, bool)> = rows
+            .iter()
+            .map(|row| (row.id.as_str(), row.acting))
+            .collect();
+        assert_eq!(ids, vec![("p12", true), ("p20", false)]);
+        assert_eq!(
+            rows[0].evidence_words().as_deref(),
+            Some("src/teardown.rs moved since [p12] was written, verified current before acting")
+        );
+        assert!(rows[0].flagged());
+        assert!(!rows[1].flagged());
+    }
+
+    #[test]
+    fn evidence_the_work_never_saw_says_so() {
+        let facts = StatusFacts {
+            consulted: vec!["p12".into()],
+            ..Default::default()
+        };
+        let rows = grounding(&[entry("p12", &["src/a.rs"])], &facts, |_| {
+            vec!["src/a.rs".into()]
+        });
+        assert_eq!(
+            rows[0].evidence_words().as_deref(),
+            Some("src/a.rs moved since [p12] was written, not re-read this session")
+        );
+    }
+
+    #[test]
+    fn nothing_consulted_or_touched_means_no_grounding() {
+        let facts = StatusFacts::default();
+        assert!(grounding(&[entry("p1", &["a.rs"])], &facts, |_| Vec::new()).is_empty());
+    }
+
+    fn ask(session: u64, id: u64) -> ProjectAsk {
+        ProjectAsk {
+            session: SessionId(session),
+            session_title: format!("chat {session}"),
+            ask: id,
+            question: "Which database?".into(),
+            options: vec!["postgres".into()],
+            worker: false,
+        }
+    }
+
+    #[test]
+    fn asks_reach_only_across_the_shown_chats_project() {
+        let others = || {
+            vec![
+                (Some(7), vec![ask(2, 10)]),
+                (Some(8), vec![ask(3, 11)]),
+                (None, vec![ask(4, 12)]),
+                (Some(7), vec![ask(5, 13), ask(5, 14)]),
+            ]
+        };
+        let reached: Vec<u64> = project_asks_for(Some(7), others())
+            .iter()
+            .map(|ask| ask.ask)
+            .collect();
+        assert_eq!(reached, vec![10, 13, 14]);
+        assert!(
+            project_asks_for(None, others()).is_empty(),
+            "an unfiled chat reaches nothing"
+        );
+    }
+
+    #[test]
+    fn the_summary_names_only_what_exists() {
+        assert_eq!(
+            summary_parts(Some("12:30".into()), 3, 1),
+            vec!["run 12:30", "3 touched", "1 ask"]
+        );
+        assert_eq!(summary_parts(None, 0, 2), vec!["2 asks"]);
+        assert!(summary_parts(None, 0, 0).is_empty());
+    }
+}
