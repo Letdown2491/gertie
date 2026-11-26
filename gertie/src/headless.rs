@@ -344,6 +344,13 @@ pub(crate) fn pump(
                 // of, so the event cannot fire; the arm is completeness.
                 LoopEvent::Steered { .. } => {}
                 LoopEvent::Nudged => {}
+                LoopEvent::Pruned { reads, chars } => {
+                    eprintln!(
+                        "· {reads} superseded read{} collapsed, about {} tokens no longer re-sent",
+                        if reads == 1 { "" } else { "s" },
+                        chars / 4
+                    );
+                }
                 LoopEvent::Error { message } => {
                     recorder.flush();
                     return (Outcome::Error { message }, recorder.text);

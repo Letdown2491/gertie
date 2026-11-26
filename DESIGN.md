@@ -299,6 +299,18 @@ left out, the SQLite wire record is never rewritten. No summarizer model, no inv
 state, nothing that can fail on the provider. Hard-truncate oversized tool outputs with a
 "truncated" marker and re-read hint. Measure before building anything fancier.
 
+Two cheaper steps run long before compaction (#39). **At entry**, bash output is shaped:
+passing tests collapse to a count, a build diagnostic keeps its whole block (the `-->`
+location and the source excerpt, not just the `error:` line), wrapped commands
+(`cd x && cargo test`, `./scripts/build.sh test`) classify by their last known segment, and
+long output of any kind keeps its head, the failure lines of the middle, and its tail,
+where the head-only cap used to cut the verdict. **In history**, a `read_file` result that
+a later read of the same lines fully covers collapses to a one-line pointer (attached
+AGENTS.md and memory blocks stay). Providers cache the request prefix and rewriting an old
+message re-bills everything after it, so collapsing is batched: nothing changes until about
+6k tokens are recoverable, then everything superseded goes at once. The decision is a pure
+function of the history, so a resumed session prunes to the same bytes.
+
 ## Projects
 
 A project is a name, not a folder: chats belong to a project only when

@@ -200,6 +200,9 @@ impl ChatView {
                     LoopEvent::Compacted { kept, total } => {
                         let _ = this.update(cx, |this, cx| this.on_compacted(kept, total, cx));
                     }
+                    // The model's view shrank; the transcript keeps
+                    // every read whole, so there is nothing to redraw.
+                    LoopEvent::Pruned { .. } => {}
                     LoopEvent::Steered { text } => {
                         let _ = this.update(cx, |this, cx| this.on_steered(&text, cx));
                     }

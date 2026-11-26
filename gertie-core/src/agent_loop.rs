@@ -66,6 +66,13 @@ pub enum LoopEvent {
         kept: usize,
         total: usize,
     },
+    /// Superseded file reads collapsed to pointers (#39): `reads`
+    /// results, `chars` characters no longer re-sent every round. The
+    /// in-memory view only, like compaction; DB rows keep the text.
+    Pruned {
+        reads: usize,
+        chars: usize,
+    },
     /// A steered user message joined the history at a round boundary.
     /// The receiver persists it like any user turn, the loop only
     /// owns the in-memory history.
@@ -305,6 +312,12 @@ pub fn run_turn(spec: TurnSpec) -> BoxStream<'static, LoopEvent> {
                         yield LoopEvent::Compacted { kept, total };
                     }
                 }
+            }
+            // Superseded reads (#39): batched, so the cached prefix
+            // breaks once per batch, not once per re-read.
+            let pruned = crate::prune::prune_superseded(&mut history.lock().await);
+            if let Some((reads, chars)) = pruned {
+                yield LoopEvent::Pruned { reads, chars };
             }
             // Steering: messages the user typed mid-run join the
             // conversation here, the model reads them with the next
@@ -2413,6 +2426,63 @@ mod tests {
         });
 
         assert!(tool_result(&events, "bash").contains("blocked by policy"));
+    }
+
+    /// #39 end to end: the same large file read twice; the request
+    /// after the second read carries the first as a pointer, the
+    /// second whole, and the loop reports what it recovered.
+    #[test]
+    fn a_reread_file_reaches_the_model_once() {
+        let call = |id: &str| Event::ToolCall {
+            id: id.into(),
+            name: "read_file".into(),
+            arguments: r#"{"path": "src/big.rs"}"#.into(),
+        };
+        let provider = Arc::new(ScriptedProvider {
+            seen: std::sync::Mutex::new(Vec::new()),
+            scripts: std::sync::Mutex::new(vec![
+                vec![call("r1"), Event::Done],
+                vec![call("r2"), Event::Done],
+                vec![
+                    Event::Token {
+                        delta: "read it".into(),
+                    },
+                    Event::Done,
+                ],
+            ]),
+        });
+        let body: &'static str = Box::leak(
+            format!(
+                "     1  fn big() {{}}\n{}",
+                "x".repeat(crate::prune::BATCH_CHARS)
+            )
+            .into_boxed_str(),
+        );
+        let read: Arc<dyn Tool> = Arc::new(StubTool::new("read_file", false, body));
+        let history: SharedHistory = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let (spec, broker) = turn(provider.clone(), registry(&[read]), history, "read big.rs");
+        let events = drain(run_turn(spec), &broker, |_| panic!("reads do not prompt"));
+        assert!(
+            events
+                .iter()
+                .any(|event| matches!(event, LoopEvent::Pruned { reads: 1, .. })),
+            "the loop says what it collapsed"
+        );
+        let seen = provider.seen.lock().unwrap();
+        let last = seen.last().expect("three requests");
+        let reads: Vec<&str> = last
+            .messages
+            .iter()
+            .filter(|message| message.name.as_deref() == Some("read_file"))
+            .filter_map(|message| message.content.as_deref())
+            .collect();
+        assert_eq!(reads.len(), 2);
+        assert!(
+            reads[0].starts_with("[read_file src/big.rs: superseded"),
+            "{}",
+            &reads[0][..60]
+        );
+        assert_eq!(reads[1], body, "the latest read stays whole");
     }
 
     #[test]
