@@ -5480,6 +5480,41 @@ fn a_question_answered_from_the_column_lands_on_its_own_card() {
 /// The file-tool arm gates too: a model-named path that is not a
 /// real file renders no row (write_file excepted: it creates).
 #[test]
+/// The live session's REAL recorded commands (from the session DB):
+/// multi-line heredocs whose interior python lines look like paths.
+/// Today's gates must kill every fragment.
+#[test]
+fn the_live_sessions_real_commands_stay_clean() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().to_path_buf();
+    std::fs::write(root.join("real.md"), "x").unwrap();
+    let mut facts = gertie::chat::status::StatusFacts::default();
+    // Verbatim from the store: a heredoc whose python body contains
+    // text.replace( tokens, and a grep over a log containing FAILED.
+    let heredoc = r#"cd /work && python3 << 'PYEOF'
+path = "gertie/src/chat/status.rs"
+text = open(path).read()
+text = text.replace(old, new)
+old2 = "FAILED\."
+print("anchored")
+PYEOF"#;
+    let grep = r#"grep -E "FAILED\." /tmp/s16.log"#;
+    for command in [heredoc, grep] {
+        facts.fold_tool(
+            "bash",
+            &serde_json::json!({"command": command}).to_string(),
+            "ok",
+            &root,
+        );
+    }
+    for (path, _) in &facts.touched {
+        assert!(
+            path.contains("real.md") || path.contains("/tmp/") || path.contains(".md"),
+            "heredoc fragments survived: {path:?}"
+        );
+    }
+}
+
 fn the_file_tool_arm_gates_model_named_paths() {
     let tmp = tempfile::tempdir().unwrap();
     let root = tmp.path().to_path_buf();

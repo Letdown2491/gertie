@@ -145,6 +145,19 @@ impl StatusFacts {
             "memory" => {
                 let command = field("command").unwrap_or_default();
                 let target = field("path").unwrap_or_default();
+                // Consultation-shaped commands saw the entries: view
+                // returns the file's entry lines (ids free, same
+                // mechanism as the search arm), and str_replace /
+                // insert had to read the content to anchor on it. The
+                // model's natural path is the memory tool, not
+                // search_memory — the live test's gap.
+                if matches!(command.as_str(), "view" | "str_replace" | "insert") {
+                    for id in memory_hit_ids(result) {
+                        if !self.consulted.contains(&id) {
+                            self.consulted.push(id);
+                        }
+                    }
+                }
                 if !command.is_empty() {
                     // The verb is gertie's word for what happened;
                     // the file is the entry's basename. "created
@@ -1557,6 +1570,26 @@ mod tests {
         let result = "[p12] gotchas.md, added 2026-11-01\n   cite the flake\n   links: builds_on p7\n\n[g3] prefs.md, added -\n   tabs\n";
         assert_eq!(memory_hit_ids(result), vec!["p12", "g3"]);
         let mut facts = StatusFacts::default();
+        // The memory tool's view is a consultation too: the model's
+        // natural path (the live test's gap — no card fired when the
+        // model viewed the files).
+        let mut viewed = StatusFacts::default();
+        viewed.fold_tool(
+            "memory",
+            r#"{"command":"view","path":"project/gotchas.md"}"#,
+            "# Gotchas\n\n- [p1] helpful=0 harmful=0 the sprite theory [source: hand; added: 2026-11-25]\n- [p2] helpful=0 harmful=0 the assets layer was the fix [source: 44837af; added: 2026-11-25]\n",
+            &root,
+        );
+        assert_eq!(viewed.consulted, vec!["p1", "p2"], "a view saw the entries");
+        // Mutating commands are actions, not consultations.
+        let mut created = StatusFacts::default();
+        created.fold_tool(
+            "memory",
+            r#"{"command":"create","path":"project/gotchas.md"}"#,
+            "created",
+            &root,
+        );
+        assert!(created.consulted.is_empty(), "create consults nothing");
         facts.fold_tool("search_memory", r#"{"query":"flake"}"#, result, &root);
         facts.fold_tool(
             "search_memory",
