@@ -368,6 +368,7 @@ impl WorkspaceView {
                     templates: self.boot.templates.clone(),
                     workspace_root: self.boot.workspace_root.clone(),
                     settle_command: self.boot.settle_command(),
+                    verify: self.boot.verify_command(),
                     broker: self.boot.broker.clone(),
                     session_scope: self.boot.session_scope.clone(),
                     mode_scope: self.boot.mode_scope.clone(),

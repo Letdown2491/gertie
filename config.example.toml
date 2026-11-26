@@ -71,6 +71,18 @@ api_key_env = "MY_API_KEY"
 # auto sweep: a human pressed the button.
 # settle_command = "cargo clean"
 
+# The project check: when the model ends a turn that edited files,
+# gertie runs this as a bash call (your permission mode decides, as for
+# any bash call) and sends a failure back to the model, up to three
+# runs a turn. Absent = inferred: `cargo check` for a Cargo workspace,
+# `go build ./...` for a Go module, each only when that program is on
+# PATH. Your config only: a repo's overlay may not set a shell command.
+# [verify]
+# enabled = true                      # false = never check
+# command = "make check"              # every workspace, over inference
+# [verify.commands]                   # per workspace; "" = off there
+# "/home/me/src/app" = "./scripts/build.sh check"
+
 # Web search: web_search explains itself until a backend is configured.
 # [search]
 # backend = "brave"          # or "searxng"

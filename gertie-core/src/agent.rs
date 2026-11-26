@@ -477,6 +477,8 @@ impl AgentTool {
                 // (its registry stripped them), so nothing ever writes
                 // this handle; it exists to satisfy the spec.
                 worker_progress: WorkerProgress::default(),
+                // Workers report to a leader whose own turn checks.
+                verify: None,
                 // Brief and guidance are model-authored; their
                 // hyphen lines are escaped so neither can forge the
                 // envelope around them.

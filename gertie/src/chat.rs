@@ -560,6 +560,8 @@ pub struct ChatView {
     /// The reclaim command a manual settle runs in the settling
     /// session's recorded workspace (config: settle_command).
     settle_command: Option<String>,
+    /// The project check run before an editing turn ends (#40).
+    verify: Option<String>,
     /// The command palette (Ctrl+K): the kit's field + keyboard nav,
     /// pointed at the store's FTS index by the callbacks in render.
     palette: Entity<CommandState>,
@@ -766,6 +768,8 @@ pub struct ChatViewConfig {
     // The reclaim command a manual settle runs in the settling
     // session's recorded workspace (config: settle_command).
     pub settle_command: Option<String>,
+    // The project check run before an editing turn ends (#40).
+    pub verify: Option<String>,
     pub broker: Arc<PermissionBroker>,
     pub session_scope: gertie_core::SessionScope,
     // Worker dispatch reads this turn's posture; the chat sets it
@@ -819,6 +823,7 @@ impl ChatView {
             templates,
             workspace_root,
             settle_command,
+            verify,
             broker,
             session_scope,
             mode_scope,
@@ -1022,6 +1027,7 @@ impl ChatView {
             templates,
             workspace_root,
             settle_command,
+            verify,
             palette,
             palette_open: false,
             palette_hits: Vec::new(),

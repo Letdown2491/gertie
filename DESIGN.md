@@ -311,6 +311,17 @@ message re-bills everything after it, so collapsing is batched: nothing changes 
 6k tokens are recoverable, then everything superseded goes at once. The decision is a pure
 function of the history, so a resumed session prunes to the same bytes.
 
+**The project check (#40).** "Done" from a model is a claim; the harness checks it. When the
+model ends a turn that edited files, gertie appends a `bash` call for the project's check to
+the model's final message and dispatches it through the ordinary path, so the permission
+mode, the sandbox, output shaping and the transcript card all apply unchanged. A pass ends
+the turn with no extra model round; a denial ends it too (the human's call); a failure goes
+back as "the turn is not done: fix it or say why it is expected", up to three runs a turn,
+the last asking for a report instead. The command comes from the user's `[verify]` config
+(global, or per workspace path) or is inferred (`cargo check --message-format=short`, `go
+build ./...`) only when the program is on PATH. The repo's overlay may not name it: the
+settle_command rule, a cloned repo does not get to choose a command gertie runs.
+
 ## Projects
 
 A project is a name, not a folder: chats belong to a project only when

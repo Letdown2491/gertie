@@ -68,6 +68,7 @@ impl ChatView {
             instructions: self.instructions.clone(),
             memory_index: self.memory_index.clone(),
             memory: self.memory_store.clone().filter(|_| self.memory_enabled),
+            verify: self.verify.clone(),
         });
         self.streaming = true;
         self.streaming_assistant = None;
@@ -203,6 +204,9 @@ impl ChatView {
                     // The model's view shrank; the transcript keeps
                     // every read whole, so there is nothing to redraw.
                     LoopEvent::Pruned { .. } => {}
+                    // The check's bash card and result are already in
+                    // the transcript; the verdict needs no extra row.
+                    LoopEvent::Checked { .. } => {}
                     LoopEvent::Steered { text } => {
                         let _ = this.update(cx, |this, cx| this.on_steered(&text, cx));
                     }

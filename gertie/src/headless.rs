@@ -205,6 +205,7 @@ pub(crate) fn drive_turn(
         max_tool_rounds: boot.max_tool_rounds(),
         grace_rounds: boot.grace_rounds(),
         worker_progress: gertie_core::WorkerProgress::default(),
+        verify: boot.verify_command(),
     });
     let worker_asks = boot
         .broker
@@ -344,6 +345,12 @@ pub(crate) fn pump(
                 // of, so the event cannot fire; the arm is completeness.
                 LoopEvent::Steered { .. } => {}
                 LoopEvent::Nudged => {}
+                LoopEvent::Checked { passed } => {
+                    eprintln!(
+                        "· project check {}",
+                        if passed { "passed" } else { "failed" }
+                    );
+                }
                 LoopEvent::Pruned { reads, chars } => {
                     eprintln!(
                         "· {reads} superseded read{} collapsed, about {} tokens no longer re-sent",
@@ -698,6 +705,7 @@ mod tests {
             max_tool_rounds: None,
             grace_rounds: None,
             worker_progress: gertie_core::WorkerProgress::default(),
+            verify: None,
         });
         let mut approvals = 0;
         let (outcome, text) = pump(
@@ -783,6 +791,7 @@ mod tests {
             max_tool_rounds: None,
             grace_rounds: None,
             worker_progress: gertie_core::WorkerProgress::default(),
+            verify: None,
         });
         let mut approvals = 0;
         let (outcome, _) = pump(

@@ -164,6 +164,12 @@ impl Bootstrap {
             .value
     }
 
+    /// The project check for this workspace (#40), from the live
+    /// config.
+    pub fn verify_command(&self) -> Option<String> {
+        self.live_config().resolve_verify(&self.workspace_root)
+    }
+
     /// Where every overlay-resolvable setting came from, resolved
     /// against the live config.
     pub fn origins(&self) -> crate::config::Origins {

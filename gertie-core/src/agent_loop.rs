@@ -73,6 +73,11 @@ pub enum LoopEvent {
         reads: usize,
         chars: usize,
     },
+    /// The project's check ran (#40). A failure went back to the model;
+    /// a pass (or a declined check) ended the turn.
+    Checked {
+        passed: bool,
+    },
     /// A steered user message joined the history at a round boundary.
     /// The receiver persists it like any user turn, the loop only
     /// owns the in-memory history.
@@ -225,6 +230,10 @@ pub struct TurnSpec {
     /// this loop hands the other to the tools that run their own
     /// loops (via [`Tool::run_with_call`]).
     pub worker_progress: crate::tool::WorkerProgress,
+    /// The project's check (#40): run as a bash call, under the turn's
+    /// permission mode, when the model ends a turn that edited files.
+    /// None = no check.
+    pub verify: Option<String>,
 }
 
 /// Runs one user turn to completion: request → (text | tool calls)* →
@@ -267,6 +276,7 @@ pub fn run_turn(spec: TurnSpec) -> BoxStream<'static, LoopEvent> {
         max_tool_rounds,
         grace_rounds,
         worker_progress,
+        verify,
     } = spec;
     let max_tool_rounds = max_tool_rounds.unwrap_or(DEFAULT_MAX_TOOL_ROUNDS);
     let grace_rounds = grace_rounds.unwrap_or(DEFAULT_GRACE_ROUNDS);
@@ -285,6 +295,11 @@ pub fn run_turn(spec: TurnSpec) -> BoxStream<'static, LoopEvent> {
         // Observed prompt size from the last request's usage events, if
         // the provider reported any; the chars/4 estimate covers the rest.
         let mut last_input_tokens: Option<u64> = None;
+        // The check (#40): owed once an edit lands, run when the model
+        // tries to end the turn, at most VERIFY_RUNS times a turn.
+        let mut edited = false;
+        let mut checks_run = 0usize;
+        let mut checking: Option<String> = None;
 
         for round in 1..=(max_tool_rounds + grace_rounds) {
             // Compaction check happens at round start, before the
@@ -435,6 +450,32 @@ pub fn run_turn(spec: TurnSpec) -> BoxStream<'static, LoopEvent> {
                 }
             }
 
+            // The model wants to end a turn that edited files: the
+            // project's check runs first, as a bash call riding the
+            // model's final message, through the same permission path
+            // as any call the model makes (the mode decides; the card,
+            // the sandbox and the shaping all apply).
+            if calls.is_empty()
+                && edited
+                && checks_run < VERIFY_RUNS
+                && round < max_tool_rounds
+                && let Some(command) = verify.as_deref()
+            {
+                let id = format!("gertie-check-{round}");
+                calls.push(ToolCall {
+                    id: id.clone(),
+                    name: "bash".into(),
+                    arguments: serde_json::json!({
+                        "command": command,
+                        "timeout": VERIFY_TIMEOUT_SECS,
+                    })
+                    .to_string(),
+                });
+                checking = Some(id);
+                checks_run += 1;
+                edited = false;
+            }
+
             if calls.is_empty() {
                 history
                     .lock()
@@ -461,6 +502,7 @@ pub fn run_turn(spec: TurnSpec) -> BoxStream<'static, LoopEvent> {
                 return;
             }
 
+            let mut check_outcome: Option<CheckVerdict> = None;
             history
                 .lock()
                 .await
@@ -669,6 +711,15 @@ pub fn run_turn(spec: TurnSpec) -> BoxStream<'static, LoopEvent> {
                     }
                 }
 
+                if EDIT_TOOLS.contains(&call.name.as_str()) && !result.starts_with("error:") {
+                    edited = true;
+                }
+                if checking.as_deref() == Some(call.id.as_str()) {
+                    let verdict = check_verdict(&result);
+                    result = decorate_check(&result, verdict, checks_run >= VERIFY_RUNS);
+                    check_outcome = Some(verdict);
+                }
+
                 // The strip above is the prompt boundary: tool output,
                 // a web page, an MCP payload, anything the world sent
                 // back, enters the model's context and the transcript
@@ -685,6 +736,31 @@ pub fn run_turn(spec: TurnSpec) -> BoxStream<'static, LoopEvent> {
                     arguments: call.arguments,
                     result,
                 };
+            }
+
+            // A passing check ends the turn as the model meant to; a
+            // declined one too (the human said not now). Only a failure
+            // goes back to the model. A steer still buys a round.
+            if let Some(verdict) = check_outcome.take() {
+                checking = None;
+                yield LoopEvent::Checked { passed: verdict == CheckVerdict::Passed };
+                if verdict != CheckVerdict::Failed {
+                    let mut steered = Vec::new();
+                    if let Some(steer) = steer.as_mut() {
+                        while let Ok(text) = steer.try_recv() {
+                            steered.push(text);
+                        }
+                    }
+                    if steered.is_empty() {
+                        yield LoopEvent::Done;
+                        return;
+                    }
+                    for text in steered {
+                        history.lock().await.push(WireMessage::user(&text));
+                        yield LoopEvent::Steered { text };
+                    }
+                    continue;
+                }
             }
 
             if round >= max_tool_rounds {
@@ -734,6 +810,52 @@ pub fn run_turn(spec: TurnSpec) -> BoxStream<'static, LoopEvent> {
             }
         }
     })
+}
+
+/// Checks a turn may run: the first, then two after failures.
+pub const VERIFY_RUNS: usize = 3;
+
+/// A check's time limit: builds are slower than the bash default.
+const VERIFY_TIMEOUT_SECS: u64 = 300;
+
+/// Tools whose success means the check is owed.
+const EDIT_TOOLS: [&str; 2] = ["edit_file", "write_file"];
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CheckVerdict {
+    Passed,
+    Failed,
+    /// Denied by the human, or blocked by policy: not the model's to fix.
+    Declined,
+}
+
+/// Reads a bash result: `exit N:` and timeouts fail, denials decline.
+fn check_verdict(result: &str) -> CheckVerdict {
+    if result.starts_with("error: denied") || result.starts_with("error: blocked") {
+        CheckVerdict::Declined
+    } else if result.starts_with("exit ") || result.starts_with("error:") {
+        CheckVerdict::Failed
+    } else {
+        CheckVerdict::Passed
+    }
+}
+
+/// What the model reads: who ran the check and why, and on a failure,
+/// that the turn is not done.
+fn decorate_check(result: &str, verdict: CheckVerdict, last: bool) -> String {
+    let head = "[gertie ran the project check before ending the turn]";
+    match verdict {
+        CheckVerdict::Passed => format!("{head}\n{result}\n[check passed]"),
+        CheckVerdict::Declined => format!("{head}\n{result}"),
+        CheckVerdict::Failed if last => format!(
+            "{head}\n{result}\n\nThe check failed and will not run again this turn: tell the user \
+             what still fails and why."
+        ),
+        CheckVerdict::Failed => format!(
+            "{head}\n{result}\n\nThe check failed, so the turn is not done: fix what it reports, \
+             or say why the failure is expected (for example, the check cannot run here)."
+        ),
+    }
 }
 
 /// Messages kept verbatim after a compaction, roughly two tool rounds.
@@ -1578,6 +1700,7 @@ mod tests {
                 max_tool_rounds: None,
                 grace_rounds: None,
                 worker_progress: crate::tool::WorkerProgress::default(),
+                verify: None,
             },
             broker,
         )
@@ -2426,6 +2549,199 @@ mod tests {
         });
 
         assert!(tool_result(&events, "bash").contains("blocked by policy"));
+    }
+
+    /// A bash stand-in that answers from a script, one result per run,
+    /// and records the commands it was given.
+    struct ScriptedBash {
+        results: std::sync::Mutex<Vec<&'static str>>,
+        commands: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl ScriptedBash {
+        fn new(results: &[&'static str]) -> Arc<Self> {
+            Arc::new(Self {
+                results: std::sync::Mutex::new(results.iter().rev().copied().collect()),
+                commands: std::sync::Mutex::new(Vec::new()),
+            })
+        }
+    }
+
+    impl Tool for ScriptedBash {
+        fn name(&self) -> &'static str {
+            "bash"
+        }
+        fn description(&self) -> String {
+            "scripted bash".into()
+        }
+        fn parameters(&self) -> serde_json::Value {
+            serde_json::json!({"type": "object", "properties": {}})
+        }
+        fn mutates(&self) -> bool {
+            true
+        }
+        fn run<'a>(
+            &'a self,
+            arguments: &'a str,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ToolResult> + Send + 'a>> {
+            let command = serde_json::from_str::<serde_json::Value>(arguments)
+                .ok()
+                .and_then(|value| value["command"].as_str().map(str::to_string))
+                .unwrap_or_default();
+            self.commands.lock().unwrap().push(command);
+            let result = self.results.lock().unwrap().pop().unwrap_or("ok");
+            Box::pin(async move { Ok(result.to_string()) })
+        }
+    }
+
+    fn edit_round(id: &str) -> Vec<Event> {
+        vec![
+            Event::ToolCall {
+                id: id.into(),
+                name: "edit_file".into(),
+                arguments: r#"{"path": "a.rs"}"#.into(),
+            },
+            Event::Done,
+        ]
+    }
+
+    fn say(text: &str) -> Vec<Event> {
+        vec![Event::Token { delta: text.into() }, Event::Done]
+    }
+
+    /// Runs a scripted turn with a check configured; returns the events,
+    /// the requests the model saw, and the commands bash ran.
+    fn checked_turn(
+        scripts: Vec<Vec<Event>>,
+        bash_results: &[&'static str],
+        decide: impl Fn(&ToolCall) -> PermissionDecision,
+    ) -> (Vec<LoopEvent>, Vec<crate::Request>, Vec<String>) {
+        let provider = Arc::new(ScriptedProvider {
+            seen: std::sync::Mutex::new(Vec::new()),
+            scripts: std::sync::Mutex::new(scripts),
+        });
+        let edit: Arc<dyn Tool> = Arc::new(StubTool::new("edit_file", true, "edited a.rs"));
+        let bash = ScriptedBash::new(bash_results);
+        let tools = registry(&[edit, bash.clone() as Arc<dyn Tool>]);
+        let history: SharedHistory = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let (mut spec, broker) = turn(provider.clone(), tools, history, "fix a.rs");
+        spec.verify = Some("cargo check".into());
+        let events = drain(run_turn(spec), &broker, decide);
+        let seen = provider.seen.lock().unwrap().clone();
+        let commands = bash.commands.lock().unwrap().clone();
+        (events, seen, commands)
+    }
+
+    fn checked(events: &[LoopEvent]) -> Vec<bool> {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                LoopEvent::Checked { passed } => Some(*passed),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn last_tool_text(request: &crate::Request) -> String {
+        request
+            .messages
+            .iter()
+            .rev()
+            .find(|message| message.role == Role::Tool)
+            .and_then(|message| message.content.clone())
+            .unwrap_or_default()
+    }
+
+    /// #40: an editing turn the model ends gets checked; a pass ends it
+    /// with no extra model round.
+    #[test]
+    fn a_passing_check_ends_the_editing_turn_without_another_round() {
+        let (events, seen, commands) = checked_turn(
+            vec![edit_round("e1"), say("done")],
+            &["Finished dev"],
+            |_| PermissionDecision::Approve,
+        );
+        assert_eq!(commands, vec!["cargo check".to_string()]);
+        assert_eq!(checked(&events), vec![true]);
+        assert_eq!(seen.len(), 2, "the pass ends the turn: no third request");
+        assert!(matches!(events.last(), Some(LoopEvent::Done)));
+    }
+
+    /// A failure goes back to the model as "not done"; the fix is
+    /// checked again.
+    #[test]
+    fn a_failing_check_bounces_the_turn_back_until_it_passes() {
+        let (events, seen, commands) = checked_turn(
+            vec![
+                edit_round("e1"),
+                say("done"),
+                edit_round("e2"),
+                say("fixed"),
+            ],
+            &[
+                "exit 101:\nsrc/a.rs:3:1: error[E0308]: mismatched types",
+                "Finished dev",
+            ],
+            |_| PermissionDecision::Approve,
+        );
+        assert_eq!(commands.len(), 2);
+        assert_eq!(checked(&events), vec![false, true]);
+        let bounced = last_tool_text(&seen[2]);
+        assert!(
+            bounced.starts_with("[gertie ran the project check")
+                && bounced.contains("mismatched types")
+                && bounced.contains("the turn is not done"),
+            "{bounced}"
+        );
+        assert_eq!(seen.len(), 4);
+    }
+
+    /// No edit, no check: a question answered from reading costs nothing.
+    #[test]
+    fn a_turn_without_edits_is_not_checked() {
+        let (events, seen, commands) = checked_turn(vec![say("it does X")], &[], |_| {
+            panic!("nothing should ask")
+        });
+        assert!(commands.is_empty());
+        assert!(checked(&events).is_empty());
+        assert_eq!(seen.len(), 1);
+    }
+
+    /// The check is bounded: after VERIFY_RUNS failures the model is told
+    /// to report, and the turn ends on its answer.
+    #[test]
+    fn checks_stop_after_the_cap_and_ask_for_a_report() {
+        let mut scripts = Vec::new();
+        for index in 0..VERIFY_RUNS {
+            scripts.push(edit_round(&format!("e{index}")));
+            scripts.push(say("done"));
+        }
+        scripts.push(say("still failing: the linker is missing"));
+        let failures = vec!["exit 1:\nerror: linker not found"; VERIFY_RUNS];
+        let (events, seen, commands) =
+            checked_turn(scripts, &failures, |_| PermissionDecision::Approve);
+        assert_eq!(commands.len(), VERIFY_RUNS);
+        assert_eq!(checked(&events), vec![false; VERIFY_RUNS]);
+        let last = last_tool_text(seen.last().unwrap());
+        assert!(last.contains("will not run again this turn"), "{last}");
+        assert!(matches!(events.last(), Some(LoopEvent::Done)));
+    }
+
+    /// A declined check is the human's call, not a failure to fix.
+    #[test]
+    fn a_declined_check_ends_the_turn() {
+        let (events, seen, commands) =
+            checked_turn(vec![edit_round("e1"), say("done")], &[], |call| {
+                if call.name == "bash" {
+                    PermissionDecision::Deny { feedback: None }
+                } else {
+                    PermissionDecision::Approve
+                }
+            });
+        assert!(commands.is_empty(), "denied: bash never ran");
+        assert_eq!(checked(&events), vec![false]);
+        assert_eq!(seen.len(), 2, "no bounce on a denial");
+        assert!(matches!(events.last(), Some(LoopEvent::Done)));
     }
 
     /// #39 end to end: the same large file read twice; the request

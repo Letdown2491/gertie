@@ -50,6 +50,27 @@ pub struct Config {
     /// Turn budgets. Absent = the loop's built-in defaults.
     #[serde(default)]
     pub turn: Option<TurnConfig>,
+    /// The check gertie runs before an editing turn ends (#40).
+    /// Absent = inferred from the workspace.
+    #[serde(default)]
+    pub verify: Option<VerifyConfig>,
+}
+
+/// `[verify]`: the project check. Your config only: the repo's overlay
+/// may not set a shell command (the settle_command rule).
+#[derive(Debug, Clone, Default, serde::Deserialize, serde::Serialize)]
+pub struct VerifyConfig {
+    /// false turns the check off everywhere. Default on.
+    #[serde(default)]
+    pub enabled: Option<bool>,
+    /// The check for every workspace, over the inferred one.
+    #[serde(default)]
+    pub command: Option<String>,
+    /// Per-workspace checks, keyed by the workspace's absolute path:
+    /// `"/home/me/repo" = "./scripts/build.sh check"`. An empty string
+    /// turns the check off for that workspace.
+    #[serde(default)]
+    pub commands: std::collections::BTreeMap<String, String>,
 }
 
 /// The turn's round budgets: the safety valve's two numbers. A turn
@@ -948,6 +969,44 @@ impl Config {
         }
     }
 
+    /// The check for `workspace` (#40): off if `[verify] enabled =
+    /// false`; else the workspace's entry in `[verify.commands]` (an
+    /// empty one is off), else `[verify] command`, else inferred:
+    /// `cargo check` for a Cargo workspace and `go build ./...` for a
+    /// Go module, each only when the program is on PATH (a check that
+    /// cannot run would send the model to fix nothing).
+    pub fn resolve_verify(&self, workspace: &Path) -> Option<String> {
+        self.resolve_verify_with(workspace, on_path)
+    }
+
+    /// [`resolve_verify`](Self::resolve_verify) with the PATH lookup
+    /// named, so tests need not touch the process environment.
+    fn resolve_verify_with(
+        &self,
+        workspace: &Path,
+        on_path: impl Fn(&str) -> bool,
+    ) -> Option<String> {
+        let verify = self.verify.clone().unwrap_or_default();
+        if verify.enabled == Some(false) {
+            return None;
+        }
+        let key = workspace.to_string_lossy();
+        if let Some(command) = verify.commands.get(key.trim_end_matches('/')) {
+            return Some(command.trim().to_string()).filter(|command| !command.is_empty());
+        }
+        if let Some(command) = verify.command.filter(|command| !command.trim().is_empty()) {
+            return Some(command);
+        }
+        let inferred = [
+            ("Cargo.toml", "cargo", "cargo check --message-format=short"),
+            ("go.mod", "go", "go build ./..."),
+        ];
+        inferred
+            .iter()
+            .find(|(manifest, program, _)| workspace.join(manifest).is_file() && on_path(program))
+            .map(|(_, _, command)| command.to_string())
+    }
+
     /// Every resolvable field's origin at once.
     pub fn resolve_origins(&self, overlay: Option<&ProjectOverlay>) -> Origins {
         Origins {
@@ -1161,6 +1220,12 @@ fn write_private(path: &std::path::Path, contents: &str) -> Result<(), String> {
     }
     file.write_all(contents.as_bytes())
         .map_err(|error| format!("could not write {}: {error}", path.display()))
+}
+
+/// Whether `program` resolves on PATH, the way a shell would find it.
+fn on_path(program: &str) -> bool {
+    std::env::var_os("PATH")
+        .is_some_and(|path| std::env::split_paths(&path).any(|dir| dir.join(program).is_file()))
 }
 
 #[cfg(test)]
@@ -1810,5 +1875,48 @@ default_mode = "full_access"
             warning.contains("\"nowhere\"") && warning.contains("skipped"),
             "the warning names the agent, the endpoint, and the skip: {warning}"
         );
+    }
+
+    /// #40: the check resolves user config first, then inference, and
+    /// inference needs the program to exist (a check that cannot run
+    /// would send the model to fix nothing).
+    #[test]
+    fn the_check_resolves_from_config_then_inference() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path();
+        std::fs::write(repo.join("Cargo.toml"), "[package]\n").unwrap();
+        let none = Config::default();
+        assert_eq!(
+            none.resolve_verify_with(repo, |program| program == "cargo")
+                .as_deref(),
+            Some("cargo check --message-format=short")
+        );
+        assert_eq!(
+            none.resolve_verify_with(repo, |_| false),
+            None,
+            "no cargo, no check"
+        );
+
+        let key = repo.to_string_lossy().to_string();
+        let parse = |raw: String| -> Config { toml::from_str(&raw).unwrap() };
+        let mapped = parse(format!(
+            "[verify]\ncommand = \"make check\"\n[verify.commands]\n\"{key}\" = \"./scripts/build.sh check\"\n"
+        ));
+        assert_eq!(
+            mapped.resolve_verify_with(repo, |_| true).as_deref(),
+            Some("./scripts/build.sh check"),
+            "the workspace's own entry wins"
+        );
+        assert_eq!(
+            mapped
+                .resolve_verify_with(&repo.join("elsewhere"), |_| true)
+                .as_deref(),
+            Some("make check"),
+            "the global command covers the rest"
+        );
+        let off_here = parse(format!("[verify.commands]\n\"{key}\" = \"\"\n"));
+        assert_eq!(off_here.resolve_verify_with(repo, |_| true), None);
+        let off = parse("[verify]\nenabled = false\ncommand = \"make\"\n".into());
+        assert_eq!(off.resolve_verify_with(repo, |_| true), None);
     }
 }
