@@ -6417,7 +6417,7 @@ mod tests {
     //! itself is exercised by the fixture tests in chat_input.rs.
 
     use super::*;
-    use crate::chat::transcript::{DiffRow, diff_data, diff_element, hunk_rows};
+    use crate::chat::transcript::{DiffRow, diff_data, hunk_rows};
     use crate::diff::Line;
 
     fn kinds(patch: &crate::diff::Patch) -> Vec<&'static str> {

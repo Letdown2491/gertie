@@ -133,7 +133,7 @@ fn fixture_full(
                 ChatView::new(
                     gertie::chat::ChatViewConfig {
                         store: store.clone(),
-                        provider: provider,
+                        provider,
                         snapshots: snapshots.clone(),
                         tools: merge_tools(
                             extra_tools.clone(),
@@ -150,7 +150,7 @@ fn fixture_full(
                         grace_rounds: None,
                         templates: Vec::new(),
                         workspace_root: root.clone(),
-                        settle_command: settle_command,
+                        settle_command,
                         broker: broker
                             .unwrap_or_else(|| Arc::new(gertie_core::PermissionBroker::new())),
                         session_scope: gertie_core::SessionScope::new(),
@@ -2092,11 +2092,6 @@ fn a_worker_ask_bubbles_into_the_transcript_and_the_answer_reaches_the_worker() 
     );
 }
 
-/// Quiet is the agent's silence, not the human's: while an approval
-/// card waits on an answer, the status line keeps "quiet" to itself,
-/// the ask's own clock tells that story. The gauge still speaks when
-/// nothing waits on anyone.
-#[test]
 /// The #15 repro, at the seam the bug lived in: two chats subscribe
 /// the way two views do (each filtered by its own turn's token), a
 /// worker ask arrives stamped with turn A's token, and only A's
@@ -2157,6 +2152,11 @@ fn an_unstamped_worker_ask_still_reaches_the_fallback() {
     assert_eq!(ask.call.id, "w2");
 }
 
+/// Quiet is the agent's silence, not the human's: while an approval
+/// card waits on an answer, the status line keeps "quiet" to itself,
+/// the ask's own clock tells that story. The gauge still speaks when
+/// nothing waits on anyone.
+#[test]
 fn the_quiet_gauge_holds_its_tongue_while_an_approval_waits() {
     // The held-turn rig from the worker-ask test: a pending card with
     // the turn alive underneath it.

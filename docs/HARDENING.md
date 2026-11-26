@@ -225,5 +225,6 @@ setting). Fixed in the audit itself:
   of url, heapless, rustix and async-executor. `cargo audit` reports no
   vulnerabilities; nine unmaintained warnings arrive through gpui and have no fix yet.
 
-Open, for later: a worker's ask is broadcast to every subscribed view, so it can show in
-another chat's transcript (#15); chat.rs (8.6k lines) wants splitting (#16).
+Both items left open by the audit are closed: a worker's ask now reaches only the chat
+whose turn spawned it, not every subscribed view (#15), and chat.rs is split into
+modules (#16).
