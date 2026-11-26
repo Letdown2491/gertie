@@ -15,6 +15,18 @@ The agent asks *you* questions too: when a decision is genuinely ambiguous it se
 `ask_user` card with clickable options (plus a free-text field when it makes sense).
 Answer by clicking; the answer rides back into the work.
 
+The composer is one box: the paperclip attaches images, PDFs, and text files (or paste
+them), and the arrow sends. Enter while a turn runs steers it; Ctrl+Enter queues a
+follow-up for after. With the composer empty, the arrow becomes Stop.
+
+Each message has small icon actions: on your messages, fork (a new conversation from
+that point) and rewind; on the agent's, copy and quote (the reply lands in the
+composer as a quote, so you can answer one part of it). The agent's final reply in a
+turn shows them faintly; earlier messages in the turn show them on hover.
+
+The header above the conversation names it (click the title to rename) and the folder
+its tools run in (click to move the agent to another folder).
+
 The status line above the composer names the current action in plain words: the tool
 being run, the file being read, the question being asked. The footer counts what the
 work costs (tokens in/out, the cache share, the live context gauge) and, while a run
@@ -27,13 +39,18 @@ on any finished tool card to see exactly what that turn changed, and **rewind** 
 restore the workspace to any earlier turn: keep your files, or restore theirs too.
 Every rewind is itself recorded; nothing is ever silently undone.
 
-## Tabs and worktree tabs
+## Parallel chats and worktree chats
 
-New-tab opens a parallel chat. The ⎇ button gives a tab its own git worktree: a real
-checkout in `<repo>/.gertie/worktrees/`, branched from HEAD, so two agents can edit
-the same repo at once without colliding. Each tab keeps its own memory tier and
-permission mode. A ✦ in the tab bar means the turn finished while you were elsewhere;
-⏸ means it is paused waiting on you.
+The sidebar is the only list of conversations; there is no tab bar. A running turn
+keeps going when you open another conversation or start a new one, and its sidebar row
+shows a green dot. A blue dot means a turn finished while you were elsewhere; a pause
+icon means the run is paused waiting on you. **New worktree chat**, under New chat, starts
+a chat in its own git worktree: a real checkout in `<repo>/.gertie/worktrees/`,
+branched from HEAD, so two agents can edit the same repo at once without colliding.
+Each chat keeps its own memory tier and permission mode.
+
+While a turn runs, the send button becomes Stop when the composer is empty. Stop ends
+the turn at once: running commands are killed and open tool cards close as stopped.
 
 ## Subagents
 
@@ -62,6 +79,13 @@ at session end arrive as review cards; approve or deny, and vote ▲/▼ on what
 recalls so the useful stuff survives the weekly cleanup. Rules that must always apply
 belong in `AGENTS.md` instead; the `memory N` footer word opens the panel.
 [docs/memory.md](memory.md) has the details.
+
+## Settings
+
+Settings opens from the foot of the sidebar (or `/settings`): endpoints and keys, the
+sandbox, memory, turn budgets, MCP servers, and agents, one card each. Every change
+saves the moment you make it, into your `config.toml` with its comments kept.
+Endpoint changes apply right away; the rest says when it needs a restart.
 
 ## MCP: your tools, its hands
 

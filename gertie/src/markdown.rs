@@ -747,6 +747,9 @@ fn render_list_item(item: &ListItem, cx: &App) -> AnyElement {
     };
     h_flex()
         .w_full()
+        // The marker sits by the first line, not the middle of a
+        // wrapped item.
+        .items_start()
         .gap_2()
         // Nested items indent one step each level.
         .pl(px((item.level.min(4) * 16) as f32))

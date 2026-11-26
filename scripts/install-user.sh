@@ -10,20 +10,32 @@
 # in the icon cache. The stale PNGs from that attempt are removed on
 # install so the theme's SVG wins everywhere.
 #
-# The binary is expected at target/debug/gertie (or target/release/
-# gertie), where scripts/build.sh leaves it: this repo builds inside a
-# container (the host has no linker), so the script installs the
-# already-built binary rather than recompiling on the host.
+# The binary is the release build, target/release/gertie, where
+# `scripts/build.sh build --release` leaves it: this repo builds inside
+# a container (the host has no linker), so the script installs the
+# already-built binary rather than recompiling on the host. `--debug`
+# installs target/debug/gertie instead. Release is the default because
+# `cargo test` also writes target/debug/gertie (about a gigabyte,
+# unoptimized), and a fresh test run must not decide what gets
+# installed.
 set -eu
 
 prefix="$HOME/.local"
 share="$prefix/share"
 repo="$(cd "$(dirname "$0")/.." && pwd)"
 
-binary="$repo/target/debug/gertie"
-[ -f "$binary" ] || binary="$repo/target/release/gertie"
+profile=release
+case "${1:-}" in
+    --debug) profile=debug ;;
+    "") ;;
+    *)
+        echo "usage: $0 [--debug]" >&2
+        exit 2
+        ;;
+esac
+binary="$repo/target/$profile/gertie"
 if [ ! -f "$binary" ]; then
-    echo "no built binary: run scripts/build.sh build first" >&2
+    echo "no $profile binary: run scripts/build.sh build$([ "$profile" = release ] && echo " --release") first" >&2
     exit 1
 fi
 

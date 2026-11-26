@@ -85,7 +85,7 @@ Shipped (M0–M5), in order:
 - **M7, the UI pass** (shipped 2026-10-31): posture-ring safety (de-escalation-only chip, the
   palette + confirm card as full access's only path), the memory surface (footer word,
   panel, ▲/▼ voting as the counters' only writer), the first-run state, composer
-  @-mentions, tab attention marks (● ⏸ ✓), Ctrl+F in-transcript find + copy on assistant
+  @-mentions, attention marks (● ⏸ ✓ on tabs then, on sidebar rows now), Ctrl+F in-transcript find + copy on assistant
   turns, the footer's compaction line, the `[turn]` budget dial (defaults 60 + 10,
   panel-editable), and the polish items (popup arrow-key navigation, vote feedback in the
   panel rows, find's row highlight). Full record in the Deferred row below.
@@ -93,7 +93,8 @@ Shipped (M0–M5), in order:
 
 The original "Deferred" row, every item shipped or decided:
 
-- Worktree tabs shipped (⎇ in the tab bar): a tab rooted at its own git worktree
+- Worktree tabs shipped (now a worktree chat, the "New worktree chat" sidebar row;
+  the tab bar is gone): a chat rooted at its own git worktree
   (`<repo>/.gertie/worktrees/tab-N`, branched from HEAD, excluded via the local exclude,
   never the user's .gitignore). Built-ins and agent tools re-root per tab; web/history/MCP/
   skills carry over by name instead of duplicating connections. Worktrees persist across
@@ -119,6 +120,10 @@ The original "Deferred" row, every item shipped or decided:
   unknown keys survive the round trip (`ConfigEdits`). Endpoint changes apply live (the
   bootstrap's live state reloads and every tab re-reads it); MCP, sandbox, and
   already-built worker agents are load-time setup and honestly say "restart to apply".
+  Changes save as they are made (no Save button): switches on click, the endpoint,
+  server, and agent forms on their own Save or Add, removals at once, the turn budgets
+  on Enter or leaving the field. Where a value comes from (your config or the project
+  overlay) is a note under its switch, not part of the label.
 - *Token ledger*: sessions persist input/output token totals (one UPDATE per Usage
   event). A resumed chat's header shows its whole spend, not just since reopen; the
   settings panel shows the all-sessions total (chats + worker runs). Prices-per-model
@@ -145,7 +150,8 @@ The original "Deferred" row, every item shipped or decided:
   offers "Add an endpoint") or gives the one-line tour, never a wizard. The composer
   gains @-mentions (workspace file picker; arrows walk it, Enter takes the walked row,
   the walk resets only when the query changes). Tabs carry attention marks (● running,
-  ⏸ limited, ✓ done-unseen, cleared on activation). Ctrl+F finds in the transcript with
+  ⏸ limited, ✓ done-unseen, cleared on activation); with the tab bar gone they are
+  sidebar dots (green running, blue done-unseen, the pause icon for limited). Ctrl+F finds in the transcript with
   a live count and wrapping walk; assistant turns carry copy beside quote. The footer
   names the coming compaction's tail (imported from `KEEP_TAIL`, so footer and loop
   cannot disagree). Turn budgets are config (`[turn] max_tool_rounds` default 60,
@@ -444,8 +450,8 @@ Each type earns existence via distinct toolset or safety posture, not just a dif
 
 (The agents panel shipped post-M5 and was later removed: a read-only column listing the
 chat's persisted worker runs with live report status; every state it showed was already
-visible as a transcript tool card. Parallel sessions shipped as tabs, including the worktree half:
-the ⎇ button opens a chat rooted at its own git worktree with a re-rooted tool registry, so
+visible as a transcript tool card. Parallel sessions shipped as tabs (now the sidebar alone: see the window shell
+note below), including the worktree half: New worktree chat opens a chat rooted at its own git worktree with a re-rooted tool registry, so
 two agents can edit the same repo without colliding. The settings panel closed the UI
 scope: live config visible in-app, theme persisted. The native Anthropic wire shipped as
 the Provider trait's second adapter (`wire = "anthropic"` per endpoint); the token ledger
@@ -456,8 +462,10 @@ The composer grew the t3code set: a command palette (Ctrl+K, or the sidebar's se
 button) that answers with FTS5 hits from the store, every session's memory, ranked, with
 confirm jumping to the hit's turn (a cross-session hit switches first; the jump breaks
 tail-follow, scrolling back to the bottom re-engages it). Attachments broadened past
-images: a paperclip button (the Lucide path, inlined as bytes, the app ships only the
-kit's default icon bundle) opens the picker, paste intercepts images and copied files, PDFs
+images: a paperclip button opens the picker (the paperclip was once inlined as bytes,
+when the app shipped only the kit's default icon bundle; the app now embeds the full
+Lucide catalog through `gpui_kit::assets::AllAssets`, about 1 MB of binary, so every
+`IconName` renders), paste intercepts images and copied files, PDFs
 ride the wire as typed document/file blocks, and text files inline into the message, the
 extension table refuses (with a reason) what no endpoint can read. The permission mode
 lives on the footer line under the composer, a quiet clickable word that cycles the ring,
@@ -549,13 +557,16 @@ chats idle that long down as settled, state only, run before any view loads, so 
 live turn can't race it. The settle command (`settle_command`, the user's config
 alone, the repo overlay may not set a shell command) is the reclaim hook: a
 manual settle runs it in the settling session's recorded workspace (recorded at first
-send, so whichever tab presses ✓ later, the command lands in the right checkout),
+send, so whichever view settles it later, the command lands in the right checkout),
 off the UI thread, outcome surfaced in the transcript; the sweep never runs commands,
 and a session older than the recording says so instead of guessing a folder. Destructive
 list actions keep no dialog: ✕ removes a session from every list at once, sidebar, fold,
 palette, and a toast at the sidebar's foot holds the store row for a five-second undo
 window (button or Ctrl+Z outside the composer, where it stays text undo); the window
 closing purges the row, undo popping the entry beats it.
+(The row's glyphs are icons now: rename is a pencil, settle an archive box, restore
+an archive-restore box, delete a trash can, shown while the pointer is on the row so
+a list of conversations reads as titles.)
 
 The keyboard is a surface, not an afterthought. `keymap.toml` (beside the other
 settings) holds rules of `{key, command, when}`, last match wins, the file's order is
@@ -595,12 +606,44 @@ model in band (`LoopEvent::Nudged`, a history user row demanding wrap-up), gives
 which rides the same Limited state, chip, bar, and Resume as a rate limit (steers at
 the boundary still land: drained before the pause, each buying its round). The old
 hard error is gone; long work is no longer killed mid-flight, runaway loops still
-are. The tab strip carries the
-working marker, a live turn shows ● on its tab, the attention signal for work
-running while another tab is up. The window holds running work to the same
+are. The sidebar carries the working marker: a live turn shows a green dot on its
+conversation's row, a finish seen by nobody a blue one, a rate-limit pause the pause
+icon.
+
+The window shell has no tab bar: two lists of the same conversations was one
+too many. The shell keeps one chat view per conversation that has something to say (a
+running turn, an unseen finish, a pause) and shows the active one; an idle view off
+screen is dropped, since its conversation lives in the store and the sidebar. A
+sidebar click routes: a view that already has the conversation open is shown; an idle
+clicked view loads it (adopting its workspace if needed); a clicked view that is
+running a turn is never dragged, a new view opens instead. New chat while a turn runs
+opens a new view the same way. Stop is the composer's send button while a turn runs
+with nothing typed: it drops the turn's future (cancellation by construction), bash
+kills its command's whole process group, and every unanswered call gets a "stopped by
+the user" result in the record and the model's history, so the next request is
+legal. The window holds running work to the same
 standard: with a turn live anywhere, the first close is refused with a notice in
-each running tab, and a second close inside five seconds is taken at its word,
+each running chat, and a second close inside five seconds is taken at its word,
 an accidental quit kills a running turn, so it costs one deliberate repeat.
+
+The same pass reworked the surface around it. The sidebar is a list, not a column of
+buttons: the logo and name on top, New chat and New worktree chat (worktree chats
+need a label; a bare branch glyph was a riddle), the conversations as plain rows (the open one tinted), and Search and Settings at the
+foot. Every transcript row (messages, tool runs, the activity line), the composer,
+and the footer under it share one reading width (820 px, centered), past which lines
+get too long to follow. Message actions are icons with tooltips: a user
+turn's fork and rewind stay visible (hiding rewind behind hover made it
+undiscoverable); an assistant's copy and quote show ghosted on the reply that ends a
+turn and only on hover for the narration before it, so a long turn is not dotted
+with icons. A conversation header names the open conversation (click to rename) and
+the folder its tools run in (click to switch workspace; a worktree chat shows its
+checkout with the branch icon, fixed), the orientation the tab bar used to give; the
+footer under the composer keeps the ledger and the endpoint. The
+composer is one rounded box: attach on the left, the field, and send (or Stop) on the
+right; its idle ghost text is "Message Gertie, or type / for commands". List markers
+sit by an item's first line, not the middle of a wrapped one. The settings panel is
+cards (Appearance, Endpoints, Sandbox, Memory, Turn budgets, MCP servers, Agents,
+Config file); endpoint rows read name over model, left-aligned.
 
 ## Onboarding
 

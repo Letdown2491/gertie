@@ -10,13 +10,14 @@ use gertie_core::{
     run_turn,
 };
 use gertie_providers::AnyProvider;
-use gpui_kit::component::button::{Button, ButtonCustomVariant, ButtonVariants as _};
+use gpui_kit::assets::IconName;
+use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::command::{Command, CommandState};
 use gpui_kit::component::input::{
     Input, InputEvent, InputState, MoveDown, MoveToEnd, MoveUp, Textarea, TextareaState,
 };
 use gpui_kit::component::tooltip::Tooltip;
-use gpui_kit::component::{ActiveTheme, Icon, Sizable as _, h_flex, v_flex};
+use gpui_kit::component::{ActiveTheme, Disableable as _, Icon, Sizable as _, h_flex, v_flex};
 use gpui_kit::{
     Action, AnyElement, AnyWindowHandle, App, AppContext as _, Context, Entity, EventEmitter,
     Focusable, IntoElement, ListAlignment, ListState, ParentElement, Render, SharedString,
@@ -98,7 +99,29 @@ const QUIET_AFTER: std::time::Duration = std::time::Duration::from_secs(20);
 const SPINNER_FRAMES: [&str; 4] = ["◐", "◓", "◑", "◒"];
 
 /// The composer's ghost text at rest.
-const IDLE_PLACEHOLDER: &str = "Message Gertie…, / for commands";
+const IDLE_PLACEHOLDER: &str = "Message Gertie, or type / for commands";
+
+/// The conversation's reading width: past this, lines get too long to
+/// follow. The transcript and the composer share it, centered.
+const READING_WIDTH: f32 = 820.;
+
+/// A row centered at the reading width plus the rows' own side
+/// padding (`px_4`, 16 px a side): what a row draws inside its padding
+/// lines up with the composer box.
+fn reading_column(row: AnyElement) -> AnyElement {
+    div()
+        .w_full()
+        .flex()
+        .justify_center()
+        .child(
+            div()
+                .w_full()
+                .min_w_0()
+                .max_w(px(READING_WIDTH + 32.))
+                .child(row),
+        )
+        .into_any_element()
+}
 
 /// The composer's ghost text while a turn runs: the send key's two
 /// meanings, stated where the keys are. Placeholders only render on
@@ -210,15 +233,44 @@ pub type LiveElsewhere =
 /// call it.
 /// What the clicked view tells the shell before the shell decides:
 /// the click holds the view's lease, so the shell may neither read
-/// nor update it (a re-entrant access is the gpui crash). These two
-/// facts are everything the four routing rules need to know about the
+/// nor update it (a re-entrant access is the gpui crash). These
+/// facts are everything the routing rules need to know about the
 /// view a click came from.
 pub struct ClickOrigin {
-    /// The clicked tab's workspace root.
+    /// The clicked view's workspace root.
     pub root: std::path::PathBuf,
-    /// The clicked view holds no session, no turns, no stream: rule 3
-    /// may re-root it for free.
-    pub pristine: bool,
+    /// The session the clicked view has open, if any.
+    pub session: Option<SessionId>,
+    /// A turn is running in the clicked view: it keeps running, so
+    /// the click lands in another view.
+    pub streaming: bool,
+}
+
+/// What a chat asks of the window shell, the views it cannot make
+/// itself.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ShellRequest {
+    /// A new chat while this one's turn runs: a second view, so the
+    /// running turn keeps going.
+    NewChat,
+    /// A new chat in its own git worktree of this repo.
+    NewWorktreeChat,
+}
+
+/// The shell hook: weak to the shell, set by tabs.rs. None in tests
+/// and headless, where one view is the whole window.
+pub type ShellAsk = Arc<dyn Fn(ShellRequest, &mut Window, &mut Context<ChatView>)>;
+
+/// A sidebar row's state across every open view, set by the shell:
+/// what a conversation is doing while it may not be on screen.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SessionMark {
+    /// A turn is running (a static dot, no repaint to say busy).
+    Running,
+    /// The run paused on its rate limit, waiting for the human.
+    Limited,
+    /// A turn finished while another conversation was up.
+    Unseen,
 }
 
 /// What the shell decided, phrased as work for the clicked view to do
@@ -508,6 +560,11 @@ pub struct ChatView {
     /// so a cross-workspace click lands in the right tab. None in
     /// tests and headless, where the local switch is the whole story.
     session_router: Option<SessionRouter>,
+    /// The shell's hook for views this chat cannot make itself.
+    shell_ask: Option<ShellAsk>,
+    /// Every open view's state per conversation, for the sidebar's
+    /// markers; pushed by the shell each frame.
+    session_marks: std::collections::HashMap<SessionId, SessionMark>,
     /// The mode menu's open state (the chip's click opens it; picking
     /// a row applies, full access opens the confirm card first).
     mode_menu: bool,
@@ -547,6 +604,10 @@ pub struct ChatView {
     /// Mid-run steering: user messages land in the running turn at the
     /// next round boundary. Set while a turn drives; cleared at its end.
     steer_tx: Option<tokio::sync::mpsc::UnboundedSender<String>>,
+    /// The running turn's stop line: a send ends the turn, dropping
+    /// its future (tools and workers with it). Lives as long as the
+    /// turn, like the steer channel.
+    stop_tx: Option<tokio::sync::mpsc::UnboundedSender<()>>,
     /// Follow-ups typed while streaming with the secondary Enter,
     /// queued rows, mirrored from the store: they run as their own
     /// turns when the current one ends, and they survive a stop, a
@@ -819,6 +880,8 @@ impl ChatView {
 
         let mut view = Self {
             session_router,
+            shell_ask: None,
+            session_marks: Default::default(),
             store,
             provider,
             snapshots,
@@ -896,6 +959,7 @@ impl ChatView {
             },
             streaming: false,
             steer_tx: None,
+            stop_tx: None,
             queued: Vec::new(),
             recall: None,
             pending_rewind: None,
@@ -921,6 +985,23 @@ impl ChatView {
     }
 
     /// The session the transcript is bound to, for tests and tooling.
+    /// The shell's hook, set once after construction.
+    pub fn set_shell_ask(&mut self, ask: ShellAsk) {
+        self.shell_ask = Some(ask);
+    }
+
+    /// The sidebar's markers, pushed by the shell each frame.
+    pub fn set_session_marks(&mut self, marks: std::collections::HashMap<SessionId, SessionMark>) {
+        self.session_marks = marks;
+    }
+
+    /// Reloads the sidebar's list: another view may have made or
+    /// renamed a conversation while this one was off screen.
+    pub fn refresh_sessions(&mut self, cx: &mut Context<Self>) {
+        self.sessions = self.store.list_sessions().unwrap_or_default();
+        cx.notify();
+    }
+
     pub fn session_id(&self) -> Option<SessionId> {
         self.session_id
     }
@@ -1670,6 +1751,11 @@ impl ChatView {
 
     fn new_session(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.streaming {
+            // The running turn keeps its view; the new chat gets one
+            // of its own.
+            if let Some(ask) = self.shell_ask.clone() {
+                ask(ShellRequest::NewChat, window, cx);
+            }
             return;
         }
         // Sessions are created lazily by the first message; "New chat" just
@@ -3812,6 +3898,7 @@ impl ChatView {
         // Enter while streaming lands here; at the turn's end the
         // sender drops and Enter queues instead.
         let (steer_tx, steer_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (stop_tx, mut stop_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
         let stream = run_turn(TurnSpec {
             provider,
             tools: self.tools.clone(),
@@ -3845,6 +3932,7 @@ impl ChatView {
         // first words stream or a tool runs.
         self.set_activity("Thinking…");
         self.steer_tx = Some(steer_tx);
+        self.stop_tx = Some(stop_tx);
         // The composer's ghost text names the steer/queue verbs while
         // the turn runs.
         self.sync_composer_placeholder(cx);
@@ -3898,6 +3986,7 @@ impl ChatView {
 
         cx.spawn(async move |this, cx| {
             let mut stream = stream;
+            let mut stopped = false;
             // The leader stream parks inside agent tools while a worker
             // runs, its asks would be invisible. Selecting over both
             // keeps every ask answerable, whoever asked.
@@ -3982,6 +4071,13 @@ impl ChatView {
                     LoopEvent::Done => break,
                         }
                     }
+                    // Stop: leaving the loop drops the stream, and the
+                    // turn's future with it (cancellation by
+                    // construction).
+                    Some(()) = stop_rx.recv() => {
+                        stopped = true;
+                        break;
+                    }
                     ask = worker_asks.recv() => {
                         if let Some(ask) = ask {
                             let _ = this.update(cx, |this, cx| {
@@ -3994,9 +4090,14 @@ impl ChatView {
                     .timer(Duration::from_millis(1))
                     .await;
             }
+            drop(stream);
             let _ = this.update(cx, |this, cx| {
+                if stopped {
+                    this.on_stopped(cx);
+                }
                 this.flush_stream(cx);
                 this.streaming = false;
+                this.stop_tx = None;
                 this.streaming_assistant = None;
                 // The run's clock closes here. A queued follow-up
                 // reopens it (accumulated); a plain completion leaves
@@ -4014,7 +4115,9 @@ impl ChatView {
                 this.sync_composer_placeholder(cx);
                 this.sessions = this.store.list_sessions().unwrap_or_default();
                 this.sync_list(cx);
-                if !this.queued.is_empty() {
+                // A stopped turn starts nothing: the queue waits for
+                // the next send.
+                if !stopped && !this.queued.is_empty() {
                     let first = this.queued[0].id;
                     match this.store.take_followup(first) {
                         Ok(Some(text)) => {
@@ -4327,6 +4430,43 @@ impl ChatView {
             db_id,
         });
         self.sync_list(cx);
+    }
+
+    /// Asks the running turn to stop; the turn's loop does the rest.
+    pub fn stop_turn(&mut self, cx: &mut Context<Self>) {
+        if let Some(stop) = &self.stop_tx {
+            let _ = stop.send(());
+            self.set_activity("Stopping…");
+            cx.notify();
+        }
+    }
+
+    /// The turn was stopped: every card still waiting or running
+    /// closes as stopped (persisted like any result), and the model's
+    /// history gets an answer for each call it made, so the next
+    /// request is a legal one.
+    fn on_stopped(&mut self, cx: &mut Context<Self>) {
+        const STOPPED: &str = "error: stopped by the user";
+        self.flush_stream(cx);
+        let open: Vec<(String, String, String)> = self
+            .turns
+            .iter()
+            .filter_map(|turn| match turn {
+                Turn::Tool {
+                    call,
+                    status: ToolStatus::Pending(_) | ToolStatus::Running,
+                    ..
+                } => Some((call.id.clone(), call.name.clone(), call.arguments.clone())),
+                _ => None,
+            })
+            .collect();
+        for (id, name, arguments) in open {
+            self.on_tool_result(&id, &name, &arguments, STOPPED, cx);
+        }
+        gertie_core::close_unanswered_calls(&mut self.history.blocking_lock(), STOPPED);
+        self.approval_replies.clear();
+        self.active_worker_call = None;
+        self.push_notice("Stopped.", cx);
     }
 
     fn on_error(&mut self, message: &str, cx: &mut Context<Self>) {
@@ -5183,7 +5323,14 @@ impl ChatView {
                 .px_4()
                 .pt_1()
                 .pb_2()
-                .child(self.render_activity_row(cx))
+                .flex()
+                .justify_center()
+                .child(
+                    div()
+                        .w_full()
+                        .max_w(px(READING_WIDTH))
+                        .child(self.render_activity_row(cx)),
+                )
                 .into_any_element();
         }
         // Runs of finished tool calls collapse into one honest summary
@@ -5250,8 +5397,8 @@ impl ChatView {
                 let db_id = *db_id;
                 Some(
                     Button::new(format!("fork-{index}"))
-                        .label("fork")
-                        .small()
+                        .icon(IconName::GitFork)
+                        .xsmall()
                         .ghost()
                         .tooltip("Branch a new session from here")
                         .on_click(cx.listener(move |this, _, window, cx| {
@@ -5271,8 +5418,8 @@ impl ChatView {
                 ..
             } => Some(
                 Button::new(format!("rewind-{index}"))
-                    .label("rewind")
-                    .small()
+                    .icon(IconName::Undo2)
+                    .xsmall()
                     .ghost()
                     .tooltip(
                         "Edit from here, the conversation after this message leaves the transcript",
@@ -5299,8 +5446,8 @@ impl ChatView {
                         .gap_1()
                         .child(
                             Button::new(format!("copy-{index}"))
-                                .label("copy")
-                                .small()
+                                .icon(IconName::Copy)
+                                .xsmall()
                                 .ghost()
                                 .tooltip("Copy the raw markdown of this turn")
                                 .on_click(cx.listener(move |this, _, _, cx| {
@@ -5309,8 +5456,8 @@ impl ChatView {
                         )
                         .child(
                             Button::new(format!("quote-{index}"))
-                                .label("quote")
-                                .small()
+                                .icon(IconName::TextQuote)
+                                .xsmall()
                                 .ghost()
                                 .tooltip(
                                     "Quote this into the composer, comment under it, send it back",
@@ -5333,6 +5480,28 @@ impl ChatView {
         // (invisible is not display:none) but an explicit
         // visibility assertion would need a hover first.
         let user_turn = fork_button.is_some();
+        // The reply that ends its turn: no later assistant message
+        // before the next user message.
+        let last_reply = self.turns[index + 1..]
+            .iter()
+            .take_while(|turn| {
+                !matches!(
+                    turn,
+                    Turn::Message {
+                        role: Role::User,
+                        ..
+                    }
+                )
+            })
+            .all(|turn| {
+                !matches!(
+                    turn,
+                    Turn::Message {
+                        role: Role::Assistant,
+                        ..
+                    }
+                )
+            });
         let mut buttons: Vec<AnyElement> = Vec::new();
         if let Some(button) = fork_button {
             buttons.push(button.into_any_element());
@@ -5357,16 +5526,19 @@ impl ChatView {
                 .when(!user_turn, |col| col.items_start())
                 .child(inner)
                 .child(
-                    // Assistant rows are ghosted rather than hidden:
-                    // 35% opacity at rest, full on the turn's hover.
-                    // Visibility-hidden made an old turn's affordances
-                    // undiscoverable (you must know to hover) and the
-                    // harness's synthetic hover can't drive gpui's
-                    // group-hover state; ghosting keeps the row
-                    // present (and clickable) while clearly chrome.
+                    // Assistant rows: the reply that ends a turn keeps
+                    // its copy and quote ghosted (35%) at rest, where
+                    // they are wanted; earlier narration in the turn
+                    // ("let me check…") shows them only on hover, so
+                    // the transcript is not dotted with icons. Opacity,
+                    // not visibility: the row stays present and
+                    // clickable (the harness's synthetic hover can't
+                    // drive gpui's group-hover state).
                     h_flex()
                         .gap_1()
-                        .when(!user_turn, |row| row.opacity(0.35))
+                        .when(!user_turn, |row| {
+                            row.opacity(if last_reply { 0.35 } else { 0. })
+                        })
                         .when(!user_turn, |row| {
                             row.group_hover(format!("turn-{index}"), |style| style.opacity(1.0))
                         })
@@ -5407,7 +5579,14 @@ impl ChatView {
         // reads as one continuous column (the screenshot showed the
         // inversion). Markdown paragraphs carry mt_2; a turn carries
         // the turn's own bottom padding plus this margin.
-        div().w_full().px_4().mt_2().child(inner).into_any_element()
+        div()
+            .w_full()
+            .px_4()
+            .mt_2()
+            .flex()
+            .justify_center()
+            .child(div().w_full().max_w(px(READING_WIDTH)).child(inner))
+            .into_any_element()
     }
 
     /// The status line's words, spinner aside: the action, the step's
@@ -5546,6 +5725,83 @@ impl ChatView {
     /// tools run in. Quiet until there is something to say; the run's
     /// clocks (step and total) live in the conversation's activity
     /// row, the ledger's slow counts live here.
+    /// The conversation header: which conversation this is and where
+    /// its tools run, the orientation the tab bar used to give. The
+    /// title renames on click (the sidebar row turns into the field);
+    /// the folder switches the workspace on click, as the footer word
+    /// did. A worktree chat's folder is its checkout, fixed, and says
+    /// so with the branch icon.
+    fn render_conversation_header(&self, cx: &Context<Self>) -> AnyElement {
+        let theme = cx.theme();
+        let title = match self.session_id {
+            Some(_) => self.tab_title(),
+            None => SharedString::from("New chat"),
+        };
+        let title = div()
+            .id("conversation-title")
+            .min_w_0()
+            .truncate()
+            .text_size(px(13.))
+            .font_weight(gpui_kit::FontWeight::MEDIUM)
+            .child(title)
+            .when_some(self.session_id, |title, session_id| {
+                title
+                    .cursor_pointer()
+                    .tooltip(|window, cx| {
+                        Tooltip::new("Rename this conversation").build(window, cx)
+                    })
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.start_rename(session_id, window, cx)
+                    }))
+            });
+        let worktree = self.branch_naming.is_some();
+        let folder: AnyElement = if worktree {
+            h_flex()
+                .gap_1()
+                .child(Icon::new(IconName::GitBranch).with_size(px(12.)))
+                .child(tildify(&self.workspace_root))
+                .into_any_element()
+        } else {
+            div()
+                .id("workspace-word")
+                .cursor_pointer()
+                .hover(|style| style.text_color(cx.theme().foreground))
+                .tooltip(|window, cx| {
+                    Tooltip::new("Workspace, click to move the agent to another folder")
+                        .build(window, cx)
+                })
+                .on_click(cx.listener(|this, _, _, cx| this.switch_workspace(cx)))
+                .child(tildify(&self.workspace_root))
+                .test_support()
+                .into_any_element()
+        };
+        div()
+            .w_full()
+            .flex_shrink_0()
+            .border_b_1()
+            .border_color(theme.border.opacity(0.6))
+            .child(reading_column(
+                h_flex()
+                    .w_full()
+                    .h(px(40.))
+                    .px_4()
+                    .gap_4()
+                    .justify_between()
+                    .child(title)
+                    .child(
+                        div()
+                            .flex_shrink_0()
+                            .max_w(px(360.))
+                            .truncate()
+                            .text_size(px(11.5))
+                            .text_color(theme.muted_foreground)
+                            .child(folder),
+                    )
+                    .into_any_element(),
+            ))
+            .into_any_element()
+    }
+
     fn render_token_footer(&self, cx: &Context<Self>) -> AnyElement {
         let parts = self.footer_parts();
         let near_compaction = self
@@ -5619,26 +5875,35 @@ impl ChatView {
             // work costs (spend, cache share) reads separately from
             // where the context stands (the gauge). One joined string
             // made three kinds of information read as one.
-            let mut gauge = parts.into_iter();
-            let spend: Vec<String> = gauge
-                .by_ref()
-                .take_while(|part| !part.starts_with("ctx "))
-                .collect();
-            ledger = ledger
-                .child(
+            let gauge = parts.into_iter();
+            // Split at the gauge without consuming it (take_while would
+            // swallow the "ctx" part it stops on).
+            let parts: Vec<String> = gauge.collect();
+            let split = parts
+                .iter()
+                .position(|part| part.starts_with("ctx "))
+                .unwrap_or(parts.len());
+            let (spend, gauge) = parts.split_at(split);
+            if !spend.is_empty() {
+                ledger = ledger.child(
                     div()
                         .text_size(px(11.))
                         .text_color(cx.theme().muted_foreground)
                         .child(spend.join("  ·  ")),
-                )
-                .child(
+                );
+            }
+            // The divider only between two groups, never trailing.
+            if !spend.is_empty() && !gauge.is_empty() {
+                ledger = ledger.child(
                     div()
                         .text_size(px(11.))
                         .text_color(cx.theme().muted_foreground)
                         .opacity(0.6)
                         .child("│"),
-                )
-                .child(
+                );
+            }
+            if !gauge.is_empty() {
+                ledger = ledger.child(
                     div()
                         .text_size(px(11.))
                         .text_color(if near_compaction {
@@ -5646,54 +5911,30 @@ impl ChatView {
                         } else {
                             cx.theme().muted_foreground
                         })
-                        .child(gauge.collect::<Vec<_>>().join("  ·  ")),
+                        .child(gauge.join("  ·  ")),
                 );
+            }
         }
         let ident = div()
             .text_size(px(11.))
             .truncate()
             .text_color(cx.theme().muted_foreground)
-            .child({
-                // At rest, the identity line leads with the folder the
-                // agent's tools run in, "which project am I talking
-                // about" is answered without opening anything. Nothing
-                // else lives here: the run's clocks are in the
-                // conversation's activity row, an ask's card is in the
-                // transcript where the approve button is.
-                let word: AnyElement = if self.branch_naming.is_none() {
-                    div()
-                        .id("workspace-word")
-                        .cursor_pointer()
-                        .hover(|style| style.text_color(cx.theme().foreground))
-                        .tooltip(|window, cx| {
-                            Tooltip::new("Workspace, click to move the agent to another folder")
-                                .build(window, cx)
-                        })
-                        .on_click(cx.listener(|this, _, _, cx| this.switch_workspace(cx)))
-                        .child(tildify(&self.workspace_root))
-                        .test_support()
-                        .into_any_element()
-                } else {
-                    div()
-                        .child(tildify(&self.workspace_root))
-                        .into_any_element()
-                };
-                h_flex()
-                    .min_w_0()
-                    .gap_2()
-                    .justify_end()
-                    .child(word)
-                    .child("·")
-                    .child(div().truncate().child(self.endpoint_label.clone()))
-            });
-        h_flex()
-            .justify_between()
-            .gap_4()
-            .px_4()
-            .pb_2()
-            .child(ledger)
-            .child(ident)
-            .into_any_element()
+            // The workspace moved to the conversation header; the
+            // footer names the endpoint the turn talks to.
+            .child(self.endpoint_label.clone());
+        // The footer sits under the composer, the same width, so the
+        // ledger and the identity line read as the composer's own.
+        reading_column(
+            h_flex()
+                .w_full()
+                .justify_between()
+                .gap_4()
+                .px_4()
+                .pb_2()
+                .child(ledger)
+                .child(ident)
+                .into_any_element(),
+        )
     }
 
     /// The palette, floating over the whole chat: a backdrop that
@@ -6531,101 +6772,153 @@ impl ChatView {
                 .into_any_element();
         }
         let is_active = self.session_id == Some(session_id);
-        let delete_button = Button::new(SharedString::from(format!("delete-{}", session_id.0)))
-            .label("✕")
-            .xsmall()
-            .ghost()
-            .tooltip("Delete this conversation, five seconds to undo");
-        h_flex()
+        let theme = cx.theme();
+        let (foreground, muted, hover_bg, active_bg) = (
+            theme.foreground,
+            theme.muted_foreground,
+            theme.foreground.opacity(0.06),
+            theme.foreground.opacity(0.09),
+        );
+        // The row's actions show while the pointer is on the row (or
+        // the row is the open one), so a list of conversations reads
+        // as titles, not as three glyphs per line.
+        let group = SharedString::from(format!("session-row-{}", session_id.0));
+        let title = summary.title.clone();
+        let stored_root = summary.workspace_root.clone();
+        let action = |id: String, icon: IconName, tip: &'static str| {
+            Button::new(SharedString::from(id))
+                .icon(icon)
+                .xsmall()
+                .ghost()
+                .tooltip(tip)
+        };
+        div()
+            .id(SharedString::from(format!("session-{}", session_id.0)))
+            // Observed so the harness can click the row; a no-op
+            // outside test-support builds.
+            .test_support()
+            .group(group.clone())
             .w_full()
             .min_w_0()
-            .gap_0p5()
+            .h(px(32.))
+            .pl_2()
+            .pr_1()
+            .flex()
+            .items_center()
+            .gap_1()
+            .rounded(px(6.))
+            .cursor_pointer()
+            .when(is_active, |row| row.bg(active_bg))
+            .hover(move |row| row.bg(hover_bg))
+            .tooltip({
+                let title = title.clone();
+                move |window, cx| Tooltip::new(title.clone()).build(window, cx)
+            })
+            .on_click(
+                cx.listener(move |this, _, window, cx| match &this.session_router {
+                    Some(router) => {
+                        // The shell decides, but never touches this view:
+                        // the click holds its lease, so this view's share
+                        // of the work comes back as an instruction.
+                        let origin = ClickOrigin {
+                            root: this.workspace_root.clone(),
+                            session: this.session_id,
+                            streaming: this.streaming,
+                        };
+                        let routing = router(session_id, stored_root.clone(), origin, window, cx);
+                        this.apply_routing(session_id, routing, window, cx);
+                    }
+                    None => this.switch_to_session(session_id, window, cx),
+                }),
+            )
+            .children(
+                self.session_marks
+                    .get(&session_id)
+                    .map(|mark| session_marker(*mark, cx)),
+            )
             .child(
-                Button::new(SharedString::from(format!("session-{}", session_id.0)))
-                    .label(summary.title.clone())
-                    .small()
+                div()
                     .flex_1()
                     .min_w_0()
-                    .when(is_active, |button| {
-                        // The open conversation is tinted, not loud, the
-                        // accent at conversation weight.
-                        button.custom(
-                            ButtonCustomVariant::new(cx)
-                                .color(cx.theme().accent.opacity(0.14))
-                                .hover(cx.theme().accent.opacity(0.2))
-                                .active(cx.theme().accent.opacity(0.24)),
-                        )
+                    .truncate()
+                    .text_size(px(13.))
+                    // Settled work reads muted; the open one at full
+                    // weight.
+                    .text_color(if is_active { foreground } else { muted })
+                    .when(settled, |text| text.text_color(muted.opacity(0.7)))
+                    .when(is_active, |text| {
+                        text.font_weight(gpui_kit::FontWeight::MEDIUM)
                     })
-                    .when(settled, |button| {
-                        // Put down, not deleted: the muted tint keeps the
-                        // row readable without competing with live work.
-                        button.custom(
-                            ButtonCustomVariant::new(cx)
-                                .color(cx.theme().muted_foreground.opacity(0.4))
-                                .hover(cx.theme().muted_foreground.opacity(0.55))
-                                .active(cx.theme().muted_foreground.opacity(0.7)),
-                        )
-                    })
-                    .tooltip(summary.title.clone())
-                    .on_click({
-                        let stored_root = summary.workspace_root.clone();
-                        cx.listener(move |this, _, window, cx| match &this.session_router {
-                            Some(router) => {
-                                // The shell decides, but never touches
-                                // this view: the click holds its lease,
-                                // so this view's share of the work
-                                // comes back as an instruction.
-                                let origin = ClickOrigin {
-                                    root: this.workspace_root.clone(),
-                                    pristine: this.is_pristine(),
-                                };
-                                let routing =
-                                    router(session_id, stored_root.clone(), origin, window, cx);
-                                this.apply_routing(session_id, routing, window, cx);
-                            }
-                            None => this.switch_to_session(session_id, window, cx),
-                        })
-                    }),
+                    .child(title),
             )
             // The limited chip: the session's last turn died on the
             // provider's rate limit. Static text, warning tint, the
             // open transcript carries the Resume button.
-            .when(summary.limited, |row| {
-                row.child(
-                    div()
-                        .text_size(px(10.))
-                        .text_color(cx.theme().warning)
-                        .child("limited"),
-                )
-            })
-            .child(
-                Button::new(SharedString::from(format!("rename-{}", session_id.0)))
-                    .label("✎")
-                    .xsmall()
-                    .ghost()
-                    .tooltip("Rename this conversation")
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        this.start_rename(session_id, window, cx);
-                    })),
+            .when(
+                summary.limited
+                    && self.session_marks.get(&session_id) != Some(&SessionMark::Limited),
+                |row| {
+                    row.child(
+                        div()
+                            .text_size(px(10.))
+                            .text_color(cx.theme().warning)
+                            .child("limited"),
+                    )
+                },
             )
             .child(
-                Button::new(SharedString::from(format!("settle-{}", session_id.0)))
-                    .label(if settled { "↩" } else { "✓" })
-                    .xsmall()
-                    .ghost()
-                    .tooltip(if settled {
-                        "Un-settle, back to the active list"
-                    } else {
-                        "Settle, done; folds out of the list"
-                    })
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.settle_clicked(session_id, !settled, cx);
-                    })),
-            )
-            .child(
-                delete_button.on_click(cx.listener(move |this, _, window, cx| {
-                    this.delete_clicked(session_id, window, cx);
-                })),
+                h_flex()
+                    .flex_shrink_0()
+                    .opacity(0.)
+                    .group_hover(group, |actions| actions.opacity(1.))
+                    .child(
+                        action(
+                            format!("rename-{}", session_id.0),
+                            IconName::Pencil,
+                            "Rename this conversation",
+                        )
+                        .on_click(cx.listener(
+                            move |this, _, window, cx| {
+                                // The row opens the session; its tools must not.
+                                cx.stop_propagation();
+                                this.start_rename(session_id, window, cx);
+                            },
+                        )),
+                    )
+                    .child(
+                        action(
+                            format!("settle-{}", session_id.0),
+                            if settled {
+                                IconName::ArchiveRestore
+                            } else {
+                                IconName::Archive
+                            },
+                            if settled {
+                                "Un-settle, back to the active list"
+                            } else {
+                                "Settle, done; folds out of the list"
+                            },
+                        )
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            // The row opens the session; its tools must not.
+                            cx.stop_propagation();
+                            this.settle_clicked(session_id, !settled, cx);
+                        })),
+                    )
+                    .child(
+                        action(
+                            format!("delete-{}", session_id.0),
+                            IconName::Trash,
+                            "Delete this conversation, five seconds to undo",
+                        )
+                        .on_click(cx.listener(
+                            move |this, _, window, cx| {
+                                // The row opens the session; its tools must not.
+                                cx.stop_propagation();
+                                this.delete_clicked(session_id, window, cx);
+                            },
+                        )),
+                    ),
             )
             .into_any_element()
     }
@@ -6729,24 +7022,69 @@ impl Render for ChatView {
                             .flex_1()
                             .min_h_0()
                             .pt_3()
-                            .px_3()
-                            .gap_1()
+                            .px_2()
+                            .gap_0p5()
                             .overflow_y_scroll()
+                            // Who this is: the mark and the name, as in
+                            // the launcher.
                             .child(
-                                Button::new("new-chat")
-                                    .label("New chat")
-                                    .small()
-                                    .w_full()
-                                    .tooltip("Start a new conversation in this tab")
+                                h_flex()
+                                    .gap_2()
+                                    .px_2()
+                                    .pb_2()
+                                    .child(logo(22.))
+                                    .child(
+                                        div()
+                                            .text_size(px(15.))
+                                            .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                                            .child("Gertie"),
+                                    ),
+                            )
+                            .child(
+                                sidebar_row("new-chat", IconName::SquarePen, "New chat", None, false, cx)
+                                    .tooltip(|window, cx| {
+                                        Tooltip::new("Start a new conversation").build(window, cx)
+                                    })
                                     .on_click(cx.listener(|this, _, window, cx| {
                                         this.new_session(window, cx)
-                                    })),
+                                    }))
+                                    .test_support(),
                             )
+                            // A worktree chat: its own checkout of this
+                            // repo, for parallel work that must not
+                            // collide. Only where a shell can make one.
+                            .when(self.shell_ask.is_some(), |col| {
+                                col.child(
+                                    sidebar_row(
+                                        "new-worktree-chat",
+                                        IconName::GitBranchPlus,
+                                        "New worktree chat",
+                                        None,
+                                        false,
+                                        cx,
+                                    )
+                                    .tooltip(|window, cx| {
+                                        Tooltip::new(
+                                            "A new chat in its own git worktree of this repo, \
+                                             so parallel edits never collide",
+                                        )
+                                        .build(window, cx)
+                                    })
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        if let Some(ask) = this.shell_ask.clone() {
+                                            ask(ShellRequest::NewWorktreeChat, window, cx);
+                                        }
+                                    }))
+                                    .test_support(),
+                                )
+                            })
                             .child(
                                 div()
                                     .px_2()
-                                    .mt_1()
+                                    .pt_4()
+                                    .pb_1()
                                     .text_size(px(11.))
+                                    .font_weight(gpui_kit::FontWeight::SEMIBOLD)
                                     .text_color(cx.theme().muted_foreground)
                                     .child("SESSIONS"),
                             )
@@ -6756,19 +7094,39 @@ impl Render for ChatView {
                             .when(
                                 visible.iter().any(|summary| summary.settled),
                                 |col| {
+                                    let count =
+                                        visible.iter().filter(|summary| summary.settled).count();
                                     col.child(
-                                        Button::new("settled-fold")
-                                            .label(format!(
-                                                "{} SETTLED ({})",
-                                                if self.settled_open { "▾" } else { "▸" },
-                                                visible
-                                                    .iter()
-                                                    .filter(|summary| summary.settled)
-                                                    .count()
-                                            ))
-                                            .xsmall()
-                                            .ghost()
-                                            .tooltip("Conversations put down, expand to bring one back")
+                                        div()
+                                            .id("settled-fold")
+                                            .test_support()
+                                            .mt_2()
+                                            .px_2()
+                                            .h(px(26.))
+                                            .flex()
+                                            .items_center()
+                                            .gap_1()
+                                            .rounded(px(6.))
+                                            .cursor_pointer()
+                                            .text_size(px(11.))
+                                            .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                                            .text_color(cx.theme().muted_foreground)
+                                            .hover(|row| row.text_color(cx.theme().foreground))
+                                            .child(
+                                                Icon::new(if self.settled_open {
+                                                    IconName::ChevronDown
+                                                } else {
+                                                    IconName::ChevronRight
+                                                })
+                                                .with_size(px(12.)),
+                                            )
+                                            .child(format!("SETTLED ({count})"))
+                                            .tooltip(|window, cx| {
+                                                Tooltip::new(
+                                                    "Conversations put down, expand to bring one back",
+                                                )
+                                                .build(window, cx)
+                                            })
                                             .on_click(cx.listener(|this, _, _, cx| {
                                                 this.settled_open = !this.settled_open;
                                                 cx.notify();
@@ -6785,8 +7143,8 @@ impl Render for ChatView {
                         // sidebar's foot, findable, never
                         // in the way.
                         v_flex()
-                            .gap_1()
-                            .px_3()
+                            .gap_0p5()
+                            .px_2()
                             .pt_2()
                             .pb_3()
                             // The undo toast: sessions inside their
@@ -6833,26 +7191,39 @@ impl Render for ChatView {
                                 )
                             })
                             .child(
-                                Button::new("search-history")
-                                    .label("Search (Ctrl+K)")
-                                    .small()
-                                    .ghost()
-                                    .w_full()
-                                    .tooltip("Search every session, Ctrl+K")
-                                    .on_click(cx.listener(|this, _, window, cx| {
-                                        this.open_palette(window, cx)
-                                    })),
+                                sidebar_row(
+                                    "search-history",
+                                    IconName::Search,
+                                    "Search",
+                                    Some("Ctrl+K"),
+                                    false,
+                                    cx,
+                                )
+                                .tooltip(|window, cx| {
+                                    Tooltip::new("Search every session").build(window, cx)
+                                })
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.open_palette(window, cx)
+                                }))
+                                .test_support(),
                             )
                             .child(
-                                Button::new("toggle-settings")
-                                    .label("Settings")
-                                    .small()
-                                    .ghost()
-                                    .w_full()
-                                    .tooltip("Configuration, theme, and token totals")
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.toggle_settings(cx)
-                                    })),
+                                sidebar_row(
+                                    "toggle-settings",
+                                    IconName::Settings,
+                                    "Settings",
+                                    None,
+                                    self.panel == Panel::Settings,
+                                    cx,
+                                )
+                                .tooltip(|window, cx| {
+                                    Tooltip::new("Configuration, theme, and token totals")
+                                        .build(window, cx)
+                                })
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.toggle_settings(cx)
+                                }))
+                                .test_support(),
                             ),
                     ),
             )
@@ -6870,6 +7241,7 @@ impl Render for ChatView {
                             .flex_1()
                             .min_h_0()
                             .relative()
+                            .child(self.render_conversation_header(cx))
                             .child(
                                 // The transcript area's container wraps
                                 // exactly the list, not the composer
@@ -6886,10 +7258,16 @@ impl Render for ChatView {
                                     .track_focus(&self.transcript_focus)
                                     .child(
                                         list(self.list_state.clone(), move |index, window, cx| {
-                                            view.update(cx, |view, cx| {
-                                                view.render_turn(index, window, cx)
-                                            })
-                                            .unwrap_or_else(|_| div().into_any_element())
+                                            // Every row kind shares the
+                                            // reading column, so nothing
+                                            // drifts to the window's edge
+                                            // on a wide window.
+                                            reading_column(
+                                                view.update(cx, |view, cx| {
+                                                    view.render_turn(index, window, cx)
+                                                })
+                                                .unwrap_or_else(|_| div().into_any_element()),
+                                            )
                                         })
                                         .h_full()
                                         .overflow_hidden()
@@ -7497,11 +7875,21 @@ impl Render for ChatView {
                                         )
                                     })
                                     .child(
+                                        // The composer: one rounded box,
+                                        // attach on the left, send on the
+                                        // right, the reading width wide.
+                                        div().w_full().px_4().pt_3().pb_2().flex().justify_center().child(
                                         h_flex()
                                             .key_context("Composer")
-                                            .px_4()
-                                            .py_3()
-                                            .gap_2()
+                                            .w_full()
+                                            .max_w(px(READING_WIDTH))
+                                            .items_end()
+                                            .gap_1()
+                                            .p_1p5()
+                                            .rounded(px(12.))
+                                            .border_1()
+                                            .border_color(cx.theme().input)
+                                            .bg(cx.theme().secondary.opacity(0.5))
                                             // The steer/queue hint lives in the
                                             // composer's placeholder now, the
                                             // sync keeps it true while a turn
@@ -7509,25 +7897,10 @@ impl Render for ChatView {
                                             // only state that ever shows it.
                                             .child(
                                                 Button::new("attach-file")
-                                                    // A paperclip, the one word
-                                                    // every file-affordance
-                                                    // speaks. Bytes, not a
-                                                    // font glyph: the emoji
-                                                    // label rasterized as
-                                                    // nothing on Linux, and
-                                                    // the app's asset source
-                                                    // ships the kit's default
-                                                    // bundle, not the full
-                                                    // Lucide catalog this path
-                                                    // lives in, `Icon::data`
-                                                    // renders it without
-                                                    // registering an asset.
-                                                    .icon(Icon::default().data(PAPERCLIP_SVG))
+                                                    .icon(IconName::Paperclip)
                                                     .small()
                                                     .ghost()
-                                                    // The label left the
-                                                    // screen with the word;
-                                                    // the name stays for the
+                                                    // The name stays for the
                                                     // reader that never sees
                                                     // pixels.
                                                     .accessibility_label("attach file")
@@ -7538,14 +7911,15 @@ impl Render for ChatView {
                                                         this.attach_from_picker(cx);
                                                     })),
                                             )
-                                            .child(div().flex_1().child(
+                                            .child(div().flex_1().min_w_0().child(
                                                 // Auto-grown by the state: one
                                                 // row at rest, up to six with
                                                 // content. Paste is hooked:
                                                 // images and copied files
                                                 // become chips, text pastes
-                                                // as text.
-                                                Textarea::new(&self.input).on_paste({
+                                                // as text. The box around it
+                                                // is the border.
+                                                Textarea::new(&self.input).appearance(false).on_paste({
                                                     let view = cx.entity();
                                                     move |item, _, cx| {
                                                         view.update(cx, |this, cx| {
@@ -7553,7 +7927,43 @@ impl Render for ChatView {
                                                         })
                                                     }
                                                 }),
-                                            )),
+                                            ))
+                                            .child({
+                                                // Send, the same as Enter
+                                                // (which steers a running
+                                                // turn): a visible way to
+                                                // send for the mouse.
+                                                let empty = self.input.read(cx).value().trim().is_empty();
+                                                // While a turn runs with
+                                                // nothing typed, the button
+                                                // stops it; typing turns it
+                                                // back into send (a steer).
+                                                if self.streaming && empty {
+                                                    Button::new("stop-turn")
+                                                        .icon(IconName::Square)
+                                                        .small()
+                                                        .danger()
+                                                        .tooltip("Stop the running turn")
+                                                        .on_click(cx.listener(|this, _, _, cx| {
+                                                            this.stop_turn(cx);
+                                                        }))
+                                                } else {
+                                                Button::new("send-message")
+                                                    .icon(IconName::ArrowUp)
+                                                    .small()
+                                                    .primary()
+                                                    .disabled(empty)
+                                                    .tooltip(if self.streaming {
+                                                        "Steer the running turn (Enter)"
+                                                    } else {
+                                                        "Send (Enter)"
+                                                    })
+                                                    .on_click(cx.listener(|this, _, window, cx| {
+                                                        this.send(false, window, cx);
+                                                    }))
+                                                }
+                                            }),
+                                    ),
                                     )
                                     .child(self.render_token_footer(cx)),
                             ),
@@ -7586,19 +7996,6 @@ impl Render for ChatView {
 const NO_ENDPOINT_NOTICE: &str = "No endpoint configured, none is built in. Add one in the \
     settings panel (type `/settings` in the composer): any OpenAI-compatible URL, the model id it \
     serves, and the env var holding your key. `gertie doctor` checks the setup.";
-
-/// The composer's paperclip, the Lucide path as raw bytes. The app's
-/// asset source is the kit's default icon bundle; the full Lucide
-/// catalog it draws from would add megabytes for one glyph, so the
-/// path rides here and `Icon::data` paints it without an asset
-/// lookup. `currentColor` keeps it in whatever the button's text
-/// color is at rest and hovered.
-const PAPERCLIP_SVG: &[u8] =
-    b"<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"24\" height=\"24\" \
-    viewBox=\"0 0 24 24\" fill=\"none\" stroke=\"currentColor\" stroke-width=\"2\" \
-    stroke-linecap=\"round\" stroke-linejoin=\"round\"><path d=\"m16 6-8.414 8.586a2 2 0 0 0 \
-    2.829 2.829l8.414-8.586a4 4 0 1 0-5.657-5.657l-8.379 8.551a6 6 0 1 0 8.485 8.485l8.379-8.551\" \
-    /></svg>";
 
 /// A stored row as a transcript turn: tool rows render as finished
 /// cards, everything else as its role's bubble. The one mapping both
@@ -7907,6 +8304,106 @@ fn human_tokens(count: u64) -> String {
     }
 }
 
+/// The mode menu's rows: the four postures with their one-line
+/// meanings, in escalation order. The current mode is marked; the
+/// full-access row routes through the confirm card (pick_mode), so
+/// the menu names the dangerous choice without dropping its gate.
+fn mode_menu_rows(current: PermissionMode) -> Vec<(PermissionMode, &'static str, bool)> {
+    use PermissionMode::*;
+    [
+        (Supervised, "everything asks", current == Supervised),
+        (
+            AcceptEdits,
+            "edits run unasked, bash asks",
+            current == AcceptEdits,
+        ),
+        (
+            Auto,
+            "edits and sandboxed bash run unasked",
+            current == Auto,
+        ),
+        (FullAccess, "nothing asks, ever", current == FullAccess),
+    ]
+    .into_iter()
+    .collect()
+}
+
+/// The gertie mark, rendered from the launcher icon's SVG.
+static LOGO: std::sync::LazyLock<Arc<gpui_kit::Image>> = std::sync::LazyLock::new(|| {
+    Arc::new(gpui_kit::Image::from_bytes(
+        gpui_kit::ImageFormat::Svg,
+        include_bytes!("../../assets/gertie-icon.svg").to_vec(),
+    ))
+});
+
+fn logo(size: f32) -> impl IntoElement {
+    gpui_kit::img(LOGO.clone()).size(px(size)).flex_shrink_0()
+}
+
+/// A sidebar destination: icon, label, an optional muted hint (a
+/// shortcut), tinted while its surface is open. The caller adds the
+/// tooltip and the click.
+fn sidebar_row(
+    id: &'static str,
+    icon: IconName,
+    label: &'static str,
+    hint: Option<&'static str>,
+    selected: bool,
+    cx: &App,
+) -> gpui_kit::Stateful<gpui_kit::Div> {
+    let theme = cx.theme();
+    let (foreground, muted) = (theme.foreground, theme.muted_foreground);
+    let (hover_bg, active_bg) = (
+        theme.foreground.opacity(0.06),
+        theme.foreground.opacity(0.09),
+    );
+    div()
+        .id(id)
+        .w_full()
+        .h(px(32.))
+        .px_2()
+        .flex()
+        .items_center()
+        .gap_2()
+        .rounded(px(6.))
+        .cursor_pointer()
+        .text_size(px(13.))
+        .text_color(if selected { foreground } else { muted })
+        .when(selected, |row| row.bg(active_bg))
+        .hover(move |row| row.bg(hover_bg).text_color(foreground))
+        .child(Icon::new(icon).with_size(px(16.)))
+        .child(div().flex_1().child(label))
+        .when_some(hint, |row, hint| {
+            row.child(
+                div()
+                    .text_size(px(11.))
+                    .text_color(muted.opacity(0.8))
+                    .child(hint),
+            )
+        })
+}
+
+/// A sidebar row's marker: green dot for a running turn, blue for a
+/// finish not yet seen, the pause icon for a rate-limited run.
+fn session_marker(mark: SessionMark, cx: &App) -> AnyElement {
+    let dot = |color: gpui_kit::Hsla| {
+        div()
+            .size(px(7.))
+            .rounded_full()
+            .bg(color)
+            .flex_shrink_0()
+            .into_any_element()
+    };
+    match mark {
+        SessionMark::Running => dot(cx.theme().success),
+        SessionMark::Unseen => dot(gpui_kit::rgb(0x3b82f6).into()),
+        SessionMark::Limited => Icon::new(IconName::Pause)
+            .with_size(px(12.))
+            .text_color(cx.theme().warning)
+            .into_any_element(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     //! The diff face's pure layer: what the arguments (and a captured
@@ -8022,28 +8519,4 @@ mod tests {
         let patch = diff_data(&call, Some("same\n")).expect("write face");
         assert_eq!((patch.adds, patch.removes), (0, 0));
     }
-}
-
-/// The mode menu's rows: the four postures with their one-line
-/// meanings, in escalation order. The current mode is marked; the
-/// full-access row routes through the confirm card (pick_mode), so
-/// the menu names the dangerous choice without dropping its gate.
-fn mode_menu_rows(current: PermissionMode) -> Vec<(PermissionMode, &'static str, bool)> {
-    use PermissionMode::*;
-    [
-        (Supervised, "everything asks", current == Supervised),
-        (
-            AcceptEdits,
-            "edits run unasked, bash asks",
-            current == AcceptEdits,
-        ),
-        (
-            Auto,
-            "edits and sandboxed bash run unasked",
-            current == Auto,
-        ),
-        (FullAccess, "nothing asks, ever", current == FullAccess),
-    ]
-    .into_iter()
-    .collect()
 }

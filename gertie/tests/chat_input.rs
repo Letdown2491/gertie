@@ -2322,7 +2322,7 @@ fn a_label_truncates_to_a_single_ellipsis() {
     );
 }
 
-/// The tab shell: the WorkspaceView shape, the tab bar above, the
+/// A shell with a fixed-height sibling above the chat view, the
 /// chat view as the column's flex item. A stand-in keeps the test on
 /// the real structural seam, a fixed-height sibling above a view that
 /// must shrink, without pulling a whole Bootstrap in.
@@ -4014,6 +4014,102 @@ fn the_ask_card_names_the_question_in_the_status() {
     );
 }
 
+/// Stop ends a running turn from the composer: with nothing typed the
+/// send button is Stop; a click ends the turn, the waiting card closes
+/// as stopped (persisted like any result), and the button is Send
+/// again.
+#[test]
+fn stop_ends_a_running_turn_and_closes_its_open_card() {
+    let scenarios = tempfile::tempdir().expect("scenario dir");
+    std::fs::write(
+        scenarios.path().join("asks.toml"),
+        "[[steps]]\ntext = ''\n\n\
+         [[steps.tool_calls]]\nname = \"ask_user\"\n\
+         arguments = '{\"question\": \"Which database?\", \"options\": \
+                      [\"postgres\", \"sqlite\"], \"allow_custom\": false}'\n\n\
+         [[steps]]\ntext = ''\n",
+    )
+    .expect("scenario file");
+    let endpoint = gertie_providers::Endpoint {
+        name: "replay".into(),
+        base_url: scenarios.path().to_string_lossy().into_owned(),
+        model: "asks".into(),
+        api_key: None,
+        context_window: None,
+        wire: gertie_providers::Wire::Replay,
+    };
+    let provider = Arc::new(
+        gertie_providers::AnyProvider::with_endpoints(vec![endpoint]).expect("replay provider"),
+    );
+    let store = Arc::new(SessionStore::open(Path::new(":memory:")).expect("memory store"));
+    let mut fixture = fixture_built(
+        store,
+        None,
+        None,
+        None,
+        Some(provider),
+        None,
+        vec![Arc::new(gertie_tools::AskUser)],
+        None,
+        None,
+    );
+    fixture.hold = vec![scenarios];
+
+    fixture.act(|window, cx| {
+        window.input("go", cx);
+        window.press("enter", cx);
+    });
+    pump(&mut fixture, 30);
+    let streaming = |fixture: &mut Fixture| {
+        fixture.cx.update(|cx| {
+            fixture
+                .view
+                .upgrade()
+                .expect("view alive")
+                .read(cx)
+                .is_streaming()
+        })
+    };
+    assert!(streaming(&mut fixture), "the turn waits on the ask");
+    fixture.act(|window, _cx| {
+        assert!(
+            window.try_find("ask-1-0").is_some(),
+            "the ask's options show"
+        );
+        assert!(
+            window.try_find("stop-turn").is_some(),
+            "an empty composer offers Stop"
+        );
+    });
+
+    fixture.act(|window, cx| window.click("stop-turn", cx));
+    pump(&mut fixture, 30);
+    assert!(!streaming(&mut fixture), "Stop ended the turn");
+    fixture.act(|window, _cx| {
+        assert!(window.try_find("send-message").is_some(), "Send is back");
+    });
+    let session = fixture
+        .cx
+        .update(|cx| {
+            fixture
+                .view
+                .upgrade()
+                .expect("view alive")
+                .read(cx)
+                .session_id()
+        })
+        .expect("session");
+    let rows = fixture.store.load_messages(session).expect("rows");
+    assert!(
+        rows.iter()
+            .any(|row| row.content.contains("stopped by the user")),
+        "the stopped card's result is stored: {:?}",
+        rows.iter()
+            .map(|row| row.content.clone())
+            .collect::<Vec<_>>()
+    );
+}
+
 /// A pending card breaks a run: finished reads before it stay
 /// stand-alone (an approval hiding inside a collapsed summary would be
 /// a trap); approving it lets the run close over both.
@@ -4459,7 +4555,8 @@ fn routing_sends_a_session_to_the_tab_that_owns_its_workspace() {
                     Some("/tmp/routing-kuma".to_string()),
                     gertie::chat::ClickOrigin {
                         root: boot.workspace_root.clone(),
-                        pristine: true,
+                        session: None,
+                        streaming: false,
                     },
                     window,
                     cx,
@@ -4480,7 +4577,7 @@ fn routing_sends_a_session_to_the_tab_that_owns_its_workspace() {
         })
         .expect("draw");
         let (tabs, view, root) = probe(&mut cx, &shell);
-        assert_eq!(tabs, 1, "rule 3: the pristine tab adopts, no new tab");
+        assert_eq!(tabs, 1, "rule 3: the idle view adopts, no new view");
         assert_eq!(
             root,
             Path::new("/tmp/routing-kuma").to_path_buf(),
@@ -4489,94 +4586,75 @@ fn routing_sends_a_session_to_the_tab_that_owns_its_workspace() {
         let _ = view;
     }
 
-    // ---- Rule 4: a busy tab spawns a new one instead of moving.
+    // ---- Rule 4, then rule 0, in one update: a frame (which the
+    // update's end may draw) drops idle off-screen views, and view 1
+    // only claims to run.
     {
         let shell = shell.lock().unwrap().clone().expect("shell");
-        // Tab 1 now holds the kuma session (busy). Click the gertie
-        // session: no tab holds /tmp/routing-gertie, tab 1 is not
-        // pristine → a new tab opens rooted at gertie's workspace.
         cx.update_window(window.into(), |_, window, cx| {
             let shell_entity = shell.upgrade().expect("shell");
             shell_entity.update(cx, |shell, cx| {
+                // View 1 holds the kuma session and (as far as the
+                // shell is told) runs a turn: the gertie click opens
+                // a new view rooted at gertie's workspace.
                 let decision = shell.route_session(
                     s_gertie,
                     Some("/tmp/routing-gertie".to_string()),
-                    // Tab 1 holds the kuma session now: busy, not
-                    // pristine, and its root is the kuma one.
                     gertie::chat::ClickOrigin {
                         root: Path::new("/tmp/routing-kuma").to_path_buf(),
-                        pristine: false,
+                        session: Some(s_kuma),
+                        streaming: true,
                     },
                     window,
                     cx,
                 );
                 assert!(
                     matches!(decision, gertie::chat::SessionRouting::Elsewhere),
-                    "rule 4 loads the session in the new tab"
+                    "rule 4 loads the session in the new view"
                 );
-                let (_, view, _) = shell.tab_probe(cx);
-                view.update(cx, |view, cx| {
-                    view.apply_routing(s_gertie, decision, window, cx)
-                });
-            });
-        })
-        .expect("route gertie");
-        cx.update_window(window.into(), |_, window, cx| {
-            window.draw(cx).clear(cx);
-        })
-        .expect("draw");
-        let (tabs, _view, root) = probe(&mut cx, &shell);
-        assert_eq!(tabs, 2, "rule 4: the busy tab stays, a new tab opens");
-        assert_eq!(
-            root,
-            Path::new("/tmp/routing-gertie").to_path_buf(),
-            "the new tab runs at the session's workspace"
-        );
-    }
+                let (tabs, _, root) = shell.tab_probe(cx);
+                assert_eq!(tabs, 2, "rule 4: the running view stays, a new view opens");
+                assert_eq!(
+                    root,
+                    Path::new("/tmp/routing-gertie").to_path_buf(),
+                    "the new view runs at the session's workspace"
+                );
 
-    // ---- Rule 2, the holder path: click the kuma session from the
-    // now-active gertie tab. Tab 1 holds /tmp/routing-kuma → the
-    // shell activates tab 1 and loads there; no third tab appears.
-    {
-        let shell = shell.lock().unwrap().clone().expect("shell");
-        cx.update_window(window.into(), |_, window, cx| {
-            let shell_entity = shell.upgrade().expect("shell");
-            shell_entity.update(cx, |shell, cx| {
-                // The active tab is the gertie-rooted one (rule 4
-                // activated it): busy, and its root differs from the
-                // kuma session's.
+                // Rule 0: the kuma click from the gertie view shows
+                // view 1, which has it open; no third view.
                 let decision = shell.route_session(
                     s_kuma,
                     Some("/tmp/routing-kuma".to_string()),
                     gertie::chat::ClickOrigin {
                         root: Path::new("/tmp/routing-gertie").to_path_buf(),
-                        pristine: false,
+                        session: Some(s_gertie),
+                        streaming: false,
                     },
                     window,
                     cx,
                 );
                 assert!(
                     matches!(decision, gertie::chat::SessionRouting::Elsewhere),
-                    "rule 2 loads the session in the holder"
+                    "rule 0 shows the view that has it open"
                 );
-                let (_, view, _) = shell.tab_probe(cx);
-                view.update(cx, |view, cx| {
-                    view.apply_routing(s_kuma, decision, window, cx)
-                });
+                let (tabs, _, root) = shell.tab_probe(cx);
+                assert_eq!(tabs, 2, "rule 0: the holder shows, no new view");
+                assert_eq!(
+                    root,
+                    Path::new("/tmp/routing-kuma").to_path_buf(),
+                    "the holder is active after the click"
+                );
             });
         })
-        .expect("route kuma again");
+        .expect("route");
+        // A frame drops the idle, off-screen gertie view: the
+        // conversation stays in the store and the sidebar.
         cx.update_window(window.into(), |_, window, cx| {
             window.draw(cx).clear(cx);
         })
         .expect("draw");
-        let (tabs, _view, root) = probe(&mut cx, &shell);
-        assert_eq!(tabs, 2, "rule 2: the holder loads it, no new tab");
-        assert_eq!(
-            root,
-            Path::new("/tmp/routing-kuma").to_path_buf(),
-            "the holder tab is active after the click"
-        );
+        let (tabs, _view, _root) = probe(&mut cx, &shell);
+        assert_eq!(tabs, 1, "idle off-screen views are dropped");
     }
 }
 

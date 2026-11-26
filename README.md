@@ -26,14 +26,17 @@ fronts, nothing shared over the network.
   test, debug, review, research, librarian) dispatched by the leader; define your own in
   TOML, pinned to any configured endpoint: a council of three models can review one diff
   (the bundled `council` skill runs the loop). Workers never spawn workers.
-- **Tabs and worktree tabs**: parallel chats in one window. The ⎇ button gives a tab its
-  own `git worktree`, so two agents can edit the same repo without colliding.
+- **Parallel and worktree chats**: a running turn keeps going while you open another
+  conversation from the sidebar, which marks it running or finished. New worktree chat
+  starts a chat in its own `git worktree`, so two agents can edit the
+  same repo without colliding. Stop ends a running turn.
 - **Any endpoint**: speaks the OpenAI-compatible wire (ppq.ai, OpenRouter, Ollama,
   vLLM, Gemini's compat endpoint) plus a native Anthropic adapter. Fallback chains: when
   an endpoint dies before producing content, the next one takes over invisibly.
 - **Editable settings**: endpoints, API keys, the sandbox, and MCP servers are
-  configurable in the panel; saves go through `toml_edit`, so your config comments and
-  hand-written keys survive. Endpoint switches apply to open chats immediately.
+  configurable in the panel, and each change saves as you make it, through `toml_edit`,
+  so your config comments and hand-written keys survive. Endpoint changes apply to open
+  chats immediately.
 - **MCP**: external tools over stdio *or* Streamable HTTP. Server tool descriptions are
   treated as untrusted input (sanitized, capped); every MCP call prompts.
 - **Token ledger**: per-session and all-time token totals, persisted locally. No
@@ -56,7 +59,9 @@ cargo install --locked --path gertie   # installs the `gertie` binary
 ```
 
 (The maintainers build and test inside a pinned container via `./scripts/build.sh`; a
-plain `cargo build` works too: `gertie` needs the usual Wayland/X11 client libraries.)
+plain `cargo build` works too: `gertie` needs the usual Wayland/X11 client libraries.
+`scripts/install-user.sh` installs a container build into `~/.local` with its desktop
+entry and icon: the release binary by default, `--debug` for the debug one.)
 
 Releases are cut by pushing a `v*` tag: CI builds the Linux binary, smoke-checks it,
 and attaches it to the release with generated notes. `gertie doctor --check-updates`
@@ -112,7 +117,8 @@ version of this whole list.
 
 ## Status
 
-**1.0.0.** Feature-complete against [DESIGN.md](DESIGN.md) (see "The original 'Deferred'
+**1.0.1**, with an unreleased UX pass on main (no tab bar, Stop, settings that save
+as you go). Feature-complete against [DESIGN.md](DESIGN.md) (see "The original 'Deferred'
 row" for every decision and its rationale). New to the tool? [The tour](docs/TOUR.md)
 walks the whole surface in ten minutes.
 

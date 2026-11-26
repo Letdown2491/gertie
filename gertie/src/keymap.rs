@@ -138,7 +138,10 @@ fn rule_to_binding(rule: &Rule, cx: &App) -> Option<KeyBinding> {
 /// same context depth (gpui resolves a tie by the binding added
 /// later).
 pub fn bind_rules(rules: &[Rule], cx: &mut App) {
-    let bindings: Vec<KeyBinding> = rules.iter().filter_map(|rule| rule_to_binding(rule, cx)).collect();
+    let bindings: Vec<KeyBinding> = rules
+        .iter()
+        .filter_map(|rule| rule_to_binding(rule, cx))
+        .collect();
     cx.bind_keys(bindings);
 }
 

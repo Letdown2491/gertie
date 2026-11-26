@@ -22,7 +22,10 @@ pub fn run_with(config_path: Option<std::path::PathBuf>) {
         false,
     ));
 
-    let app = application().with_assets(gpui_kit::assets::Assets);
+    // The whole Lucide catalog (under 1 MB of SVG): the default source
+    // carries only the component set, and the sidebar and tab bar use
+    // icons outside it.
+    let app = application().with_assets(gpui_kit::assets::AllAssets);
     app.run(move |cx: &mut App| {
         gpui_kit::init(cx);
         // The user-editable keymap: gertie's own bindings (the

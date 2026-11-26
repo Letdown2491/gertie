@@ -14,11 +14,12 @@ use crate::config::{
     AgentConfig, Config, ConfigEdits, EndpointConfig, Invocation, McpServerConfig,
 };
 use crate::settings::SettingsSummary;
+use gpui_kit::assets::IconName;
 use gpui_kit::component::ActiveTheme as _;
 use gpui_kit::component::Sizable as _;
 use gpui_kit::component::ThemeMode;
-use gpui_kit::component::button::{Button, ButtonCustomVariant, ButtonVariants as _};
-use gpui_kit::component::input::{Input, InputState};
+use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::switch::Switch;
 use gpui_kit::component::{h_flex, v_flex};
 use gpui_kit::prelude::*;
@@ -213,6 +214,19 @@ impl SettingsPanelView {
     /// its value into the draft, one direction only. The old
     /// reverse-sync forced the input back to the draft each frame,
     /// which wiped every keystroke before Save could see it.
+    /// A budget saves when its edit is done: Enter, or leaving the
+    /// field.
+    fn budget_event(
+        &mut self,
+        _input: Entity<InputState>,
+        event: &InputEvent,
+        cx: &mut Context<Self>,
+    ) {
+        if matches!(event, InputEvent::PressEnter { .. } | InputEvent::Blur) {
+            self.autosave(cx);
+        }
+    }
+
     fn budget_field(
         &mut self,
         id: &'static str,
@@ -228,6 +242,7 @@ impl SettingsPanelView {
         let input = match id {
             "turn-max-rounds" => self.max_tool_rounds_input.get_or_insert_with(|| {
                 let state = cx.new(|cx| InputState::new(window, cx).placeholder(placeholder));
+                cx.subscribe(&state, Self::budget_event).detach();
                 if !seed.is_empty() {
                     state.update(cx, |state, cx| state.set_value(&seed, window, cx));
                 }
@@ -235,6 +250,7 @@ impl SettingsPanelView {
             }),
             _ => self.grace_rounds_input.get_or_insert_with(|| {
                 let state = cx.new(|cx| InputState::new(window, cx).placeholder(placeholder));
+                cx.subscribe(&state, Self::budget_event).detach();
                 if !seed.is_empty() {
                     state.update(cx, |state, cx| state.set_value(&seed, window, cx));
                 }
@@ -424,7 +440,7 @@ impl SettingsPanelView {
             }
         }
         self.form = None;
-        cx.notify();
+        self.autosave(cx);
     }
 
     fn remove_endpoint(&mut self, index: usize, cx: &mut Context<Self>) {
@@ -442,7 +458,7 @@ impl SettingsPanelView {
                 _ => {}
             }
         }
-        cx.notify();
+        self.autosave(cx);
     }
 
     /// Opens the agent form for `index` (None = add), pre-filled from
@@ -543,7 +559,7 @@ impl SettingsPanelView {
             None => self.agents.push(draft),
         }
         self.agent_form = None;
-        cx.notify();
+        self.autosave(cx);
     }
 
     fn remove_agent(&mut self, index: usize, cx: &mut Context<Self>) {
@@ -558,7 +574,7 @@ impl SettingsPanelView {
                 _ => {}
             }
         }
-        cx.notify();
+        self.autosave(cx);
     }
 
     /// Theme switch: applies immediately and persists, UI state, kept
@@ -569,14 +585,18 @@ impl SettingsPanelView {
         cx.notify();
     }
 
-    /// The Save button: writes the pending edits through toml_edit and
-    /// emits Saved so the workspace reloads the bootstrap live.
-    fn save_all(
-        &mut self,
-        _event: &gpui_kit::ClickEvent,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    /// A committed change: write it now and repaint. Settings save as
+    /// they are made (no Save button): switches on click, endpoint,
+    /// server and agent forms on their own Save or Add, removals at
+    /// once, budgets on Enter or leaving the field.
+    fn autosave(&mut self, cx: &mut Context<Self>) {
+        self.save(cx);
+        cx.notify();
+    }
+
+    /// Writes the panel's state through toml_edit and emits Saved so
+    /// the workspace reloads the bootstrap live.
+    fn save(&mut self, cx: &mut Context<Self>) {
         // The budgets: parsed from the drafts, an empty or unparseable
         // field means "the panel doesn't own this key" (None = the
         // file's value and the built-in default read through).
@@ -643,7 +663,7 @@ impl SettingsPanelView {
         match edits.save(&path) {
             Ok(()) => {
                 self.status = Some((
-                    "saved, endpoints apply to open chats; sandbox, MCP, and agents on restart"
+                    "Saved. Endpoints apply now; sandbox, memory, MCP servers and agents on restart."
                         .into(),
                     false,
                 ));
@@ -672,25 +692,48 @@ fn endpoint_row(
         .w_full()
         .gap_0p5()
         .child(
-            Button::new(SharedString::from(format!("endpoint-{index}")))
-                .label(format!("{} · {}", draft.name, draft.model))
-                .small()
+            div()
+                .id(SharedString::from(format!("endpoint-{index}")))
                 .flex_1()
                 .min_w_0()
-                .when(is_default, |button| {
-                    // The default endpoint gets the same quiet accent
-                    // tint as the active session row.
-                    button
-                        .custom(ButtonCustomVariant::new(cx).color(cx.theme().accent.opacity(0.14)))
+                .px_2()
+                .py_1()
+                .rounded(px(6.))
+                .cursor_pointer()
+                .hover(|row| row.bg(cx.theme().foreground.opacity(0.06)))
+                .when(is_default, |row| row.bg(cx.theme().accent.opacity(0.14)))
+                .tooltip({
+                    let tip = SharedString::from(format!("{key_note}, click to edit"));
+                    move |window, cx| {
+                        gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(window, cx)
+                    }
                 })
-                .tooltip(format!("{key_note}, click to edit"))
                 .on_click(cx.listener(move |this, _, window, cx| {
                     this.open_form(Some(index), window, cx);
-                })),
+                }))
+                // Name over model, left-aligned like every other list.
+                .child(
+                    div()
+                        .truncate()
+                        .text_size(px(12.5))
+                        .font_weight(gpui_kit::FontWeight::MEDIUM)
+                        .child(draft.name.clone()),
+                )
+                .child(
+                    div()
+                        .truncate()
+                        .text_size(px(11.))
+                        .text_color(cx.theme().muted_foreground)
+                        .child(format!("{} · {key_note}", draft.model)),
+                ),
         )
         .child(
             Button::new(SharedString::from(format!("default-{index}")))
-                .label(if is_default { "★" } else { "☆" })
+                .icon(if is_default {
+                    IconName::Star
+                } else {
+                    IconName::StarOff
+                })
                 .xsmall()
                 .ghost()
                 .tooltip(if is_default {
@@ -700,15 +743,15 @@ fn endpoint_row(
                 })
                 .on_click(cx.listener(move |this, _, _, cx| {
                     this.default_endpoint = Some(this.endpoints[index].name.clone());
-                    cx.notify();
+                    this.autosave(cx);
                 })),
         )
         .child(
             Button::new(SharedString::from(format!("remove-endpoint-{index}")))
-                .label("✕")
+                .icon(IconName::Trash)
                 .xsmall()
                 .ghost()
-                .tooltip("Remove (pending until Save)")
+                .tooltip("Remove")
                 .on_click(cx.listener(move |this, _, _, cx| {
                     this.remove_endpoint(index, cx);
                 })),
@@ -745,10 +788,10 @@ fn agent_row(
         )
         .child(
             Button::new(SharedString::from(format!("remove-agent-{index}")))
-                .label("✕")
+                .icon(IconName::Trash)
                 .xsmall()
                 .ghost()
-                .tooltip("Remove (pending until Save)")
+                .tooltip("Remove")
                 .on_click(cx.listener(move |this, _, _, cx| {
                     this.remove_agent(index, cx);
                 })),
@@ -756,13 +799,23 @@ fn agent_row(
 }
 
 /// The section-header styling for this panel.
-fn section_header(title: &'static str, cx: &App) -> impl IntoElement {
-    div()
-        .mt_3()
-        .mb_0p5()
-        .text_size(px(11.))
-        .text_color(cx.theme().muted_foreground)
-        .child(title)
+/// One settings group: a titled card, the panel's unit of reading.
+fn settings_card(title: &'static str, cx: &App) -> gpui_kit::Div {
+    v_flex()
+        .w_full()
+        .flex_shrink_0()
+        .gap_1p5()
+        .p_3()
+        .rounded(px(10.))
+        .border_1()
+        .border_color(cx.theme().border)
+        .bg(cx.theme().secondary.opacity(0.35))
+        .child(
+            div()
+                .text_size(px(12.))
+                .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                .child(title),
+        )
 }
 
 impl EventEmitter<SettingsEvent> for SettingsPanelView {}
@@ -869,7 +922,7 @@ impl Render for SettingsPanelView {
                                         this.mcp_name = None;
                                         this.mcp_url = None;
                                         this.mcp_command = None;
-                                        cx.notify();
+                                        this.autosave(cx);
                                     })),
                             )
                             .child(
@@ -946,10 +999,9 @@ impl Render for SettingsPanelView {
             .pt_3()
             .px_3()
             .pb_3()
-            .gap_1()
+            .gap_3()
             .overflow_y_scroll()
-            .child(section_header("APPEARANCE", cx))
-            .child({
+            .child(settings_card("Appearance", cx).child({
                 let current = gpui_kit::component::Theme::global(cx).mode;
                 h_flex()
                     .gap_1()
@@ -965,251 +1017,253 @@ impl Render for SettingsPanelView {
                         };
                         button.on_click(cx.listener(move |this, _, _, cx| this.set_theme(mode, cx)))
                     }))
-            })
-            .child(section_header("ENDPOINTS", cx))
-            .when(self.endpoints.is_empty(), |col| {
-                col.child(
-                    div()
-                        .text_size(px(12.))
-                        .text_color(theme.muted_foreground)
-                        .child("none configured, add one below"),
-                )
-            })
-            .children(self.endpoints.iter().enumerate().map(|(index, draft)| {
-                let key_resolved = self
-                    .summary
-                    .endpoints
-                    .iter()
-                    .find(|info| info.name == draft.name)
-                    .map(|info| info.key_resolved);
-                let is_default = self.default_endpoint.as_deref() == Some(draft.name.as_str());
-                endpoint_row(index, draft, key_resolved, is_default, cx).into_any_element()
             }))
             .child(
-                Button::new("add-endpoint")
-                    .label("Add endpoint")
-                    .small()
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        this.open_form(None, window, cx);
-                    })),
-            )
-            .children(form)
-            .child(section_header("SANDBOX", cx))
-            .child(
-                Switch::new("sandbox-switch")
-                    .label(format!(
-                        "Landlock-isolate bash children, from {}",
-                        self.summary.sandbox_origin.as_str()
-                    ))
-                    .small()
-                    .checked(self.sandbox)
-                    .tooltip(concat!(
-                        "Restart to apply. Your config sets this; while it",
-                        " doesn't, the repo's .gertie/config.toml wins, and",
-                        " that file may also write \"inherit\" to stand down."
-                    ))
-                    .on_click({
-                        let panel = cx.entity().downgrade();
-                        move |checked, _, cx| {
-                            if let Some(panel) = panel.upgrade() {
-                                panel.update(cx, |panel, cx| {
-                                    panel.sandbox = *checked;
-                                    cx.notify();
-                                });
-                            }
-                        }
-                    }),
-            )
-            .child(section_header("MEMORY", cx))
-            .child(
-                Switch::new("memory-switch")
-                    .label(format!(
-                        "Remember across sessions, from {}",
-                        self.summary.memory_origin.as_str()
-                    ))
-                    .small()
-                    .checked(self.memory_enabled)
-                    .tooltip(concat!(
-                        "Session-end extraction proposes memory entries",
-                        " as review cards on settle; dreaming consolidates",
-                        " the store on startup. Applies on restart; the",
-                        " files live in .gertie/memory/ and the data dir."
-                    ))
-                    .on_click({
-                        let panel = cx.entity().downgrade();
-                        move |checked, _, cx| {
-                            if let Some(panel) = panel.upgrade() {
-                                panel.update(cx, |panel, cx| {
-                                    panel.memory_enabled = *checked;
-                                    cx.notify();
-                                });
-                            }
-                        }
-                    }),
-            )
-            .child(
-                Switch::new("dream-switch")
-                    .label(format!(
-                        "Consolidate memory every {} days",
-                        self.memory_dream_days
-                    ))
-                    .small()
-                    .checked(self.memory_enabled && self.memory_dream_days > 0)
-                    .tooltip(concat!(
-                        "Startup pass that merges duplicate entries and",
-                        " archives counter-dead ones. A changelog lands in",
-                        " .gertie/memory/dreams/. Applies on restart."
-                    ))
-                    .on_click({
-                        let panel = cx.entity().downgrade();
-                        move |checked, _, cx| {
-                            if let Some(panel) = panel.upgrade() {
-                                panel.update(cx, |panel, cx| {
-                                    panel.memory_dream_days = if *checked { 7 } else { 0 };
-                                    cx.notify();
-                                });
-                            }
-                        }
-                    }),
-            )
-            .child(section_header("TURN BUDGETS", cx))
-            .child(
-                v_flex()
-                    .gap_1p5()
-                    .px_1()
+                settings_card("Endpoints", cx)
+                    .when(self.endpoints.is_empty(), |col| {
+                        col.child(
+                            div()
+                                .text_size(px(12.))
+                                .text_color(theme.muted_foreground)
+                                .child("none configured, add one below"),
+                        )
+                    })
+                    .children(self.endpoints.iter().enumerate().map(|(index, draft)| {
+                        let key_resolved = self
+                            .summary
+                            .endpoints
+                            .iter()
+                            .find(|info| info.name == draft.name)
+                            .map(|info| info.key_resolved);
+                        let is_default =
+                            self.default_endpoint.as_deref() == Some(draft.name.as_str());
+                        endpoint_row(index, draft, key_resolved, is_default, cx).into_any_element()
+                    }))
                     .child(
-                        div()
-                            .text_size(px(10.5))
-                            .text_color(theme.muted_foreground)
-                            .child(format!(
-                                "Tool rounds before a wrap-up nudge, then grace rounds before \
-                                 the turn pauses (resumable). Defaults {} + {}; empty = the \
-                                 default. Long work (a wide sweep, a migration) wants more.",
-                                gertie_core::DEFAULT_MAX_TOOL_ROUNDS,
-                                gertie_core::DEFAULT_GRACE_ROUNDS
-                            )),
-                    )
-                    .child(self.budget_field(
-                        "turn-max-rounds",
-                        format!("{} (default)", gertie_core::DEFAULT_MAX_TOOL_ROUNDS),
-                        "max tool rounds",
-                        _window,
-                        cx,
-                    ))
-                    .child(self.budget_field(
-                        "turn-grace-rounds",
-                        format!("{} (default)", gertie_core::DEFAULT_GRACE_ROUNDS),
-                        "grace rounds",
-                        _window,
-                        cx,
-                    )),
-            )
-            .child(section_header("MCP SERVERS", cx))
-            .when(self.mcp_servers.is_empty(), |col| {
-                col.child(
-                    div()
-                        .text_size(px(12.))
-                        .text_color(theme.muted_foreground)
-                        .child("none configured"),
-                )
-            })
-            .children(self.mcp_servers.iter().enumerate().map(|(index, server)| {
-                let target = server
-                    .url
-                    .clone()
-                    .or_else(|| server.command.clone())
-                    .unwrap_or_default();
-                h_flex()
-                    .w_full()
-                    .gap_0p5()
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .truncate()
-                            .text_size(px(12.))
-                            .child(format!("{} · {}", server.name, target)),
-                    )
-                    .child(
-                        Button::new(SharedString::from(format!("remove-mcp-{index}")))
-                            .label("✕")
-                            .xsmall()
-                            .ghost()
-                            .tooltip("Remove (pending until Save)")
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.mcp_servers.remove(index);
-                                cx.notify();
+                        Button::new("add-endpoint")
+                            .label("Add endpoint")
+                            .small()
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.open_form(None, window, cx);
                             })),
                     )
-                    .into_any_element()
-            }))
-            .children(mcp_form)
-            .when(!mcp_form_open, |col| {
-                col.child(
-                    Button::new("add-mcp")
-                        .label("Add server")
-                        .small()
-                        .on_click(cx.listener(|this, _, window, cx| {
-                            this.mcp_name =
-                                Some(cx.new(|cx| InputState::new(window, cx).placeholder("name")));
-                            this.mcp_url = Some(cx.new(|cx| {
-                                InputState::new(window, cx).placeholder("url (https://…/mcp)")
-                            }));
-                            this.mcp_command = Some(cx.new(|cx| {
-                                InputState::new(window, cx).placeholder("or command (stdio)")
-                            }));
-                            cx.notify();
-                        })),
-                )
-            })
-            .child(section_header("AGENTS", cx))
-            .when(self.agents.is_empty(), |col| {
-                col.child(
-                    div()
-                        .text_size(px(12.))
-                        .text_color(theme.muted_foreground)
-                        .child("none configured, the eight built-ins need none"),
-                )
-            })
-            .children(
-                self.agents
-                    .iter()
-                    .enumerate()
-                    .map(|(index, draft)| agent_row(index, draft, cx).into_any_element()),
+                    .children(form),
             )
-            .children(agent_form)
-            .when(self.agent_form.is_none(), |col| {
-                col.child(
-                    Button::new("add-agent")
-                        .label("Add agent")
-                        .small()
-                        .on_click(cx.listener(|this, _, window, cx| {
-                            this.open_agent_form(None, window, cx);
-                        })),
-                )
-            })
-            .child(section_header("CONFIG FILE", cx))
             .child(
-                div()
-                    .text_size(px(11.))
-                    .text_color(theme.muted_foreground)
-                    .child(match &self.summary.config_path {
-                        Some(path) => format!(
-                            "written on save: {}, comments and unknown keys are kept",
-                            path.display()
-                        ),
-                        None => "no config file location".into(),
+                settings_card("Sandbox", cx)
+                    .child(
+                        Switch::new("sandbox-switch")
+                            .label("Landlock-isolate bash children")
+                            .small()
+                            .checked(self.sandbox)
+                            .tooltip(concat!(
+                                "Restart to apply. Your config sets this; while it",
+                                " doesn't, the repo's .gertie/config.toml wins, and",
+                                " that file may also write \"inherit\" to stand down."
+                            ))
+                            .on_click({
+                                let panel = cx.entity().downgrade();
+                                move |checked, _, cx| {
+                                    if let Some(panel) = panel.upgrade() {
+                                        panel.update(cx, |panel, cx| {
+                                            panel.sandbox = *checked;
+                                            panel.autosave(cx);
+                                        });
+                                    }
+                                }
+                            }),
+                    )
+                    .child(origin_note(self.summary.sandbox_origin, cx)),
+            )
+            .child(
+                settings_card("Memory", cx)
+                    .child(
+                        Switch::new("memory-switch")
+                            .label("Remember across sessions")
+                            .small()
+                            .checked(self.memory_enabled)
+                            .tooltip(concat!(
+                                "Session-end extraction proposes memory entries",
+                                " as review cards on settle; dreaming consolidates",
+                                " the store on startup. Applies on restart; the",
+                                " files live in .gertie/memory/ and the data dir."
+                            ))
+                            .on_click({
+                                let panel = cx.entity().downgrade();
+                                move |checked, _, cx| {
+                                    if let Some(panel) = panel.upgrade() {
+                                        panel.update(cx, |panel, cx| {
+                                            panel.memory_enabled = *checked;
+                                            panel.autosave(cx);
+                                        });
+                                    }
+                                }
+                            }),
+                    )
+                    .child(origin_note(self.summary.memory_origin, cx))
+                    .child(
+                        Switch::new("dream-switch")
+                            .label(format!(
+                                "Consolidate memory every {} days",
+                                self.memory_dream_days
+                            ))
+                            .small()
+                            .checked(self.memory_enabled && self.memory_dream_days > 0)
+                            .tooltip(concat!(
+                                "Startup pass that merges duplicate entries and",
+                                " archives counter-dead ones. A changelog lands in",
+                                " .gertie/memory/dreams/. Applies on restart."
+                            ))
+                            .on_click({
+                                let panel = cx.entity().downgrade();
+                                move |checked, _, cx| {
+                                    if let Some(panel) = panel.upgrade() {
+                                        panel.update(cx, |panel, cx| {
+                                            panel.memory_dream_days = if *checked { 7 } else { 0 };
+                                            panel.autosave(cx);
+                                        });
+                                    }
+                                }
+                            }),
+                    ),
+            )
+            .child(
+                settings_card("Turn budgets", cx).child(
+                    v_flex()
+                        .gap_1p5()
+                        .px_1()
+                        .child(
+                            div()
+                                .text_size(px(10.5))
+                                .text_color(theme.muted_foreground)
+                                .child(format!(
+                                    "Tool rounds before a wrap-up nudge, then grace rounds before \
+                                 the turn pauses (resumable). Defaults {} + {}; empty = the \
+                                 default. Long work (a wide sweep, a migration) wants more.",
+                                    gertie_core::DEFAULT_MAX_TOOL_ROUNDS,
+                                    gertie_core::DEFAULT_GRACE_ROUNDS
+                                )),
+                        )
+                        .child(self.budget_field(
+                            "turn-max-rounds",
+                            format!("{} (default)", gertie_core::DEFAULT_MAX_TOOL_ROUNDS),
+                            "max tool rounds",
+                            _window,
+                            cx,
+                        ))
+                        .child(self.budget_field(
+                            "turn-grace-rounds",
+                            format!("{} (default)", gertie_core::DEFAULT_GRACE_ROUNDS),
+                            "grace rounds",
+                            _window,
+                            cx,
+                        )),
+                ),
+            )
+            .child(
+                settings_card("MCP servers", cx)
+                    .when(self.mcp_servers.is_empty(), |col| {
+                        col.child(
+                            div()
+                                .text_size(px(12.))
+                                .text_color(theme.muted_foreground)
+                                .child("none configured"),
+                        )
+                    })
+                    .children(self.mcp_servers.iter().enumerate().map(|(index, server)| {
+                        let target = server
+                            .url
+                            .clone()
+                            .or_else(|| server.command.clone())
+                            .unwrap_or_default();
+                        h_flex()
+                            .w_full()
+                            .gap_0p5()
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .truncate()
+                                    .text_size(px(12.))
+                                    .child(format!("{} · {}", server.name, target)),
+                            )
+                            .child(
+                                Button::new(SharedString::from(format!("remove-mcp-{index}")))
+                                    .icon(IconName::Trash)
+                                    .xsmall()
+                                    .ghost()
+                                    .tooltip("Remove")
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.mcp_servers.remove(index);
+                                        this.autosave(cx);
+                                    })),
+                            )
+                            .into_any_element()
+                    }))
+                    .children(mcp_form)
+                    .when(!mcp_form_open, |col| {
+                        col.child(Button::new("add-mcp").label("Add server").small().on_click(
+                            cx.listener(|this, _, window, cx| {
+                                this.mcp_name = Some(
+                                    cx.new(|cx| InputState::new(window, cx).placeholder("name")),
+                                );
+                                this.mcp_url = Some(cx.new(|cx| {
+                                    InputState::new(window, cx).placeholder("url (https://…/mcp)")
+                                }));
+                                this.mcp_command = Some(cx.new(|cx| {
+                                    InputState::new(window, cx).placeholder("or command (stdio)")
+                                }));
+                                cx.notify();
+                            }),
+                        ))
                     }),
             )
             .child(
-                Button::new("save-config")
-                    .label("Save to config.toml")
-                    .small()
-                    .primary()
-                    .on_click(cx.listener(Self::save_all)),
+                settings_card("Agents", cx)
+                    .when(self.agents.is_empty(), |col| {
+                        col.child(
+                            div()
+                                .text_size(px(12.))
+                                .text_color(theme.muted_foreground)
+                                .child("none configured, the eight built-ins need none"),
+                        )
+                    })
+                    .children(
+                        self.agents
+                            .iter()
+                            .enumerate()
+                            .map(|(index, draft)| agent_row(index, draft, cx).into_any_element()),
+                    )
+                    .children(agent_form)
+                    .when(self.agent_form.is_none(), |col| {
+                        col.child(
+                            Button::new("add-agent")
+                                .label("Add agent")
+                                .small()
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.open_agent_form(None, window, cx);
+                                })),
+                        )
+                    }),
+            )
+            .child(
+                settings_card("Config file", cx).child(
+                    div()
+                        .text_size(px(11.))
+                        .text_color(theme.muted_foreground)
+                        .child(match &self.summary.config_path {
+                            Some(path) => format!(
+                                "Changes save to {} as you make them; its comments and \
+                             unknown keys are kept.",
+                                path.display()
+                            ),
+                            None => "no config file location".into(),
+                        }),
+                ),
             )
             .children(self.status.iter().map(|(message, is_error)| {
                 div()
+                    .px_1()
                     .text_size(px(11.5))
                     .text_color(if *is_error {
                         theme.danger
@@ -1219,4 +1273,17 @@ impl Render for SettingsPanelView {
                     .child(message.clone())
             }))
     }
+}
+
+/// Where a switch's value comes from, under the switch: the label
+/// stays the setting, the provenance reads as a note. Shown only when
+/// it is not the built-in default.
+fn origin_note(origin: crate::config::Origin, cx: &App) -> impl IntoElement {
+    div()
+        .pl(px(36.))
+        .text_size(px(10.5))
+        .text_color(cx.theme().muted_foreground)
+        .when(origin != crate::config::Origin::Default, |note| {
+            note.child(format!("set by your {}", origin.as_str()))
+        })
 }

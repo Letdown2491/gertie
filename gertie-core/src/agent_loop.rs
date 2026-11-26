@@ -1001,6 +1001,34 @@ fn contained(root: &std::path::Path, path: &std::path::Path) -> Option<std::path
     }
 }
 
+/// Answers every tool call the history left unanswered, after a turn
+/// was stopped mid-round: dropping the turn's future (the cancel)
+/// can leave the last assistant message's calls without results, and
+/// a request whose calls have no results is rejected by every wire.
+/// Returns how many calls it answered.
+pub fn close_unanswered_calls(history: &mut Vec<WireMessage>, result: &str) -> usize {
+    let Some(last_call) = history
+        .iter()
+        .rposition(|message| message.role == Role::Assistant && !message.tool_calls.is_empty())
+    else {
+        return 0;
+    };
+    let answered: std::collections::HashSet<String> = history[last_call + 1..]
+        .iter()
+        .filter_map(|message| message.tool_call_id.clone())
+        .collect();
+    let missing: Vec<ToolCall> = history[last_call]
+        .tool_calls
+        .iter()
+        .filter(|call| !answered.contains(&call.id))
+        .cloned()
+        .collect();
+    for call in &missing {
+        history.push(WireMessage::tool_result(call, result));
+    }
+    missing.len()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2523,5 +2551,29 @@ mod tests {
         ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ToolResult> + Send + 'a>> {
             Box::pin(async { Ok("ran".into()) })
         }
+    }
+
+    #[test]
+    fn a_stopped_round_gets_its_unanswered_calls_closed() {
+        let call = |id: &str| ToolCall {
+            id: id.to_string(),
+            name: "bash".to_string(),
+            arguments: "{}".to_string(),
+        };
+        let mut history = vec![
+            WireMessage::user("go"),
+            WireMessage::assistant_with_tool_calls(None, vec![call("a"), call("b")]),
+            WireMessage::tool_result(&call("a"), "done"),
+        ];
+        assert_eq!(close_unanswered_calls(&mut history, "stopped"), 1);
+        assert_eq!(history.len(), 4);
+        assert_eq!(history[3].tool_call_id.as_deref(), Some("b"));
+        assert_eq!(history[3].content.as_deref(), Some("stopped"));
+        // Nothing left to answer: a second pass is a no-op.
+        assert_eq!(close_unanswered_calls(&mut history, "stopped"), 0);
+        // A history with no calls is left alone.
+        let mut plain = vec![WireMessage::user("hi"), WireMessage::assistant("hello")];
+        assert_eq!(close_unanswered_calls(&mut plain, "stopped"), 0);
+        assert_eq!(plain.len(), 2);
     }
 }

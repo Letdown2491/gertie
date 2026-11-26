@@ -1,22 +1,26 @@
-//! Tabs: parallel chats in one window. Each tab is a full `ChatView`,
+//! The window shell: parallel chats in one window, chosen from the
+//! sidebar (there is no tab bar). Each open chat is a full `ChatView`,
 //! its own session, transcript, and stream; store, provider, broker,
 //! and the root-independent tools are shared, so worker asks land on
-//! one approval queue no matter which tab dispatched them. A worktree
-//! tab (⎇) additionally gets its own tool registry rooted at a fresh
-//! git worktree: its file tools and subagents work in a separate
-//! checkout of the same repo, invisible to the tab next door.
+//! one approval queue no matter which chat dispatched them. Only the
+//! active view is on screen. A view stays alive while it has
+//! something to say (a running turn, an unseen finish, a rate-limit
+//! pause) and is dropped once it is idle and off screen: the
+//! conversation itself lives in the store and the sidebar.
+//!
+//! A worktree chat additionally gets its own tool registry rooted at
+//! a fresh git worktree: its file tools and subagents work in a
+//! separate checkout of the same repo, invisible to the chat next
+//! door.
+
+// The internals keep the old "tab" names: one TabState per open view.
 
 use crate::bootstrap::Bootstrap;
-use crate::chat::{ChatView, ChatViewEvent};
+use crate::chat::{ChatView, ChatViewEvent, SessionMark, ShellRequest};
 use gpui_kit::component::ActiveTheme as _;
-use gpui_kit::component::Disableable as _;
-use gpui_kit::component::Sizable as _;
-use gpui_kit::component::button::{Button, ButtonVariants as _};
-use gpui_kit::component::tab::{Tab, TabBar};
-use gpui_kit::component::{h_flex, v_flex};
+use gpui_kit::component::v_flex;
 use gpui_kit::prelude::*;
-use gpui_kit::{Context, Entity, IntoElement, Render, Window, div, px};
-use std::path::PathBuf;
+use gpui_kit::{Context, Entity, EntityId, IntoElement, Render, Window};
 use std::sync::Arc;
 
 pub struct WorkspaceView {
@@ -26,9 +30,9 @@ pub struct WorkspaceView {
     /// Worktree names are stable across runs (`tab-0`, `tab-1`, …) so
     /// an earlier run's worktree is reused, not duplicated.
     next_worktree: usize,
-    /// Why the last worktree request failed, shown beside the tab bar
-    /// until the next attempt. Worktree creation must never be silent.
-    last_error: Option<String>,
+    /// The view the last frame showed: a change means a switch, and
+    /// the newly shown view reloads its sidebar list.
+    shown: Option<EntityId>,
     /// When the close gate refused the first close attempt: the second
     /// one inside the confirm window means it.
     armed_close: Option<std::time::Instant>,
@@ -38,31 +42,51 @@ pub struct WorkspaceView {
 /// again", and for this long, closing again is believed.
 const CLOSE_CONFIRM_WINDOW: std::time::Duration = std::time::Duration::from_secs(5);
 
-/// One tab's attention mark and the state it leaves behind, the
-/// tab bar's whole logic as a pure function. Loudest first: ● a live
-/// turn (work running while another tab is up, static glyph, no
-/// repaint to say busy), ⏸ a run paused on its rate limit (the tab
-/// waits for the human), ✓ a turn finished unseen (cleared when the
-/// tab activates, the falling streaming edge is how it's seen without
-/// a callback).
+/// What a tab's marker says, loudest first.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Attention {
+    None,
+    /// A live turn: work running while another tab is up (a static
+    /// dot, no repaint to say busy).
+    Running,
+    /// A run paused on its rate limit: the tab waits for the human.
+    Limited,
+    /// A turn finished unseen: the blue "something new" dot, cleared
+    /// when the tab activates.
+    Unseen,
+}
+
+/// One tab's attention mark and the state it leaves behind, the tab
+/// bar's whole logic as a pure function. The falling streaming edge is
+/// how a finish is seen without a callback.
 fn tab_attention(
     streaming: bool,
     prev_streaming: bool,
     limited: bool,
     done_unseen: bool,
-    label: &str,
-) -> (String, bool, bool) {
+) -> (Attention, bool, bool) {
     if streaming {
-        return (format!("● {label}"), true, done_unseen);
+        return (Attention::Running, true, done_unseen);
     }
     let finished_unseen = prev_streaming || done_unseen;
     if limited {
-        return (format!("⏸ {label}"), false, finished_unseen);
+        return (Attention::Limited, false, finished_unseen);
     }
     if finished_unseen {
-        return (format!("✓ {label}"), false, true);
+        return (Attention::Unseen, false, true);
     }
-    (label.to_string(), false, false)
+    (Attention::None, false, false)
+}
+
+impl Attention {
+    fn mark(self) -> Option<SessionMark> {
+        match self {
+            Attention::None => None,
+            Attention::Running => Some(SessionMark::Running),
+            Attention::Limited => Some(SessionMark::Limited),
+            Attention::Unseen => Some(SessionMark::Unseen),
+        }
+    }
 }
 
 /// Whether a window close goes through. A turn running anywhere holds
@@ -84,8 +108,6 @@ fn close_confirmed(
 
 struct TabState {
     view: Entity<ChatView>,
-    /// The tab's own checkout, if it has one (marks the ⎇ label).
-    worktree: Option<PathBuf>,
     /// The previous render's streaming state: the rising/falling edge
     /// is how a finished turn is seen without a callback.
     prev_streaming: bool,
@@ -192,16 +214,15 @@ impl WorkspaceView {
             boot,
             tabs: vec![TabState {
                 view: first,
-                worktree: None,
                 prev_streaming: false,
                 done_unseen: false,
             }],
             active: 0,
             next_worktree: 0,
-            last_error: None,
+            shown: None,
             armed_close: None,
         };
-        this.subscribe_config_saved(0, window, cx);
+        this.wire_view(0, window, cx);
         // The window-close gate: registered once, asked on every close
         // attempt (titlebar ✕, Alt+F4, WM gesture, there is no other
         // quit). Returning false holds the window open.
@@ -241,28 +262,46 @@ impl WorkspaceView {
         confirmed
     }
 
-    /// A settings save anywhere reloads the bootstrap once and fans the
-    /// fresh provider/label/panel out to every open tab.
-    fn subscribe_config_saved(&mut self, tab: usize, _window: &mut Window, cx: &mut Context<Self>) {
-        cx.subscribe_in(
-            &self.tabs[tab].view,
-            _window,
-            |this, _, event, _, cx| match event {
-                ChatViewEvent::ConfigSaved => this.reload_and_apply(cx),
-            },
-        )
+    /// Connects a new view to the shell: a settings save anywhere
+    /// reloads the bootstrap once and fans the fresh provider out to
+    /// every open view; any repaint of a view repaints the shell (an
+    /// off-screen view's finish must reach the sidebar's markers);
+    /// and the view gets the hook for the views it cannot make.
+    fn wire_view(&mut self, tab: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let view = self.tabs[tab].view.clone();
+        cx.subscribe_in(&view, window, |this, _, event, _, cx| match event {
+            ChatViewEvent::ConfigSaved => this.reload_and_apply(cx),
+        })
         .detach();
+        cx.observe(&view, |_, _, cx| cx.notify()).detach();
+        let shell = cx.entity().downgrade();
+        let ask: crate::chat::ShellAsk = std::sync::Arc::new(move |request, window, cx| {
+            // The asking view is leased by its own click: the shell
+            // only builds new views, it never touches the asker.
+            let Some(shell) = shell.upgrade() else { return };
+            shell.update(cx, |shell, cx| match request {
+                ShellRequest::NewChat => shell.add_tab(window, cx),
+                ShellRequest::NewWorktreeChat => shell.add_worktree_tab(window, cx),
+            });
+        });
+        view.update(cx, |view, _| view.set_shell_ask(ask));
+    }
+
+    /// Says something in the view on screen: the shell has no surface
+    /// of its own. Deferred, because the active view may be leased by
+    /// the click that led here.
+    fn tell_active(&self, text: String, cx: &mut Context<Self>) {
+        let view = self.tabs[self.active].view.clone();
+        cx.defer(move |cx| view.update(cx, |chat, cx| chat.warn(&text, cx)));
     }
 
     fn reload_and_apply(&mut self, cx: &mut Context<Self>) {
         if let Err(error) = self.boot.reload() {
             // The written config doesn't parse, leave the live state
-            // alone and say so where the worktree errors show.
-            self.last_error = Some(format!("config: {error}"));
-            cx.notify();
+            // alone and say so.
+            self.tell_active(format!("The saved config does not load: {error}"), cx);
             return;
         }
-        self.last_error = None;
         let update = self.boot.snapshot();
         for tab in &self.tabs {
             let update = update.clone();
@@ -333,12 +372,12 @@ impl WorkspaceView {
                 cx,
             )
         });
-        // Subscribing needs &mut self, the caller does it (add_tab /
-        // add_worktree_tab / new).
+        // Wiring needs &mut self, the caller does it (wire_view).
         view
     }
 
-    /// A plain tab: parallel chat, shared workspace.
+    /// A new view: a parallel chat in the shared workspace (New chat
+    /// while a turn runs).
     fn add_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let view = self.make_view(
             self.boot.tools.clone(),
@@ -354,17 +393,16 @@ impl WorkspaceView {
         );
         self.tabs.push(TabState {
             view,
-            worktree: None,
             prev_streaming: false,
             done_unseen: false,
         });
         let index = self.tabs.len() - 1;
         self.active = index;
-        self.subscribe_config_saved(index, window, cx);
+        self.wire_view(index, window, cx);
         cx.notify();
     }
 
-    /// A worktree tab: parallel chat in its own checkout of the repo,
+    /// A worktree chat: parallel chat in its own checkout of the repo,
     /// the DESIGN promise, "parallel sessions run against separate
     /// worktrees". The worktree persists on disk after the run.
     fn add_worktree_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -406,60 +444,41 @@ impl WorkspaceView {
                         );
                         this.tabs.push(TabState {
                             view,
-                            worktree: Some(root),
                             prev_streaming: false,
                             done_unseen: false,
                         });
                         let index = this.tabs.len() - 1;
                         this.active = index;
-                        this.subscribe_config_saved(index, window, cx);
-                        this.last_error = None;
+                        this.wire_view(index, window, cx);
                         cx.notify();
                     }
                     Err(error) => {
-                        this.last_error = Some(error);
-                        cx.notify();
+                        this.tell_active(format!("No worktree chat: {error}"), cx);
                     }
                 });
             })
             .detach();
     }
-
-    /// Closes the tab at `index`. The last tab stays, an empty window
-    /// is a broken state, not a feature. A worktree tab's checkout
-    /// persists on disk (the DESIGN note on worktree tabs).
-    fn close_tab(&mut self, index: usize, cx: &mut Context<Self>) {
-        if self.tabs.len() <= 1 {
-            return;
-        }
-        self.tabs.remove(index);
-        self.active = self.active.min(self.tabs.len() - 1);
-        cx.notify();
-    }
 }
 
 impl WorkspaceView {
-    /// Routes a sidebar click to the tab where the session belongs
-    /// (the full routing model, four rules):
-    /// 1. the session's root matches the clicked tab's → load there;
-    /// 2. another open tab already holds the root → activate it and
-    ///    load there (a project's sessions belong to its project tab);
-    /// 3. no tab holds it and the clicked tab is pristine → that tab
-    ///    adopts the root and loads it (a launch-tab is free real
-    ///    estate);
-    /// 4. no tab holds it and the clicked tab is busy → a new tab
-    ///    opens, rooted at the session's workspace. A working
-    ///    conversation is never dragged somewhere else.
+    /// Routes a sidebar click to the view where the session belongs:
+    /// 0. a view already has it open → show that view (two views on
+    ///    one session would diverge their histories);
+    /// 1. the clicked view is idle at the session's root → it loads
+    ///    the session;
+    /// 2. an idle off-screen view sits at the session's root → show
+    ///    it and load there;
+    /// 3. the clicked view is idle → it adopts the session's root and
+    ///    loads it;
+    /// 4. the clicked view is running a turn → a new view opens at the
+    ///    session's root. A running turn is never dragged anywhere.
     ///
     /// The clicked view is leased by its own click, so this method
     /// never reads or updates it: its state arrives in `origin`, and
-    /// its share of the work (rule 1's load, rule 3's adoption, the
-    /// refusals) leaves as the returned instruction. Whatever the
-    /// shell does itself (rule 2's holder, rule 4's new tab) touches
-    /// only idle views.
-    ///
-    /// Streaming tabs are skipped by rule 2's load, not the routing:
-    /// loading into a streaming view is refused by the view itself.
+    /// its share of the work (rules 1 and 3, the refusals) leaves as
+    /// the returned instruction. Whatever the shell does itself
+    /// touches only off-screen views.
     /// Tests: the active tab's chat handle, the tab count, and the
     /// active tab's root. The routing assertions read these.
     pub fn tab_probe(&self, cx: &gpui_kit::App) -> (usize, Entity<ChatView>, std::path::PathBuf) {
@@ -495,55 +514,66 @@ impl WorkspaceView {
                 (Ok(a), Ok(b)) => a == b,
                 _ => false,
             };
-        // Rule 1: this tab's root matches (or the session predates the
-        // root column: its home is wherever it's opened). The clicked
-        // view loads it; the instruction is the answer.
-        let session_matches_active =
-            session_root == active_root || same_root(&session_root, &active_root);
-        if session_matches_active {
+        // Rule 0: already open. In the clicked view, a reload (it
+        // also brings a settled session back); elsewhere, show it.
+        if origin.session == Some(session_id) {
             return crate::chat::SessionRouting::Here;
         }
-        // Rule 2: a tab that already lives at the session's root. The
-        // active tab is skipped (rule 1 just proved its root differs),
-        // and every remaining tab is idle: reading them is safe here.
-        let holder = self
-            .tabs
-            .iter()
-            .enumerate()
-            .filter(|(index, _)| *index != self.active)
-            .find(|(_, tab)| {
-                let view_root = tab.view.read(cx).workspace_root().to_path_buf();
-                view_root == session_root || same_root(&view_root, &session_root)
+        if let Some(index) = (0..self.tabs.len())
+            .filter(|index| *index != self.active)
+            .find(|index| self.tabs[*index].view.read(cx).session_id() == Some(session_id))
+        {
+            self.activate(index, cx);
+            return crate::chat::SessionRouting::Elsewhere;
+        }
+        // Rule 1: the clicked view is idle at the session's root (or
+        // the session predates the root column: its home is wherever
+        // it's opened).
+        let session_matches_active =
+            session_root == active_root || same_root(&session_root, &active_root);
+        if session_matches_active && !origin.streaming {
+            return crate::chat::SessionRouting::Here;
+        }
+        // Rule 2: an off-screen view at the session's root with nothing
+        // to say (idle, nothing unseen) takes it.
+        let holder = (0..self.tabs.len())
+            .filter(|index| *index != self.active)
+            .find(|index| {
+                let tab = &self.tabs[*index];
+                let view = tab.view.read(cx);
+                let view_root = view.workspace_root().to_path_buf();
+                !view.is_streaming()
+                    && !tab.done_unseen
+                    && !view.open_session_limited()
+                    && (view_root == session_root || same_root(&view_root, &session_root))
             });
-        if let Some((index, tab)) = holder {
-            let view = tab.view.clone();
-            self.active = index;
-            self.tabs[index].done_unseen = false;
+        if let Some(index) = holder {
+            let view = self.tabs[index].view.clone();
+            self.activate(index, cx);
             view.update(cx, |view, cx| {
                 view.switch_to_session(session_id, window, cx)
             });
-            cx.notify();
             return crate::chat::SessionRouting::Elsewhere;
         }
-        // Rule 3: this tab is pristine (no session, no turns): it
-        // adopts the root. The adoption is the clicked view's work:
-        // the Switched rides back to it.
-        if origin.pristine {
+        // Rule 3: the clicked view is idle: it adopts the root. The
+        // adoption is the clicked view's work: the Switched rides back
+        // to it.
+        if !origin.streaming {
             return match self.boot.workspace_for_root(&session_root) {
                 Ok(switched) => crate::chat::SessionRouting::Adopt(switched),
                 Err(error) => crate::chat::SessionRouting::Refused(format!(
-                    "This conversation started in a folder that refuses the switch ({error}); open it from that folder's tab."
+                    "This conversation started in a folder that refuses the switch ({error})."
                 )),
             };
         }
-        // Rule 4: open a new tab at the session's root and load there.
+        // Rule 4: open a new view at the session's root and load there.
         let switched = match self.boot.workspace_for_root(&session_root) {
             Ok(switched) => switched,
             Err(error) => {
                 // The refusal rides back to the clicked view, which
                 // shows it; the shell builds nothing.
                 return crate::chat::SessionRouting::Refused(format!(
-                    "This conversation's folder refuses the switch ({error}); open it from that folder's tab."
+                    "This conversation's folder refuses the switch ({error})."
                 ));
             }
         };
@@ -565,114 +595,87 @@ impl WorkspaceView {
         });
         self.tabs.push(TabState {
             view,
-            worktree: None,
             prev_streaming: false,
             done_unseen: false,
         });
         let index = self.tabs.len() - 1;
         self.active = index;
-        self.subscribe_config_saved(index, window, cx);
+        self.wire_view(index, window, cx);
         cx.notify();
         crate::chat::SessionRouting::Elsewhere
+    }
+
+    /// Shows the view at `index`: its unseen finish is now seen.
+    fn activate(&mut self, index: usize, cx: &mut Context<Self>) {
+        self.active = index;
+        self.tabs[index].done_unseen = false;
+        cx.notify();
     }
 }
 
 impl Render for WorkspaceView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let active = self.active.min(self.tabs.len().saturating_sub(1));
-        let view = self.tabs[active].view.clone();
-        let entity = cx.entity().downgrade();
-
-        let mut suffix = h_flex().items_center().gap_1();
-        if let Some(error) = &self.last_error {
-            suffix = suffix.child(
-                div()
-                    .text_size(px(11.))
-                    .text_color(cx.theme().danger)
-                    .max_w_96()
-                    .truncate()
-                    .child(error.clone()),
+        self.active = self.active.min(self.tabs.len().saturating_sub(1));
+        // Each view's attention, by the pure state machine; the shown
+        // view has nothing unseen.
+        let mut attention = Vec::with_capacity(self.tabs.len());
+        for (index, tab) in self.tabs.iter_mut().enumerate() {
+            let view = tab.view.read(cx);
+            let (mark, prev_streaming, done_unseen) = tab_attention(
+                view.is_streaming(),
+                tab.prev_streaming,
+                view.open_session_limited(),
+                tab.done_unseen && index != self.active,
             );
+            tab.prev_streaming = prev_streaming;
+            tab.done_unseen = done_unseen && index != self.active;
+            let mark = match mark {
+                Attention::Unseen if index == self.active => Attention::None,
+                mark => mark,
+            };
+            attention.push(mark);
         }
-        suffix = suffix
-            .child(
-                Button::new("add-tab")
-                    .label("+")
-                    .xsmall()
-                    .ghost()
-                    .tooltip("New tab, parallel chat, shared workspace")
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        this.add_tab(window, cx);
-                    })),
-            )
-            .child(
-                Button::new("add-worktree-tab")
-                    .label("⎇")
-                    .xsmall()
-                    .ghost()
-                    .tooltip("New worktree tab, its own git checkout of this repo")
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        this.add_worktree_tab(window, cx);
-                    })),
-            )
-            .child(
-                Button::new("close-tab")
-                    .label("✕")
-                    .xsmall()
-                    .ghost()
-                    .disabled(self.tabs.len() <= 1)
-                    .tooltip(if self.tabs.len() <= 1 {
-                        "The last tab stays"
-                    } else {
-                        "Close this tab"
-                    })
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.close_tab(active, cx);
-                    })),
-            );
+        // Drop the off-screen views with nothing to say: their
+        // conversations are in the store, a sidebar click reopens them.
+        let mut index = 0;
+        let mut kept_attention = Vec::with_capacity(attention.len());
+        let active = self.active;
+        let mut new_active = 0;
+        self.tabs.retain(|_| {
+            let keep = index == active || attention[index] != Attention::None;
+            if keep {
+                if index == active {
+                    new_active = kept_attention.len();
+                }
+                kept_attention.push(attention[index]);
+            }
+            index += 1;
+            keep
+        });
+        self.active = new_active;
+        // The sidebar's markers, keyed by conversation.
+        let marks: std::collections::HashMap<_, _> = self
+            .tabs
+            .iter()
+            .zip(&kept_attention)
+            .filter_map(|(tab, attention)| {
+                Some((tab.view.read(cx).session_id()?, attention.mark()?))
+            })
+            .collect();
+        let view = self.tabs[self.active].view.clone();
+        let switched = self.shown != Some(view.entity_id());
+        self.shown = Some(view.entity_id());
+        view.update(cx, |chat, cx| {
+            chat.set_session_marks(marks);
+            if switched {
+                chat.refresh_sessions(cx);
+            }
+        });
 
         v_flex()
             .size_full()
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
-            .child(
-                TabBar::new("chat-tabs")
-                    .selected_index(active)
-                    .on_click(move |index, _window, cx| {
-                        let Some(this) = entity.upgrade() else { return };
-                        this.update(cx, |this, cx| {
-                            this.active = *index;
-                            if let Some(tab) = this.tabs.get_mut(*index) {
-                                tab.done_unseen = false;
-                            }
-                            cx.notify();
-                        });
-                    })
-                    .children(self.tabs.iter_mut().map(|tab| {
-                        let view = tab.view.read(cx);
-                        let title = view.tab_title();
-                        let label = match &tab.worktree {
-                            Some(_) => format!("⎇ {title}"),
-                            None => title.to_string(),
-                        };
-                        // The attention marks, loudest first (see
-                        // tab_attention): ● running, ⏸ limited, ✓
-                        // finished unseen. The state machine rides
-                        // tab_attention so the tests own the logic and
-                        // the render only paints it.
-                        let (marked, prev_streaming, done_unseen) = tab_attention(
-                            view.is_streaming(),
-                            tab.prev_streaming,
-                            view.open_session_limited(),
-                            tab.done_unseen,
-                            &label,
-                        );
-                        tab.prev_streaming = prev_streaming;
-                        tab.done_unseen = done_unseen;
-                        Tab::new().label(marked)
-                    }))
-                    .suffix(suffix),
-            )
             .child(view)
     }
 }
@@ -684,33 +687,33 @@ mod tests {
     #[test]
     fn the_attention_marks_follow_the_work() {
         // Running: the dot, and the rising edge is remembered.
-        let (marked, prev, done) = tab_attention(true, false, false, false, "chat");
-        assert_eq!(marked, "● chat");
+        let (marked, prev, done) = tab_attention(true, false, false, false);
+        assert_eq!(marked, Attention::Running);
         assert!(prev);
         assert!(!done);
 
         // The falling edge turns the remembered streaming into a
         // finished-unseen mark.
-        let (marked, prev, done) = tab_attention(false, true, false, false, "chat");
-        assert_eq!(marked, "✓ chat");
+        let (marked, prev, done) = tab_attention(false, true, false, false);
+        assert_eq!(marked, Attention::Unseen);
         assert!(!prev);
         assert!(done);
 
         // The mark survives further quiet renders (a repaint without
         // a focus must not lose the signal).
-        let (marked, _, done) = tab_attention(false, false, false, true, "chat");
-        assert_eq!(marked, "✓ chat");
+        let (marked, _, done) = tab_attention(false, false, false, true);
+        assert_eq!(marked, Attention::Unseen);
         assert!(done);
 
-        // Limited outranks the ✓: the tab waits for the human.
-        let (marked, prev, done) = tab_attention(false, true, true, false, "chat");
-        assert_eq!(marked, "⏸ chat");
+        // Limited outranks the unseen dot: the tab waits for the human.
+        let (marked, prev, done) = tab_attention(false, true, true, false);
+        assert_eq!(marked, Attention::Limited);
         assert!(!prev);
         assert!(done, "limited clears unseen only on focus");
 
         // Activating clears the mark: done=false renders plain.
-        let (marked, _, done) = tab_attention(false, false, false, false, "chat");
-        assert_eq!(marked, "chat");
+        let (marked, _, done) = tab_attention(false, false, false, false);
+        assert_eq!(marked, Attention::None);
         assert!(!done);
     }
 

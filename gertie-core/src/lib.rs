@@ -17,7 +17,7 @@ pub mod tool;
 pub use agent::{AgentTool, AgentType, builtin_agent_types, sanitize_untrusted, worker_registry};
 pub use agent_loop::{
     DEFAULT_GRACE_ROUNDS, DEFAULT_MAX_TOOL_ROUNDS, LoopEvent, PermissionDecision, SharedHistory,
-    ToolRegistry, TurnSpec, run_turn,
+    ToolRegistry, TurnSpec, close_unanswered_calls, run_turn,
 };
 pub use memory::{MemoryEntry, MemoryHit, MemoryStore, Op, Tier};
 pub use permissions::{ModeScope, PendingAsk, PermissionBroker, PermissionMode, PromptSource};

@@ -161,6 +161,47 @@ where
     })
 }
 
+/// `blocking` for a tool that can stop early: the closure gets a flag
+/// that turns true when the tool's future is dropped (the turn was
+/// stopped), so a long-running child can be killed instead of running
+/// on, unseen, to its timeout.
+fn blocking_cancellable<F>(run: F) -> Pin<Box<dyn Future<Output = ToolResult> + Send>>
+where
+    F: FnOnce(&std::sync::atomic::AtomicBool) -> ToolResult + Send + 'static,
+{
+    struct RaiseOnDrop(std::sync::Arc<std::sync::atomic::AtomicBool>);
+    impl Drop for RaiseOnDrop {
+        fn drop(&mut self) {
+            self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+    Box::pin(async move {
+        let cancelled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let _raise = RaiseOnDrop(cancelled.clone());
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        std::thread::spawn(move || {
+            let _ = sender.send(run(&cancelled));
+        });
+        match receiver.await {
+            Ok(result) => result,
+            // The sender only disappears if the thread panicked.
+            Err(_) => Err("tool thread panicked".into()),
+        }
+    })
+}
+
+/// Kills a command and everything it started: the child leads its own
+/// process group, so a `cargo build` under `sh -c` dies with the shell.
+fn kill_group(child: &mut std::process::Child) {
+    let _ = std::process::Command::new("kill")
+        .args(["-KILL", "--", &format!("-{}", child.id())])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
 macro_rules! rooted {
     ($($ty:ident),* $(,)?) => {
         $(
@@ -619,7 +660,7 @@ impl Tool for Bash {
         let root = self.root.clone();
         let sandbox = self.sandbox.clone();
         let arguments = arguments.to_string();
-        blocking(move || {
+        blocking_cancellable(move |cancelled| {
             let args: BashArgs = parse(&arguments, "bash")?;
             let timeout = std::time::Duration::from_secs(args.timeout.unwrap_or(30).clamp(1, 300));
 
@@ -631,6 +672,9 @@ impl Tool for Bash {
                     .current_dir(&root)
                     .stdout(std::process::Stdio::piped())
                     .stderr(std::process::Stdio::piped());
+                // Its own process group, so a kill reaches what it
+                // starts.
+                std::os::unix::process::CommandExt::process_group(&mut command, 0);
                 if let Some(sandbox) = &sandbox {
                     sandbox.apply(&mut command)?;
                 }
@@ -660,12 +704,15 @@ impl Tool for Bash {
                             summary
                         });
                     }
+                    Ok(None) if cancelled.load(std::sync::atomic::Ordering::SeqCst) => {
+                        kill_group(&mut child);
+                        return Err("bash: stopped".into());
+                    }
                     Ok(None) if start.elapsed() < timeout => {
                         std::thread::sleep(std::time::Duration::from_millis(50));
                     }
                     Ok(None) => {
-                        let _ = child.kill();
-                        let _ = child.wait();
+                        kill_group(&mut child);
                         return Err(format!("bash: timed out after {}s", timeout.as_secs()));
                     }
                     Err(error) => return Err(format!("bash: {error}")),
@@ -968,6 +1015,26 @@ mod tests {
         let tool = Bash::new(dir.path().into());
         let result = await_sync(tool.run(r#"{"command": "sleep 5", "timeout": 1}"#));
         assert!(result.unwrap_err().contains("timed out"));
+    }
+
+    #[test]
+    fn a_dropped_bash_call_kills_its_command() {
+        let dir = workspace();
+        let marker = dir.path().join("marker");
+        let tool = Bash::new(dir.path().into());
+        // The subshell is a grandchild: only a group kill reaches it.
+        let command = format!(
+            r#"{{"command": "(sleep 1; touch {}) & wait"}}"#,
+            marker.display()
+        );
+        let mut future = tool.run(&command);
+        let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+        // One poll starts the command; the drop is the stopped turn.
+        assert!(future.as_mut().poll(&mut context).is_pending());
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        drop(future);
+        std::thread::sleep(std::time::Duration::from_millis(1500));
+        assert!(!marker.exists(), "the stopped command ran on");
     }
 
     #[test]
