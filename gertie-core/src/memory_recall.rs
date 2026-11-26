@@ -111,8 +111,10 @@ pub(crate) fn block_for(
         })
         .collect();
     Some(format!(
-        "\n\n{marker}\nMemory from earlier sessions about this file (recall, not rules; \
-         supersede an entry with the remember tool if it is wrong):\n{}\n{CLOSING}",
+        "\n\n{marker}\nMemory from earlier sessions about this file. If what you are about \
+         to do contradicts an entry, name the entry and ask the user before acting, unless \
+         their message already addressed it. If an entry is simply out of date, supersede it \
+         with the remember tool:\n{}\n{CLOSING}",
         lines.join("\n")
     ))
 }
@@ -223,6 +225,11 @@ mod tests {
         assert!(
             p4.contains("evidence changed") && p4.contains("rests on p9"),
             "{p4}"
+        ); // A remembered failure must stop the model, not footnote the
+        // edit (the heed eval: "recall, not rules" read as permission).
+        assert!(
+            block.contains("contradicts an entry") && block.contains("ask the user before acting"),
+            "{block}"
         );
     }
 
