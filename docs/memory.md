@@ -81,3 +81,12 @@ sees, and in its search results, where the model is told to re-check before rely
 on it. Nothing else happens on its own. The entry keeps its place and its votes; you
 decide whether it still holds (vote, edit, or supersede it). Put the file back and
 the mark goes away.
+
+## When a memory is corrected
+
+Superseding an entry also flags the entries that rested on it: ones linked to it with
+`builds_on` or `solves`, and ones from the same session. They gain `[recheck: p12]`
+and show "p12 was corrected" in the memory panel, with two buttons: **keep** (it still
+holds; the flag goes) and **archive** (it doesn't). For anything else, edit the line.
+Nothing changes on its own, and the model sees the flag too. The walk goes one step
+back only: correcting a flagged entry flags its own dependents, not the whole chain.

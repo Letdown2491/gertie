@@ -2637,6 +2637,30 @@ impl ChatView {
             .unwrap_or_default();
     }
 
+    /// The panel's answer to a recheck flag: keep clears it (the entry
+    /// still holds), archive retires the entry. Either way the rows and
+    /// the index refresh.
+    fn settle_recheck(&mut self, id: String, keep: bool, cx: &mut Context<Self>) {
+        let Some(store) = self.memory_store.clone() else {
+            return;
+        };
+        let result = if keep {
+            store.clear_recheck(&id)
+        } else {
+            store
+                .apply(&[gertie_core::Op::Archive { id: id.clone() }], 16)
+                .map(|_| ())
+        };
+        match result {
+            Ok(()) => {
+                self.refresh_memory_rows();
+                self.refresh_memory_index(cx);
+                cx.notify();
+            }
+            Err(error) => self.push_notice(format!("memory: {id} not updated ({error})"), cx),
+        }
+    }
+
     /// One vote: writes through the store, refreshes the rows. The
     /// vote is a real write to the entry's file line, so the sidecar,
     /// the index, and dreaming all see it.
@@ -2758,6 +2782,52 @@ impl ChatView {
                                     .text_size(px(10.5))
                                     .text_color(cx.theme().muted_foreground)
                                     .child(provenance),
+                            )
+                        })
+                        .when(!entry.recheck.is_empty() && entry.valid_until.is_none(), |row| {
+                            let keep = format!("memory-keep-{id}");
+                            let archive = format!("memory-archive-{id}");
+                            row.child(
+                                h_flex()
+                                    .gap_2()
+                                    .text_size(px(10.5))
+                                    .child(
+                                        div()
+                                            .text_color(cx.theme().warning)
+                                            .child(format!("{} was corrected", entry.recheck.join(", "))),
+                                    )
+                                    .child(
+                                        div()
+                                            .id(SharedString::from(keep))
+                                            .cursor_pointer()
+                                            .text_color(cx.theme().muted_foreground)
+                                            .hover(|style| style.text_color(cx.theme().foreground))
+                                            .tooltip(|window, cx| {
+                                                Tooltip::new("Still holds: clear the flag").build(window, cx)
+                                            })
+                                            .on_click(cx.listener({
+                                                let id = id.clone();
+                                                move |this, _, _, cx| this.settle_recheck(id.clone(), true, cx)
+                                            }))
+                                            .child("keep")
+                                            .test_support(),
+                                    )
+                                    .child(
+                                        div()
+                                            .id(SharedString::from(archive))
+                                            .cursor_pointer()
+                                            .text_color(cx.theme().muted_foreground)
+                                            .hover(|style| style.text_color(cx.theme().foreground))
+                                            .tooltip(|window, cx| {
+                                                Tooltip::new("No longer holds: archive it").build(window, cx)
+                                            })
+                                            .on_click(cx.listener({
+                                                let id = id.clone();
+                                                move |this, _, _, cx| this.settle_recheck(id.clone(), false, cx)
+                                            }))
+                                            .child("archive")
+                                            .test_support(),
+                                    ),
                             )
                         })
                         .when_some(drift, |row, drift| {
@@ -4077,11 +4147,20 @@ impl ChatView {
                                     store.mark_extracted(&digest_hash, Some(session_id.0 as i64));
                                 let applied = report
                                     .map(|report| {
-                                        format!(
+                                        let mut notice = format!(
                                             "memory: {} applied, {} skipped",
                                             report.applied.len(),
                                             report.skipped.len()
-                                        )
+                                        );
+                                        // A correction's dependents, named:
+                                        // the panel holds the keep/archive.
+                                        for (corrected, flagged) in &report.flagged {
+                                            notice.push_str(&format!(
+                                                "; {corrected} was corrected, recheck {} in the memory panel",
+                                                flagged.join(", ")
+                                            ));
+                                        }
+                                        notice
                                     })
                                     .unwrap_or_else(|error| {
                                         format!("memory: apply failed ({error})")

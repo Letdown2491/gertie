@@ -28,6 +28,11 @@
 //! Whether a cited file has changed since is computed on read, never
 //! stored: an entry whose evidence moved is flagged for the human and
 //! the model, and its ranking is left alone.
+//!
+//! Superseding an entry flags what rested on it, one hop back: live
+//! entries that `builds_on` or `solves` it, and live entries from the
+//! same session, gain `[recheck: p12]`. A flag never changes a belief;
+//! the human keeps (clears the flag), archives, or edits the entry.
 
 use crate::agent::sanitize_untrusted;
 use rusqlite::Connection;
@@ -90,6 +95,9 @@ pub struct MemoryEntry {
     pub links: Vec<Link>,
     /// The files that supported this entry when it was written.
     pub evidence: Vec<Evidence>,
+    /// Superseded entries this one rested on: each correction flags
+    /// its dependents for a human look, until they are kept or retired.
+    pub recheck: Vec<String>,
 }
 
 /// One cited file: a workspace-relative path (`/`-separated) and its
@@ -148,6 +156,8 @@ pub struct MemoryHit {
     /// Cited files that changed (or vanished) since the entry was
     /// written. Non-empty means: re-check before relying on it.
     pub evidence_changed: Vec<String>,
+    /// Corrected entries this hit rested on (see [`MemoryEntry::recheck`]).
+    pub recheck: Vec<String>,
 }
 
 /// A delta operation, the only way memory changes under harness hands.
@@ -200,6 +210,9 @@ pub enum Op {
 pub struct ApplyReport {
     pub applied: Vec<String>,
     pub skipped: Vec<String>,
+    /// Per supersede that flagged something: the superseded id and
+    /// the entries now marked to recheck.
+    pub flagged: Vec<(String, Vec<String>)>,
 }
 
 pub struct MemoryStore {
@@ -595,6 +608,7 @@ impl MemoryStore {
                         added_at: row.get(4)?,
                         links: Vec::new(),
                         evidence_changed: Vec::new(),
+                        recheck: Vec::new(),
                     })
                 })?;
                 let mut hits = rows.collect::<rusqlite::Result<Vec<_>>>()?;
@@ -622,6 +636,7 @@ impl MemoryStore {
                 for hit in &mut hits {
                     if let Some(entry) = entries.iter().find(|entry| entry.id == hit.id) {
                         hit.evidence_changed = self.changed_evidence(entry);
+                        hit.recheck = entry.recheck.clone();
                     }
                 }
                 hits
@@ -652,6 +667,7 @@ impl MemoryStore {
                     superseded_by: row.get(9)?,
                     links: Vec::new(),
                     evidence: Vec::new(),
+                    recheck: Vec::new(),
                 })
             })?;
             rows.collect()
@@ -695,7 +711,13 @@ impl MemoryStore {
                 Op::Update { id, text } => self.update_entry(id, text),
                 Op::Supersede { id, by } => {
                     let by = by.clone().or_else(|| added.clone().filter(|_| lone_add));
-                    self.supersede_entry(id, by.as_deref())
+                    self.supersede_entry(id, by.as_deref()).and_then(|()| {
+                        let flagged = self.flag_dependents(id, by.as_deref())?;
+                        if !flagged.is_empty() {
+                            report.flagged.push((id.clone(), flagged));
+                        }
+                        Ok(())
+                    })
                 }
                 Op::Archive { id } => self.retire_entry(id, "[archived: "),
                 Op::Merge { keep, drop, text } => self.merge_entries(keep, drop, text),
@@ -742,6 +764,7 @@ impl MemoryStore {
             superseded_by: None,
             links: Vec::new(),
             evidence: self.evidence_for(evidence),
+            recheck: Vec::new(),
         });
         append_line(self.root(Tier::Project).join(&file), &line)?;
         Ok(id)
@@ -844,6 +867,72 @@ impl MemoryStore {
         rewrite_line(self.root(tier_of(&entry.id)).join(&entry.file), id, |_| {
             Ok(line)
         })
+    }
+
+    /// The correction walk, one hop: after `id` is superseded, every
+    /// live entry that `builds_on` or `solves` it, or that shares one
+    /// of its source sessions, gains `id` in its `[recheck: ...]`
+    /// marker. The replacement itself is never flagged. Returns the
+    /// flagged ids, in file order.
+    fn flag_dependents(&self, id: &str, by: Option<&str>) -> rusqlite::Result<Vec<String>> {
+        let entries = self.scan();
+        let Some(corrected) = entries.iter().find(|entry| entry.id == id) else {
+            return Ok(Vec::new());
+        };
+        let sessions = source_sessions(corrected);
+        let mut flagged = Vec::new();
+        for entry in &entries {
+            if entry.id == id
+                || Some(entry.id.as_str()) == by
+                || entry.valid_until.is_some()
+                || entry.recheck.iter().any(|seen| seen == id)
+            {
+                continue;
+            }
+            let rests_on = entry.links.iter().any(|link| {
+                link.to == id && (link.relation == "builds_on" || link.relation == "solves")
+            });
+            let sibling = source_sessions(entry)
+                .iter()
+                .any(|session| sessions.contains(session));
+            if !rests_on && !sibling {
+                continue;
+            }
+            let mut recheck = entry.recheck.clone();
+            recheck.push(id.to_string());
+            let line = render_line(&MemoryEntry {
+                recheck,
+                ..entry.clone()
+            });
+            rewrite_line(
+                self.root(tier_of(&entry.id)).join(&entry.file),
+                &entry.id,
+                |_| Ok(line),
+            )?;
+            flagged.push(entry.id.clone());
+        }
+        Ok(flagged)
+    }
+
+    /// Keep: the human looked at a flagged entry and it still holds.
+    /// Clears its `[recheck: ...]` marker; the belief is unchanged.
+    pub fn clear_recheck(&self, id: &str) -> rusqlite::Result<()> {
+        let entry = self
+            .scan()
+            .into_iter()
+            .find(|entry| entry.id == id)
+            .ok_or(rusqlite::Error::QueryReturnedNoRows)?;
+        if entry.recheck.is_empty() {
+            return Ok(());
+        }
+        let line = render_line(&MemoryEntry {
+            recheck: Vec::new(),
+            ..entry.clone()
+        });
+        rewrite_line(self.root(tier_of(&entry.id)).join(&entry.file), id, |_| {
+            Ok(line)
+        })?;
+        self.sync()
     }
 
     /// Writes a typed link onto the `from` entry's line. Both ends
@@ -955,12 +1044,15 @@ impl MemoryStore {
             if entry.valid_until.is_some() {
                 continue;
             }
-            let mark = if self.changed_evidence(&entry).is_empty() {
-                ""
-            } else {
+            let mut mark = String::new();
+            if !self.changed_evidence(&entry).is_empty() {
                 any_changed = true;
-                " [evidence changed]"
-            };
+                mark.push_str(" [evidence changed]");
+            }
+            if !entry.recheck.is_empty() {
+                any_changed = true;
+                mark.push_str(&format!(" [recheck: {}]", entry.recheck.join(", ")));
+            }
             sections
                 .entry(entry.file.clone())
                 .or_default()
@@ -988,8 +1080,9 @@ impl MemoryStore {
         if any_changed {
             // One line, only when it applies: the mark's meaning.
             index.push_str(
-                "\nEntries marked [evidence changed] cite files that changed since; \
-                 re-check before relying on them.\n",
+                "\nEntries marked [evidence changed] cite files that changed since, and \
+                 [recheck: id] ones rested on an entry since corrected; re-check \
+                 before relying on them.\n",
             );
             spent += 20;
         }
@@ -1038,6 +1131,7 @@ pub fn add_global(
         links: Vec::new(),
         // Global entries span projects: no one workspace to cite.
         evidence: Vec::new(),
+        recheck: Vec::new(),
     });
     append_line(store.global_root.join(&file), &line)
 }
@@ -1119,6 +1213,7 @@ fn parse_entry(line: &str, tier: Tier, file: &str) -> Option<MemoryEntry> {
     let mut superseded_by = None;
     let mut links = Vec::new();
     let mut evidence = Vec::new();
+    let mut recheck = Vec::new();
     loop {
         let trimmed = text.trim_end();
         if !trimmed.ends_with(']') {
@@ -1147,6 +1242,10 @@ fn parse_entry(line: &str, tier: Tier, file: &str) -> Option<MemoryEntry> {
             && let Some(parsed) = parse_evidence(list)
         {
             evidence = parsed;
+        } else if let Some(list) = inner.strip_prefix("recheck:")
+            && let Some(parsed) = parse_ids(list)
+        {
+            recheck = parsed;
         } else if let Some(date) = inner.strip_prefix("archived:") {
             valid_until = Some(date.trim().to_string());
         } else if inner.starts_with("source:") || inner.starts_with("added:") {
@@ -1178,7 +1277,37 @@ fn parse_entry(line: &str, tier: Tier, file: &str) -> Option<MemoryEntry> {
         superseded_by,
         links,
         evidence,
+        recheck,
     })
+}
+
+/// `p12, g3` into ids; None (the bracket stays text) when any item is
+/// not an entry id.
+fn parse_ids(list: &str) -> Option<Vec<String>> {
+    list.split(',')
+        .map(|item| {
+            let id = item.trim();
+            let valid = id.len() >= 2
+                && (id.starts_with('p') || id.starts_with('g'))
+                && id[1..].chars().all(|c| c.is_ascii_digit());
+            valid.then(|| id.to_string())
+        })
+        .collect()
+}
+
+/// An entry's source sessions: a merge joins them with ", ".
+fn source_sessions(entry: &MemoryEntry) -> Vec<String> {
+    entry
+        .source_session
+        .as_deref()
+        .map(|sources| {
+            sources
+                .split(',')
+                .map(|source| source.trim().to_string())
+                .filter(|source| !source.is_empty())
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// `src/a.rs@3f2a1c9e0b12, b.rs@...` into evidence; None (the bracket
@@ -1270,6 +1399,9 @@ fn render_line(entry: &MemoryEntry) -> String {
             .collect::<Vec<_>>()
             .join(", ");
         line.push_str(&format!(" [evidence: {list}]"));
+    }
+    if !entry.recheck.is_empty() {
+        line.push_str(&format!(" [recheck: {}]", entry.recheck.join(", ")));
     }
     if entry.source_session.is_some() || entry.added_at.is_some() {
         line.push_str(" [source: ");
@@ -1934,6 +2066,154 @@ mod tests {
         let entry = parse_entry(odd, Tier::Project, "decisions.md").unwrap();
         assert!(entry.evidence.is_empty());
         assert_eq!(entry.text, "see [evidence: just words]");
+    }
+
+    fn add_from(store: &MemoryStore, text: &str, session: &str) {
+        store
+            .apply(
+                &[Op::Add {
+                    file: "decisions.md".into(),
+                    text: text.into(),
+                    source: Some(session.into()),
+                    evidence: Vec::new(),
+                }],
+                4096,
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn a_correction_flags_what_rested_on_it_one_hop_back() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (store, _session) = store_with_roots(&tmp);
+        add_from(&store, "the cache is per process", "10"); // p1, corrected
+        add_from(&store, "so restarts start cold", "10"); // p2, sibling
+        add_from(&store, "warm it at boot", "20"); // p3, builds_on p1
+        add_from(&store, "logs go to stderr", "30"); // p4, unrelated
+        add_from(&store, "see the cache notes", "40"); // p5, relates_to only
+        add_from(&store, "the cache is shared", "50"); // p6, the replacement
+        let link = |from: &str, relation: &str| Op::Link {
+            from: from.into(),
+            to: "p1".into(),
+            relation: relation.into(),
+        };
+        store
+            .apply(&[link("p3", "builds_on"), link("p5", "relates_to")], 64)
+            .unwrap();
+        // p6 rests on p1 as well, but it is the replacement: never flagged.
+        store
+            .apply(
+                &[Op::Link {
+                    from: "p6".into(),
+                    to: "p1".into(),
+                    relation: "solves".into(),
+                }],
+                16,
+            )
+            .unwrap();
+
+        let report = store
+            .apply(
+                &[Op::Supersede {
+                    id: "p1".into(),
+                    by: Some("p6".into()),
+                }],
+                16,
+            )
+            .unwrap();
+        assert_eq!(
+            report.flagged,
+            vec![("p1".to_string(), vec!["p2".to_string(), "p3".to_string()])]
+        );
+        let entries = store.scan();
+        let recheck = |id: &str| {
+            entries
+                .iter()
+                .find(|entry| entry.id == id)
+                .unwrap()
+                .recheck
+                .clone()
+        };
+        assert_eq!(recheck("p2"), vec!["p1"]);
+        assert_eq!(recheck("p3"), vec!["p1"]);
+        assert!(recheck("p4").is_empty());
+        assert!(recheck("p5").is_empty());
+        assert!(recheck("p6").is_empty());
+        // Flags change no belief: text and validity are untouched.
+        let p3 = entries.iter().find(|entry| entry.id == "p3").unwrap();
+        assert_eq!(p3.text, "warm it at boot");
+        assert!(p3.valid_until.is_none());
+        let line = std::fs::read_to_string(tmp.path().join("project-memory/decisions.md")).unwrap();
+        assert!(
+            line.contains(
+                "warm it at boot [links: builds_on p1] [recheck: p1] [source: 20; added: "
+            )
+        );
+        assert!(line.contains("[recheck: p1]"));
+
+        // The model sees the flag, in the index and on the hit.
+        let index = store.render_index(600);
+        assert!(index.contains("- [p3] warm it at boot [recheck: p1]"));
+        assert!(index.contains("[recheck: id] ones rested on an entry"));
+        assert_eq!(store.search("boot", 10).unwrap()[0].recheck, vec!["p1"]);
+
+        // One hop: superseding a flagged entry flags its own dependents
+        // (none here), never re-walks p1's.
+        let report = store
+            .apply(
+                &[Op::Supersede {
+                    id: "p3".into(),
+                    by: None,
+                }],
+                16,
+            )
+            .unwrap();
+        assert!(report.flagged.is_empty());
+
+        // Keep clears the flag and only the flag.
+        store.clear_recheck("p2").unwrap();
+        let p2 = store
+            .scan()
+            .into_iter()
+            .find(|entry| entry.id == "p2")
+            .unwrap();
+        assert!(p2.recheck.is_empty());
+        assert_eq!(p2.text, "so restarts start cold");
+    }
+
+    #[test]
+    fn a_supersede_with_no_dependents_flags_nothing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (store, _session) = store_with_roots(&tmp);
+        add_from(&store, "alone", "1");
+        add_from(&store, "elsewhere", "2");
+        let report = store
+            .apply(
+                &[Op::Supersede {
+                    id: "p1".into(),
+                    by: None,
+                }],
+                16,
+            )
+            .unwrap();
+        assert!(report.flagged.is_empty());
+        assert!(store.scan()[1].recheck.is_empty());
+    }
+
+    #[test]
+    fn a_recheck_marker_round_trips_and_a_bad_one_stays_text() {
+        let line =
+            "- [p2] helpful=0 harmful=0 warm it [recheck: p1, g4] [source: 20; added: 2026-11-26]";
+        let entry = parse_entry(line, Tier::Project, "decisions.md").unwrap();
+        assert_eq!(entry.recheck, vec!["p1", "g4"]);
+        assert_eq!(render_line(&entry), line);
+        let odd = "- [p3] helpful=0 harmful=0 see [recheck: soon]";
+        assert_eq!(
+            parse_entry(odd, Tier::Project, "decisions.md")
+                .unwrap()
+                .text,
+            "see [recheck: soon]"
+        );
     }
 
     #[test]

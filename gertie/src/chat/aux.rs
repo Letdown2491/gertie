@@ -197,6 +197,7 @@ mod tests {
             superseded_by: by.map(Into::into),
             links: Vec::new(),
             evidence: Vec::new(),
+            recheck: Vec::new(),
         }
     }
 

@@ -925,6 +925,54 @@ fn the_panel_flags_an_entry_whose_evidence_changed() {
     assert!(!shown.2, "the current entry is not");
 }
 
+/// A flagged entry carries keep and archive in the panel: keep clears
+/// the flag and leaves the belief, archive retires the entry.
+#[test]
+fn the_panel_settles_a_recheck_flag() {
+    let (mut fixture, dir) = fixture_with_memory();
+    std::fs::create_dir_all(dir.path().join("project")).expect("tier root");
+    let file = dir.path().join("project").join("decisions.md");
+    std::fs::write(
+        &file,
+        "- [p1] helpful=0 harmful=0 old [superseded by: p4; valid until: 2026-11-01]\n\
+         - [p2] helpful=0 harmful=0 kept belief [recheck: p1]\n\
+         - [p3] helpful=0 harmful=0 doomed belief [recheck: p1]\n\
+         - [p4] helpful=0 harmful=0 new\n",
+    )
+    .expect("topic file");
+    fixture.act(|window, cx| {
+        window.input("hello", cx);
+        window.press("enter", cx);
+    });
+    fixture.act(|window, cx| {
+        window.click("memory-chip", cx);
+    });
+    let mut shown = (false, false);
+    fixture.act(|window, _| {
+        shown = (
+            window.try_find("memory-keep-p2").is_some(),
+            window.try_find("memory-keep-p4").is_some(),
+        );
+    });
+    assert!(shown.0, "a flagged entry offers keep");
+    assert!(!shown.1, "an unflagged one does not");
+    fixture.act(|window, cx| {
+        window.click("memory-keep-p2", cx);
+    });
+    fixture.act(|window, cx| {
+        window.click("memory-archive-p3", cx);
+    });
+    let text = std::fs::read_to_string(&file).expect("topic file");
+    assert!(
+        text.contains("- [p2] helpful=0 harmful=0 kept belief\n"),
+        "{text}"
+    );
+    assert!(
+        text.contains("doomed belief [recheck: p1] [archived: "),
+        "{text}"
+    );
+}
+
 #[test]
 fn voting_through_the_panel_writes_the_counters() {
     let (mut fixture, dir) = fixture_with_memory();

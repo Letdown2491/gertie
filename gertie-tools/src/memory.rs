@@ -539,6 +539,12 @@ impl Tool for SearchMemory {
                         .join(", ");
                     out.push_str(&format!("   links: {links}\n"));
                 }
+                if !hit.recheck.is_empty() {
+                    out.push_str(&format!(
+                        "   rested on {}, since corrected (re-check before relying on it)\n",
+                        hit.recheck.join(", ")
+                    ));
+                }
                 if !hit.evidence_changed.is_empty() {
                     out.push_str(&format!(
                         "   evidence changed since written: {} (re-check before relying on it)\n",

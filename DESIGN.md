@@ -328,6 +328,15 @@ because a changed file does not make a belief wrong, it makes it unverified, and
 human decides. Age-based decay was rejected for the same reason (no schedule has survived
 validation); this marks *which* beliefs the code moved under, not how old they are.
 
+**Retroactive correction.** A supersede walks one hop back: live entries that `builds_on`
+or `solves` the corrected one, and live entries sharing a source session, gain
+`[recheck: p12]` on their line (the replacement never does). The flag is a file marker,
+not a transcript card, so it survives restarts and travels with the repo; the panel
+answers it with keep (clear the flag) or archive, and editing stays the files' job. The
+index and `search_memory` carry it, so the model re-checks too. One hop, never
+transitive: a correction of a flagged entry starts its own walk. A recall log (which
+sessions used an entry, so a correction could name past work) is deferred.
+
 **Read path: frozen index, fetched body.** Cache prefixes build tools→system→messages, and any
 byte change busts everything after the change, a mutable index inside the system prompt is a
 cache bomb (the pi-context experiment watched a memory layer cost 2.34× tokens this way). So
