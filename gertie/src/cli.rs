@@ -210,7 +210,10 @@ mod tests {
             }
         ));
         let refused = parse_arguments(&["--allow-dirty"]);
-        assert!(refused.is_err(), "--allow-dirty without run is a usage error");
+        assert!(
+            refused.is_err(),
+            "--allow-dirty without run is a usage error"
+        );
     }
 
     #[test]

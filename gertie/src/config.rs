@@ -740,10 +740,7 @@ impl Config {
         let mut unknown = Vec::new();
         for (key, item) in table {
             match key.as_str() {
-                "security" => unknown.extend(Self::unknown_section_keys(
-                    item,
-                    &["sandbox_bash"],
-                )),
+                "security" => unknown.extend(Self::unknown_section_keys(item, &["sandbox_bash"])),
                 "permissions" => {
                     unknown.extend(Self::unknown_section_keys(item, &["default_mode"]))
                 }

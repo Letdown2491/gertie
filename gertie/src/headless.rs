@@ -501,7 +501,7 @@ mod tests {
         let git = |args: &[&str]| {
             std::process::Command::new("git")
                 .args(["-C", root.to_str().unwrap()])
-                .args(["-c", "user.name=t"],)
+                .args(["-c", "user.name=t"])
                 .args(["-c", "user.email=t@t"])
                 .args(args)
                 .output()

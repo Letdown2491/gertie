@@ -11,7 +11,11 @@ fn main() {
             config,
             ephemeral,
         }) => std::process::exit(gertie::headless::run(
-            prompt, yes, allow_dirty, config, ephemeral,
+            prompt,
+            yes,
+            allow_dirty,
+            config,
+            ephemeral,
         )),
         Ok(gertie::cli::Command::Doctor {
             config,

@@ -100,7 +100,6 @@ enum Transport {
     },
 }
 
-
 /// One \n-terminated frame, bounded: a server that streams an endless
 /// line cannot balloon the reader's memory. Returns Eof when nothing
 /// was read and the stream is done; Line { oversized } when a frame
@@ -113,11 +112,7 @@ enum Frame {
 
 const MAX_FRAME: usize = 8 * 1024 * 1024;
 
-fn read_bounded_frame<R: std::io::BufRead>(
-    reader: &mut R,
-    out: &mut Vec<u8>,
-    cap: usize,
-) -> Frame {
+fn read_bounded_frame<R: std::io::BufRead>(reader: &mut R, out: &mut Vec<u8>, cap: usize) -> Frame {
     loop {
         // Snapshot a bounded slice, then release the fill_buf borrow
         // before consuming: the two calls cannot overlap.
@@ -126,19 +121,27 @@ fn read_bounded_frame<R: std::io::BufRead>(
                 Some(end) => (buf[..=end].to_vec(), true),
                 None => (buf.to_vec(), false),
             },
-            Err(_) => return Frame::Line { oversized: out.len() > cap },
+            Err(_) => {
+                return Frame::Line {
+                    oversized: out.len() > cap,
+                };
+            }
         };
         if chunk.is_empty() {
             return if out.is_empty() {
                 Frame::Eof
             } else {
-                Frame::Line { oversized: out.len() > cap }
+                Frame::Line {
+                    oversized: out.len() > cap,
+                }
             };
         }
         reader.consume(chunk.len());
         out.extend_from_slice(&chunk);
         if ends_frame {
-            return Frame::Line { oversized: out.len() > cap };
+            return Frame::Line {
+                oversized: out.len() > cap,
+            };
         }
         if out.len() > cap {
             // Overflowed: stop buffering, discard to the next newline.
