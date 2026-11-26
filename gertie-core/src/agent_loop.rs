@@ -166,6 +166,12 @@ pub struct TurnSpec {
     /// Whose ask this loop's prompts are: the leader's surface as loop
     /// events, a worker's through the broker subscription.
     pub prompt_source: crate::PromptSource,
+    /// The turn's routing token on the permission broker: a worker ask
+    /// carrying it reaches only the surface that spawned this turn
+    /// (the chat that delegated the worker). None, the token-absent
+    /// fallback, leaves the ask unscoped: it fans out to every
+    /// subscriber, the behavior before scoping existed.
+    pub turn_token: Option<crate::TurnToken>,
     /// Sent as the first message of every request, never stored in
     /// history: it is per-turn framing, not conversation record (the
     /// DB stays canonical; the next turn may have a different index).
@@ -240,6 +246,7 @@ pub fn run_turn(spec: TurnSpec) -> BoxStream<'static, LoopEvent> {
         permission_mode,
         sandbox_bash,
         prompt_source,
+        turn_token,
         system_prompt,
         instructions,
         memory_index,
@@ -461,7 +468,7 @@ pub fn run_turn(spec: TurnSpec) -> BoxStream<'static, LoopEvent> {
                                 None => Err("no permission channel available, cannot ask".into()),
                                 Some(broker) => {
                                     let (request_id, answer) =
-                                        broker.request(ask.call.clone(), prompt_source);
+                                        broker.request(ask.call.clone(), prompt_source, turn_token);
                                     yield LoopEvent::ToolCallRequested {
                                         id: request_id,
                                         call: ask.call.clone(),
@@ -530,7 +537,7 @@ pub fn run_turn(spec: TurnSpec) -> BoxStream<'static, LoopEvent> {
                                 }
                                 (Some(broker), false) => {
                                     let (request_id, answer) =
-                                        broker.request(call.clone(), prompt_source);
+                                        broker.request(call.clone(), prompt_source, turn_token);
                                     yield LoopEvent::ToolCallRequested {
                                         id: request_id,
                                         call: call.clone(),
@@ -578,7 +585,7 @@ pub fn run_turn(spec: TurnSpec) -> BoxStream<'static, LoopEvent> {
                                         };
                                         return;
                                     }
-                                    tool.run_with_call(&call, &worker_progress).await
+                                    tool.run_with_call(&call, &worker_progress, turn_token).await
                                 }
                                 // The human said no, and possibly
                                 // why. Their reply rides in the tool
@@ -596,7 +603,7 @@ pub fn run_turn(spec: TurnSpec) -> BoxStream<'static, LoopEvent> {
                             }
                         } else {
                             yield LoopEvent::ToolCallStarted { call: call.clone() };
-                            tool.run_with_call(&call, &worker_progress).await
+                            tool.run_with_call(&call, &worker_progress, turn_token).await
                         }
                     }
                 };
@@ -1504,6 +1511,7 @@ mod tests {
                 permission_mode: crate::permissions::PermissionMode::Supervised,
                 sandbox_bash: false,
                 prompt_source: crate::PromptSource::Leader,
+                turn_token: None,
                 system_prompt: None,
                 instructions: None,
                 memory_index: None,

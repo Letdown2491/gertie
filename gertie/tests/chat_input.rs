@@ -1929,14 +1929,28 @@ impl gertie_core::Tool for WorkerAskTool {
         _arguments: &'a str,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = gertie_core::ToolResult> + Send + 'a>>
     {
+        Box::pin(async move { Ok("worker approved".into()) })
+    }
+
+    fn run_with_call<'a>(
+        &'a self,
+        call: &'a gertie_core::ToolCall,
+        _progress: &'a gertie_core::WorkerProgress,
+        turn_token: Option<gertie_core::TurnToken>,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = gertie_core::ToolResult> + Send + 'a>>
+    {
+        let call = call.clone();
         Box::pin(async move {
+            // The ask stamps with the turn token the loop handed this
+            // tool: that stamp is the whole fix under test (issue #15).
             let (_id, answer) = self.broker.request(
                 gertie_core::ToolCall {
-                    id: "worker_1".into(),
-                    name: "bash".into(),
-                    arguments: r#"{"command":"rm -rf /tmp/worker-scratch"}"#.into(),
+                    id: call.id.clone(),
+                    name: call.name.clone(),
+                    arguments: call.arguments.clone(),
                 },
                 gertie_core::PromptSource::Worker,
+                turn_token,
             );
             match answer.await {
                 Ok(gertie_core::PermissionDecision::Approve) => Ok("worker approved".into()),
@@ -2056,6 +2070,66 @@ fn a_worker_ask_bubbles_into_the_transcript_and_the_answer_reaches_the_worker() 
 /// the ask's own clock tells that story. The gauge still speaks when
 /// nothing waits on anyone.
 #[test]
+/// The #15 repro, at the seam the bug lived in: two chats subscribe
+/// the way two views do (each filtered by its own turn's token), a
+/// worker ask arrives stamped with turn A's token, and only A's
+/// subscription receives it. The other chat's fallback subscription
+/// (which exists for token-absent asks, the resume path) sees
+/// nothing either: a stamped ask is addressed, never broadcast.
+#[test]
+fn a_worker_ask_reaches_only_the_turn_that_spawned_it() {
+    let broker = Arc::new(gertie_core::PermissionBroker::new());
+    let token_a = broker.next_turn_token();
+    let token_b = broker.next_turn_token();
+    let mut chat_a = broker.subscribe(gertie_core::AskFilter::Turn(token_a));
+    let mut chat_b = broker.subscribe(gertie_core::AskFilter::Turn(token_b));
+    let mut fallback_b = broker.subscribe(gertie_core::AskFilter::EveryWorkerAsk);
+
+    let (_id, answer) = broker.request(
+        gertie_core::ToolCall {
+            id: "w1".into(),
+            name: "bash".into(),
+            arguments: "{}".into(),
+        },
+        gertie_core::PromptSource::Worker,
+        Some(token_a),
+    );
+
+    let ask = chat_a.blocking_recv().expect("the owning chat got its ask");
+    assert_eq!(ask.call.id, "w1");
+    assert!(
+        chat_b.try_recv().is_err(),
+        "the other chat's subscription never sees a foreign turn's ask"
+    );
+    assert!(
+        fallback_b.try_recv().is_err(),
+        "a stamped ask is addressed, not broadcast to fallbacks"
+    );
+    drop(answer);
+}
+
+/// The token-absent fallback still delivers: an unstamped worker ask
+/// reaches the EveryWorkerAsk subscriber, so a pending ask saved
+/// before this fix still gets answered after it.
+#[test]
+fn an_unstamped_worker_ask_still_reaches_the_fallback() {
+    let broker = Arc::new(gertie_core::PermissionBroker::new());
+    let mut rx = broker.subscribe(gertie_core::AskFilter::EveryWorkerAsk);
+    let (_id, _answer) = broker.request(
+        gertie_core::ToolCall {
+            id: "w2".into(),
+            name: "bash".into(),
+            arguments: "{}".into(),
+        },
+        gertie_core::PromptSource::Worker,
+        None,
+    );
+    let ask = rx
+        .blocking_recv()
+        .expect("the fallback sees unstamped asks");
+    assert_eq!(ask.call.id, "w2");
+}
+
 fn the_quiet_gauge_holds_its_tongue_while_an_approval_waits() {
     // The held-turn rig from the worker-ask test: a pending card with
     // the turn alive underneath it.

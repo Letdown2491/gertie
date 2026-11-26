@@ -120,6 +120,9 @@ pub fn run(
         permission_mode: boot.default_mode,
         sandbox_bash: boot.sandbox_bash,
         prompt_source: gertie_core::PromptSource::Leader,
+        // One turn at a time, one subscriber: the asks route by the
+        // EveryWorkerAsk filter below, no token needed.
+        turn_token: None,
         system_prompt: boot.system_prompt.clone(),
         instructions: boot.instructions.clone(),
         memory_index: boot.memory_index.clone(),
@@ -130,7 +133,9 @@ pub fn run(
         grace_rounds: boot.grace_rounds(),
         worker_progress: gertie_core::WorkerProgress::default(),
     });
-    let worker_asks = boot.broker.subscribe();
+    let worker_asks = boot
+        .broker
+        .subscribe(gertie_core::AskFilter::EveryWorkerAsk);
 
     let interactive = std::io::stdin().is_terminal();
     let mut decide = |_call: &gertie_core::ToolCall| -> PermissionDecision {
@@ -654,6 +659,7 @@ mod tests {
             permission_mode: gertie_core::PermissionMode::Supervised,
             sandbox_bash: false,
             prompt_source: gertie_core::PromptSource::Leader,
+            turn_token: None,
             system_prompt: None,
             instructions: None,
             memory_index: None,
@@ -666,7 +672,7 @@ mod tests {
         let mut approvals = 0;
         let (outcome, text) = pump(
             stream,
-            broker.subscribe(),
+            broker.subscribe(gertie_core::AskFilter::EveryWorkerAsk),
             &broker,
             &store,
             session,
@@ -737,6 +743,7 @@ mod tests {
             permission_mode: gertie_core::PermissionMode::Supervised,
             sandbox_bash: false,
             prompt_source: gertie_core::PromptSource::Leader,
+            turn_token: None,
             system_prompt: None,
             instructions: None,
             memory_index: None,
@@ -749,7 +756,7 @@ mod tests {
         let mut approvals = 0;
         let (outcome, _) = pump(
             stream,
-            broker.subscribe(),
+            broker.subscribe(gertie_core::AskFilter::EveryWorkerAsk),
             &broker,
             &store,
             session,

@@ -111,15 +111,17 @@ pub trait Tool: Send + Sync {
         arguments: &'a str,
     ) -> Pin<Box<dyn Future<Output = ToolResult> + Send + 'a>>;
 
-    /// Runs the tool with the full call (id included) and the leader's
-    /// worker-progress handle. Only tools that run their own loop (the
-    /// agent tools) need either; everything else keeps the plain run.
+    /// Runs the tool with the full call (id included), the leader's
+    /// worker-progress handle, and the turn's routing token. Only
+    /// tools that run their own loop (the agent tools) need any of
+    /// it; everything else keeps the plain run.
     fn run_with_call<'a>(
         &'a self,
         call: &'a ToolCall,
         progress: &'a WorkerProgress,
+        turn_token: Option<crate::TurnToken>,
     ) -> Pin<Box<dyn Future<Output = ToolResult> + Send + 'a>> {
-        let _ = progress;
+        let _ = (progress, turn_token);
         self.run(&call.arguments)
     }
 }

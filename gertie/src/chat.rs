@@ -1744,9 +1744,9 @@ impl ChatView {
                         when it is not. Resume nothing-asks on purpose?"
                 .into(),
         };
-        let (id, _answer) = self
-            .broker
-            .request(call.clone(), gertie_core::PromptSource::Leader);
+        let (id, _answer) =
+            self.broker
+                .request(call.clone(), gertie_core::PromptSource::Leader, None);
         self.pending_mode_confirm = Some(id);
         self.turns.push(Turn::Tool {
             call,
@@ -2889,9 +2889,9 @@ impl ChatView {
         // deny UI, the same card lifecycle, and the answer routes back
         // through decide_tool. The proposal rides the pending map so
         // the decision site can apply it.
-        let (id, _answer) = self
-            .broker
-            .request(call.clone(), gertie_core::PromptSource::Leader);
+        let (id, _answer) =
+            self.broker
+                .request(call.clone(), gertie_core::PromptSource::Leader, None);
         self.pending_memory_apply
             .insert(call.id.clone(), (proposal, store, session_id));
         self.turns.push(Turn::Tool {
@@ -3922,6 +3922,11 @@ impl ChatView {
         let provider: Arc<dyn gertie_core::Provider> = provider;
         // Subagent dispatch reads this to link its runs to this chat.
         self.session_scope.set(self.session_id);
+        // The turn's routing token (issue #15): minted before the
+        // spec, it rides the spec (worker asks stamp with it) and the
+        // view's subscription filter (this view receives only its own
+        // worker's asks).
+        let turn_token = self.broker.next_turn_token();
         // Worker dispatch reads the posture the same way: set once per
         // turn, read at their spawn, never mutated mid-turn.
         self.mode_scope.set(self.mode);
@@ -3948,20 +3953,27 @@ impl ChatView {
             sandbox_bash: self.sandbox_bash,
             worker_progress: self.worker_progress.clone(),
             prompt_source: gertie_core::PromptSource::Leader,
+            turn_token: Some(turn_token),
             system_prompt: self.system_prompt.clone(),
             instructions: self.instructions.clone(),
             memory_index: self.memory_index.clone(),
         });
-        // Subagent asks arrive here, not on the leader's stream, a
-        // worker's loop runs inside a tool, so nobody drains its events.
-        let mut worker_asks = self.broker.subscribe();
-
         self.streaming = true;
         self.streaming_assistant = None;
         // Turn start: fresh narration is not yet available (the model
         // has not spoken this round), so the plain label until its
         // first words stream or a tool runs.
         self.set_activity("Thinking…");
+        // Turn start: fresh narration is not yet available (the model
+        // has not spoken this round), so the plain label until its
+        // first words stream or a tool runs.
+        self.set_activity("Thinking…");
+        // Subagent asks arrive here, not on the leader's stream: a
+        // worker's loop runs inside a tool, so nobody drains its
+        // events. The filter keeps other turns' worker asks away.
+        let mut worker_asks = self
+            .broker
+            .subscribe(gertie_core::AskFilter::Turn(turn_token));
         self.steer_tx = Some(steer_tx);
         self.stop_tx = Some(stop_tx);
         // The composer's ghost text names the steer/queue verbs while

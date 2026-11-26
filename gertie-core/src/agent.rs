@@ -245,6 +245,12 @@ pub struct AgentTool {
     /// The front's active permission mode, read at dispatch so the
     /// worker's turn inherits the posture its leader ran under.
     mode_scope: ModeScope,
+    /// The live turn's routing token, set at the leader's turn start
+    /// and cloned into the spec here at dispatch, so a worker's asks
+    /// route back to the chat that spawned it (and no other chat).
+    /// None (a plain `run`, headless resume, tests) leaves the worker's
+    /// asks unscoped, the token-absent fallback.
+    turn_scope: Arc<std::sync::Mutex<Option<crate::TurnToken>>>,
     /// Whether bash runs inside the Landlock sandbox, mirrored into
     /// the worker's turn, whose Auto mode keys off the same fact.
     sandbox_bash: bool,
@@ -290,8 +296,16 @@ impl AgentTool {
             store,
             scope,
             mode_scope,
+            turn_scope: Arc::new(std::sync::Mutex::new(None)),
             sandbox_bash,
         }
+    }
+
+    /// The live turn's routing token, set at turn start. The loop
+    /// calls this through [`Tool::run_with_call`], the only dispatch
+    /// path that knows the call's turn.
+    fn set_turn_scope(&self, token: crate::TurnToken) {
+        *self.turn_scope.lock().expect("turn scope") = Some(token);
     }
 
     /// Reads the brief under the workspace root, the same escape rule
@@ -374,7 +388,15 @@ impl Tool for AgentTool {
         &'a self,
         call: &'a crate::request::ToolCall,
         progress: &'a WorkerProgress,
+        turn_token: Option<crate::TurnToken>,
     ) -> Pin<Box<dyn Future<Output = ToolResult> + Send + 'a>> {
+        // Route this dispatch's worker asks back to the turn that
+        // spawned it. The handle is the same one every dispatch of
+        // this tool shares, the loop set the turn's token on it just
+        // before the await.
+        if let Some(token) = turn_token {
+            self.set_turn_scope(token);
+        }
         self.execute(&call.arguments, Some(call.id.clone()), progress.clone())
     }
 }
@@ -482,6 +504,12 @@ impl AgentTool {
                 permission_mode: self.mode_scope.get(),
                 sandbox_bash: self.sandbox_bash,
                 prompt_source: PromptSource::Worker,
+                // The worker's asks route to the surface whose turn
+                // spawned this dispatch: the same token the leader's
+                // spec carried and this tool received on
+                // `run_with_call`. None (no token reached the tool)
+                // leaves the asks unscoped, the token-absent fallback.
+                turn_token: *self.turn_scope.lock().expect("turn scope"),
                 // Instructions reach the worker through its brief
                 // envelope, not the spec: the brief is the whole world.
                 // Workers get no memory index either: they are
@@ -759,7 +787,7 @@ mod tests {
             name: "agent_worker".into(),
             arguments: r#"{"brief_path": "brief.md"}"#.into(),
         };
-        let future = tool.run_with_call(&call, &progress);
+        let future = tool.run_with_call(&call, &progress, None);
         let waker = Waker::noop();
         let mut cx = TaskContext::from_waker(waker);
         let mut future = Box::pin(future);

@@ -17,6 +17,15 @@ use crate::request::ToolCall;
 use std::sync::{Arc, Mutex};
 use tokio::sync::oneshot;
 
+/// Identifies the turn a worker ask belongs to. The UI's live turns
+/// each hold one (minted at turn start, carried on the `TurnSpec`);
+/// the broker routes a worker ask to the subscriber whose token
+/// matches. An ask with no token (a path that predates the field, or
+/// a caller that never learned of it) is unscoped and fans out to
+/// every subscriber, the behavior before this field existed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TurnToken(pub u64);
+
 /// Who asked. The UI renders leader asks from the leader's event stream
 /// and worker asks from the broker subscription; the tag keeps them
 /// distinguishable for labeling (and for tests).
@@ -32,13 +41,32 @@ pub struct PendingAsk {
     pub id: u64,
     pub call: ToolCall,
     pub source: PromptSource,
+    /// The turn the ask belongs to, when the asker knew it. A Some
+    /// token routes the ask to that turn's surface alone; None falls
+    /// back to every subscriber.
+    pub turn: Option<TurnToken>,
+}
+
+/// A subscription's filter, minted by [`PermissionBroker::subscribe`].
+/// A scoped subscriber receives only the asks carrying its token (plus
+/// unscoped ones, the token-absent fallback); an unscoped one sees
+/// every worker ask, exactly as before.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AskFilter {
+    /// Every surface that predates turn scoping: the headless pump,
+    /// tests, a monitor that wants the whole firehose.
+    EveryWorkerAsk,
+    /// One chat's live turn: this surface spawned the worker, the ask
+    /// is nobody else's business.
+    Turn(TurnToken),
 }
 
 pub struct PermissionBroker {
     state: Arc<Mutex<BrokerState>>,
-    /// Worker asks fan out to every subscriber, one per surface
-    /// (multiple tabs, a panel, a headless monitor).
-    subscribers: Mutex<Vec<tokio::sync::mpsc::UnboundedSender<PendingAsk>>>,
+    /// Worker asks fan out to their surfaces, one subscription per
+    /// surface (multiple tabs, a panel, a headless monitor), each with
+    /// its filter.
+    subscribers: Mutex<Vec<(AskFilter, tokio::sync::mpsc::UnboundedSender<PendingAsk>)>>,
 }
 
 struct BrokerState {
@@ -64,11 +92,14 @@ impl PermissionBroker {
     }
 
     /// Registers an ask and returns its id plus the receiver the loop
-    /// awaits. Worker asks are also published to every subscription.
+    /// awaits. Worker asks are also published to the subscription: to
+    /// the turn's surface when the ask carries a turn token, to every
+    /// surface when it does not (the token-absent fallback).
     pub fn request(
         &self,
         call: ToolCall,
         source: PromptSource,
+        turn: Option<TurnToken>,
     ) -> (u64, oneshot::Receiver<PermissionDecision>) {
         let (respond, answer) = oneshot::channel();
         let id = {
@@ -82,17 +113,29 @@ impl PermissionBroker {
             id
         };
         if source == PromptSource::Worker {
+            let ask = PendingAsk {
+                id,
+                call: call.clone(),
+                source,
+                turn,
+            };
             let mut subscribers = self.subscribers.lock().unwrap();
             // Retain only live subscribers; a surface that went away
             // takes its ask cards with it.
-            subscribers.retain(|subscriber| {
-                subscriber
-                    .send(PendingAsk {
-                        id,
-                        call: call.clone(),
-                        source,
-                    })
-                    .is_ok()
+            subscribers.retain(|(filter, subscriber)| {
+                let routed = match (turn, filter) {
+                    // The firehose catches only what no address can
+                    // name: an ask that predates scoping cannot name
+                    // its turn, so it stays everyone's, never silently
+                    // swallowed. A stamped ask is addressed; a firehose
+                    // subscriber (headless, tests) does not receive
+                    // other turns' workers (issue #15).
+                    (None, AskFilter::EveryWorkerAsk) => true,
+                    (None, _) => true,
+                    (Some(token), AskFilter::Turn(own)) => token == *own,
+                    (Some(_), AskFilter::EveryWorkerAsk) => false,
+                };
+                routed && subscriber.send(ask.clone()).is_ok()
             });
         }
         (id, answer)
@@ -112,13 +155,24 @@ impl PermissionBroker {
         sender.send(decision).is_ok()
     }
 
-    /// A stream of worker asks. Any number of surfaces subscribe; each
-    /// sees every worker ask. No backlog by design: the registry holds
-    /// the pending ones, and a surface answers the cards it has.
-    pub fn subscribe(&self) -> tokio::sync::mpsc::UnboundedReceiver<PendingAsk> {
+    /// A stream of worker asks. Any number of surfaces subscribe; a
+    /// scoped one sees only its turn's asks (plus unscoped ones, the
+    /// token-absent fallback), an unscoped one sees every worker ask.
+    /// No backlog by design: the registry holds the pending ones, and
+    /// a surface answers the cards it has.
+    pub fn subscribe(&self, filter: AskFilter) -> tokio::sync::mpsc::UnboundedReceiver<PendingAsk> {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-        self.subscribers.lock().unwrap().push(tx);
+        self.subscribers.lock().unwrap().push((filter, tx));
         rx
+    }
+
+    /// Mint a turn token. Called once per turn at turn start; the
+    /// same u64 rides the `TurnSpec` and this surface's filter.
+    pub fn next_turn_token(&self) -> TurnToken {
+        let mut state = self.state.lock().unwrap();
+        let token = TurnToken(state.next_id);
+        state.next_id += 1;
+        token
     }
 }
 
@@ -266,9 +320,9 @@ mod tests {
     #[test]
     fn abandoned_asks_do_not_pile_up() {
         let broker = PermissionBroker::new();
-        let (stale, receiver) = broker.request(call(), PromptSource::Leader);
+        let (stale, receiver) = broker.request(call(), PromptSource::Leader, None);
         drop(receiver);
-        let (live, _receiver) = broker.request(call(), PromptSource::Leader);
+        let (live, _receiver) = broker.request(call(), PromptSource::Leader, None);
         assert_eq!(broker.state.lock().unwrap().pending.len(), 1);
         assert!(!broker.respond(stale, PermissionDecision::Approve));
         assert!(broker.respond(live, PermissionDecision::Approve));
@@ -285,7 +339,7 @@ mod tests {
     #[test]
     fn asks_round_trip_through_ids() {
         let broker = PermissionBroker::new();
-        let (id, answer) = broker.request(call(), PromptSource::Leader);
+        let (id, answer) = broker.request(call(), PromptSource::Leader, None);
 
         assert!(broker.respond(id, PermissionDecision::Approve));
         assert_eq!(answer.blocking_recv(), Ok(PermissionDecision::Approve));
@@ -296,8 +350,8 @@ mod tests {
     #[test]
     fn worker_asks_publish_to_the_subscription() {
         let broker = PermissionBroker::new();
-        let mut rx = broker.subscribe();
-        let (id, _answer) = broker.request(call(), PromptSource::Worker);
+        let mut rx = broker.subscribe(AskFilter::EveryWorkerAsk);
+        let (id, _answer) = broker.request(call(), PromptSource::Worker, None);
 
         let ask = rx.blocking_recv().expect("published");
         assert_eq!(ask.id, id);
@@ -305,26 +359,67 @@ mod tests {
     }
 
     #[test]
+    fn a_turn_scoped_ask_reaches_its_own_surface_and_no_other() {
+        let broker = PermissionBroker::new();
+        let token = broker.next_turn_token();
+        let other = broker.next_turn_token();
+        let mut ours = broker.subscribe(AskFilter::Turn(token));
+        let mut theirs = broker.subscribe(AskFilter::Turn(other));
+        let mut firehose = broker.subscribe(AskFilter::EveryWorkerAsk);
+        let (id, _answer) = broker.request(call(), PromptSource::Worker, Some(token));
+
+        // The owning surface gets it, the other turn's surface does
+        // not, and the firehose does not either: a stamped ask is
+        // addressed (issue #15). The firehose catches only unstamped
+        // asks, the resume fallback.
+        let ask = ours.blocking_recv().expect("published to the owner");
+        assert_eq!(ask.id, id);
+        assert_eq!(ask.turn, Some(token));
+        assert!(
+            theirs.try_recv().is_err(),
+            "a foreign turn never sees the ask"
+        );
+        assert!(
+            firehose.try_recv().is_err(),
+            "a stamped ask is addressed, not broadcast"
+        );
+    }
+
+    #[test]
+    fn an_unscoped_ask_falls_back_to_every_turn_scoped_subscriber() {
+        let broker = PermissionBroker::new();
+        let token = broker.next_turn_token();
+        let mut first = broker.subscribe(AskFilter::Turn(token));
+        let mut second = broker.subscribe(AskFilter::Turn(broker.next_turn_token()));
+        let (id, _answer) = broker.request(call(), PromptSource::Worker, None);
+
+        // The token-absent fallback: the ask predates scoping (or the
+        // path never set one), it is everyone's, never swallowed.
+        assert_eq!(first.blocking_recv().unwrap().id, id);
+        assert_eq!(second.blocking_recv().unwrap().id, id);
+    }
+
+    #[test]
     fn every_surface_subscribes_and_sees_every_ask() {
         let broker = PermissionBroker::new();
-        let mut first = broker.subscribe();
-        let mut second = broker.subscribe();
-        let (id, _answer) = broker.request(call(), PromptSource::Worker);
+        let mut first = broker.subscribe(AskFilter::EveryWorkerAsk);
+        let mut second = broker.subscribe(AskFilter::EveryWorkerAsk);
+        let (id, _answer) = broker.request(call(), PromptSource::Worker, None);
 
         assert_eq!(first.blocking_recv().unwrap().id, id);
         assert_eq!(second.blocking_recv().unwrap().id, id);
         // Dropping a surface doesn't break the others: the broker
         // prunes dead subscribers on publish.
         drop(first);
-        let (id2, _answer2) = broker.request(call(), PromptSource::Worker);
+        let (id2, _answer2) = broker.request(call(), PromptSource::Worker, None);
         assert_eq!(second.blocking_recv().unwrap().id, id2);
     }
 
     #[test]
     fn leader_asks_stay_off_the_subscription() {
         let broker = PermissionBroker::new();
-        let mut rx = broker.subscribe();
-        let (id, answer) = broker.request(call(), PromptSource::Leader);
+        let mut rx = broker.subscribe(AskFilter::EveryWorkerAsk);
+        let (id, answer) = broker.request(call(), PromptSource::Leader, None);
         broker.respond(id, PermissionDecision::Deny { feedback: None });
         // The loop-side receiver still resolves.
         assert_eq!(

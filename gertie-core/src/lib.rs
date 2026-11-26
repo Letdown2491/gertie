@@ -20,7 +20,9 @@ pub use agent_loop::{
     ToolRegistry, TurnSpec, close_unanswered_calls, run_turn,
 };
 pub use memory::{MemoryEntry, MemoryHit, MemoryStore, Op, Tier};
-pub use permissions::{ModeScope, PendingAsk, PermissionBroker, PermissionMode, PromptSource};
+pub use permissions::{
+    AskFilter, ModeScope, PendingAsk, PermissionBroker, PermissionMode, PromptSource, TurnToken,
+};
 pub use provider::Provider;
 pub use request::{
     IMAGE_MARKER_PREFIX, Request, ToolCall, ToolSpec, WireMessage, data_url_parts,
