@@ -226,4 +226,4 @@ setting). Fixed in the audit itself:
   vulnerabilities; nine unmaintained warnings arrive through gpui and have no fix yet.
 
 Open, for later: a worker's ask is broadcast to every subscribed view, so it can show in
-another chat's transcript; chat.rs (8.5k lines) wants splitting.
+another chat's transcript (#15); chat.rs (8.6k lines) wants splitting (#16).
