@@ -132,8 +132,6 @@ api_key_env = "MY_API_KEY"
 ## Endpoint name for the session-end extraction call. Absent = the
 ## session's own endpoint.
 #extract_endpoint = "ppq"
-## Apply proposals without the review card. Default off.
-#auto_apply = false
 ## Consolidate (merge duplicates, archive counter-dead entries,
 ## rebuild the index) at most this often, riding the startup sweep.
 ## Default 7; zero = never.
