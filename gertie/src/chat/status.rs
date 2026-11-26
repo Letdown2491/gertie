@@ -254,6 +254,9 @@ pub fn memory_hit_ids(result: &str) -> Vec<String> {
     result
         .lines()
         .filter_map(|line| {
+            // View results carry the file's entry lines, which begin
+            // with the "- " bullet; search hits begin at the bracket.
+            let line = line.trim_start_matches("- ").trim_start();
             let rest = line.strip_prefix('[')?;
             let (id, after) = rest.split_once(']')?;
             let valid =
