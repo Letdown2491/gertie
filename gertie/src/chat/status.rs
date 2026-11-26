@@ -795,12 +795,20 @@ impl ChatView {
                             .text_color(theme.foreground)
                             .child(SharedString::from(file.to_string())),
                     )
-                    .child(
+                    .child({
+                        // The FILES badge's semantic colors: state
+                        // changes (created/edited/renamed) in warning
+                        // amber, consultative ones (superseded's
+                        // audit-trail reads) muted.
+                        let (word, color) = match verb {
+                            "created" | "edited" | "renamed" => (verb, theme.warning),
+                            _ => (verb, theme.muted_foreground),
+                        };
                         div()
                             .text_size(px(10.5))
-                            .text_color(theme.muted_foreground)
-                            .child(verb.to_string()),
-                    )
+                            .text_color(color)
+                            .child(word.to_string())
+                    })
                     .into_any_element()
             });
             sections.push(
