@@ -305,6 +305,21 @@ impl Bootstrap {
     /// except for the one non-negotiable (no session store): callers
     /// decide what their surface does with warnings.
     pub fn load(config_path: Option<&Path>, ephemeral: bool) -> Self {
+        let workspace_root = std::env::current_dir().unwrap_or_else(|_| ".".into());
+        Self::load_at(config_path, ephemeral, workspace_root, None)
+    }
+
+    /// [`load`](Self::load) with the workspace named rather than taken
+    /// from the process's working directory: the eval boots one
+    /// throwaway fixture per scenario without touching the process CWD.
+    /// `global_memory` replaces the user's global tier (the eval's
+    /// models must not read or write the real one); None keeps it.
+    pub fn load_at(
+        config_path: Option<&Path>,
+        ephemeral: bool,
+        workspace_root: PathBuf,
+        global_memory: Option<PathBuf>,
+    ) -> Self {
         // First run with the default path: no config file yet means
         // gertie writes a starter of comments and pointers (no endpoint
         // is built in) and says so. An explicit --config override never
@@ -328,7 +343,6 @@ impl Bootstrap {
         // paths against it and checkpoints land beside the session
         // store. The repo's own overlay is found (or not) here,
         // before the label, so its problems surface with the rest.
-        let workspace_root = std::env::current_dir().unwrap_or_else(|_| ".".into());
         let (overlay, overlay_error) = crate::config::Config::load_project_overlay(&workspace_root);
         let endpoint = config.selected_endpoint();
         let model_label = if let Some(error) = &config_error {
@@ -523,7 +537,7 @@ impl Bootstrap {
         // through registry_for_root, the global tier stays shared.
         let memory = Arc::new(gertie_core::MemoryStore::open(
             workspace_root.join(".gertie/memory"),
-            memory_global_root(),
+            global_memory.unwrap_or_else(memory_global_root),
             store.clone(),
         ));
         memory

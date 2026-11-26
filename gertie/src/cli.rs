@@ -19,6 +19,9 @@ USAGE:
                                      key resolution, MCP, sessions
     gertie doctor --check-updates    also ask GitHub for the newest release
                                      (the one opt-in network call)
+    gertie eval memory               score each configured model on using
+                                     memory (live calls, throwaway repos);
+                                     --endpoint NAME limits it, repeatable
 
 OPTIONS:
     --config <PATH>    config file (default: the standard config dir)
@@ -61,6 +64,12 @@ pub enum Command {
         clean_worktrees: bool,
         check_updates: bool,
     },
+    /// `gertie eval memory`: the per-model memory conformance eval.
+    /// `endpoints` empty means every configured endpoint.
+    Eval {
+        config: Option<PathBuf>,
+        endpoints: Vec<String>,
+    },
     /// Print usage and exit 0.
     Help,
     /// Print version and exit 0.
@@ -81,6 +90,8 @@ pub fn parse(arguments: &[String]) -> Result<Command, UsageError> {
     let mut doctor = false;
     let mut clean_worktrees = false;
     let mut check_updates = false;
+    let mut eval = false;
+    let mut endpoints: Vec<String> = Vec::new();
 
     let mut index = 0;
     while index < arguments.len() {
@@ -93,7 +104,15 @@ pub fn parse(arguments: &[String]) -> Result<Command, UsageError> {
             "--ephemeral" if run => ephemeral = true,
             "--clean-worktrees" if !run => clean_worktrees = true,
             "--check-updates" if !run => check_updates = true,
-            "doctor" if positional.is_empty() && !run && !doctor => doctor = true,
+            "doctor" if positional.is_empty() && !run && !doctor && !eval => doctor = true,
+            "eval" if positional.is_empty() && !run && !doctor && !eval => eval = true,
+            "--endpoint" if eval => {
+                index += 1;
+                let Some(value) = arguments.get(index) else {
+                    return Err(UsageError("--endpoint needs a name".into()));
+                };
+                endpoints.push(value.clone());
+            }
             "--config" => {
                 index += 1;
                 let Some(value) = arguments.get(index) else {
@@ -115,6 +134,21 @@ pub fn parse(arguments: &[String]) -> Result<Command, UsageError> {
             _ => positional.push(argument.to_string()),
         }
         index += 1;
+    }
+
+    if eval {
+        if clean_worktrees || check_updates {
+            return Err(UsageError("those flags belong to doctor".into()));
+        }
+        return match positional.as_slice() {
+            [suite] if suite == "memory" => Ok(Command::Eval { config, endpoints }),
+            [] => Err(UsageError(
+                "eval needs a suite: `gertie eval memory`".into(),
+            )),
+            [other, ..] => Err(UsageError(format!(
+                "unknown eval suite: {other} (the one suite is `memory`)"
+            ))),
+        };
     }
 
     if doctor {
@@ -302,6 +336,27 @@ mod tests {
                 check_updates: false
             }
         );
+    }
+
+    #[test]
+    fn eval_takes_a_suite_and_repeatable_endpoints() {
+        assert_eq!(
+            parse_arguments(&["eval", "memory"]).unwrap(),
+            Command::Eval {
+                config: None,
+                endpoints: Vec::new()
+            }
+        );
+        assert_eq!(
+            parse_arguments(&["eval", "memory", "--endpoint", "a", "--endpoint", "b"]).unwrap(),
+            Command::Eval {
+                config: None,
+                endpoints: vec!["a".into(), "b".into()]
+            }
+        );
+        assert!(parse_arguments(&["eval"]).is_err());
+        assert!(parse_arguments(&["eval", "speed"]).is_err());
+        assert!(parse_arguments(&["run", "--endpoint", "a", "hi"]).is_err());
     }
 
     #[test]

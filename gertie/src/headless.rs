@@ -106,38 +106,6 @@ pub fn run(
     // Subagent dispatch reads this to link its runs to this chat.
     boot.session_scope.set(Some(session));
 
-    let history = Arc::new(tokio::sync::Mutex::new(Vec::new()));
-    let stream = gertie_core::run_turn(gertie_core::TurnSpec {
-        provider,
-        tools: boot.tools.clone(),
-        history,
-        user_message: Some(prompt),
-        snapshots: boot.snapshots.clone(),
-        checkpoint_session: Some(session),
-        workspace_root: Some(boot.workspace_root.clone()),
-        context_window,
-        permission_broker: Some(boot.broker.clone()),
-        permission_mode: boot.default_mode,
-        sandbox_bash: boot.sandbox_bash,
-        prompt_source: gertie_core::PromptSource::Leader,
-        // One turn at a time, one subscriber: the asks route by the
-        // EveryWorkerAsk filter below, no token needed.
-        turn_token: None,
-        system_prompt: boot.system_prompt.clone(),
-        instructions: boot.instructions.clone(),
-        memory_index: boot.memory_index.clone(),
-        memory: boot.memory.clone(),
-        // One-shot prompt mode: no steering, nothing queues.
-        steer: None,
-        user_attachments: Vec::new(),
-        max_tool_rounds: boot.max_tool_rounds(),
-        grace_rounds: boot.grace_rounds(),
-        worker_progress: gertie_core::WorkerProgress::default(),
-    });
-    let worker_asks = boot
-        .broker
-        .subscribe(gertie_core::AskFilter::EveryWorkerAsk);
-
     let interactive = std::io::stdin().is_terminal();
     let mut decide = |_call: &gertie_core::ToolCall| -> PermissionDecision {
         if yes {
@@ -174,12 +142,12 @@ pub fn run(
         }
     };
 
-    let (outcome, _) = pump(
-        stream,
-        worker_asks,
-        &boot.broker,
-        &boot.store,
+    let (outcome, _) = drive_turn(
+        &boot,
+        provider,
+        context_window,
         session,
+        prompt,
         &mut decide,
     );
     match outcome {
@@ -197,6 +165,59 @@ pub fn run(
             1
         }
     }
+}
+
+/// One leader turn on `boot`, driven to completion: the TurnSpec every
+/// headless caller builds (`gertie run`, the eval), then [`pump`].
+pub(crate) fn drive_turn(
+    boot: &crate::bootstrap::Bootstrap,
+    provider: Arc<dyn gertie_core::Provider>,
+    context_window: Option<u64>,
+    session: SessionId,
+    prompt: String,
+    decide: &mut dyn FnMut(&gertie_core::ToolCall) -> PermissionDecision,
+) -> (Outcome, String) {
+    let history = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+    let stream = gertie_core::run_turn(gertie_core::TurnSpec {
+        provider,
+        tools: boot.tools.clone(),
+        history,
+        user_message: Some(prompt),
+        snapshots: boot.snapshots.clone(),
+        checkpoint_session: Some(session),
+        workspace_root: Some(boot.workspace_root.clone()),
+        context_window,
+        permission_broker: Some(boot.broker.clone()),
+        permission_mode: boot.default_mode,
+        sandbox_bash: boot.sandbox_bash,
+        prompt_source: gertie_core::PromptSource::Leader,
+        // One turn at a time, one subscriber: the asks route by the
+        // EveryWorkerAsk filter below, no token needed.
+        turn_token: None,
+        system_prompt: boot.system_prompt.clone(),
+        instructions: boot.instructions.clone(),
+        memory_index: boot.memory_index.clone(),
+        // Recall on touch follows the memory switch, as in the app.
+        memory: boot.memory.clone().filter(|_| boot.memory_enabled()),
+        // One-shot prompt mode: no steering, nothing queues.
+        steer: None,
+        user_attachments: Vec::new(),
+        max_tool_rounds: boot.max_tool_rounds(),
+        grace_rounds: boot.grace_rounds(),
+        worker_progress: gertie_core::WorkerProgress::default(),
+    });
+    let worker_asks = boot
+        .broker
+        .subscribe(gertie_core::AskFilter::EveryWorkerAsk);
+
+    pump(
+        stream,
+        worker_asks,
+        &boot.broker,
+        &boot.store,
+        session,
+        decide,
+    )
 }
 
 #[derive(Debug)]

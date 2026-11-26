@@ -77,6 +77,7 @@ compares your installed version against the newest tag.
 gertie doctor          # checks config, endpoint, and key resolution; exit 0 = ready
 gertie                 # the desktop app
 gertie run "fix the flaky test in ci and explain why"   # one headless turn
+gertie eval memory     # scores each configured model on using memory (live calls)
 ```
 
 First launch writes a starter `~/.config/gertie/config.toml` with comments and pointers

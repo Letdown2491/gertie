@@ -80,9 +80,10 @@ reqwest = { package = "gpui-pre-reqwest", version = "0.12.15", default-features 
 # Format-preserving TOML editing: the settings panel writes the user's
 # config.toml without destroying their comments or unknown keys.
 toml_edit = "0.25"
+# `gertie eval`: one throwaway fixture repo per scenario.
+tempfile = "3"
 
 [dev-dependencies]
 # The headless UI harness: window.input()/press() to drive the real
 # widget tree without a display.
 gpui-kit = { version = "=0.11.0", features = ["test-support"] }
-tempfile = "3"

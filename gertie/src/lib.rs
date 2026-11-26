@@ -4,6 +4,7 @@ pub mod cli;
 pub mod config;
 pub mod diff;
 pub mod doctor;
+pub mod eval;
 pub mod headless;
 pub mod keymap;
 pub mod markdown;

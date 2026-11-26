@@ -393,6 +393,11 @@ dropped below its no-adaptation baseline, no consolidation may ever regenerate t
    Every file write passes `MemoryStore::normalize_edit`, so a model's headings, bullets,
    rewritten counters or invented hashes never reach the store as malformed entries. The
    `remember` tool is the preferred write path: a schema instead of a grammar.
+   Two checks keep it honest across models: `gertie doctor` lints both tiers (lines that do
+   not parse, prose, double-wrapped entries, duplicate ids, links to nothing, cited files that
+   are gone), and `gertie eval memory` runs live scenarios per configured endpoint in
+   throwaway repos (heed a recalled constraint, save one valid fact, supersede a changed one)
+   and prints one row per model with its tokens.
 2. **Session end**, extraction rides the two reliable boundaries: compaction (the digest is
    already built) and settle (the ✓ is the human's "done"; process exit is not reliable).
    Eligibility first: skip short and still-active sessions; flag sessions that ingested
