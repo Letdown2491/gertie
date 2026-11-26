@@ -673,6 +673,56 @@ impl Tool for EditFile {
     }
 }
 
+/// How long a finished command's pipes may stay open (a backgrounded
+/// child holding them) before bash returns what it has.
+const DRAIN_GRACE: std::time::Duration = std::time::Duration::from_millis(400);
+
+/// Bytes kept per pipe. Past it the drain keeps reading (so the child
+/// never blocks) and discards; `limit` cuts far below this anyway.
+const DRAIN_CAP: usize = 2 * 1024 * 1024;
+
+/// One pipe read to EOF on its own thread, into a shared buffer the
+/// caller can take from at any time, finished or not.
+struct Drain {
+    buffer: Arc<std::sync::Mutex<Vec<u8>>>,
+    done: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl Drain {
+    fn start(pipe: Option<impl std::io::Read + Send + 'static>) -> Self {
+        let buffer = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let done = Arc::new(std::sync::atomic::AtomicBool::new(pipe.is_none()));
+        if let Some(mut pipe) = pipe {
+            let (buffer, done) = (buffer.clone(), done.clone());
+            std::thread::spawn(move || {
+                let mut chunk = [0u8; 8192];
+                loop {
+                    match pipe.read(&mut chunk) {
+                        Ok(0) => break,
+                        Ok(n) => {
+                            let mut buffer = buffer.lock().unwrap();
+                            let room = DRAIN_CAP.saturating_sub(buffer.len());
+                            buffer.extend_from_slice(&chunk[..n.min(room)]);
+                        }
+                        Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
+                        Err(_) => break,
+                    }
+                }
+                done.store(true, std::sync::atomic::Ordering::SeqCst);
+            });
+        }
+        Self { buffer, done }
+    }
+
+    fn done(&self) -> bool {
+        self.done.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    fn text(&self) -> String {
+        String::from_utf8_lossy(&self.buffer.lock().unwrap()).into_owned()
+    }
+}
+
 impl Tool for Bash {
     fn name(&self) -> &'static str {
         "bash"
@@ -746,17 +796,28 @@ impl Tool for Bash {
                 command.spawn().map_err(|error| format!("bash: {error}"))?
             };
 
+            // Drain both pipes while the command runs: a child that
+            // writes more than the pipe buffer (64 KB) blocks until
+            // someone reads, so reading only after exit deadlocked
+            // every chatty command into a timeout.
+            let stdout = Drain::start(child.stdout.take());
+            let stderr = Drain::start(child.stderr.take());
+            let collect = |stdout: &Drain, stderr: &Drain| {
+                // A backgrounded grandchild can hold a pipe open past
+                // the shell's exit: wait briefly, then take what came.
+                let deadline = std::time::Instant::now() + DRAIN_GRACE;
+                while !(stdout.done() && stderr.done()) && std::time::Instant::now() < deadline {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                let mut output = stdout.text();
+                output.push_str(&stderr.text());
+                output
+            };
             let start = std::time::Instant::now();
             loop {
                 match child.try_wait() {
                     Ok(Some(status)) => {
-                        let mut output = String::new();
-                        if let Some(mut stdout) = child.stdout.take() {
-                            let _ = stdout.read_to_string(&mut output);
-                        }
-                        if let Some(mut stderr) = child.stderr.take() {
-                            let _ = stderr.read_to_string(&mut output);
-                        }
+                        let output = collect(&stdout, &stderr);
                         // Shape once, here: the model-visible string and
                         // the persisted string are the same string.
                         let summary = limit(shape::shape(&args.command, output.trim_end()));
@@ -778,7 +839,16 @@ impl Tool for Bash {
                     }
                     Ok(None) => {
                         kill_group(&mut child);
-                        return Err(format!("bash: timed out after {}s", timeout.as_secs()));
+                        let output = collect(&stdout, &stderr);
+                        let partial = limit(output.trim_end().to_string());
+                        return Err(if partial.is_empty() {
+                            format!("bash: timed out after {}s", timeout.as_secs())
+                        } else {
+                            format!(
+                                "bash: timed out after {}s, output so far:\n{partial}",
+                                timeout.as_secs()
+                            )
+                        });
                     }
                     Err(error) => return Err(format!("bash: {error}")),
                 }
@@ -1164,6 +1234,47 @@ mod tests {
         let tool = Bash::new(dir.path().into());
         let result = await_sync(tool.run(r#"{"command": "sleep 5", "timeout": 1}"#));
         assert!(result.unwrap_err().contains("timed out"));
+    }
+
+    #[test]
+    fn bash_drains_output_larger_than_the_pipe_buffer() {
+        // Either pipe overfilled blocks the child until someone reads:
+        // both must come back as answers, not timeouts.
+        let dir = workspace();
+        let tool = Bash::new(dir.path().into());
+        for target in ["", " >&2"] {
+            let command = format!("head -c 200000 /dev/zero | tr '\\0' x{target}");
+            let arguments = serde_json::json!({"command": command, "timeout": 5}).to_string();
+            let output = await_sync(tool.run(&arguments))
+                .unwrap_or_else(|error| panic!("{command}: {error}"));
+            assert!(
+                output.starts_with("xxxx"),
+                "{command}: {}",
+                &output[..output.len().min(80)]
+            );
+        }
+    }
+
+    #[test]
+    fn a_backgrounded_child_holding_the_pipe_does_not_hold_the_call() {
+        let dir = workspace();
+        let tool = Bash::new(dir.path().into());
+        let started = std::time::Instant::now();
+        let output =
+            await_sync(tool.run(r#"{"command": "sleep 20 & echo started", "timeout": 10}"#))
+                .expect("the shell exits at once");
+        assert!(output.contains("started"), "{output}");
+        assert!(started.elapsed() < std::time::Duration::from_secs(3));
+    }
+
+    #[test]
+    fn a_timed_out_command_returns_its_output_so_far() {
+        let dir = workspace();
+        let tool = Bash::new(dir.path().into());
+        let error = await_sync(tool.run(r#"{"command": "echo progress; sleep 20", "timeout": 1}"#))
+            .expect_err("the timeout fires");
+        assert!(error.contains("timed out"), "{error}");
+        assert!(error.contains("progress"), "{error}");
     }
 
     #[test]

@@ -217,10 +217,13 @@ setting). Fixed in the audit itself:
   an unsent draft and attachments. Such views are kept.
 - The permission broker kept an entry for every ask abandoned by a stopped turn. Each
   new ask prunes the dead ones.
+- bash read its pipes only after the command exited, so more than 64 KB of output
+  (the pipe buffer) blocked the command until the timeout. Both pipes now drain on
+  threads while it runs; a backgrounded child holding a pipe open gets a short grace,
+  and a timeout returns the output so far.
 - Dependencies: rusqlite 0.43 (libsqlite3-sys RUSTSEC-2026-0459), plus patch releases
   of url, heapless, rustix and async-executor. `cargo audit` reports no
   vulnerabilities; nine unmaintained warnings arrive through gpui and have no fix yet.
 
 Open, for later: a worker's ask is broadcast to every subscribed view, so it can show in
-another chat's transcript; bash output over 64 KB still deadlocks until the timeout
-until #3 lands (its drain threads fix it); chat.rs (8.5k lines) wants splitting.
+another chat's transcript; chat.rs (8.5k lines) wants splitting.
