@@ -111,6 +111,14 @@ pub fn action_label(name: &str, arguments: &str, running: bool) -> String {
                     format!("Asked you \u{201c}{question}\u{201d}"),
                 )
             }
+            "status" => {
+                let next = short(&field("next"), 96);
+                if next.is_empty() {
+                    tense("Noting the goal".into(), "Noted the goal".into())
+                } else {
+                    tense(format!("Next: {next}"), format!("Next: {next}"))
+                }
+            }
             other => {
                 let humanized = humanize_name(other);
                 tense(format!("Running {humanized}"), format!("Ran {humanized}"))

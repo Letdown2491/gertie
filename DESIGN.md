@@ -262,6 +262,11 @@ configured**) · `search_history` (native, FTS5 over our own session DB) · `mem
 `memory_20250818` command surface over both memory tiers, mutation audited to the index's
 own trail) · `search_memory` (FTS5 over the derived sidecar, ranked pointers).
 
+Beside them, two surfaces the UI answers rather than the world: `ask_user` (a question
+with clickable options, answered through the permission broker) and `status` (the model's
+stated goal and next step, shown in the status column; read-only, no card to approve, set
+when the plan changes rather than every turn).
+
 Explicitly out of v1: LSP, notebooks, native web browsing beyond fetch/search.
 
 **web_fetch dials the open web only**: a URL is judged as an address, not a string,

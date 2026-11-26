@@ -570,6 +570,12 @@ impl Bootstrap {
         map.insert("ask_user".into(), Arc::new(gertie_tools::AskUser));
         root_independent.push("ask_user".into());
 
+        // The status column's feed: the model states its goal and next
+        // step, the column shows them (issue #33). Read-only, it runs
+        // without a card and costs no extra request.
+        map.insert("status".into(), Arc::new(gertie_tools::Status));
+        root_independent.push("status".into());
+
         // MCP servers connect at startup; a server that won't start is a
         // status-line warning, never a failed launch, gertie's local
         // tools carry the session alone if needed.

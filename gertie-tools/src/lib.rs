@@ -312,6 +312,61 @@ impl Tool for AskUser {
     }
 }
 
+/// The status column's model-side surface: the model states its
+/// goal and its next step, the column shows them. Read-only and
+/// immediate, it rides a round the model was already making (no
+/// extra request); the arguments are the whole payload, the result
+/// only acknowledges. The description carries the discipline: set it
+/// when the plan changes, never as per-turn boilerplate.
+pub struct Status;
+
+impl Tool for Status {
+    fn name(&self) -> &'static str {
+        "status"
+    }
+
+    fn description(&self) -> String {
+        "State your current goal and next step for the status column \
+         beside the transcript. Call it when the goal sharpens or the \
+         next step changes, typically at the start of multi-step work \
+         and when the plan shifts, never as per-turn boilerplate. \
+         Both fields are short: the goal one sentence, the next step \
+         a phrase. Omit a field to keep what you said before."
+            .into()
+    }
+
+    fn parameters(&self) -> serde_json::Value {
+        serde_json::json!({
+            "type": "object",
+            "properties": {
+                "goal": {"type": "string", "description": "what this work is for, one sentence"},
+                "next": {"type": "string", "description": "the next concrete step, a short phrase"}
+            }
+        })
+    }
+
+    fn run<'a>(
+        &'a self,
+        arguments: &'a str,
+    ) -> std::pin::Pin<Box<dyn Future<Output = ToolResult> + Send + 'a>> {
+        let arguments = arguments.to_string();
+        Box::pin(async move {
+            let parsed: serde_json::Value = serde_json::from_str(&arguments)
+                .map_err(|error| format!("status: bad arguments ({error})"))?;
+            let has = |key: &str| {
+                parsed
+                    .get(key)
+                    .and_then(|value| value.as_str())
+                    .is_some_and(|text| !text.trim().is_empty())
+            };
+            if !has("goal") && !has("next") {
+                return Err("status: give a goal, a next step, or both".into());
+            }
+            Ok("status noted".into())
+        })
+    }
+}
+
 pub struct ReadFile {
     root: PathBuf,
 }
