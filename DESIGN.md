@@ -308,6 +308,20 @@ into by accident.
 
 ## Memory
 
+**Entry states (the validity lattice)**: an entry is `current` (no
+valid_until), `superseded` (a named successor exists in superseded_by),
+or `archived` (retired by the dream pass or the correction walk, reason
+in the line). There is no other state and no time-based retirement:
+entries leave `current` only by an explicit act (supersede, archive),
+never by age.
+
+**The tie-break**: when two entries state the same fact, the newest
+wins — new information beats old by definition, and a genuine conflict
+is resolved by superseding the loser (which records the replacement),
+not by leaving both current. When retrieval surfaces both, the result
+labels the relationship rather than hiding it.
+
+
 Long-term memory is plain markdown plus a derived SQLite index. The field's convergent
 answer is files, Letta's filesystem agent beat specialized memory tools on LoCoMo, every
 first-party agent (Claude Code, Devin, Codex, Gemini CLI, Cline) landed on markdown, and
