@@ -131,52 +131,52 @@ fn fixture_full(
                     )
                 });
                 ChatView::new(
-                    store.clone(),
-                    provider,
-                    snapshots.clone(),
-                    merge_tools(
-                        extra_tools.clone(),
-                        workspace.as_deref().unwrap_or(Path::new(".")),
-                    ),
-                    "no endpoint configured".into(),
-                    None,
-                    None,
-                    None,
-                    false,
-                    memory.clone(),
-                    None,
-                    None,
-                    None,
-                    Vec::new(),
-                    root.clone(),
-                    settle_command,
-                    broker.unwrap_or_else(|| Arc::new(gertie_core::PermissionBroker::new())),
-                    gertie_core::SessionScope::new(),
-                    gertie_core::ModeScope::new(),
-                    false,
-                    gertie_core::PermissionMode::Supervised,
-                    panel,
-                    true,
-                    naming,
-                    guard.clone(),
-                    // The switch, fixture-grade: the same rebuild the
-                    // bootstrap would answer with, over the fixture's
-                    // own tools.
-                    Arc::new(move |root: &Path| {
-                        Ok(gertie::bootstrap::Switched {
-                            tools: merge_tools(extra_tools.clone(), root),
-                            system_prompt: None,
-                            instructions: None,
-                            memory_index: None,
-                            memory: None,
-                            memory_extract_provider: None,
-                            workspace_root: root.to_path_buf(),
-                            templates: Vec::new(),
-                            sandbox_bash: false,
-                            warnings: Vec::new(),
-                        })
-                    }),
-                    None,
+                    gertie::chat::ChatViewConfig {
+                        store: store.clone(),
+                        provider: provider,
+                        snapshots: snapshots.clone(),
+                        tools: merge_tools(
+                            extra_tools.clone(),
+                            workspace.as_deref().unwrap_or(Path::new(".")),
+                        ),
+                        endpoint_label: "no endpoint configured".into(),
+                        system_prompt: None,
+                        instructions: None,
+                        memory_index: None,
+                        memory_enabled: false,
+                        memory_store: memory.clone(),
+                        memory_extract_provider: None,
+                        max_tool_rounds: None,
+                        grace_rounds: None,
+                        templates: Vec::new(),
+                        workspace_root: root.clone(),
+                        settle_command: settle_command,
+                        broker: broker
+                            .unwrap_or_else(|| Arc::new(gertie_core::PermissionBroker::new())),
+                        session_scope: gertie_core::SessionScope::new(),
+                        mode_scope: gertie_core::ModeScope::new(),
+                        sandbox_bash: false,
+                        default_mode: gertie_core::PermissionMode::Supervised,
+                        settings_panel: panel,
+                        resume: true,
+                        branch_naming: naming,
+                        live_elsewhere: guard.clone(),
+                        switch: Arc::new(move |root: &Path| {
+                            Ok(gertie::bootstrap::Switched {
+                                tools: merge_tools(extra_tools.clone(), root),
+                                system_prompt: None,
+                                instructions: None,
+                                memory_index: None,
+                                memory: None,
+                                memory_extract_provider: None,
+                                workspace_root: root.to_path_buf(),
+                                templates: Vec::new(),
+                                sandbox_bash: false,
+                                warnings: Vec::new(),
+                            })
+                        }),
+                        session_router: None,
+                    },
                     window,
                     cx,
                 )
@@ -1223,46 +1223,48 @@ fn markdown_and_tool_rows_draw_clean() {
                     )
                 });
                 ChatView::new(
-                    store.clone(),
-                    None,
-                    None,
-                    gertie_tools::builtin_tools(Path::new(".")),
-                    "no endpoint configured".into(),
-                    None,
-                    None,
-                    None,
-                    false,
-                    None,
-                    None,
-                    None,
-                    None,
-                    Vec::new(),
-                    Path::new(".").to_path_buf(),
-                    None,
-                    Arc::new(gertie_core::PermissionBroker::new()),
-                    gertie_core::SessionScope::new(),
-                    gertie_core::ModeScope::new(),
-                    false,
-                    gertie_core::PermissionMode::Supervised,
-                    panel,
-                    true,
-                    None,
-                    guard.clone(),
-                    Arc::new(|root: &Path| {
-                        Ok(gertie::bootstrap::Switched {
-                            tools: gertie_tools::builtin_tools(root),
-                            system_prompt: None,
-                            instructions: None,
-                            memory_index: None,
-                            memory: None,
-                            memory_extract_provider: None,
-                            workspace_root: root.to_path_buf(),
-                            templates: Vec::new(),
-                            sandbox_bash: false,
-                            warnings: Vec::new(),
-                        })
-                    }),
-                    None,
+                    gertie::chat::ChatViewConfig {
+                        store: store.clone(),
+                        provider: None,
+                        snapshots: None,
+                        tools: gertie_tools::builtin_tools(Path::new(".")),
+                        endpoint_label: "no endpoint configured".into(),
+                        system_prompt: None,
+                        instructions: None,
+                        memory_index: None,
+                        memory_enabled: false,
+                        memory_store: None,
+                        memory_extract_provider: None,
+                        max_tool_rounds: None,
+                        grace_rounds: None,
+                        templates: Vec::new(),
+                        workspace_root: Path::new(".").to_path_buf(),
+                        settle_command: None,
+                        broker: Arc::new(gertie_core::PermissionBroker::new()),
+                        session_scope: gertie_core::SessionScope::new(),
+                        mode_scope: gertie_core::ModeScope::new(),
+                        sandbox_bash: false,
+                        default_mode: gertie_core::PermissionMode::Supervised,
+                        settings_panel: panel,
+                        resume: true,
+                        branch_naming: None,
+                        live_elsewhere: guard.clone(),
+                        switch: Arc::new(|root: &Path| {
+                            Ok(gertie::bootstrap::Switched {
+                                tools: gertie_tools::builtin_tools(root),
+                                system_prompt: None,
+                                instructions: None,
+                                memory_index: None,
+                                memory: None,
+                                memory_extract_provider: None,
+                                workspace_root: root.to_path_buf(),
+                                templates: Vec::new(),
+                                sandbox_bash: false,
+                                warnings: Vec::new(),
+                            })
+                        }),
+                        session_router: None,
+                    },
                     window,
                     cx,
                 )
@@ -1974,6 +1976,31 @@ fn pump(fixture: &mut Fixture, passes: usize) {
     }
 }
 
+/// Pumps until a condition holds (or the pass budget runs out, at
+/// which point the test's own assert fails with a real message). The
+/// fixed-count pump was the audit's flake: a cold cache makes the
+/// real-thread work slower than a tuned pass count, and a test that
+/// needs exactly N passes fails on the first run after a build.
+/// Condition-pumping makes the count a deadline, not a requirement.
+fn pump_until(
+    fixture: &mut Fixture,
+    passes: usize,
+    ready: impl Fn(&mut Fixture) -> bool,
+    what: &'static str,
+) {
+    for _ in 0..passes {
+        if ready(fixture) {
+            return;
+        }
+        fixture
+            .cx
+            .background_executor
+            .advance_clock(std::time::Duration::from_millis(5));
+        settle(&mut fixture.cx, fixture.window.into());
+    }
+    panic!("pump_until: {what} never settled within {passes} passes");
+}
+
 #[test]
 fn a_worker_ask_bubbles_into_the_transcript_and_the_answer_reaches_the_worker() {
     // The scripted leader turn: one call to the test's worker-ask tool,
@@ -2459,46 +2486,48 @@ fn the_footer_and_the_sidebar_foot_stay_inside_the_window() {
                     )
                 });
                 ChatView::new(
-                    store.clone(),
-                    None,
-                    None,
-                    gertie_tools::builtin_tools(Path::new(".")),
-                    "no endpoint configured".into(),
-                    None,
-                    None,
-                    None,
-                    false,
-                    None,
-                    None,
-                    None,
-                    None,
-                    Vec::new(),
-                    Path::new(".").to_path_buf(),
-                    None,
-                    Arc::new(gertie_core::PermissionBroker::new()),
-                    gertie_core::SessionScope::new(),
-                    gertie_core::ModeScope::new(),
-                    false,
-                    gertie_core::PermissionMode::Supervised,
-                    panel,
-                    true,
-                    None,
-                    guard.clone(),
-                    Arc::new(|root: &Path| {
-                        Ok(gertie::bootstrap::Switched {
-                            tools: gertie_tools::builtin_tools(root),
-                            system_prompt: None,
-                            instructions: None,
-                            memory_index: None,
-                            memory: None,
-                            memory_extract_provider: None,
-                            workspace_root: root.to_path_buf(),
-                            templates: Vec::new(),
-                            sandbox_bash: false,
-                            warnings: Vec::new(),
-                        })
-                    }),
-                    None,
+                    gertie::chat::ChatViewConfig {
+                        store: store.clone(),
+                        provider: None,
+                        snapshots: None,
+                        tools: gertie_tools::builtin_tools(Path::new(".")),
+                        endpoint_label: "no endpoint configured".into(),
+                        system_prompt: None,
+                        instructions: None,
+                        memory_index: None,
+                        memory_enabled: false,
+                        memory_store: None,
+                        memory_extract_provider: None,
+                        max_tool_rounds: None,
+                        grace_rounds: None,
+                        templates: Vec::new(),
+                        workspace_root: Path::new(".").to_path_buf(),
+                        settle_command: None,
+                        broker: Arc::new(gertie_core::PermissionBroker::new()),
+                        session_scope: gertie_core::SessionScope::new(),
+                        mode_scope: gertie_core::ModeScope::new(),
+                        sandbox_bash: false,
+                        default_mode: gertie_core::PermissionMode::Supervised,
+                        settings_panel: panel,
+                        resume: true,
+                        branch_naming: None,
+                        live_elsewhere: guard.clone(),
+                        switch: Arc::new(|root: &Path| {
+                            Ok(gertie::bootstrap::Switched {
+                                tools: gertie_tools::builtin_tools(root),
+                                system_prompt: None,
+                                instructions: None,
+                                memory_index: None,
+                                memory: None,
+                                memory_extract_provider: None,
+                                workspace_root: root.to_path_buf(),
+                                templates: Vec::new(),
+                                sandbox_bash: false,
+                                warnings: Vec::new(),
+                            })
+                        }),
+                        session_router: None,
+                    },
                     window,
                     cx,
                 )
@@ -3640,9 +3669,43 @@ fn the_guard_refuses_a_file_restore_while_another_tab_streams() {
         window.input("go", cx);
         window.press("enter", cx);
     });
-    pump(&mut fixture, 30);
+    // The approval lands, then the turn runs to its done state. Both
+    // waits pump-until (the audit's flake: a cold cache made the
+    // fixed counts fail on first run).
+    // The pending write card: pump until an approve-* button exists
+    // in the tree (any index). Indexing by a literal is the old
+    // flake's other half.
+    let card_up = std::cell::Cell::new(false);
+    pump_until(
+        &mut fixture,
+        40,
+        |fixture| {
+            fixture.act(|window, _| {
+                card_up.set((0..8).any(|i| {
+                    window
+                        .try_find(gpui_kit::ElementId::from(format!("approve-{i}")))
+                        .is_some()
+                }));
+            });
+            card_up.get()
+        },
+        "the write card pends",
+    );
     fixture.act(|window, cx| window.click("approve-1", cx));
-    pump(&mut fixture, 40);
+    pump_until(
+        &mut fixture,
+        60,
+        |fixture| {
+            !fixture.cx.update(|cx| {
+                fixture
+                    .view
+                    .upgrade()
+                    .map(|view| view.read(cx).is_streaming())
+                    .unwrap_or(true)
+            })
+        },
+        "the turn done after approval",
+    );
 
     // Files restore: refused, nothing touched.
     fixture.act(|window, cx| window.click("rewind-0", cx));

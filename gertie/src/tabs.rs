@@ -16,7 +16,7 @@
 // The internals keep the old "tab" names: one TabState per open view.
 
 use crate::bootstrap::Bootstrap;
-use crate::chat::{ChatView, ChatViewEvent, SessionMark, ShellRequest};
+use crate::chat::{ChatView, ChatViewConfig, ChatViewEvent, SessionMark, ShellRequest};
 use gpui_kit::component::ActiveTheme as _;
 use gpui_kit::component::v_flex;
 use gpui_kit::prelude::*;
@@ -318,33 +318,35 @@ impl WorkspaceView {
         let router = Self::session_router(cx);
         let view = cx.new(|cx| {
             ChatView::new(
-                self.boot.store.clone(),
-                self.boot.provider(),
-                self.boot.snapshots.clone(),
-                tools,
-                self.boot.model_label(),
-                system_prompt,
-                instructions,
-                memory_index,
-                memory_enabled,
-                memory,
-                memory_extract_provider,
-                self.boot.max_tool_rounds(),
-                self.boot.grace_rounds(),
-                self.boot.templates.clone(),
-                self.boot.workspace_root.clone(),
-                self.boot.settle_command(),
-                self.boot.broker.clone(),
-                self.boot.session_scope.clone(),
-                self.boot.mode_scope.clone(),
-                self.boot.sandbox_bash,
-                self.boot.default_mode,
-                panel,
-                first,
-                naming,
-                guard,
-                switch,
-                Some(router),
+                ChatViewConfig {
+                    store: self.boot.store.clone(),
+                    provider: self.boot.provider(),
+                    snapshots: self.boot.snapshots.clone(),
+                    tools,
+                    endpoint_label: self.boot.model_label(),
+                    system_prompt,
+                    instructions,
+                    memory_index,
+                    memory_enabled,
+                    memory_store: memory,
+                    memory_extract_provider,
+                    max_tool_rounds: self.boot.max_tool_rounds(),
+                    grace_rounds: self.boot.grace_rounds(),
+                    templates: self.boot.templates.clone(),
+                    workspace_root: self.boot.workspace_root.clone(),
+                    settle_command: self.boot.settle_command(),
+                    broker: self.boot.broker.clone(),
+                    session_scope: self.boot.session_scope.clone(),
+                    mode_scope: self.boot.mode_scope.clone(),
+                    sandbox_bash: self.boot.sandbox_bash,
+                    default_mode: self.boot.default_mode,
+                    settings_panel: panel,
+                    resume: first,
+                    branch_naming: naming,
+                    live_elsewhere: guard,
+                    switch,
+                    session_router: Some(router),
+                },
                 window,
                 cx,
             )

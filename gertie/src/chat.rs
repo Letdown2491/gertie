@@ -1,6 +1,12 @@
 //! The M2 chat: session sidebar + transcript + the agent loop, with tool
 //! cards that gate mutating calls behind approve/deny.
 
+pub mod aux;
+
+pub use aux::{
+    MentionMatch, human_tokens, mention_matches, mention_matches_for_test, mode_menu_rows, tildify,
+};
+
 use crate::bootstrap::Reloaded;
 use crate::settings_edit::{SettingsEvent, SettingsPanelView};
 use futures_util::StreamExt as _;
@@ -673,62 +679,97 @@ pub struct ChatView {
     stream_notify: Option<std::time::Instant>,
 }
 
+/// Everything ChatView::new needs besides the window and its
+/// context. Built once per view by the only builder (tabs.rs),
+/// so the 27-argument constructor becomes one struct and a
+/// change anywhere touches one shape.
+#[derive(Clone)]
+pub struct ChatViewConfig {
+    pub store: Arc<SessionStore>,
+    pub provider: Option<Arc<AnyProvider>>,
+    pub snapshots: Option<Arc<SnapshotStore>>,
+    pub tools: ToolRegistry,
+    pub endpoint_label: String,
+    pub system_prompt: Option<String>,
+    pub instructions: Option<String>,
+    pub memory_index: Option<String>,
+    pub memory_enabled: bool,
+    pub memory_store: Option<Arc<gertie_core::MemoryStore>>,
+    pub memory_extract_provider: Option<Arc<dyn gertie_core::Provider>>,
+    pub max_tool_rounds: Option<usize>,
+    pub grace_rounds: Option<usize>,
+    pub templates: Vec<gertie_tools::templates::Template>,
+    // The folder the agent's tools run in, shown in the footer.
+    pub workspace_root: std::path::PathBuf,
+    // The reclaim command a manual settle runs in the settling
+    // session's recorded workspace (config: settle_command).
+    pub settle_command: Option<String>,
+    pub broker: Arc<PermissionBroker>,
+    pub session_scope: gertie_core::SessionScope,
+    // Worker dispatch reads this turn's posture; the chat sets it
+    // at every turn start.
+    pub mode_scope: gertie_core::ModeScope,
+    // Whether bash runs inside the Landlock sandbox (config),
+    // the auto mode's bash approval keys off it.
+    pub sandbox_bash: bool,
+    // The mode new sessions open in ([permissions] default_mode).
+    pub default_mode: gertie_core::PermissionMode,
+    // The settings editor over the live config.
+    pub settings_panel: Entity<SettingsPanelView>,
+    // Resume the newest stored session (window open), or start
+    // blank (a new tab, two views on one session would diverge).
+    pub resume: bool,
+    // The worktree branch naming, when this chat works in its own
+    // worktree: the branch is renamed from the session's first
+    // message. None = a shared-workspace tab (nothing to rename).
+    pub branch_naming: Option<crate::worktree::BranchNaming>,
+    // The rewind safety guard, built by the workspace: refuses a
+    // file restore while another tab streams in the same checkout.
+    pub live_elsewhere: LiveElsewhere,
+    // The workspace switch, built by the workspace (see the type):
+    // the footer's word asks it, the chat applies the answer.
+    pub switch: SwitchWorkspace,
+    // The sidebar's routing hook (tabs.rs): a cross-workspace
+    // session click lands in the tab that owns that workspace.
+    // None = local switch only (tests, headless).
+    pub session_router: Option<SessionRouter>,
+}
+
 impl ChatView {
     /// The constructor is UI-wiring, not an abstraction boundary; every
     /// argument is a genuine dependency of the view.
     #[allow(clippy::too_many_arguments)]
-    pub fn new(
-        store: Arc<SessionStore>,
-        provider: Option<Arc<AnyProvider>>,
-        snapshots: Option<Arc<SnapshotStore>>,
-        tools: ToolRegistry,
-        endpoint_label: String,
-        system_prompt: Option<String>,
-        instructions: Option<String>,
-        memory_index: Option<String>,
-        memory_enabled: bool,
-        memory_store: Option<Arc<gertie_core::MemoryStore>>,
-        memory_extract_provider: Option<Arc<dyn gertie_core::Provider>>,
-        max_tool_rounds: Option<usize>,
-        grace_rounds: Option<usize>,
-        templates: Vec<gertie_tools::templates::Template>,
-        // The folder the agent's tools run in, shown in the footer.
-        workspace_root: std::path::PathBuf,
-        // The reclaim command a manual settle runs in the settling
-        // session's recorded workspace (config: settle_command).
-        settle_command: Option<String>,
-        broker: Arc<PermissionBroker>,
-        session_scope: gertie_core::SessionScope,
-        // Worker dispatch reads this turn's posture; the chat sets it
-        // at every turn start.
-        mode_scope: gertie_core::ModeScope,
-        // Whether bash runs inside the Landlock sandbox (config),
-        // the auto mode's bash approval keys off it.
-        sandbox_bash: bool,
-        // The mode new sessions open in ([permissions] default_mode).
-        default_mode: gertie_core::PermissionMode,
-        // The settings editor over the live config.
-        settings_panel: Entity<SettingsPanelView>,
-        // Resume the newest stored session (window open), or start
-        // blank (a new tab, two views on one session would diverge).
-        resume: bool,
-        // The worktree branch naming, when this chat works in its own
-        // worktree: the branch is renamed from the session's first
-        // message. None = a shared-workspace tab (nothing to rename).
-        branch_naming: Option<crate::worktree::BranchNaming>,
-        // The rewind safety guard, built by the workspace: refuses a
-        // file restore while another tab streams in the same checkout.
-        live_elsewhere: LiveElsewhere,
-        // The workspace switch, built by the workspace (see the type):
-        // the footer's word asks it, the chat applies the answer.
-        switch: SwitchWorkspace,
-        // The sidebar's routing hook (tabs.rs): a cross-workspace
-        // session click lands in the tab that owns that workspace.
-        // None = local switch only (tests, headless).
-        session_router: Option<SessionRouter>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Self {
+    pub fn new(config: ChatViewConfig, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let ChatViewConfig {
+            store,
+            provider,
+            snapshots,
+            tools,
+            endpoint_label,
+            system_prompt,
+            instructions,
+            memory_index,
+            memory_enabled,
+            memory_store,
+            memory_extract_provider,
+            max_tool_rounds,
+            grace_rounds,
+            templates,
+            workspace_root,
+            settle_command,
+            broker,
+            session_scope,
+            mode_scope,
+            sandbox_bash,
+            default_mode,
+            settings_panel,
+            resume,
+            branch_naming,
+            live_elsewhere,
+            switch,
+            session_router,
+        } = config;
+
         // The composer is a multi-line text area: Enter sends,
         // Shift+Enter is a newline (long prompts, pasted snippets).
         // One row at rest, growing with content up to a cap, a tall
@@ -8157,23 +8198,6 @@ fn display_text(text: &str) -> String {
     }
 }
 
-/// `/home/martin/x/y` → `~/x/y`, the footer's folder stays short. No
-/// `HOME`, or a path outside it: printed whole.
-fn tildify(path: &std::path::Path) -> String {
-    let home = std::env::var("HOME").ok().filter(|home| !home.is_empty());
-    match home {
-        Some(home) if path.starts_with(&home) => {
-            let tail = path.strip_prefix(&home).unwrap_or(path);
-            if tail.as_os_str().is_empty() {
-                "~".into()
-            } else {
-                format!("~/{}", tail.display())
-            }
-        }
-        _ => path.display().to_string(),
-    }
-}
-
 /// Whether a session's stored root and a tab's root are the same
 /// folder. Canonical compare when both resolve (symlinks, `..`
 /// segments, bind mounts); a folder that no longer exists falls back
@@ -8211,111 +8235,6 @@ enum SlashMatch {
 pub fn popup_token_for_test(value: &str) -> Option<String> {
     let trimmed = value.trim_end_matches('\n');
     trimmed.rfind('@').map(|at| trimmed[at..].to_string())
-}
-
-/// The @-mention matcher, exposed for tests (doc'ed, not hidden: the
-/// integration tests reach it through the crate's public surface).
-pub fn mention_matches_for_test(input: &str, root: &std::path::Path) -> Vec<MentionMatch> {
-    mention_matches(input, root)
-}
-
-/// One row of the @-mention popup: a workspace file the picker offers.
-#[derive(Debug, Clone)]
-pub struct MentionMatch {
-    /// Path relative to the workspace root, what the agent reads by.
-    pub path: String,
-    /// The trailing `@query` token to erase on acceptance.
-    pub token: String,
-}
-
-/// The @-mention's candidate list: files under the workspace root
-/// whose relative path contains the query, directory scratch
-/// (.git, target, node_modules, .gertie) excluded, capped so a big
-/// repo renders a popup, not a novel. The bare `@` lists nothing
-/// until a character narrows it: with thousands of files the first
-/// keystroke should already mean something.
-fn mention_matches(input: &str, root: &std::path::Path) -> Vec<MentionMatch> {
-    // The token: an `@` that starts the input or follows whitespace,
-    // up to the caret (the input state's value is all we see; the
-    // token is the whole trailing `@...` run, mentions are typed at
-    // the end like slash commands).
-    let input = input.trim_end_matches('\n');
-    let Some(at) = input.rfind('@') else {
-        return Vec::new();
-    };
-    let at_line_start = at == 0
-        || input[..at]
-            .chars()
-            .last()
-            .is_some_and(|c| c.is_whitespace());
-    if !at_line_start {
-        return Vec::new();
-    }
-    let query = &input[at + 1..];
-    // A query with spaces is a sentence again, not a mention.
-    if query.is_empty() || query.chars().any(char::is_whitespace) {
-        return Vec::new();
-    }
-    let token = input[at..].to_string();
-    // The walk's budget in directory entries: a repo with a vendored
-    // tree or a data directory is millions of entries, and the popup
-    // owes an answer now, not a complete one.
-    const MAX_VISITED: usize = 50_000;
-    let mut visited = 0usize;
-    let mut files = Vec::new();
-    let mut stack = vec![root.to_path_buf()];
-    while let Some(dir) = stack.pop() {
-        let Ok(read) = std::fs::read_dir(&dir) else {
-            continue;
-        };
-        for entry in read.flatten() {
-            visited += 1;
-            if visited > MAX_VISITED {
-                stack.clear();
-                break;
-            }
-            let path = entry.path();
-            let Ok(file_type) = entry.file_type() else {
-                continue;
-            };
-            let name = entry.file_name().to_string_lossy().into_owned();
-            if file_type.is_dir() {
-                if matches!(
-                    name.as_str(),
-                    ".git" | ".gertie" | "target" | "node_modules" | "dist"
-                ) {
-                    continue;
-                }
-                stack.push(path);
-                continue;
-            }
-            let relative = path
-                .strip_prefix(root)
-                .map(|p| p.to_string_lossy().into_owned())
-                .unwrap_or(name.clone());
-            if !relative.contains(query) {
-                continue;
-            }
-            files.push(relative);
-            if files.len() >= 64 {
-                return files
-                    .into_iter()
-                    .map(|path| MentionMatch {
-                        path,
-                        token: token.clone(),
-                    })
-                    .collect();
-            }
-        }
-    }
-    files.sort();
-    files
-        .into_iter()
-        .map(|path| MentionMatch {
-            path,
-            token: token.clone(),
-        })
-        .collect()
 }
 
 /// A tool card's parsed face, memoized per turn index: the label in
@@ -8380,44 +8299,8 @@ fn slash_matches(input: &str, templates: &[gertie_tools::templates::Template]) -
     matches
 }
 
-/// `1234` → "1.2k", token counts stay scannable: one decimal below
-/// 100k (`12.3k`), whole k above (`123k`).
-fn human_tokens(count: u64) -> String {
-    if count >= 1_000_000 {
-        format!("{:.1}M", count as f64 / 1_000_000.)
-    } else if count >= 100_000 {
-        format!("{:.0}k", count as f64 / 1000.)
-    } else if count >= 1_000 {
-        format!("{:.1}k", count as f64 / 1000.)
-    } else {
-        format!("{count}")
-    }
-}
-
 /// The mode menu's rows: the four postures with their one-line
 /// meanings, in escalation order. The current mode is marked; the
-/// full-access row routes through the confirm card (pick_mode), so
-/// the menu names the dangerous choice without dropping its gate.
-fn mode_menu_rows(current: PermissionMode) -> Vec<(PermissionMode, &'static str, bool)> {
-    use PermissionMode::*;
-    [
-        (Supervised, "everything asks", current == Supervised),
-        (
-            AcceptEdits,
-            "edits run unasked, bash asks",
-            current == AcceptEdits,
-        ),
-        (
-            Auto,
-            "edits and sandboxed bash run unasked",
-            current == Auto,
-        ),
-        (FullAccess, "nothing asks, ever", current == FullAccess),
-    ]
-    .into_iter()
-    .collect()
-}
-
 /// The gertie mark, rendered from the launcher icon's SVG.
 static LOGO: std::sync::LazyLock<Arc<gpui_kit::Image>> = std::sync::LazyLock::new(|| {
     Arc::new(gpui_kit::Image::from_bytes(
