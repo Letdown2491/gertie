@@ -523,6 +523,39 @@ fn the_gauge_names_the_compaction_before_it_happens() {
     );
 }
 
+/// /compact on an idle session: the gauge drops to the compacted size
+/// (it showed the last request's 400k until the next request), and no
+/// run clock starts, because nothing runs.
+#[test]
+fn compact_shrinks_the_gauge_and_starts_no_run() {
+    let mut fixture = fixture();
+    fixture.cx.update(|cx| {
+        let view = fixture.view.upgrade().expect("view alive");
+        view.update(cx, |chat, cx| {
+            chat.set_context_for_test(Some(200_000), 190_000, cx);
+            chat.fill_history_for_test(200, 4_000);
+            chat.compact_for_test(cx);
+        });
+    });
+    fixture.cx.run_until_parked();
+    let (line, running, turns) = fixture.cx.update(|cx| {
+        let view = fixture.view.upgrade().expect("view alive");
+        let chat = view.read(cx);
+        (
+            chat.gauge_line_for_test(),
+            chat.run_clock_running_for_test(),
+            chat.turn_count_for_test(),
+        )
+    });
+    assert!(
+        !line.contains("190k"),
+        "the gauge still shows the old size: {line}"
+    );
+    assert!(!line.contains("next compaction"), "{line}");
+    assert!(!running, "an idle /compact started the run clock");
+    assert!(turns >= 1, "the compaction note is in the transcript");
+}
+
 #[test]
 fn find_walks_the_transcript_and_escape_hands_focus_back() {
     let mut fixture = fixture();

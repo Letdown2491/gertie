@@ -973,7 +973,7 @@ fn compact_in_place(current: &mut Vec<WireMessage>, budget_chars: usize) -> Opti
 
 /// chars/4: the boring token estimate, used only when the provider
 /// hasn't reported usage yet.
-fn estimate_tokens(history: &[WireMessage]) -> u64 {
+pub fn estimate_tokens(history: &[WireMessage]) -> u64 {
     let chars: usize = history
         .iter()
         .map(|message| {

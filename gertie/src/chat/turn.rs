@@ -561,7 +561,11 @@ impl ChatView {
         if let Some(session_id) = session_id {
             self.maybe_extract(session_id, cx);
         }
-        self.set_activity("Compacting context…");
+        // Mid-run (the loop's own compaction) the activity row says so;
+        // an idle /compact must not start the run clock, nothing runs.
+        if self.streaming {
+            self.set_activity("Context compacted");
+        }
         self.turns.push(Turn::Message {
             role: Role::System,
             text: format!(

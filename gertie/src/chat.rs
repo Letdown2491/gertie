@@ -1442,6 +1442,32 @@ impl ChatView {
         })
     }
 
+    /// Fills the in-memory history with `pairs` user/assistant pairs
+    /// of `chars` characters each, for tests (what /compact selects from).
+    pub fn fill_history_for_test(&mut self, pairs: usize, chars: usize) {
+        let mut history = self.history.blocking_lock();
+        for index in 0..pairs {
+            history.push(gertie_core::request::WireMessage::user(&format!(
+                "question {index} {}",
+                "q".repeat(chars)
+            )));
+            history.push(gertie_core::request::WireMessage::assistant(&format!(
+                "answer {index} {}",
+                "a".repeat(chars)
+            )));
+        }
+    }
+
+    /// `/compact`, for tests.
+    pub fn compact_for_test(&mut self, cx: &mut Context<Self>) {
+        self.compact_now(cx);
+    }
+
+    /// Whether a run clock is going, for tests.
+    pub fn run_clock_running_for_test(&self) -> bool {
+        self.run_started.is_some()
+    }
+
     /// The status line's words, for tests.
     pub fn activity_line_for_test(&self) -> String {
         self.activity_line()
@@ -4318,11 +4344,15 @@ impl ChatView {
         }
         let budget = gertie_core::agent_loop::compaction_budget(self.context_window);
         cx.spawn(async move |this, cx| {
-            let result = gertie_core::agent_loop::compact_history(history, budget).await;
+            let result = gertie_core::agent_loop::compact_history(history.clone(), budget).await;
+            // The gauge shows the last request's size, which describes
+            // the history before compaction until the next request goes
+            // out: re-estimate from what the next request will carry.
+            let estimate = gertie_core::agent_loop::estimate_tokens(&history.lock().await);
             let _ = this.update(cx, |this, cx| match result {
                 Some((kept, total)) => {
+                    this.context_used = estimate;
                     this.on_compacted(kept, total, cx);
-                    this.set_activity("Context compacted");
                 }
                 None => this.push_notice("Nothing to compact, history is small.", cx),
             });
