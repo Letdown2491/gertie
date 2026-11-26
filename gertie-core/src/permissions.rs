@@ -161,17 +161,18 @@ impl PermissionMode {
     /// Whether this mode settles a mutating-tool ask without the
     /// broker. `checkpointed`, the checkpoint hook will snapshot
     /// what the call touches, so the change is reversible;
-    /// `sandboxed_bash`, the process runs bash inside the Landlock
-    /// sandbox; `third_party`, an MCP tool, whose side effects
-    /// gertie cannot vouch for. The reversibility argument only
-    /// covers gertie's own tools: a third-party tool's notion of a
-    /// "path" is its own, so accept-edits and auto never pre-approve
-    /// one, every mode short of full_access asks.
-    pub fn auto_allows(&self, checkpointed: bool, sandboxed_bash: bool, third_party: bool) -> bool {
+    /// `contained`, this exact call is bash running inside the
+    /// Landlock sandbox (a per-call fact: the sandbox contains bash,
+    /// not whatever else the turn does); `third_party`, an MCP tool,
+    /// whose side effects gertie cannot vouch for. The reversibility
+    /// and containment arguments only cover gertie's own tools: a
+    /// third-party tool's notion of a "path" is its own, so neither
+    /// ever pre-approves one, every mode short of full_access asks.
+    pub fn auto_allows(&self, checkpointed: bool, contained: bool, third_party: bool) -> bool {
         match self {
             PermissionMode::Supervised => false,
             PermissionMode::AcceptEdits => checkpointed && !third_party,
-            PermissionMode::Auto => (checkpointed && !third_party) || sandboxed_bash,
+            PermissionMode::Auto => (checkpointed || contained) && !third_party,
             PermissionMode::FullAccess => true,
         }
     }
@@ -231,6 +232,31 @@ impl ModeScope {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Auto's containment argument is per-call: true means this exact
+    /// call is bash inside the Landlock sandbox. Containment never
+    /// extends the auto-approval to third-party code, whose side
+    /// effects and path notions gertie cannot vouch for: a
+    /// sandbox-looking turn must not wave an MCP tool through.
+    #[test]
+    fn auto_never_pre_approves_third_party_even_contained() {
+        let auto = PermissionMode::Auto;
+        assert!(
+            !auto.auto_allows(false, true, true),
+            "the QA finding: a turn-wide sandbox flag waved MCP tools through"
+        );
+        assert!(!auto.auto_allows(true, true, true));
+        // Contained bash and checkpointed own tools still pre-approve.
+        assert!(auto.auto_allows(false, true, false));
+        assert!(auto.auto_allows(true, false, false));
+        // Accept-edits: checkpointed own tools only, containment adds
+        // nothing there.
+        assert!(!PermissionMode::AcceptEdits.auto_allows(false, true, false));
+        assert!(PermissionMode::AcceptEdits.auto_allows(true, false, false));
+        // Supervised never pre-approves anything.
+        assert!(!PermissionMode::Supervised.auto_allows(true, true, false));
+        assert!(!PermissionMode::Supervised.auto_allows(false, true, true));
+    }
 
     fn call() -> ToolCall {
         ToolCall {
