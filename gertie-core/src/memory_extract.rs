@@ -26,7 +26,18 @@ pub fn digest_from(messages: &[crate::Message], max_chars: usize) -> String {
         let role = match message.role {
             crate::Role::User => "user",
             crate::Role::Assistant => "assistant",
-            _ => continue, // tool rows are noise for extraction
+            // Tool rows are noise for extraction, except a denial with
+            // a reason (#44): the user correcting the agent, in place.
+            crate::Role::Tool => {
+                if let Some(correction) = correction_in(message) {
+                    lines.push(format!(
+                        "user (rejected {} `{}`): {}",
+                        correction.tool, correction.target, correction.reply
+                    ));
+                }
+                continue;
+            }
+            _ => continue,
         };
         let text = message.content.trim();
         if text.is_empty() {
@@ -44,6 +55,62 @@ pub fn digest_from(messages: &[crate::Message], max_chars: usize) -> String {
     let tail_start = joined.chars().count() - max_chars / 2;
     let tail = joined.chars().skip(tail_start).collect::<String>();
     format!("{head}\n\n[middle omitted]\n\n{tail}")
+}
+
+/// A user correction (#44): a tool call the user denied, and why.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Correction {
+    pub tool: String,
+    /// What was attempted: the command, the path, or the first argument.
+    pub target: String,
+    /// The file involved, when the call named one: the evidence a
+    /// correction entry cites, so recall on touch brings it back.
+    pub path: Option<String>,
+    pub reply: String,
+}
+
+/// The prefix the loop gives a denial that carried the user's reply.
+const DENIED_WITH_REPLY: &str = "error: denied by user, their reply: ";
+
+/// Every correction in a session, in order. A bare denial ("no") is
+/// not one: it says what, not why, and memory needs the why.
+pub fn corrections_from(messages: &[crate::Message]) -> Vec<Correction> {
+    messages.iter().filter_map(correction_in).collect()
+}
+
+fn correction_in(message: &crate::Message) -> Option<Correction> {
+    if message.role != crate::Role::Tool {
+        return None;
+    }
+    let reply = message.content.strip_prefix(DENIED_WITH_REPLY)?.trim();
+    if reply.is_empty() {
+        return None;
+    }
+    let arguments: serde_json::Value = message
+        .tool_arguments
+        .as_deref()
+        .and_then(|raw| serde_json::from_str(raw).ok())
+        .unwrap_or_default();
+    let field = |name: &str| arguments.get(name).and_then(|value| value.as_str());
+    let path = field("path")
+        .or_else(|| field("file_path"))
+        .map(|path| path.trim_start_matches("./").to_string());
+    let target = field("command")
+        .map(str::to_string)
+        .or_else(|| path.clone())
+        .or_else(|| {
+            arguments
+                .as_object()
+                .and_then(|object| object.values().find_map(|value| value.as_str()))
+                .map(str::to_string)
+        })
+        .unwrap_or_default();
+    Some(Correction {
+        tool: message.tool_name.clone().unwrap_or_else(|| "a tool".into()),
+        target: sanitize_untrusted(&target, 120),
+        path,
+        reply: sanitize_untrusted(reply, 400),
+    })
 }
 
 /// The files a session read or wrote, from its tool rows: every
@@ -112,6 +179,11 @@ Ops:\n\
 - {{\"op\":\"supersede\",\"id\":\"<entry id>\",\"by\":\"<id of the existing entry that replaces it, if any>\"}}\n\
 - {{\"op\":\"archive\",\"id\":\"<entry id>\"}}\n\
 - {{\"op\":\"link\",\"from\":\"<id>\",\"to\":\"<id>\",\"relation\":\"relates_to|solves|causes|builds_on|replaces\"}}\n\n\
+Corrections come first: a line \"user (rejected <tool> ...): <why>\", or a \
+user message telling the agent it got something wrong, states how this \
+project wants things done. Record each one that will hold beyond this task \
+as an add with \"source\":\"correction\", worded as the rule (\"use cargo \
+clean, never rm -rf target\"), citing the file involved when there is one.\n\
 Rules: one line per entry, under 160 chars. Facts and preferences only, \
 never task narration. Supersede an existing entry when the new fact \
 replaces it: pair the supersede with the add that states the new fact \
@@ -325,6 +397,138 @@ mod tests {
         assert!(prompt.contains("existing memory"));
         assert!(prompt.contains("\nsrc/a.rs\n"));
         assert!(extraction_prompt("d", "i", &[]).contains("(none)"));
+    }
+
+    fn row(role: crate::Role, content: &str) -> crate::Message {
+        crate::Message {
+            id: crate::MessageId(1),
+            parent_id: None,
+            role,
+            content: content.into(),
+            tool_call_id: None,
+            tool_name: None,
+            tool_arguments: None,
+        }
+    }
+
+    fn denied(tool: &str, arguments: &str, reply: Option<&str>) -> crate::Message {
+        crate::Message {
+            id: crate::MessageId(1),
+            parent_id: None,
+            role: crate::Role::Tool,
+            content: match reply {
+                Some(reply) => format!("error: denied by user, their reply: {reply}"),
+                None => "error: denied by user".into(),
+            },
+            tool_call_id: Some("c".into()),
+            tool_name: Some(tool.into()),
+            tool_arguments: Some(arguments.into()),
+        }
+    }
+
+    /// #44: a denial with a reason is the user stating how the project
+    /// wants things done. It lived only in a tool row, which the digest
+    /// skipped, so extraction never saw it.
+    #[test]
+    fn denials_with_a_reason_are_corrections_in_the_digest() {
+        let messages = vec![
+            row(crate::Role::User, "clean up the build"),
+            denied(
+                "bash",
+                r#"{"command": "rm -rf target"}"#,
+                Some("never rm target here, use cargo clean"),
+            ),
+            denied(
+                "edit_file",
+                r#"{"path": "src/pool.rs"}"#,
+                Some("POOL_SIZE stays 8"),
+            ),
+            denied("bash", r#"{"command": "ls"}"#, None),
+            row(crate::Role::Assistant, "ran cargo clean instead"),
+        ];
+        let corrections = corrections_from(&messages);
+        assert_eq!(corrections.len(), 2, "a bare denial carries no lesson");
+        assert_eq!(corrections[0].tool, "bash");
+        assert_eq!(corrections[0].target, "rm -rf target");
+        assert_eq!(corrections[1].target, "src/pool.rs");
+        assert_eq!(corrections[1].path.as_deref(), Some("src/pool.rs"));
+        let digest = digest_from(&messages, 10_000);
+        let at = |needle: &str| {
+            digest
+                .find(needle)
+                .unwrap_or_else(|| panic!("{needle}: {digest}"))
+        };
+        assert!(
+            at("user: clean up the build")
+                < at("user (rejected bash `rm -rf target`): never rm target here")
+        );
+        assert!(
+            at("never rm target") < at("assistant: ran cargo clean"),
+            "in order"
+        );
+        assert!(!digest.contains("denied by user"), "the raw row stays out");
+    }
+
+    /// #44 end to end, minus the provider call: a short session with
+    /// one denial and its reason, through the digest, the parsed
+    /// proposal, evidence restriction and the store, to the recall
+    /// block the next session gets when it touches the file.
+    #[test]
+    fn a_correction_comes_back_when_the_file_is_touched_again() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(
+            root.join("src/pool.rs"),
+            "pub const POOL_SIZE: usize = 8;\n",
+        )
+        .unwrap();
+        let store = crate::MemoryStore::open(
+            root.join(".gertie/memory"),
+            root.join("global"),
+            Arc::new(crate::SessionStore::open(std::path::Path::new(":memory:")).unwrap()),
+        );
+        let messages = vec![
+            row(crate::Role::User, "raise the pool to 32"),
+            denied(
+                "edit_file",
+                r#"{"path": "./src/pool.rs"}"#,
+                Some("no: the CI runners have 8 cores, a bigger pool deadlocks teardown"),
+            ),
+            row(crate::Role::Assistant, "left it at 8"),
+        ];
+        let digest = digest_from(&messages, 12_000);
+        assert!(digest.contains("deadlocks teardown"), "{digest}");
+        let touched = touched_files(&messages);
+        assert_eq!(touched, vec!["src/pool.rs"]);
+
+        // What an extraction model returns for that digest.
+        let mut ops = parse_ops(
+            r#"[{"op":"add","file":"gotchas.md","source":"correction",
+                "text":"POOL_SIZE stays 8: the CI runners have 8 cores and a bigger pool deadlocks teardown",
+                "evidence":["src/pool.rs","src/elsewhere.rs"]}]"#,
+        )
+        .unwrap();
+        restrict_evidence(&mut ops, &touched);
+        store.apply(&ops, 4096).unwrap();
+        store.sync().unwrap();
+
+        let entry = store.scan().into_iter().next().unwrap();
+        assert_eq!(entry.helpful, 1, "the user said it: one vote up");
+        assert_eq!(entry.evidence.len(), 1);
+        assert_eq!(entry.evidence[0].path, "src/pool.rs");
+
+        // Next session: the file is touched, the correction rides along.
+        let block = crate::memory_recall::block_for(&store, &root, &root.join("src/pool.rs"), &[])
+            .expect("the correction cites the file");
+        assert!(block.contains("deadlocks teardown"), "{block}");
+    }
+
+    #[test]
+    fn the_prompt_asks_for_corrections_first() {
+        let prompt = extraction_prompt("d", "i", &[]);
+        assert!(prompt.contains("\"source\":\"correction\""), "{prompt}");
+        assert!(prompt.contains("rejected"), "{prompt}");
     }
 
     fn tool_row(arguments: &str) -> crate::Message {

@@ -986,11 +986,14 @@ impl MemoryStore {
         let text = sanitize_untrusted(text, 512);
         let id = self.next_id(Tier::Project);
         let date = self.today()?;
+        // A correction (#44) is the user stating the rule directly:
+        // it starts one vote up, ahead of facts the model inferred.
+        let helpful = u32::from(source.as_deref() == Some(CORRECTION_SOURCE));
         let line = render_line(&MemoryEntry {
             id: id.clone(),
             file: file.clone(),
             text: text.clone(),
-            helpful: 0,
+            helpful,
             harmful: 0,
             source_session: source,
             added_at: Some(date),
@@ -1440,6 +1443,10 @@ fn fts_query(raw: &str) -> Option<String> {
     }
     (!terms.is_empty()).then(|| terms.join(" OR "))
 }
+
+/// The source marker of an entry that records a user correction
+/// (#44), set by session-end extraction.
+pub const CORRECTION_SOURCE: &str = "correction";
 
 /// One lint finding (#38): where, and what to do about it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -3107,6 +3114,45 @@ mod tests {
     /// words, punctuation. The eval caught every query missing seeded
     /// entries, because MATCH took the raw text: all words required,
     /// no stemming, punctuation parsed as FTS syntax.
+    /// #44: a correction starts one vote up; anything else at zero.
+    #[test]
+    fn a_correction_starts_one_vote_up() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = MemoryStore::open(
+            tmp.path().join("project-memory"),
+            tmp.path().join("global"),
+            std::sync::Arc::new(crate::SessionStore::open(Path::new(":memory:")).unwrap()),
+        );
+        let add = |text: &str, source: Option<&str>| Op::Add {
+            file: "conventions.md".into(),
+            text: text.into(),
+            source: source.map(str::to_string),
+            evidence: Vec::new(),
+        };
+        store
+            .apply(
+                &[
+                    add(
+                        "use cargo clean, never rm -rf target",
+                        Some(CORRECTION_SOURCE),
+                    ),
+                    add("the build takes two minutes", Some("41")),
+                ],
+                4096,
+            )
+            .unwrap();
+        let entries = store.scan();
+        let votes = |needle: &str| {
+            entries
+                .iter()
+                .find(|entry| entry.text.contains(needle))
+                .map(|entry| (entry.helpful, entry.source_session.clone()))
+                .unwrap()
+        };
+        assert_eq!(votes("cargo clean"), (1, Some("correction".into())));
+        assert_eq!(votes("two minutes").0, 0);
+    }
+
     /// The writer emits `[source: added: D]` for an entry with no
     /// session; the parser used to file the date as the source, so
     /// every such entry searched as "added -".

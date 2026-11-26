@@ -3106,7 +3106,10 @@ impl ChatView {
             .iter()
             .filter(|message| message.role == gertie_core::Role::User)
             .count();
-        if user_turns < 4 {
+        // A correction (#44) is worth extracting even from a short
+        // session: one denial with a reason is the whole lesson.
+        let corrected = !gertie_core::memory_extract::corrections_from(&messages).is_empty();
+        if user_turns < 4 && !corrected {
             return;
         }
         let digest = gertie_core::memory_extract::digest_from(&messages, 12_000);
@@ -3189,11 +3192,25 @@ impl ChatView {
                     file,
                     text,
                     evidence,
-                    ..
-                } if !evidence.is_empty() => {
-                    format!("add {file} :: {text} (evidence: {})", evidence.join(", "))
+                    source,
+                } => {
+                    // Corrections say so: the user's own words, turned
+                    // into a rule, deserve the closer read.
+                    let kind = if source.as_deref() == Some(gertie_core::memory::CORRECTION_SOURCE)
+                    {
+                        "add correction"
+                    } else {
+                        "add"
+                    };
+                    if evidence.is_empty() {
+                        format!("{kind} {file} :: {text}")
+                    } else {
+                        format!(
+                            "{kind} {file} :: {text} (evidence: {})",
+                            evidence.join(", ")
+                        )
+                    }
                 }
-                gertie_core::Op::Add { file, text, .. } => format!("add {file} :: {text}"),
                 gertie_core::Op::Update { id, text } => format!("update {id} :: {text}"),
                 gertie_core::Op::Supersede { id, by: Some(by) } => {
                     format!("supersede {id} (replaced by {by})")

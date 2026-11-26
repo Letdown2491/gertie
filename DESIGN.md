@@ -433,6 +433,15 @@ dropped below its no-adaptation baseline, no consolidation may ever regenerate t
    which merge deterministically in Rust under a token budget with dedup. The default gate is
    a review inbox: proposed ops render as a diff the user approves; auto-apply-with-changelog
    is the opt-in.
+   **Corrections (#44)** are the most valuable thing a session holds and used to be invisible:
+   a denial with the user's reason lives in a tool row, and the digest skipped tool rows. The
+   digest now carries each one in place (`user (rejected bash \`rm -rf target\`): use cargo
+   clean`); the prompt asks for corrections first, worded as the rule, `source: correction`,
+   citing the file involved (so recall on touch brings it back when the work returns there).
+   A session with a correction is eligible however short it is, the card labels the add as a
+   correction, and the entry starts one helpful vote up. A bare "no" is not a correction: it
+   says what, not why. Undone edits carry no reason and are not saved, so they are not a
+   source yet.
 3. **Dreaming**, a thin consolidation pass riding the startup sweep (idle-gated, like
    auto-settle): merge duplicates keeping both provenance links, archive counter-dead entries
    (helpful/harmful votes and budget pressure, retirement is never time-decay; no decay
