@@ -1499,6 +1499,9 @@ fn bash_file_targets(command: &str, root: &std::path::Path) -> Vec<(String, Touc
     // tokens after the operator; a scan keyed on "what came before
     // this token" misses both.
     let mut pending: Option<Touch> = None;
+    // Creating operators (>, >>, touch, cp/mv targets) name files
+    // that need not exist yet; mutating ones (sed -i) require it.
+    let mut pending_creates = false;
     for token in command.split_whitespace() {
         let quoted = token.starts_with('"') || token.starts_with('\'');
         let cleaned = token.trim_matches(|c| c == '"' || c == '\'');
@@ -1525,7 +1528,8 @@ fn bash_file_targets(command: &str, root: &std::path::Path) -> Vec<(String, Touc
         }
         match cleaned {
             ">" | ">>" | "tee" | "sed" | "mv" | "cp" | "rm" | "touch" => {
-                pending = Some(Touch::Edited)
+                pending = Some(Touch::Edited);
+                pending_creates = !matches!(cleaned, "sed");
             }
             "cat" | "head" | "tail" | "less" | "grep" | "stat" | "wc" => {
                 pending = Some(Touch::Read)
@@ -1545,7 +1549,8 @@ fn bash_file_targets(command: &str, root: &std::path::Path) -> Vec<(String, Touc
                     // (text.replace(old,), error strings, sed
                     // expressions) die here instead of rendering as
                     // rows. Only real, in-workspace files pass.
-                    if !is_real_workspace_file(root, cleaned) {
+                    let exists_ok = pending_creates || is_real_workspace_file(root, cleaned);
+                    if !exists_ok {
                         continue;
                     }
                     if let Some(normalized) = normalize_path(root, cleaned) {
