@@ -566,6 +566,15 @@ pub struct ChatView {
     tool_guidance: gertie_core::ToolGuidance,
     /// The compaction ceiling in tokens (config: [turn] compact_at_tokens).
     compact_at: Option<u64>,
+    /// The repo map's budget in tokens (#41), None when it is off.
+    repo_map_budget: Option<usize>,
+    /// The current session's map and the root it maps: rendered on the
+    /// session's first turn, reused (frozen) while both stay the same.
+    session_map: Option<(
+        Option<SessionId>,
+        std::path::PathBuf,
+        gertie_core::repo_map::SessionMap,
+    )>,
     /// The command palette (Ctrl+K): the kit's field + keyboard nav,
     /// pointed at the store's FTS index by the callbacks in render.
     palette: Entity<CommandState>,
@@ -778,6 +787,8 @@ pub struct ChatViewConfig {
     pub tool_guidance: gertie_core::ToolGuidance,
     // The compaction ceiling in tokens (config: [turn] compact_at_tokens).
     pub compact_at: Option<u64>,
+    // The repo map's budget in tokens (#41), None when it is off.
+    pub repo_map_budget: Option<usize>,
     pub broker: Arc<PermissionBroker>,
     pub session_scope: gertie_core::SessionScope,
     // Worker dispatch reads this turn's posture; the chat sets it
@@ -834,6 +845,7 @@ impl ChatView {
             verify,
             tool_guidance,
             compact_at,
+            repo_map_budget,
             broker,
             session_scope,
             mode_scope,
@@ -1045,6 +1057,8 @@ impl ChatView {
             verify,
             tool_guidance,
             compact_at,
+            repo_map_budget,
+            session_map: None,
             palette,
             palette_open: false,
             palette_hits: Vec::new(),
@@ -3610,6 +3624,27 @@ impl ChatView {
         cx.notify();
     }
 
+    /// Takes a chat out of its project (#31), the row's one-click way
+    /// out: back to the unfiled chats, kept whole. The notice names the
+    /// project, so a slip is one "Move to a project" from undone.
+    pub(super) fn unfile_session(&mut self, session_id: SessionId, cx: &mut Context<Self>) {
+        let name = self
+            .sessions
+            .iter()
+            .find(|summary| summary.id == session_id)
+            .and_then(|summary| summary.project_id)
+            .and_then(|id| self.projects.iter().find(|project| project.id == id))
+            .map(|project| project.name.clone());
+        let Some(name) = name else {
+            return;
+        };
+        self.move_session(session_id, None, cx);
+        self.push_notice(
+            format!("Removed from {name}. The chat is kept; Move to a project files it back."),
+            cx,
+        );
+    }
+
     /// Folds or opens a project's group; the state persists.
     pub(super) fn toggle_project(&mut self, id: i64, cx: &mut Context<Self>) {
         if let Some(project) = self.projects.iter_mut().find(|project| project.id == id) {
@@ -5757,6 +5792,12 @@ impl ChatView {
         // as titles, not as three glyphs per line.
         let group = SharedString::from(format!("session-row-{}", session_id.0));
         let title = summary.title.clone();
+        let project_name = summary.project_id.and_then(|id| {
+            self.projects
+                .iter()
+                .find(|project| project.id == id)
+                .map(|project| project.name.clone())
+        });
         let stored_root = summary.workspace_root.clone();
         let action = |id: String, icon: IconName, tip: &'static str| {
             Button::new(SharedString::from(id))
@@ -5874,6 +5915,23 @@ impl ChatView {
                             )),
                         )
                     })
+                    // Leaving a project is one click, like the delete
+                    // beside it (#31): the chat goes back to the unfiled
+                    // list, nothing else about it changes.
+                    .when_some(project_name.clone(), |actions, name| {
+                        actions.child(
+                            Button::new(SharedString::from(format!("unfile-{}", session_id.0)))
+                                .icon(IconName::FolderOutput)
+                                .xsmall()
+                                .ghost()
+                                .tooltip(format!("Remove from {name}, back to the unfiled chats"))
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    // The row opens the session; its tools must not.
+                                    cx.stop_propagation();
+                                    this.unfile_session(session_id, cx);
+                                })),
+                        )
+                    })
                     .child(
                         action(
                             format!("settle-{}", session_id.0),
@@ -5944,10 +6002,10 @@ impl ChatView {
                 cx,
             ));
         }
-        if summary.project_id.is_some() {
+        if let Some(name) = &project_name {
             list = list.child(target(
                 format!("move-{}-out", session_id.0),
-                "→ No project".to_string(),
+                format!("→ Out of {name}"),
                 None,
                 cx,
             ));

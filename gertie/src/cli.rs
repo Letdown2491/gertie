@@ -23,7 +23,10 @@ USAGE:
                                      memory (live calls, throwaway repos);
                                      --endpoint NAME limits it, repeatable;
                                      --set KEY=VALUE tries a profile
-                                     (memory_writes, tool_guidance)
+                                     (memory_writes, tool_guidance, repo_map)
+    gertie eval nav                  score each model on finding code, with
+                                     the repo map and without (live calls);
+                                     --endpoint NAME limits it, repeatable
 
 OPTIONS:
     --config <PATH>    config file (default: the standard config dir)
@@ -73,6 +76,12 @@ pub enum Command {
         endpoints: Vec<String>,
         /// `--set key=value`: a profile to try, not saved.
         settings: Vec<String>,
+    },
+    /// `gertie eval nav` (#41): finding code with the repo map and
+    /// without, per model.
+    EvalNav {
+        config: Option<PathBuf>,
+        endpoints: Vec<String>,
     },
     /// Print usage and exit 0.
     Help,
@@ -158,11 +167,19 @@ pub fn parse(arguments: &[String]) -> Result<Command, UsageError> {
                 endpoints,
                 settings,
             }),
+            [suite] if suite == "nav" => {
+                if !settings.is_empty() {
+                    return Err(UsageError(
+                        "eval nav varies the repo map itself; --set belongs to eval memory".into(),
+                    ));
+                }
+                Ok(Command::EvalNav { config, endpoints })
+            }
             [] => Err(UsageError(
-                "eval needs a suite: `gertie eval memory`".into(),
+                "eval needs a suite: `gertie eval memory` or `gertie eval nav`".into(),
             )),
             [other, ..] => Err(UsageError(format!(
-                "unknown eval suite: {other} (the one suite is `memory`)"
+                "unknown eval suite: {other} (the suites are `memory` and `nav`)"
             ))),
         };
     }
@@ -380,6 +397,14 @@ mod tests {
                 settings: vec!["tool_guidance=terse".into()]
             }
         );
+        assert_eq!(
+            parse_arguments(&["eval", "nav", "--endpoint", "a"]).unwrap(),
+            Command::EvalNav {
+                config: None,
+                endpoints: vec!["a".into()]
+            }
+        );
+        assert!(parse_arguments(&["eval", "nav", "--set", "repo_map=false"]).is_err());
         assert!(parse_arguments(&["eval"]).is_err());
         assert!(parse_arguments(&["eval", "speed"]).is_err());
         assert!(parse_arguments(&["run", "--endpoint", "a", "hi"]).is_err());

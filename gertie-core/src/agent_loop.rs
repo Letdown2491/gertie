@@ -209,6 +209,10 @@ pub struct TurnSpec {
     /// cache for the whole session (research/MEMORY-RESEARCH.md,
     /// finding 5). Mutations land next session's snapshot.
     pub memory_index: Option<String>,
+    /// The session's repo map (#41): rendered from the session's hints
+    /// on its first turn, then frozen, and sent after the memory index
+    /// on every request. None = no map (off, workers, tests).
+    pub repo_map: Option<crate::repo_map::SessionMap>,
     /// The memory store, for recall on touch (#36): a call that touches
     /// a file some live entry cites carries those entries in its
     /// result. None (workers, memory off) recalls nothing.
@@ -279,6 +283,7 @@ pub fn run_turn(spec: TurnSpec) -> BoxStream<'static, LoopEvent> {
         system_prompt,
         instructions,
         memory_index,
+        repo_map,
         memory,
         steer,
         user_attachments,
@@ -305,6 +310,27 @@ pub fn run_turn(spec: TurnSpec) -> BoxStream<'static, LoopEvent> {
         // Observed prompt size from the last request's usage events, if
         // the provider reported any; the chars/4 estimate covers the rest.
         let mut last_input_tokens: Option<u64> = None;
+        // The repo map (#41): the session's first turn renders it from
+        // what the session holds so far (the user's words, files already
+        // touched, files live memory cites); later turns reuse the
+        // frozen text.
+        let repo_map_text = match &repo_map {
+            Some(map) => {
+                let cited: Vec<String> = memory
+                    .as_ref()
+                    .and_then(|store| {
+                        let today = store.today().ok()?;
+                        store.valid_entries(&today).ok()
+                    })
+                    .unwrap_or_default()
+                    .into_iter()
+                    .flat_map(|entry| entry.evidence.into_iter().map(|evidence| evidence.path))
+                    .collect();
+                let hints = crate::repo_map::hints_from(&history.lock().await, cited);
+                map.text(hints).await
+            }
+            None => None,
+        };
         // The check (#40): owed once an edit lands, run when the model
         // tries to end the turn, at most VERIFY_RUNS times a turn.
         let mut edited = false;
@@ -417,6 +443,22 @@ pub fn run_turn(spec: TurnSpec) -> BoxStream<'static, LoopEvent> {
                              changed fact, never rewrite it)]\n{index}\n\
                              [end memory index]"
                         )),
+                        ..WireMessage::default()
+                    },
+                );
+            }
+
+            // The repo map closes the framing block: per-session and
+            // frozen like the index, so the cached prefix holds.
+            if let Some(body) = &repo_map_text {
+                let at = usize::from(system_prompt.is_some())
+                    + usize::from(instructions.is_some())
+                    + usize::from(memory_index.is_some());
+                request.messages.insert(
+                    at,
+                    WireMessage {
+                        role: Role::User,
+                        content: Some(crate::repo_map::framing(body)),
                         ..WireMessage::default()
                     },
                 );
@@ -1735,6 +1777,7 @@ mod tests {
                 system_prompt: None,
                 instructions: None,
                 memory_index: None,
+                repo_map: None,
                 memory: None,
                 steer: None,
                 user_attachments: Vec::new(),
@@ -3128,6 +3171,56 @@ mod tests {
         let index = seen[0].messages[1].content.as_deref().unwrap();
         assert!(index.starts_with("[memory index"));
         assert!(index.contains("tabs over spaces"));
+    }
+
+    /// #41: the repo map closes the framing block, after the memory
+    /// index, and is the same bytes on every round of the turn.
+    #[test]
+    fn the_repo_map_frames_after_the_index_and_holds_across_rounds() {
+        struct Fixed;
+        impl crate::repo_map::RepoMapSource for Fixed {
+            fn render(&self, hints: &crate::repo_map::MapHints, _: usize) -> Option<String> {
+                Some(format!(
+                    "src/pool.rs: struct Pool (asked: {})",
+                    hints.said.trim()
+                ))
+            }
+        }
+        let provider = Arc::new(ScriptedProvider {
+            seen: std::sync::Mutex::new(Vec::new()),
+            scripts: std::sync::Mutex::new(one_call_then_text("peek")),
+        });
+        let history: SharedHistory = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let peek: Arc<dyn Tool> = Arc::new(StubTool::new("peek", false, "peeked"));
+        let (mut spec, broker) = turn(
+            provider.clone(),
+            registry(&[peek]),
+            history.clone(),
+            "fix the pool",
+        );
+        spec.system_prompt = Some("You are gertie.".into());
+        spec.memory_index = Some("- [p1] helpful=0 harmful=0 tabs".into());
+        let map = crate::repo_map::SessionMap::new(Arc::new(Fixed), 500);
+        spec.repo_map = Some(map.clone());
+        let _ = drain(run_turn(spec), &broker, |_| panic!("nothing to prompt for"));
+
+        let seen = provider.seen.lock().unwrap();
+        assert_eq!(seen.len(), 2, "a tool round, then the wrap-up");
+        for request in seen.iter() {
+            let framing = request.messages[2].content.as_deref().unwrap();
+            assert!(framing.starts_with("[repo map"), "{framing}");
+            assert!(framing.contains("src/pool.rs: struct Pool (asked: fix the pool)"));
+        }
+        assert_eq!(seen[0].messages[2].content, seen[1].messages[2].content);
+        assert!(map.is_frozen(), "the next turn reuses it");
+        // Framing, never record: history holds none of it.
+        assert!(history.blocking_lock().iter().all(|message| {
+            !message
+                .content
+                .as_deref()
+                .unwrap_or("")
+                .contains("[repo map")
+        }));
     }
 
     #[test]

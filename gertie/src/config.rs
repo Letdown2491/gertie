@@ -54,7 +54,26 @@ pub struct Config {
     /// Absent = inferred from the workspace.
     #[serde(default)]
     pub verify: Option<VerifyConfig>,
+    /// The repo map (#41). Absent = on, at the default budget.
+    #[serde(default)]
+    pub repo_map: Option<RepoMapConfig>,
 }
+
+/// `[repo_map]`: the ranked map of the workspace's code sent at session
+/// start, and the `repo_map` tool.
+#[derive(Deserialize, Debug, Clone, Default)]
+pub struct RepoMapConfig {
+    /// false turns both off. Absent = on.
+    #[serde(default)]
+    pub enabled: Option<bool>,
+    /// The framing's ceiling in tokens. Absent = 500.
+    #[serde(default)]
+    pub budget_tokens: Option<usize>,
+}
+
+/// The repo map's framing budget when the config names none: a few
+/// hundred tokens, about the memory index's size.
+pub const DEFAULT_REPO_MAP_TOKENS: usize = 500;
 
 /// `[verify]`: the project check. Your config only: the repo's overlay
 /// may not set a shell command (the settle_command rule).
@@ -1046,6 +1065,15 @@ impl Config {
 
     /// The selected endpoint's memory write setting (#42), see
     /// [`EndpointConfig::memory_writes`].
+    /// The repo map's framing budget in tokens, None when the map is off.
+    pub fn repo_map_budget(&self) -> Option<usize> {
+        let section = self.repo_map.clone().unwrap_or_default();
+        if section.enabled == Some(false) {
+            return None;
+        }
+        Some(section.budget_tokens.unwrap_or(DEFAULT_REPO_MAP_TOKENS))
+    }
+
     pub fn memory_writes(&self) -> bool {
         self.selected_endpoint_config()
             .is_some_and(EndpointConfig::memory_writes_in_force)

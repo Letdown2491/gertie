@@ -17,6 +17,13 @@ serde_json = "1"
 # The oneshot bridging a tool's OS thread back into the async loop.
 tokio = { version = "1", features = ["sync"] }
 walkdir = "2"
+# The repo map (#41): top-level symbols per file, parsed, not grepped.
+tree-sitter = "0.25"
+tree-sitter-rust = "0.24"
+tree-sitter-python = "0.25"
+tree-sitter-go = "0.25"
+tree-sitter-javascript = "0.25"
+tree-sitter-typescript = "0.23"
 # Kernel-level filesystem sandbox for bash children (opt-in).
 landlock = "0.4"
 # O_NOFOLLOW for the write tools (the raced-symlink guard).

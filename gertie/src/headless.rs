@@ -197,6 +197,7 @@ pub(crate) fn drive_turn(
         system_prompt: boot.system_prompt.clone(),
         instructions: boot.instructions.clone(),
         memory_index: boot.memory_index.clone(),
+        repo_map: boot.repo_map_for(&boot.workspace_root),
         // Recall on touch follows the memory switch, as in the app.
         memory: boot.memory.clone().filter(|_| boot.memory_enabled()),
         // One-shot prompt mode: no steering, nothing queues.
@@ -700,6 +701,7 @@ mod tests {
             system_prompt: None,
             instructions: None,
             memory_index: None,
+            repo_map: None,
             memory: None,
             steer: None,
             user_attachments: Vec::new(),
@@ -787,6 +789,7 @@ mod tests {
             system_prompt: None,
             instructions: None,
             memory_index: None,
+            repo_map: None,
             memory: None,
             steer: None,
             user_attachments: Vec::new(),

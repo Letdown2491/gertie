@@ -154,6 +154,7 @@ fn fixture_full(
                         verify: None,
                         tool_guidance: gertie_core::ToolGuidance::Standard,
                         compact_at: None,
+                        repo_map_budget: None,
                         broker: broker
                             .unwrap_or_else(|| Arc::new(gertie_core::PermissionBroker::new())),
                         session_scope: gertie_core::SessionScope::new(),
@@ -1397,6 +1398,7 @@ fn markdown_and_tool_rows_draw_clean() {
                         verify: None,
                         tool_guidance: gertie_core::ToolGuidance::Standard,
                         compact_at: None,
+                        repo_map_budget: None,
                         broker: Arc::new(gertie_core::PermissionBroker::new()),
                         session_scope: gertie_core::SessionScope::new(),
                         mode_scope: gertie_core::ModeScope::new(),
@@ -2058,6 +2060,45 @@ fn a_chat_moves_into_a_project_and_back_out() {
     fixture.act(|window, cx| window.click("move-2", cx));
     fixture.act(|window, cx| window.click("move-2-out", cx));
     assert_eq!(filed(&store), None);
+}
+
+/// #31: a filed chat leaves its project in one click from its row,
+/// kept whole; an unfiled chat has no such button.
+#[test]
+fn a_filed_chat_leaves_its_project_in_one_click() {
+    let (store, id) = project_store();
+    let mut fixture = fixture_with_store(store.clone());
+    assert_eq!(
+        shown(&mut fixture, &["unfile-1", "unfile-2"]),
+        vec![true, false],
+        "only the filed chat offers the way out"
+    );
+    fixture.act(|window, cx| window.click("unfile-1", cx));
+    let sessions = store.list_sessions().unwrap();
+    assert!(sessions.iter().all(|summary| summary.project_id.is_none()));
+    assert_eq!(sessions.len(), 2, "unfiling deletes nothing");
+    assert_eq!(store.list_projects().unwrap().len(), 1, "the project stays");
+    assert_eq!(
+        shown(
+            &mut fixture,
+            &["session-1", "unfile-1", &format!("project-{id}")]
+        ),
+        vec![true, false, true]
+    );
+    let notices = fixture.cx.update(|cx| {
+        fixture
+            .view
+            .upgrade()
+            .unwrap()
+            .read(cx)
+            .notice_texts_for_test()
+    });
+    assert!(
+        notices
+            .iter()
+            .any(|text| text.contains("Removed from alpha")),
+        "{notices:?}"
+    );
 }
 
 /// A project's + opens a blank chat in the current folder, filed
@@ -2858,6 +2899,7 @@ fn the_footer_and_the_sidebar_foot_stay_inside_the_window() {
                         verify: None,
                         tool_guidance: gertie_core::ToolGuidance::Standard,
                         compact_at: None,
+                        repo_map_budget: None,
                         broker: Arc::new(gertie_core::PermissionBroker::new()),
                         session_scope: gertie_core::SessionScope::new(),
                         mode_scope: gertie_core::ModeScope::new(),

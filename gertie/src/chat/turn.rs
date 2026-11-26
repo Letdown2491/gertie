@@ -46,6 +46,27 @@ impl ChatView {
         // sender drops and Enter queues instead.
         let (steer_tx, steer_rx) = tokio::sync::mpsc::unbounded_channel();
         let (stop_tx, mut stop_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
+        // The session's repo map (#41): one per session and root, so a
+        // new chat or a re-rooted tab renders a fresh one and every
+        // later turn of the session reuses the frozen text.
+        let repo_map = self.repo_map_budget.map(|budget| match &self.session_map {
+            Some((session, root, map))
+                if self.session_id.is_some()
+                    && *session == self.session_id
+                    && *root == self.workspace_root =>
+            {
+                map.clone()
+            }
+            _ => {
+                let map = gertie_core::repo_map::SessionMap::new(
+                    gertie_tools::repo_map::RepoMap::for_root(&self.workspace_root),
+                    budget,
+                );
+                self.session_map =
+                    Some((self.session_id, self.workspace_root.clone(), map.clone()));
+                map
+            }
+        });
         let stream = run_turn(TurnSpec {
             provider,
             tools: self.tools.clone(),
@@ -68,6 +89,7 @@ impl ChatView {
             system_prompt: self.system_prompt.clone(),
             instructions: self.instructions.clone(),
             memory_index: self.memory_index.clone(),
+            repo_map,
             memory: self.memory_store.clone().filter(|_| self.memory_enabled),
             verify: self.verify.clone(),
             tool_guidance: self.tool_guidance,

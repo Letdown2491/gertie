@@ -526,6 +526,7 @@ impl AgentTool {
                 // explicitly).
                 instructions: None,
                 memory_index: None,
+                repo_map: None,
                 memory: None,
                 system_prompt: Some(self.system_prompt.clone()),
             });

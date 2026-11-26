@@ -32,6 +32,25 @@ being run, the file being read, the question being asked. The footer counts what
 work costs (tokens in/out, the cache share, the live context gauge) and, while a run
 is live, how long it has taken.
 
+## Help for any model
+
+Whichever model you pick, the harness does the parts weaker models skip:
+
+- **A map of the code.** The first turn of a session sends a short, ranked map of the
+  repo's source files and what each defines, so the agent opens the right file first.
+  The `repo_map` tool lists a directory or a file's signatures when it needs more.
+- **Memory on touch.** When the agent reads or edits a file that a memory entry cites,
+  the entry arrives with the result.
+- **The check before "done".** If a turn edited files, gertie runs the project's check
+  (`cargo check`, `go build`, or your `[verify]` command) before the turn can end; a
+  failure goes back to the agent.
+- **Fewer wasted tokens.** Long command output keeps its head, its failures and its
+  tail; a file read twice keeps only the newer copy; and long sessions compact at 160k
+  tokens even when the model claims a far bigger window, so replies stay quick.
+
+`gertie eval memory` and `gertie eval nav` measure each configured model (memory use,
+and how much faster the map finds code) and suggest settings for it.
+
 ## Checkpoints and rewind
 
 Before any file-mutating tool runs, the workspace is snapshotted. Open **turn diff**
@@ -58,8 +77,9 @@ Projects organize conversations: a project is a name, not a folder. Make one wit
 button beside the list heading, then file a chat under it with the move button on the
 chat's row, or start a chat from the project's **+** (it runs in your current folder,
 already filed). A chat is in one project at most; ones you haven't filed sit in
-**Other**. Each group folds, removing a project only takes it off the list, and
-Ctrl+K finds a project by name.
+**Other**. To take a chat out again, click the remove button on its row (beside
+delete): it goes back to Other, kept whole. Each group folds, removing a project only
+takes it off the list, and Ctrl+K finds a project by name.
 
 ## Subagents
 
@@ -113,7 +133,9 @@ pipe-safe approvals (mutating calls deny themselves unless you pass `--yes`, and
 `--yes` refuses a git workspace with uncommitted changes unless you also pass
 `--allow-dirty`: auto-approval over work you can't roll back is opt-in). The
 library behind it (`gertie-core`) is plain Rust: embed the agent in CI, an editor, a
-server. Same sessions, same memory, same permission broker.
+server. Same sessions, same memory, same permission broker. `gertie eval memory` and
+`gertie eval nav` run live scenarios in throwaway repos against each configured model
+and keep a record of the results.
 
 ## Doctor
 

@@ -44,6 +44,25 @@ pub struct Outcome {
 }
 
 impl Outcome {
+    /// An outcome over an existing directory, for other suites' tests.
+    #[cfg(test)]
+    pub(crate) fn for_test(
+        root: &Path,
+        calls: Vec<(String, String, String)>,
+        tokens: (u64, u64),
+    ) -> Self {
+        Self {
+            root: root.to_path_buf(),
+            calls,
+            text: String::new(),
+            entries: Vec::new(),
+            tokens,
+            lint: 0,
+            error: None,
+            _fixture: None,
+        }
+    }
+
     fn file(&self, path: &str) -> String {
         std::fs::read_to_string(self.root.join(path)).unwrap_or_default()
     }
@@ -152,7 +171,7 @@ fn lay_out(scenario: &Scenario, root: &Path) -> std::io::Result<()> {
 /// The user's config with `default_endpoint` pointed at `endpoint`,
 /// written beside (not inside) the fixture: every other key, key
 /// sources included, stays exactly as the user wrote it.
-fn config_for(
+pub(crate) fn config_for(
     raw: &str,
     endpoint: &str,
     overrides: &Overrides,
@@ -186,6 +205,14 @@ fn config_for(
             );
         }
     }
+    if let Some(enabled) = overrides.repo_map {
+        let section = table
+            .entry("repo_map")
+            .or_insert_with(|| toml::Value::Table(Default::default()));
+        if let Some(section) = section.as_table_mut() {
+            section.insert("enabled".into(), toml::Value::Boolean(enabled));
+        }
+    }
     let path = dir.join("config.toml");
     std::fs::write(
         &path,
@@ -201,6 +228,8 @@ fn config_for(
 pub struct Overrides {
     pub memory_writes: Option<bool>,
     pub tool_guidance: Option<gertie_core::ToolGuidance>,
+    /// `[repo_map] enabled` in the throwaway config (#41).
+    pub repo_map: Option<bool>,
 }
 
 impl Overrides {
@@ -226,9 +255,16 @@ impl Overrides {
                             format!("tool_guidance takes standard or terse, not {value}")
                         })?)
                 }
+                "repo_map" => {
+                    overrides.repo_map = Some(match value.trim() {
+                        "true" | "on" => true,
+                        "false" | "off" => false,
+                        other => return Err(format!("repo_map takes true or false, not {other}")),
+                    })
+                }
                 other => {
                     return Err(format!(
-                        "--set {other}: the profile settings are memory_writes and tool_guidance"
+                        "--set {other}: the settings are memory_writes, tool_guidance and repo_map"
                     ));
                 }
             }
@@ -243,6 +279,22 @@ impl Overrides {
 
 /// Runs one scenario against the endpoint `config` selects.
 fn run_scenario(scenario: &Scenario, config: &Path) -> Outcome {
+    run_fixture(
+        scenario.name,
+        |root| lay_out(scenario, root),
+        scenario.prompt,
+        config,
+    )
+}
+
+/// One turn in a throwaway repo `lay` fills, against the endpoint
+/// `config` selects, read back as an [`Outcome`]. Shared by the suites.
+pub(crate) fn run_fixture(
+    name: &str,
+    lay: impl FnOnce(&Path) -> std::io::Result<()>,
+    prompt: &str,
+    config: &Path,
+) -> Outcome {
     let dir = tempfile::tempdir().expect("a temp dir");
     let root = dir.path().join("repo");
     let failed = |root: PathBuf, error: String| Outcome {
@@ -255,7 +307,7 @@ fn run_scenario(scenario: &Scenario, config: &Path) -> Outcome {
         error: Some(error),
         _fixture: None,
     };
-    if let Err(error) = lay_out(scenario, &root) {
+    if let Err(error) = lay(&root) {
         return failed(root, error.to_string());
     }
     let boot = crate::bootstrap::Bootstrap::load_at(
@@ -272,20 +324,20 @@ fn run_scenario(scenario: &Scenario, config: &Path) -> Outcome {
     };
     let context_window = boot.compaction_window(provider.context_window());
     let provider: std::sync::Arc<dyn gertie_core::Provider> = provider;
-    let session = match boot.store.create_session(scenario.name) {
+    let session = match boot.store.create_session(name) {
         Ok(session) => session,
         Err(error) => return failed(root, error.to_string()),
     };
     let _ = boot
         .store
-        .append_message(session, None, gertie_core::Role::User, scenario.prompt);
+        .append_message(session, None, gertie_core::Role::User, prompt);
     let mut approve = |_: &gertie_core::ToolCall| gertie_core::PermissionDecision::Approve;
     let (outcome, text) = crate::headless::drive_turn(
         &boot,
         provider,
         context_window,
         session,
-        scenario.prompt.to_string(),
+        prompt.to_string(),
         &mut approve,
     );
     let error = match outcome {
@@ -712,7 +764,7 @@ pub fn record(rows: &[Row], date: &str) -> Vec<String> {
 }
 
 /// Today in UTC, from SQLite's clock (the one memory dates use).
-fn today() -> String {
+pub(crate) fn today() -> String {
     gertie_core::SessionStore::open(Path::new(":memory:"))
         .ok()
         .and_then(|store| {

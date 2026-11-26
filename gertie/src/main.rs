@@ -22,6 +22,9 @@ fn main() {
             clean_worktrees,
             check_updates,
         }) => std::process::exit(gertie::doctor::run(config, clean_worktrees, check_updates)),
+        Ok(gertie::cli::Command::EvalNav { config, endpoints }) => {
+            std::process::exit(gertie::eval_nav::run(config, endpoints))
+        }
         Ok(gertie::cli::Command::Eval {
             config,
             endpoints,

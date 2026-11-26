@@ -28,8 +28,16 @@ fronts, nothing shared over the network.
   (the bundled `council` skill runs the loop). Workers never spawn workers.
 - **Projects**: named groups for organizing conversations (not folders). File a chat
   under one from its row's move button, or start it from the project's +; a chat is in
-  one project at most, and ones you haven't filed sit in Other. Each group folds,
-  removing a project only takes it off the list, and Ctrl+K finds projects by name.
+  one project at most, and ones you haven't filed sit in Other. Leaving is one click on
+  the row too. Each group folds, removing a project only takes it off the list, and
+  Ctrl+K finds projects by name.
+- **Any model, made sharper**: the harness carries what weaker models miss. A ranked map
+  of the repo's code (tree-sitter) sends the model to the right file first; memory
+  entries citing a file arrive when the model touches it; when a turn edited files, the
+  project check runs before the turn can end; bash output is shaped and re-read files
+  collapse, so tokens go to new information; compaction starts at 160k tokens whatever
+  the window claims. `gertie eval memory` and `gertie eval nav` score each configured
+  model and suggest per-model settings (`memory_writes`, `tool_guidance`).
 - **Parallel and worktree chats**: a running turn keeps going while you open another
   conversation from the sidebar, which marks it running or finished. New worktree chat
   starts a chat in its own `git worktree`, so two agents can edit the
@@ -78,6 +86,7 @@ gertie doctor          # checks config, endpoint, and key resolution; exit 0 = r
 gertie                 # the desktop app
 gertie run "fix the flaky test in ci and explain why"   # one headless turn
 gertie eval memory     # scores each configured model on using memory (live calls)
+gertie eval nav        # measures what the repo map saves each model in finding code
 ```
 
 First launch writes a starter `~/.config/gertie/config.toml` with comments and pointers
@@ -129,7 +138,10 @@ version of this whole list.
 ## Status
 
 **1.2.0**: projects to organize conversations, memory entries that cite their sources
-and flag what a correction touches, and per-directory `AGENTS.md`. Feature-complete against [DESIGN.md](DESIGN.md) (see "The original 'Deferred'
+and flag what a correction touches, and per-directory `AGENTS.md`. Since then, on `main`:
+the repo map, recall on touch, the project check, output shaping and read pruning, the
+compaction ceiling, per-model settings with the eval that suggests them, corrections as
+memory candidates, and one-click leave for projects. Feature-complete against [DESIGN.md](DESIGN.md) (see "The original 'Deferred'
 row" for every decision and its rationale). New to the tool? [The tour](docs/TOUR.md)
 walks the whole surface in ten minutes.
 

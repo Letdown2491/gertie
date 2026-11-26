@@ -73,6 +73,23 @@ Because these live in the file, they travel with the repo and survive a rebuilt
 database. The memory panel shows each superseded entry's chain ("replaced by p31 →
 p40") and each entry's links. Edit them by hand like anything else in the file.
 
+## When the agent touches a file
+
+Memory doesn't wait for the model to look it up. When a tool reads or edits a file
+that a memory entry cites, the strongest few entries about that file arrive with the
+tool's result, so you see in the transcript what the agent was given and where. If
+what it is about to do contradicts one, it names the entry and asks you first. Each
+file's entries arrive once per session (again after a compaction drops them).
+
+## When the agent saves a fact
+
+The agent saves facts with a `remember` tool: one fact per call, and a changed fact
+is superseded (the old entry retired, a new one replacing it) instead of rewritten.
+Gertie writes the entry's line itself, so any model produces valid entries. If you
+deny an action and say why ("no, we use tabs here"), that correction becomes a
+memory proposal at session end, even in a short session, labeled as a correction on
+the review card.
+
 ## When the code moves out from under a memory
 
 If a file an entry cites has changed since the entry was written, or is gone, the

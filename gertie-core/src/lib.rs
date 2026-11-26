@@ -14,6 +14,7 @@ pub mod permissions;
 pub mod projects;
 pub mod provider;
 pub mod prune;
+pub mod repo_map;
 pub mod request;
 pub mod snapshot;
 pub mod tool;

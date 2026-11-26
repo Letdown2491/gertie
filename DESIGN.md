@@ -253,7 +253,7 @@ directories beyond the optional `gertie.toml`.
 
 ## Tools
 
-Eleven built-ins, each done well; MCP fills the rest:
+Thirteen built-ins, each done well; MCP fills the rest:
 
 `read_file` · `write_file` · `edit_file` (search/replace with occurrence validation) · `bash` ·
 `glob` · `grep` · `web_fetch` (reqwest + readability extraction) · `web_search` (pluggable
@@ -263,7 +263,9 @@ configured**) · `search_history` (native, FTS5 over our own session DB) · `mem
 own trail) · `search_memory` (FTS5 over the derived sidecar, ranked pointers) · `remember`
 (the structured write path: add, supersede, update, archive, link as a JSON schema, applied
 through the same delta ops extraction uses, so any model writes valid entries without
-learning the grammar).
+learning the grammar) · `repo_map` (the workspace's code structure from tree-sitter: the
+directories, a directory's files and their top-level symbols, or a file's signatures with
+line numbers; Rust, Python, Go, JavaScript, TypeScript).
 
 Beside them, two surfaces the UI answers rather than the world: `ask_user` (a question
 with clickable options, answered through the permission broker) and `status` (the model's
@@ -326,6 +328,26 @@ the last asking for a report instead. The command comes from the user's `[verify
 build ./...`) only when the program is on PATH. The repo's overlay may not name it: the
 settle_command rule, a cloned repo does not get to choose a command gertie runs.
 
+**The repo map (#41).** Models spend rounds finding code: list a directory, read the wrong
+file, grep, read again; weak models wander longest. On a session's first turn the harness
+renders a map of the workspace's source files with their top-level symbols (tree-sitter,
+not regexes: types, functions, impls and their methods, module constants), ranks it for the
+session (a path or file name the user wrote, files already touched, files live memory
+cites, file names the user's words contain, entry points, then shallow before deep) and
+cuts it to `[repo_map] budget_tokens` (default 500), with one summary line for the rest.
+It rides after the memory index as framing, frozen for the session like the index, so the
+cached prefix holds; the `repo_map` tool answers anything newer or deeper. Outlines cache
+per file under the git blob hash (memory evidence's hash), so a changed file re-parses and
+an unchanged one never does; the walk skips build output and dependencies, stops at 20k
+files, never parses a file over 512 KB, and the framing parses at most 400 files, so a
+monorepo degrades to its summary line. The first build of gertie's own map takes about
+65 ms, a cached one about 2. The render runs on its own thread, off the executor the loop
+shares with the UI. `gertie eval nav` measures it per model: three find-and-fix tasks in a
+fixture whose values to change also sit in decoy files, each run with the map and without.
+On glm-5.3-flash over two runs: 3/3 both ways, steps to the first correct edit 11 and 8
+with the map against 23 and 33 without, tokens in 38% lower. `[repo_map] enabled = false`
+turns off the framing and the tool together.
+
 ## Projects
 
 A project is a name, not a folder: chats belong to a project only when
@@ -335,6 +357,11 @@ and no per-project configuration. Memory keys on workspace scope, and
 instructions on AGENTS.md; if a project-scoped context need shows up in
 real use, it is a design decision to make then, not a default to grow
 into by accident.
+
+Membership is as easy to leave as to join: a filed chat's row carries a one-click
+remove (#31), next to delete, which sends it back to Other and changes nothing else about
+it; the notice names the project, so a slip is one move away from undone. The move list
+says "→ Out of <project>" for the same thing.
 
 ## Memory
 
@@ -346,7 +373,7 @@ entries leave `current` only by an explicit act (supersede, archive),
 never by age.
 
 **The tie-break**: when two entries state the same fact, the newest
-wins — new information beats old by definition, and a genuine conflict
+wins: new information beats old by definition, and a genuine conflict
 is resolved by superseding the loser (which records the replacement),
 not by leaving both current. When retrieval surfaces both, the result
 labels the relationship rather than hiding it.

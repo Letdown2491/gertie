@@ -171,3 +171,14 @@ api_key_env = "MY_API_KEY"
 # (slow to first token, costly per turn). Default 160000; 0 = only
 # the window's 80% decides.
 #compact_at_tokens = 160000
+
+# The repo map: on a session's first turn, a ranked map of the
+# workspace's source files and their top-level symbols (Rust, Python,
+# Go, JavaScript, TypeScript) is sent ahead of the conversation, so the
+# model goes straight to the right file; the repo_map tool lists a
+# directory or a file's signatures on demand. Frozen per session, so
+# prompt caching holds. `gertie eval nav` measures what it buys each
+# model. enabled = false turns off both the map and the tool.
+#[repo_map]
+#enabled = true
+#budget_tokens = 500

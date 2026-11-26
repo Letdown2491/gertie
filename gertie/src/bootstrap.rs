@@ -235,6 +235,22 @@ impl Bootstrap {
         gertie_core::agent_loop::compaction_window(window, self.live_config().resolve_compact_at())
     }
 
+    /// A fresh session map for `root` (#41), None when the map is off.
+    /// One per session: it renders on the session's first turn and
+    /// freezes.
+    pub fn repo_map_for(&self, root: &Path) -> Option<gertie_core::repo_map::SessionMap> {
+        let budget = self.live_config().repo_map_budget()?;
+        Some(gertie_core::repo_map::SessionMap::new(
+            gertie_tools::repo_map::RepoMap::for_root(root),
+            budget,
+        ))
+    }
+
+    /// The map budget the GUI's chats render at, None when off.
+    pub fn repo_map_budget(&self) -> Option<usize> {
+        self.live_config().repo_map_budget()
+    }
+
     pub fn grace_rounds(&self) -> Option<usize> {
         self.live_config().resolve_grace_rounds()
     }
@@ -459,6 +475,7 @@ impl Bootstrap {
                 std::sync::Arc::new(gertie_tools::sandbox::Sandbox::new(workspace_root.clone()))
             });
         let mut tools = gertie_tools::builtin_tools_with(&workspace_root, sandbox);
+        without_repo_map(&mut tools, &config);
         let mut root_independent: Vec<String> = Vec::new();
 
         // Skills: user dir + project dir (project overrides by name),
@@ -857,6 +874,7 @@ impl Bootstrap {
         let sandbox = sandbox_bash
             .then(|| std::sync::Arc::new(gertie_tools::sandbox::Sandbox::new(root.clone())));
         let mut tools = gertie_tools::builtin_tools_with(&root, sandbox);
+        without_repo_map(&mut tools, &self.live_config());
         {
             let map = Arc::get_mut(&mut tools).expect("registry not yet shared");
             for name in &self.root_independent {
@@ -999,6 +1017,7 @@ impl Bootstrap {
             .value
             .then(|| std::sync::Arc::new(gertie_tools::sandbox::Sandbox::new(root.to_path_buf())));
         let mut tools = gertie_tools::builtin_tools_with(root, sandbox);
+        without_repo_map(&mut tools, &self.live_config());
         {
             let map = Arc::get_mut(&mut tools).expect("registry not yet shared");
             for name in &self.root_independent {
@@ -1098,6 +1117,16 @@ fn render_memory_index(memory: &gertie_core::MemoryStore) -> Option<String> {
 
 /// The memory tool for the endpoint in force (#42): full file commands,
 /// or view only with remember as the one write path.
+/// The repo map off (`[repo_map] enabled = false`) takes its tool with
+/// it: a comparison without the map must not keep half of it.
+fn without_repo_map(tools: &mut gertie_core::ToolRegistry, config: &crate::config::Config) {
+    if config.repo_map_budget().is_none()
+        && let Some(map) = Arc::get_mut(tools)
+    {
+        map.remove("repo_map");
+    }
+}
+
 fn memory_tool(memory: &Arc<gertie_core::MemoryStore>, writes: bool) -> Arc<dyn gertie_core::Tool> {
     if writes {
         Arc::new(gertie_tools::memory::Memory::new(memory.clone()))

@@ -5,6 +5,7 @@ pub mod config;
 pub mod diff;
 pub mod doctor;
 pub mod eval;
+pub mod eval_nav;
 pub mod headless;
 pub mod keymap;
 pub mod markdown;

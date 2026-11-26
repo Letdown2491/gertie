@@ -7,6 +7,7 @@
 
 pub mod mcp;
 pub mod memory;
+pub mod repo_map;
 pub mod sandbox;
 pub mod shape;
 pub mod skills;
@@ -519,7 +520,7 @@ struct GrepArgs {
     path: Option<String>,
 }
 
-/// Builds the six local tools against one workspace root.
+/// Builds the local tools against one workspace root.
 pub fn builtin_tools(root: &Path) -> gertie_core::ToolRegistry {
     builtin_tools_with(root, None)
 }
@@ -539,6 +540,7 @@ pub fn builtin_tools_with(
         }),
         Arc::new(Glob { root: root.into() }),
         Arc::new(Grep { root: root.into() }),
+        Arc::new(repo_map::RepoMapTool::new(root)),
     ];
     let map: std::collections::BTreeMap<String, Arc<dyn Tool>> = tools
         .into_iter()
