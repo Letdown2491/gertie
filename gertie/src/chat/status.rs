@@ -4,7 +4,7 @@
 //!
 //! Sections, in column order, each rendered only when it has
 //! something to say: GOAL (the model's `status` goal, else the latest
-//! prompt) with the run clock, TOUCHED (read/edited per file, from the
+//! prompt) with the run clock, FILES (read/edited per file, from the
 //! session's tool calls, edited wins), NEXT (the model's `status` next
 //! step), GROUNDED IN (memory the work consulted, then entries whose
 //! evidence shares a file with the work), WAITING ON YOU (asks from
@@ -26,7 +26,7 @@ pub(crate) const STATUS_WIDTH: f32 = 300.;
 pub(crate) const RAIL_WIDTH: f32 = 34.;
 
 /// How many touched files list before the rest fold into a count.
-const TOUCHED_SHOWN: usize = 12;
+const TOUCHED_SHOWN: usize = 10;
 
 /// Grounding rows per tier: the consulted entries, then the
 /// file-sharing ones (the weaker signal, so fewer).
@@ -44,6 +44,9 @@ pub enum Touch {
 /// The session's durable state, folded from its rows and live events.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct StatusFacts {
+    /// The session's memory actions, newest-first (capped at five):
+    /// created/superseded/edited entries, the #20 walk's live view.
+    pub memory_actions: Vec<String>,
     /// The model's stated goal (the `status` tool), the latest one.
     pub goal: Option<String>,
     /// The model's stated next step (the `status` tool).
@@ -111,6 +114,32 @@ impl StatusFacts {
                     Touch::Edited
                 };
                 self.touch(path, touch);
+            }
+            // The memory tool's actions are state changes worth
+            // surfacing: create/str_replace/insert/delete/rename and
+            // supersede ops. Each lands as one action line,
+            // newest-first.
+            "memory" => {
+                let command = field("command").unwrap_or_default();
+                let target = field("path").unwrap_or_default();
+                if !command.is_empty() {
+                    // The verb is gertie's word for what happened;
+                    // the file is the entry's basename. "created
+                    // gotchas.md", not "create project/gotchas.md".
+                    let verb = match command.as_str() {
+                        "create" => "created",
+                        "str_replace" | "insert" => "edited",
+                        "delete" => "removed",
+                        "rename" => "renamed",
+                        other => other,
+                    };
+                    let file = target.rsplit('/').next().unwrap_or(&target);
+                    self.memory_actions
+                        .push(clip(&format!("{verb} {file}"), 80));
+                    if self.memory_actions.len() > 5 {
+                        self.memory_actions.pop();
+                    }
+                }
             }
             "search_memory" => {
                 for id in memory_hit_ids(result) {
@@ -724,6 +753,34 @@ impl ChatView {
             );
         }
 
+        if !facts.memory_actions.is_empty() {
+            let head = label(format!(
+                "MEMORY · {} action{}",
+                facts.memory_actions.len(),
+                if facts.memory_actions.len() == 1 {
+                    ""
+                } else {
+                    "s"
+                }
+            ));
+            let rows: Vec<_> = facts
+                .memory_actions
+                .iter()
+                .map(|action| {
+                    div()
+                        .text_size(px(11.5))
+                        .text_color(theme.foreground)
+                        .child(SharedString::from(action.clone()))
+                })
+                .collect();
+            sections.push(
+                v_flex()
+                    .gap_1()
+                    .child(head)
+                    .children(rows)
+                    .into_any_element(),
+            );
+        }
         if !facts.touched.is_empty() {
             let count = facts.touched.len();
             let touched_rows = |take: Option<usize>| {
@@ -761,7 +818,7 @@ impl ChatView {
                 v_flex()
                     .gap_1()
                     .child(label(format!(
-                        "TOUCHED · {count} file{}",
+                        "FILES · {count} file{}",
                         if count == 1 { "" } else { "s" }
                     )))
                     .children(rows)
@@ -1447,9 +1504,22 @@ fn bash_file_targets(command: &str, root: &std::path::Path) -> Vec<(String, Touc
         let cleaned = token.trim_matches(|c| c == '"' || c == '\'');
         let glued = cleaned.trim_start_matches(['>', '&', '2']);
         if glued != cleaned && glued.len() >= 2 && glued.contains('/') {
-            if let Some(normalized) = normalize_path(root, glued) {
-                push_unique(&mut out, normalized, Touch::Edited);
+            // Stream dumps (2>/dev/null, >&2) edit nothing the user
+            // cares about; /tmp is scratch by convention.
+            if !is_scratch(glued) && !glued.contains("&&") && path_in_root(root, glued) {
+                // Redirect targets are created if absent: containment
+                // (under root), not existence, is the gate here.
+                if let Some(normalized) = normalize_path(root, glued) {
+                    push_unique(&mut out, normalized, Touch::Edited);
+                }
             }
+            pending = None;
+            continue;
+        }
+        // Stream dumps and scratch targets are never file state:
+        // 2>/dev/null edits nothing the user cares about; /tmp is
+        // scratch by convention (the hardening probes' own workspace).
+        if is_scratch(glued) {
             pending = None;
             continue;
         }
@@ -1468,10 +1538,19 @@ fn bash_file_targets(command: &str, root: &std::path::Path) -> Vec<(String, Touc
             _ if quoted && pending != Some(Touch::Read) => {}
             _ => {
                 if let (Some(touch), true) = (pending, looks_like_path(cleaned)) {
+                    pending = None;
+                    // The existence gate: a status list answers "what
+                    // did the agent touch", and a token that names no
+                    // real file touches nothing — script fragments
+                    // (text.replace(old,), error strings, sed
+                    // expressions) die here instead of rendering as
+                    // rows. Only real, in-workspace files pass.
+                    if !is_real_workspace_file(root, cleaned) {
+                        continue;
+                    }
                     if let Some(normalized) = normalize_path(root, cleaned) {
                         push_unique(&mut out, normalized, touch);
                     }
-                    pending = None;
                 }
             }
         }
@@ -1487,10 +1566,40 @@ fn looks_like_path(token: &str) -> bool {
         && (token.contains('/') || token.contains('.'))
 }
 
+/// The token names a file that actually exists under the workspace
+/// root: the extractor's recall-vs-precision trade resolves to
+/// precision, because a 584-row list of script fragments (the hand
+/// test's finding) is worse than a 10-row list of real files.
+fn is_real_workspace_file(root: &std::path::Path, token: &str) -> bool {
+    let joined = resolve_tool_path(root, std::path::Path::new(token));
+    joined.is_file() && path_in_root(root, token)
+}
+
+/// The path (absolute or root-relative) stays under the workspace
+/// root: the containment the tool layer enforces, mirrored here so
+/// `../escape` and absolute paths outside root never land.
+fn path_in_root(root: &std::path::Path, token: &str) -> bool {
+    let joined = resolve_tool_path(root, std::path::Path::new(token));
+    let Ok(joined) = joined.canonicalize() else {
+        // Non-existent (a redirect target): lexical containment only.
+        return joined.starts_with(root);
+    };
+    let Ok(root_canon) = root.canonicalize() else {
+        return false;
+    };
+    joined.starts_with(root_canon)
+}
+
 fn push_unique(out: &mut Vec<(String, Touch)>, path: String, touch: Touch) {
     if !out.iter().any(|(seen, _)| *seen == path) {
         out.push((path, touch));
     }
+}
+
+/// True when the token lands outside the user's project and outside
+/// the device tree: /tmp and /var/tmp are scratch by convention.
+fn is_scratch(token: &str) -> bool {
+    token.starts_with("/dev/") || token.starts_with("/tmp/") || token.starts_with("/var/tmp/")
 }
 
 #[cfg(test)]
@@ -1500,19 +1609,30 @@ mod bash_tests {
 
     #[test]
     fn redirects_and_edits_classify_as_edited() {
-        let root = P::new("/w");
+        // The existence gate needs real files: a tempdir root with a
+        // real file and a real subdir.
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(root.join("src/main.rs"), "fn main() {}").unwrap();
+        // Redirects create their target: containment (not existence)
+        // is the gate there.
         let targets = bash_file_targets("echo hi > out.txt", root);
         assert_eq!(targets.len(), 1);
         assert_eq!(targets[0].1, Touch::Edited);
+        // sed -i edits in place: the file must exist.
         let targets = bash_file_targets("sed -i 's/a/b/' src/main.rs", root);
         assert_eq!(targets[0].1, Touch::Edited);
-        assert!(targets[0].0.contains("src/main.rs"));
+        assert!(targets[0].0.contains("main.rs"));
     }
 
     #[test]
     fn reads_classify_as_read_and_noise_is_ignored() {
-        let root = P::new("/w");
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        std::fs::write(root.join("README.md"), "x").unwrap();
         let targets = bash_file_targets("cat README.md", root);
+        assert_eq!(targets.len(), 1, "the real file passes: {targets:?}");
         assert_eq!(targets[0].1, Touch::Read);
         // Flags, bare words, and URLs are not files.
         assert!(bash_file_targets("cargo build --release", root).is_empty());
@@ -1530,5 +1650,41 @@ mod bash_tests {
         // a was re-touched (edited): front, and upgraded.
         assert_eq!(facts.touched[0].0, "a.md");
         assert_eq!(facts.touched[0].1, Touch::Edited);
+    }
+}
+
+#[cfg(test)]
+mod gate_tests {
+    use super::*;
+
+    #[test]
+    fn script_fragments_never_land_in_the_list() {
+        let root = std::path::Path::new("/tmp/gertie-gates");
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(root.join("src/real.rs"), "fn main() {}\n").unwrap();
+        // The hand test's garbage: tokens with dots/slashes that name
+        // nothing.
+        let targets =
+            bash_file_targets("python3 -c \"text.replace(old, new)\" && echo s/a/b", root);
+        assert!(
+            targets.iter().all(|(path, _)| !path.contains("replace")),
+            "script fragments must die: {targets:?}"
+        );
+        // The real file passes.
+        let targets = bash_file_targets("cat src/real.rs", root);
+        assert_eq!(targets.len(), 1);
+        assert!(targets[0].0.contains("real.rs"));
+        std::fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn escapes_and_absolute_outside_paths_are_refused() {
+        let root = std::path::Path::new("/tmp/gertie-gates2");
+        std::fs::create_dir_all(root).unwrap();
+        std::fs::write(root.join("in.md"), "x").unwrap();
+        assert!(bash_file_targets("cat ../outside.md", root).is_empty());
+        assert!(bash_file_targets("cat /etc/passwd", root).is_empty());
+        assert!(!bash_file_targets("cat in.md", root).is_empty());
+        std::fs::remove_dir_all(root).ok();
     }
 }
