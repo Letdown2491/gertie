@@ -1,5 +1,4 @@
-// Modified by Longbridge for gpui-fast.
-// Modified for gpui-fast releases: adapted to wgpu =30.0.1.
+// Modified for gpui-pre (snapshot of zed@f126950): adapt device queues and sRGB detection to wgpu 30.0.1.
 use anyhow::{Context as _, Result};
 use etagere::{BucketedAtlasAllocator, size2};
 use gpui::{
@@ -178,9 +177,6 @@ impl WgpuAtlasTextures {
             }
         }
 
-        if !crate::fast::atlas::fits(size, self.max_texture_size) {
-            return None;
-        }
         let texture = self.push_texture(size, texture_kind);
         texture.allocate(size)
     }

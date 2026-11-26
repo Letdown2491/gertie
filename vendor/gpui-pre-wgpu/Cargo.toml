@@ -11,32 +11,25 @@
 
 [package]
 edition = "2024"
-name = "gpui-fast-wgpu"
-version = "0.1.19"
-authors = ["Longbridge"]
+name = "gpui-pre-wgpu"
+version = "0.3.14"
 build = false
-include = [
-    "/src/**",
-    "/resources/**",
-    "/build.rs",
-    "/Cargo.toml",
-    "/README.md",
-    "/LICENSE",
-    "/NOTICE",
-]
-publish = ["crates-io"]
+publish = true
 autolib = false
 autobins = false
 autoexamples = false
 autotests = false
 autobenches = false
-description = "gpui_wgpu: GPUI with gpui-fast rendering and layout optimizations"
-homepage = "https://github.com/longbridge/gpui-fast"
-documentation = "https://docs.rs/gpui-fast-wgpu/0.1.19/gpui_wgpu/"
-readme = "README.md"
+description = "Zed's `gpui_wgpu` crate (gpui-pre snapshot of zed@f126950)"
+readme = false
 license = "Apache-2.0"
-repository = "https://github.com/longbridge/gpui-fast"
+repository = "https://github.com/zed-industries/zed"
 resolver = "2"
+
+[package.metadata.gpui-pre]
+zed-crate = "gpui_wgpu"
+zed-version = "0.1.0"
+zed-rev = "f126950f9d3b62666f97437ae5d4ccac2272c4db"
 
 [features]
 bench-support = [
@@ -54,6 +47,11 @@ test-support = [
 name = "gpui_wgpu"
 path = "src/gpui_wgpu.rs"
 doctest = false
+
+[[bench]]
+name = "layout_line"
+path = "benches/layout_line.rs"
+harness = false
 
 [dependencies.anyhow]
 version = "1.0.86"
@@ -78,9 +76,9 @@ default-features = false
 package = "zed-font-kit"
 
 [dependencies.gpui]
-version = "^0.1.19"
+version = "=0.3.14"
 default-features = false
-package = "gpui-fast"
+package = "gpui-pre"
 
 [dependencies.gpui_util]
 version = "=0.3.14"
@@ -144,7 +142,7 @@ default-features = false
 version = "1.10"
 
 [target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dependencies.wgpu]
-version = "=30.0.1"
+version = "30.0.1"
 features = [
     "std",
     "metal",
@@ -154,10 +152,12 @@ features = [
     "webgpu",
 ]
 default-features = false
+package = "wgpu"
 
 [target.'cfg(not(any(target_os = "linux", target_os = "freebsd")))'.dependencies.wgpu]
-version = "=30.0.1"
+version = "30.0.1"
 default-features = true
+package = "wgpu"
 
 [target.'cfg(target_family = "wasm")'.dependencies.js-sys]
 version = "0.3"
@@ -167,9 +167,27 @@ version = "0.3"
 features = ["HtmlCanvasElement"]
 
 [target.'cfg(target_family = "wasm")'.dependencies.wgpu]
-version = "=30.0.1"
+version = "30.0.1"
 features = ["webgl"]
 default-features = false
+package = "wgpu"
+
+[lints.clippy]
+dbg_macro = "deny"
+declare_interior_mutable_const = "deny"
+disallowed_methods = "deny"
+large_enum_variant = "allow"
+let_underscore_future = "allow"
+nonminimal_bool = "allow"
+redundant_clone = "deny"
+single_range_in_vec_init = "allow"
+todo = "deny"
+too_many_arguments = "allow"
+type_complexity = "allow"
+
+[lints.clippy.style]
+level = "allow"
+priority = -1
 
 [lints.rust.unexpected_cfgs]
 level = "allow"

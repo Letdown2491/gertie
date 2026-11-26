@@ -1,4 +1,3 @@
-// Modified by Longbridge for gpui-fast.
 use anyhow::{Context as _, Ok, Result};
 use collections::HashMap;
 use cosmic_text::{
@@ -22,7 +21,7 @@ use swash::{
 };
 use unicode_segmentation::UnicodeSegmentation;
 
-pub struct CosmicTextSystem(pub(crate) RwLock<CosmicTextSystemState>); // crate::fast::synthetic_italic's tests read the state
+pub struct CosmicTextSystem(RwLock<CosmicTextSystemState>);
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct FontKey {
@@ -47,15 +46,14 @@ struct LoadedFontKey {
     font: FontKey,
 }
 
-pub(crate) struct CosmicTextSystemState {
-    pub(crate) font_system: FontSystem,
+struct CosmicTextSystemState {
+    font_system: FontSystem,
     scratch: ShapeBuffer,
     swash_scale_context: ScaleContext,
     pending_glyph_images: HashMap<RenderGlyphParams, swash::scale::image::Image>,
     /// Contains all already loaded fonts, including all faces. Indexed by `FontId`.
-    pub(crate) loaded_fonts: Vec<LoadedFont>,
+    loaded_fonts: Vec<LoadedFont>,
     loaded_font_ids_by_key: HashMap<LoadedFontKey, FontId>,
-    pub(crate) synthetic_italic: crate::fast::synthetic_italic::Twins,
     /// Caches the `FontId`s associated with a specific family to avoid iterating the font database
     /// for every font face in a family.
     font_ids_by_family_cache: HashMap<FontKey, SmallVec<[FontId; 4]>>,
@@ -63,11 +61,10 @@ pub(crate) struct CosmicTextSystemState {
     missing_glyph_sink: Option<Arc<dyn MissingGlyphSink>>,
 }
 
-#[derive(Clone)] // crate::fast::synthetic_italic clones a face for its italic twin
-pub(crate) struct LoadedFont {
-    pub(crate) font: Arc<CosmicTextFont>,
+struct LoadedFont {
+    font: Arc<CosmicTextFont>,
     features: CosmicFontFeatures,
-    pub(crate) is_known_emoji_font: bool,
+    is_known_emoji_font: bool,
     /// resolved at load time so `layout_line` shares one chain across faces.
     /// `Arc` keeps clone cheap on the per-run hot path.
     user_fallback_chain: Arc<[(FontId, SharedString)]>,
@@ -141,7 +138,6 @@ impl CosmicTextSystem {
             pending_glyph_images: HashMap::default(),
             loaded_fonts: Vec::new(),
             loaded_font_ids_by_key: HashMap::default(),
-            synthetic_italic: crate::fast::synthetic_italic::Twins::default(),
             font_ids_by_family_cache: HashMap::default(),
             system_font_fallback: system_font_fallback.to_string(),
             missing_glyph_sink: None,
@@ -161,7 +157,6 @@ impl CosmicTextSystem {
             pending_glyph_images: HashMap::default(),
             loaded_fonts: Vec::new(),
             loaded_font_ids_by_key: HashMap::default(),
-            synthetic_italic: crate::fast::synthetic_italic::Twins::default(),
             font_ids_by_family_cache: HashMap::default(),
             system_font_fallback: system_font_fallback.to_string(),
             missing_glyph_sink: None,
@@ -209,10 +204,8 @@ impl PlatformTextSystem for CosmicTextSystem {
         };
 
         let ix = find_best_match(font, candidates, &state)?;
-        let font_id = candidates[ix];
-        Ok(crate::fast::synthetic_italic::for_request(
-            &mut state, font_id, font.style,
-        ))
+
+        Ok(candidates[ix])
     }
 
     fn prewarm_fonts(&self, font_ids: &[FontId]) {
@@ -309,11 +302,7 @@ impl CosmicTextSystemState {
         Some(FontMatchProperties {
             primary_family_name: first_family.0.clone().into(),
             stretch: face.stretch,
-            style: crate::fast::synthetic_italic::style(
-                &self.synthetic_italic,
-                font_id,
-                face.style,
-            ),
+            style: face.style,
             weight: face.weight,
             features: loaded_font.features.clone(),
             fallback_chain: Arc::clone(&loaded_font.user_fallback_chain),
@@ -438,7 +427,6 @@ impl CosmicTextSystemState {
             // glyph.
             if font.as_swash().charmap().map('m') == 0
                 && !allowed_bad_font_names.contains(&postscript_name.as_str())
-                && !crate::fast::emoji_fonts::may_load_without_m(&postscript_name)
             {
                 continue;
             };
@@ -551,8 +539,6 @@ impl CosmicTextSystemState {
             &[Source::Bitmap(StrikeWith::ExactSize), Source::Outline]
         };
 
-        let sources =
-            crate::fast::synthetic_italic::sources(&self.synthetic_italic, params, sources);
         let mut renderer = Render::new(sources);
         if params.subpixel_rendering {
             // There seems to be a bug in Swash where the B and R values are swapped.
@@ -562,7 +548,6 @@ impl CosmicTextSystemState {
         } else {
             renderer.format(Format::Alpha).offset(subpixel_offset);
         }
-        crate::fast::synthetic_italic::slant(&self.synthetic_italic, params, &mut renderer);
 
         let glyph_id: u16 = params.glyph_id.0.try_into()?;
         renderer
@@ -809,8 +794,7 @@ impl CosmicTextSystemState {
             if loaded_font.font.id() != glyph.font_id {
                 match self.font_id_for_cosmic_id(glyph.font_id) {
                     std::result::Result::Ok(resolved_id) => {
-                        font_id =
-                            crate::fast::synthetic_italic::for_fallback(self, font_id, resolved_id);
+                        font_id = resolved_id;
                         loaded_font = self.loaded_font(font_id);
                     }
                     Err(error) => {
@@ -1217,7 +1201,7 @@ fn face_info_into_properties(
     }
 }
 
-pub(crate) fn check_is_known_emoji_font(postscript_name: &str) -> bool {
+fn check_is_known_emoji_font(postscript_name: &str) -> bool {
     // TODO: Include other common emoji fonts
     postscript_name == "NotoColorEmoji"
 }
@@ -1369,10 +1353,7 @@ mod tests {
                 ..regular.clone()
             };
             let font_id = text_system.font_id(&requested)?;
-            // An italic request gets crate::fast::synthetic_italic's slanted twin.
-            let twins = &text_system.0.read().synthetic_italic;
-            assert_eq!(twins.is_twin(font_id), style != gpui::FontStyle::Normal);
-            assert_eq!(twins.base(font_id), regular_id);
+            assert_eq!(font_id, regular_id);
             assert_eq!(
                 text_system.font_weight_and_style(font_id)?,
                 (gpui::FontWeight::NORMAL, gpui::FontStyle::Normal)

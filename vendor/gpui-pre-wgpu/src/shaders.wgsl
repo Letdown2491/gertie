@@ -1366,7 +1366,10 @@ fn fs_underline(input: UnderlineVarying) -> @location(0) vec4<f32> {
 
 struct MonochromeSprite {
     order: u32,
-    animation: u32,
+    // The Rust struct's `animation: SpriteAnimationId` lands here
+    // (word 1): the shader has no animation feature, so the field is
+    // read as padding, exactly as the pre-0.3.14 layout treated it.
+    pad: u32,
     tile: AtlasTile,
     bounds: Bounds,
     content_mask: Bounds,

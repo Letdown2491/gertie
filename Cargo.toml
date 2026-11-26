@@ -29,12 +29,15 @@ codegen-units = 1
 debug = "line-tables-only"
 strip = true
 
-# The icons went blank after the gpui-kit 0.11 upgrade: gpui-fast-wgpu
-# 0.1.19's shaders.wgsl still declares the 0.3.7 MonochromeSprite layout
-# (pad then bounds then tile) while gpui-pre 0.3.14 reordered the Rust
-# struct to (animation, tile, bounds). Same 112-byte stride, reordered
-# fields: the GPU reads every sprite field wrong, icons paint blank,
-# containers paint fine. Fixed in the vendor copy; removable when the
-# fork ships a matching shader (watch gpui-fast-wgpu >= 0.1.20).
+# The icons went blank after the gpui-kit 0.11 upgrade: gpui-pre-wgpu
+# 0.3.14 (the Linux wayland renderer) declares MonochromeSprite in its
+# shader with the 0.3.7 field order (pad, bounds, tile) while gpui-pre
+# 0.3.14 reordered the Rust struct to (animation, tile, bounds). Same
+# 112-byte stride, reordered fields: the GPU read every sprite's tile
+# as bounds and vice versa, so icons painted blank inside intact
+# containers (img() bypasses sprites, which is why the logo survived).
+# The vendor copy reorders the declaration to match the Rust struct;
+# removable when the fork ships a matching shader (watch gpui-pre-wgpu
+# > 0.3.14).
 [patch.crates-io]
-gpui-fast-wgpu = { path = "vendor/gpui-fast-wgpu" }
+gpui-pre-wgpu = { path = "vendor/gpui-pre-wgpu" }

@@ -1,5 +1,4 @@
-// Modified by Longbridge for gpui-fast.
-// Modified for gpui-fast releases: adapted to wgpu =30.0.1.
+// Modified for gpui-pre (snapshot of zed@f126950): adapt device queues and sRGB detection to wgpu 30.0.1.
 #[cfg(not(target_family = "wasm"))]
 use crate::{WgpuRenderer, WgpuSurfaceConfig};
 #[cfg(not(target_family = "wasm"))]
@@ -13,7 +12,6 @@ use wgpu::TextureFormat;
 
 #[derive(Clone)]
 pub struct WgpuContext {
-    pub(crate) fast_dynamic_textures: crate::fast::dynamic_textures::TextureStore,
     pub instance: wgpu::Instance,
     pub adapter: wgpu::Adapter,
     pub device: Arc<wgpu::Device>,
@@ -210,8 +208,8 @@ impl WgpuContext {
         not(target_family = "wasm"),
         any(test, feature = "bench-support", feature = "test-support")
     ))]
-    pub(crate) fn create_headless() -> anyhow::Result<(Self, wgpu::TextureFormat)> {
-        let instance = crate::fast::rounded_clip::headless_instance();
+    fn create_headless() -> anyhow::Result<(Self, wgpu::TextureFormat)> {
+        let instance = Self::instance(None);
         let device_id_filter = Self::device_id_filter();
         let (adapter, device, queue, dual_source_blending, color_texture_format, target_format) =
             gpui::block_on(async {
@@ -322,7 +320,6 @@ impl WgpuContext {
             dual_source_blending,
             color_texture_format,
             errors,
-            fast_dynamic_textures: crate::fast::dynamic_textures::TextureStore::default(),
         }
     }
 
@@ -434,12 +431,11 @@ impl WgpuContext {
             dual_source_blending,
             color_texture_format,
             errors,
-            fast_dynamic_textures: crate::fast::dynamic_textures::TextureStore::default(),
         };
         Ok(PreparedWebGraphics { context, surface })
     }
 
-    pub(crate) async fn create_device(
+    async fn create_device(
         adapter: &wgpu::Adapter,
     ) -> anyhow::Result<(wgpu::Device, wgpu::Queue, bool, TextureFormat)> {
         let dual_source_blending = adapter
@@ -468,7 +464,9 @@ impl WgpuContext {
                 .using_alignment(adapter.limits())
         };
         #[cfg(not(target_family = "wasm"))]
-        let required_limits = crate::fast::native_gl::required_limits(adapter);
+        let required_limits = wgpu::Limits::downlevel_defaults()
+            .using_resolution(adapter.limits())
+            .using_alignment(adapter.limits());
 
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
@@ -742,7 +740,6 @@ impl WgpuContext {
 
     pub fn uses_webgl_instance_data(&self) -> bool {
         matches!(self.backend, WgpuBackend::Gl) && cfg!(target_family = "wasm")
-            || crate::fast::native_gl::uses_texture_instance_data(&self.adapter)
     }
 
     pub fn supports_dual_source_blending(&self) -> bool {
