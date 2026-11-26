@@ -206,6 +206,7 @@ pub(crate) fn drive_turn(
         grace_rounds: boot.grace_rounds(),
         worker_progress: gertie_core::WorkerProgress::default(),
         verify: boot.verify_command(),
+        tool_guidance: boot.tool_guidance(),
     });
     let worker_asks = boot
         .broker
@@ -706,6 +707,7 @@ mod tests {
             grace_rounds: None,
             worker_progress: gertie_core::WorkerProgress::default(),
             verify: None,
+            tool_guidance: gertie_core::ToolGuidance::Standard,
         });
         let mut approvals = 0;
         let (outcome, text) = pump(
@@ -792,6 +794,7 @@ mod tests {
             grace_rounds: None,
             worker_progress: gertie_core::WorkerProgress::default(),
             verify: None,
+            tool_guidance: gertie_core::ToolGuidance::Standard,
         });
         let mut approvals = 0;
         let (outcome, _) = pump(

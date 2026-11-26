@@ -41,7 +41,7 @@ pub use snapshot::{
     AfterState, Checkpoint, CheckpointId, SnapshotStore, TurnBounds, TurnFileChange, TurnId,
 };
 use std::path::Path;
-pub use tool::{Tool, ToolResult, WorkerProgress, WorkerStep};
+pub use tool::{Tool, ToolGuidance, ToolResult, WorkerProgress, WorkerStep};
 
 /// Identifies one message in a session's message tree.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]

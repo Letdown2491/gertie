@@ -44,8 +44,9 @@ struct EndpointDraft {
     api_key: Option<String>,
     api_key_env: Option<String>,
     context_window: Option<u64>,
-    /// Not on the form: carried through so an edit keeps it.
+    /// Not on the form: carried through so an edit keeps them.
     memory_writes: Option<bool>,
+    tool_guidance: Option<String>,
 }
 
 impl EndpointDraft {
@@ -59,6 +60,7 @@ impl EndpointDraft {
             api_key_env: endpoint.api_key_env.clone(),
             context_window: endpoint.context_window,
             memory_writes: endpoint.memory_writes,
+            tool_guidance: endpoint.tool_guidance.clone(),
         }
     }
 
@@ -72,6 +74,7 @@ impl EndpointDraft {
             api_key_env: self.api_key_env.clone(),
             context_window: self.context_window,
             memory_writes: self.memory_writes,
+            tool_guidance: self.tool_guidance.clone(),
         }
     }
 }
@@ -355,6 +358,7 @@ impl SettingsPanelView {
                 api_key_env: None,
                 context_window: None,
                 memory_writes: None,
+                tool_guidance: None,
             });
         let mut field = |value: String, placeholder: &'static str, masked: bool| {
             let state = cx.new(|cx| {
@@ -438,6 +442,10 @@ impl SettingsPanelView {
                 .editing
                 .and_then(|index| self.endpoints.get(index))
                 .and_then(|endpoint| endpoint.memory_writes),
+            tool_guidance: form
+                .editing
+                .and_then(|index| self.endpoints.get(index))
+                .and_then(|endpoint| endpoint.tool_guidance.clone()),
         };
         match form.editing {
             Some(index) => self.endpoints[index] = draft,

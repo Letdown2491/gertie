@@ -21,7 +21,9 @@ USAGE:
                                      (the one opt-in network call)
     gertie eval memory               score each configured model on using
                                      memory (live calls, throwaway repos);
-                                     --endpoint NAME limits it, repeatable
+                                     --endpoint NAME limits it, repeatable;
+                                     --set KEY=VALUE tries a profile
+                                     (memory_writes, tool_guidance)
 
 OPTIONS:
     --config <PATH>    config file (default: the standard config dir)
@@ -69,6 +71,8 @@ pub enum Command {
     Eval {
         config: Option<PathBuf>,
         endpoints: Vec<String>,
+        /// `--set key=value`: a profile to try, not saved.
+        settings: Vec<String>,
     },
     /// Print usage and exit 0.
     Help,
@@ -92,6 +96,7 @@ pub fn parse(arguments: &[String]) -> Result<Command, UsageError> {
     let mut check_updates = false;
     let mut eval = false;
     let mut endpoints: Vec<String> = Vec::new();
+    let mut settings: Vec<String> = Vec::new();
 
     let mut index = 0;
     while index < arguments.len() {
@@ -112,6 +117,13 @@ pub fn parse(arguments: &[String]) -> Result<Command, UsageError> {
                     return Err(UsageError("--endpoint needs a name".into()));
                 };
                 endpoints.push(value.clone());
+            }
+            "--set" if eval => {
+                index += 1;
+                let Some(value) = arguments.get(index) else {
+                    return Err(UsageError("--set needs key=value".into()));
+                };
+                settings.push(value.clone());
             }
             "--config" => {
                 index += 1;
@@ -141,7 +153,11 @@ pub fn parse(arguments: &[String]) -> Result<Command, UsageError> {
             return Err(UsageError("those flags belong to doctor".into()));
         }
         return match positional.as_slice() {
-            [suite] if suite == "memory" => Ok(Command::Eval { config, endpoints }),
+            [suite] if suite == "memory" => Ok(Command::Eval {
+                config,
+                endpoints,
+                settings,
+            }),
             [] => Err(UsageError(
                 "eval needs a suite: `gertie eval memory`".into(),
             )),
@@ -344,14 +360,24 @@ mod tests {
             parse_arguments(&["eval", "memory"]).unwrap(),
             Command::Eval {
                 config: None,
-                endpoints: Vec::new()
+                endpoints: Vec::new(),
+                settings: Vec::new()
             }
         );
         assert_eq!(
             parse_arguments(&["eval", "memory", "--endpoint", "a", "--endpoint", "b"]).unwrap(),
             Command::Eval {
                 config: None,
-                endpoints: vec!["a".into(), "b".into()]
+                endpoints: vec!["a".into(), "b".into()],
+                settings: Vec::new()
+            }
+        );
+        assert_eq!(
+            parse_arguments(&["eval", "memory", "--set", "tool_guidance=terse"]).unwrap(),
+            Command::Eval {
+                config: None,
+                endpoints: Vec::new(),
+                settings: vec!["tool_guidance=terse".into()]
             }
         );
         assert!(parse_arguments(&["eval"]).is_err());

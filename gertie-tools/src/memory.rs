@@ -133,6 +133,18 @@ impl Tool for Memory {
         "memory"
     }
 
+    fn terse_description(&self) -> String {
+        if self.writes {
+            "Read and write long-term memory files under `project/` or `global/`; to save \
+             a fact, prefer remember."
+                .into()
+        } else {
+            "Read long-term memory: `project`, `global`, or `project/<file>.md`; remember \
+             writes."
+                .into()
+        }
+    }
+
     fn description(&self) -> String {
         if !self.writes {
             return "Read long-term memory: `project` or `global` lists a tier's topic \
@@ -278,6 +290,10 @@ struct RememberArgs {
 impl Tool for Remember {
     fn name(&self) -> &'static str {
         "remember"
+    }
+
+    fn terse_description(&self) -> String {
+        "Save long-term memory, one fact per call: add a new fact, supersede (id and new text) a changed one instead of rewriting it, archive, update, or link.".into()
     }
 
     fn description(&self) -> String {
@@ -963,6 +979,10 @@ impl SearchMemory {
 impl Tool for SearchMemory {
     fn name(&self) -> &'static str {
         "search_memory"
+    }
+
+    fn terse_description(&self) -> String {
+        "Search long-term memory; search before deciding something the project may have settled, and before remembering.".into()
     }
 
     fn description(&self) -> String {

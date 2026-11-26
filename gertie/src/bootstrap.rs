@@ -164,6 +164,15 @@ impl Bootstrap {
             .value
     }
 
+    /// How much the tool definitions coach the selected endpoint's
+    /// model (#42), from the live config.
+    pub fn tool_guidance(&self) -> gertie_core::ToolGuidance {
+        self.live_config()
+            .selected_endpoint_config()
+            .map(crate::config::EndpointConfig::tool_guidance_in_force)
+            .unwrap_or_default()
+    }
+
     /// The project check for this workspace (#40), from the live
     /// config.
     pub fn verify_command(&self) -> Option<String> {
@@ -1653,6 +1662,7 @@ mod tests {
             api_key_env: Some("ANTHROPIC_API_KEY".into()),
             context_window: Some(200_000),
             memory_writes: None,
+            tool_guidance: None,
         });
         let mut seat = crate::config::AgentConfig {
             name: "council-anthropic".into(),

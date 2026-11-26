@@ -127,13 +127,20 @@ pub type SharedHistory = Arc<tokio::sync::Mutex<Vec<WireMessage>>>;
 pub type ToolRegistry = Arc<BTreeMap<String, Arc<dyn Tool>>>;
 
 /// Builds the ToolSpec list advertised to the model.
-pub fn tool_specs(tools: &ToolRegistry) -> Vec<ToolSpec> {
+pub fn tool_specs(tools: &ToolRegistry, guidance: crate::tool::ToolGuidance) -> Vec<ToolSpec> {
     tools
         .values()
-        .map(|tool| ToolSpec {
-            name: tool.name().to_string(),
-            description: tool.description(),
-            parameters: tool.parameters(),
+        .map(|tool| match guidance {
+            crate::tool::ToolGuidance::Standard => ToolSpec {
+                name: tool.name().to_string(),
+                description: tool.description(),
+                parameters: tool.parameters(),
+            },
+            crate::tool::ToolGuidance::Terse => ToolSpec {
+                name: tool.name().to_string(),
+                description: tool.terse_description(),
+                parameters: crate::tool::bare_schema(&tool.parameters()),
+            },
         })
         .collect()
 }
@@ -234,6 +241,8 @@ pub struct TurnSpec {
     /// permission mode, when the model ends a turn that edited files.
     /// None = no check.
     pub verify: Option<String>,
+    /// How much the tool definitions coach this model (#42).
+    pub tool_guidance: crate::tool::ToolGuidance,
 }
 
 /// Runs one user turn to completion: request → (text | tool calls)* →
@@ -277,11 +286,12 @@ pub fn run_turn(spec: TurnSpec) -> BoxStream<'static, LoopEvent> {
         grace_rounds,
         worker_progress,
         verify,
+        tool_guidance,
     } = spec;
     let max_tool_rounds = max_tool_rounds.unwrap_or(DEFAULT_MAX_TOOL_ROUNDS);
     let grace_rounds = grace_rounds.unwrap_or(DEFAULT_GRACE_ROUNDS);
     let mut steer = steer;
-    let specs = tool_specs(&tools);
+    let specs = tool_specs(&tools, tool_guidance);
     Box::pin(async_stream::stream! {
         // A resume turn pushes nothing: history already ends with what
         // the model should continue from.
@@ -1701,6 +1711,7 @@ mod tests {
                 grace_rounds: None,
                 worker_progress: crate::tool::WorkerProgress::default(),
                 verify: None,
+                tool_guidance: crate::tool::ToolGuidance::Standard,
             },
             broker,
         )

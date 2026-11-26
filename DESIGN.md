@@ -417,6 +417,14 @@ dropped below its no-adaptation baseline, no consolidation may ever regenerate t
    one write path. Models given two write paths wrote the same fact twice, and the write
    commands are most of the tool's ~440 tokens per request. Edits apply immediately (the user
    is watching them happen); the frozen index picks them up next session.
+   The second profile setting is `tool_guidance`: `standard`, or `terse` (each tool's short
+   description, its first sentence unless the tool writes one, and schemas without field
+   descriptions; about 60% fewer tool-definition tokens). `gertie eval memory --set` tries a
+   profile without touching the config, and the eval's suggestions judge a terse trial on cost,
+   not score: the mean of every passing run per setting in the results file (same endpoint,
+   model and memory setting), output tokens weighted x4, two runs per side before a verdict,
+   kept only at 10% cheaper or better. Less coaching can buy cheaper requests and spend them on
+   more steps: on glm-5.3-flash terse passed 3/3 but cost within 5% of standard.
    Every file write passes `MemoryStore::normalize_edit`, so a model's headings, bullets,
    rewritten counters or invented hashes never reach the store as malformed entries. The
    `remember` tool is the preferred write path: a schema instead of a grammar.

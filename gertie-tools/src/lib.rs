@@ -655,6 +655,10 @@ impl Tool for EditFile {
         "edit_file"
     }
 
+    fn terse_description(&self) -> String {
+        "Replace exact text in a file; old_str must match exactly once.".into()
+    }
+
     fn description(&self) -> String {
         "Replace exact text in a file. old_text must match exactly once \
          unless replace_all is set, the edit is rejected otherwise, with \
@@ -915,6 +919,10 @@ impl Tool for Bash {
 impl Tool for Glob {
     fn name(&self) -> &'static str {
         "glob"
+    }
+
+    fn terse_description(&self) -> String {
+        "Find files by glob pattern, relative to the workspace root.".into()
     }
 
     fn description(&self) -> String {

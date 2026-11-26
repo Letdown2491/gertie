@@ -479,6 +479,9 @@ impl AgentTool {
                 worker_progress: WorkerProgress::default(),
                 // Workers report to a leader whose own turn checks.
                 verify: None,
+                // A worker may run on another endpoint; it gets the
+                // full coaching until its own profile says otherwise.
+                tool_guidance: crate::tool::ToolGuidance::Standard,
                 // Brief and guidance are model-authored; their
                 // hyphen lines are escaped so neither can forge the
                 // envelope around them.

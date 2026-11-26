@@ -562,6 +562,8 @@ pub struct ChatView {
     settle_command: Option<String>,
     /// The project check run before an editing turn ends (#40).
     verify: Option<String>,
+    /// How much the tool definitions coach the model (#42).
+    tool_guidance: gertie_core::ToolGuidance,
     /// The command palette (Ctrl+K): the kit's field + keyboard nav,
     /// pointed at the store's FTS index by the callbacks in render.
     palette: Entity<CommandState>,
@@ -770,6 +772,8 @@ pub struct ChatViewConfig {
     pub settle_command: Option<String>,
     // The project check run before an editing turn ends (#40).
     pub verify: Option<String>,
+    // How much the tool definitions coach the model (#42).
+    pub tool_guidance: gertie_core::ToolGuidance,
     pub broker: Arc<PermissionBroker>,
     pub session_scope: gertie_core::SessionScope,
     // Worker dispatch reads this turn's posture; the chat sets it
@@ -824,6 +828,7 @@ impl ChatView {
             workspace_root,
             settle_command,
             verify,
+            tool_guidance,
             broker,
             session_scope,
             mode_scope,
@@ -1028,6 +1033,7 @@ impl ChatView {
             workspace_root,
             settle_command,
             verify,
+            tool_guidance,
             palette,
             palette_open: false,
             palette_hits: Vec::new(),

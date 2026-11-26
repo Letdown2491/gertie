@@ -58,6 +58,65 @@ impl WorkerProgress {
 /// One executable capability the model can call. Tools are async and
 /// cancellable by construction (the returned future is dropped to cancel),
 /// which is what makes "subagents as tools" a one-crate change later.
+/// How much the tool definitions coach the model (#42), a per-model
+/// profile setting. Standard: full descriptions, per-field guidance.
+/// Terse: one-line descriptions and bare schemas (types, enums,
+/// required kept), for models that do not need the coaching; every
+/// request carries the tool definitions, so this is tokens on every
+/// round. `gertie eval memory` decides which a model gets.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ToolGuidance {
+    #[default]
+    Standard,
+    Terse,
+}
+
+impl ToolGuidance {
+    pub fn parse(raw: &str) -> Option<Self> {
+        match raw.trim() {
+            "standard" => Some(Self::Standard),
+            "terse" => Some(Self::Terse),
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Standard => "standard",
+            Self::Terse => "terse",
+        }
+    }
+}
+
+/// The first sentence of a description: up to the first ". " or "; "
+/// boundary, whole if it has none.
+pub fn first_sentence(text: &str) -> String {
+    let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    match text.find(". ") {
+        Some(end) => text[..=end].to_string(),
+        None => text,
+    }
+}
+
+/// A schema without its `description` fields, at every depth. Types,
+/// enums, required lists and nesting stay: the shape is the contract,
+/// the prose is coaching.
+pub fn bare_schema(schema: &serde_json::Value) -> serde_json::Value {
+    match schema {
+        serde_json::Value::Object(object) => serde_json::Value::Object(
+            object
+                .iter()
+                .filter(|(key, value)| !(key.as_str() == "description" && value.is_string()))
+                .map(|(key, value)| (key.clone(), bare_schema(value)))
+                .collect(),
+        ),
+        serde_json::Value::Array(items) => {
+            serde_json::Value::Array(items.iter().map(bare_schema).collect())
+        }
+        other => other.clone(),
+    }
+}
+
 pub trait Tool: Send + Sync {
     /// The stable name the model calls it by.
     fn name(&self) -> &'static str;
@@ -65,6 +124,14 @@ pub trait Tool: Send + Sync {
     /// What the leader reads when deciding whether to spawn it. Type and
     /// tool discovery quality is description quality.
     fn description(&self) -> String;
+
+    /// The description under [`ToolGuidance::Terse`] (#42): for models
+    /// that need the what, not the coaching. Defaults to the first
+    /// sentence; a tool whose first sentence drops a rule that matters
+    /// says so here.
+    fn terse_description(&self) -> String {
+        first_sentence(&self.description())
+    }
 
     /// JSON schema for the arguments object.
     fn parameters(&self) -> serde_json::Value;
@@ -123,5 +190,44 @@ pub trait Tool: Send + Sync {
     ) -> Pin<Box<dyn Future<Output = ToolResult> + Send + 'a>> {
         let _ = (progress, turn_token);
         self.run(&call.arguments)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// #42: terse keeps the contract (types, enums, required, nesting)
+    /// and drops the coaching, and a description cuts at its first
+    /// sentence.
+    #[test]
+    fn terse_keeps_the_schema_shape_and_the_first_sentence() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "action": {"type": "string", "enum": ["add", "supersede"], "description": "what to do"},
+                "evidence": {"type": "array", "items": {"type": "string", "description": "a path"}},
+                "description": {"type": "string", "description": "a field named description stays"}
+            },
+            "required": ["action"]
+        });
+        let bare = bare_schema(&schema);
+        assert_eq!(bare["properties"]["action"]["enum"][1], "supersede");
+        assert!(bare["properties"]["action"].get("description").is_none());
+        assert!(
+            bare["properties"]["evidence"]["items"]
+                .get("description")
+                .is_none()
+        );
+        assert_eq!(bare["required"][0], "action");
+        assert_eq!(
+            bare["properties"]["description"]["type"], "string",
+            "a property named description is data"
+        );
+        assert_eq!(
+            first_sentence("Read a file.  Returns numbered lines. Use offset."),
+            "Read a file."
+        );
+        assert_eq!(first_sentence("no boundary here"), "no boundary here");
     }
 }

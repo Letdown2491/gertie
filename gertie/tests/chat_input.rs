@@ -152,6 +152,7 @@ fn fixture_full(
                         workspace_root: root.clone(),
                         settle_command,
                         verify: None,
+                        tool_guidance: gertie_core::ToolGuidance::Standard,
                         broker: broker
                             .unwrap_or_else(|| Arc::new(gertie_core::PermissionBroker::new())),
                         session_scope: gertie_core::SessionScope::new(),
@@ -1360,6 +1361,7 @@ fn markdown_and_tool_rows_draw_clean() {
                         workspace_root: Path::new(".").to_path_buf(),
                         settle_command: None,
                         verify: None,
+                        tool_guidance: gertie_core::ToolGuidance::Standard,
                         broker: Arc::new(gertie_core::PermissionBroker::new()),
                         session_scope: gertie_core::SessionScope::new(),
                         mode_scope: gertie_core::ModeScope::new(),
@@ -2819,6 +2821,7 @@ fn the_footer_and_the_sidebar_foot_stay_inside_the_window() {
                         workspace_root: Path::new(".").to_path_buf(),
                         settle_command: None,
                         verify: None,
+                        tool_guidance: gertie_core::ToolGuidance::Standard,
                         broker: Arc::new(gertie_core::PermissionBroker::new()),
                         session_scope: gertie_core::SessionScope::new(),
                         mode_scope: gertie_core::ModeScope::new(),

@@ -13,6 +13,10 @@ api_key_env = "MY_API_KEY"
 # memory_writes = false      # memory tool's file write commands; unset =
 #                            # on for Claude models, off for the rest
 #                            # (view only, remember writes)
+# tool_guidance = "terse"    # one-line tool descriptions, bare schemas:
+#                            # ~60% fewer tool-definition tokens per
+#                            # request; unset = "standard". Try it with
+#                            # gertie eval memory --set tool_guidance=terse
 
 # A local model needs no key:
 # [[endpoints]]

@@ -394,6 +394,12 @@ pub struct EndpointConfig {
     /// path. `gertie eval memory` measures the difference.
     #[serde(default)]
     pub memory_writes: Option<bool>,
+    /// How much the tool definitions coach this endpoint's model (#42):
+    /// "standard" (the default) or "terse" (one-line descriptions, bare
+    /// schemas, fewer tokens every request). `gertie eval memory`
+    /// suggests it; anything else reads as standard.
+    #[serde(default)]
+    pub tool_guidance: Option<String>,
 }
 
 /// `~` or `~/…` at the start of an endpoint's base_url expands to the
@@ -455,6 +461,15 @@ impl EndpointConfig {
     pub fn memory_writes_in_force(&self) -> bool {
         self.memory_writes
             .unwrap_or_else(|| self.model.to_lowercase().contains("claude"))
+    }
+
+    /// [`tool_guidance`](Self::tool_guidance) parsed, standard when
+    /// absent or unrecognized.
+    pub fn tool_guidance_in_force(&self) -> gertie_core::ToolGuidance {
+        self.tool_guidance
+            .as_deref()
+            .and_then(gertie_core::ToolGuidance::parse)
+            .unwrap_or_default()
     }
 
     /// Where the key comes from, for `gertie doctor`:
@@ -1262,6 +1277,7 @@ mod tests {
             api_key_env: Some(format!("{name}_KEY")),
             context_window: None,
             memory_writes: None,
+            tool_guidance: None,
         }
     }
 
@@ -1856,6 +1872,7 @@ default_mode = "full_access"
             api_key_env: Some("GERTIE_TEST_UNSET_KEY_8347".into()),
             context_window: None,
             memory_writes: None,
+            tool_guidance: None,
         });
         config.default_endpoint = Some("ppq".into());
         // No env mutation (unsafe under edition 2024), the variable is
