@@ -576,6 +576,13 @@ impl Bootstrap {
             Arc::new(gertie_tools::memory::SearchMemory::new(memory.clone())),
         );
         root_independent.push("search_memory".into());
+        // The structured write path (#35): any model fills a schema,
+        // the harness writes the grammar, one path with extraction's.
+        map.insert(
+            "remember".into(),
+            Arc::new(gertie_tools::memory::Remember::new(memory.clone())),
+        );
+        root_independent.push("remember".into());
 
         // The structured question: the loop intercepts `ask_user`
         // before any tool's run (the answer rides the permission
@@ -844,6 +851,10 @@ impl Bootstrap {
                 "search_memory".into(),
                 Arc::new(gertie_tools::memory::SearchMemory::new(Arc::clone(&memory))),
             );
+            map.insert(
+                "remember".into(),
+                Arc::new(gertie_tools::memory::Remember::new(Arc::clone(&memory))),
+            );
         }
 
         // Skills: the user dir rides along; the project dir is the new
@@ -981,6 +992,10 @@ impl Bootstrap {
             map.insert(
                 "search_memory".into(),
                 Arc::new(gertie_tools::memory::SearchMemory::new(Arc::clone(&memory))),
+            );
+            map.insert(
+                "remember".into(),
+                Arc::new(gertie_tools::memory::Remember::new(Arc::clone(&memory))),
             );
         }
         if let (Some(endpoint), Some(leader_provider)) = (self.agent_endpoint(), self.provider()) {

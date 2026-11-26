@@ -123,7 +123,11 @@ impl Tool for Memory {
          files hold one-line markdown entries; MEMORY.md is a derived \
          index, never create, edit, or delete it. Memory is advisory: \
          recall, not policy. The index in your context was snapshotted \
-         at session start, edits surface next session."
+         at session start, edits surface next session. Use view to \
+         browse; to write a fact, prefer the remember tool (it handles \
+         ids, evidence and supersedes for you). If you edit a file here \
+         directly, a changed fact is superseded, never rewritten or \
+         deleted."
             .into()
     }
 
@@ -187,6 +191,355 @@ impl Tool for Memory {
                 )),
             }
         })
+    }
+}
+
+/// The structured write path (#35): the model fills a schema, the
+/// harness writes the grammar. Every action lands through
+/// `MemoryStore::apply`, the same ops extraction uses, so there is one
+/// write path with one set of rules (ids, evidence hashing, supersede
+/// flags). Inputs are checked before apply so a refusal can say how to
+/// do it right; apply itself only reports "skipped".
+pub struct Remember {
+    store: Arc<gertie_core::MemoryStore>,
+}
+
+impl Remember {
+    pub fn new(store: Arc<gertie_core::MemoryStore>) -> Self {
+        Self { store }
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct RememberArgs {
+    action: String,
+    #[serde(default)]
+    tier: Option<String>,
+    #[serde(default)]
+    file: Option<String>,
+    #[serde(default)]
+    text: Option<String>,
+    #[serde(default)]
+    evidence: Vec<String>,
+    #[serde(default)]
+    id: Option<String>,
+    #[serde(default)]
+    by: Option<String>,
+    #[serde(default)]
+    to: Option<String>,
+    #[serde(default)]
+    relation: Option<String>,
+}
+
+impl Tool for Remember {
+    fn name(&self) -> &'static str {
+        "remember"
+    }
+
+    fn description(&self) -> String {
+        "Write long-term memory: facts worth knowing in a future session (decisions, \
+         gotchas, conventions, the user's preferences). One fact per call, one line, \
+         specific enough to act on. Actions: add (a new fact, with the files it rests on \
+         as evidence); supersede (a fact changed: give the old id and either the new \
+         `text` or the replacing id as `by`; never rewrite a fact into a different one); \
+         update (fix wording only, same fact); archive (no longer true, nothing replaces \
+         it); link (relate two entries). Search memory first so you do not add a \
+         duplicate. Memory is recall, not policy: rules belong in AGENTS.md."
+            .into()
+    }
+
+    fn parameters(&self) -> serde_json::Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "action": {"type": "string",
+                           "enum": ["add", "supersede", "update", "archive", "link"]},
+                "text": {"type": "string",
+                         "description": "add, update, supersede: the fact, one line"},
+                "file": {"type": "string",
+                         "description": "add: the topic file, e.g. gotchas.md, decisions.md, conventions.md, preferences.md"},
+                "evidence": {"type": "array", "items": {"type": "string"},
+                             "description": "add, supersede: workspace paths the fact rests on (files this session read or wrote); gertie records their hashes and flags the entry when they change"},
+                "id": {"type": "string",
+                       "description": "supersede, update, archive: the entry, e.g. p12; link: the entry the link starts from"},
+                "by": {"type": "string",
+                       "description": "supersede: an existing entry that replaces id (or give text instead)"},
+                "to": {"type": "string", "description": "link: the other entry"},
+                "relation": {"type": "string",
+                             "enum": gertie_core::memory::RELATIONS,
+                             "description": "link: how id relates to `to`"},
+                "tier": {"type": "string", "enum": ["project", "global"],
+                         "description": "add: project (this repo, the default) or global (about the user, all projects)"}
+            },
+            "required": ["action"]
+        })
+    }
+
+    fn run<'a>(
+        &'a self,
+        arguments: &'a str,
+    ) -> Pin<Box<dyn Future<Output = ToolResult> + Send + 'a>> {
+        let store = self.store.clone();
+        let arguments = arguments.to_string();
+        blocking(move || {
+            let args: RememberArgs = crate::parse(&arguments, "remember")?;
+            let tier = match args.tier.as_deref() {
+                Some("global") => Tier::Global,
+                None | Some("project") => Tier::Project,
+                Some(other) => {
+                    return Err(format!(
+                        "remember: tier is project or global, got {other:?}"
+                    ));
+                }
+            };
+            std::fs::create_dir_all(store.root(tier))
+                .map_err(|error| format!("remember: {error}"))?;
+            let output = remember_action(&store, tier, &args)?;
+            audit(
+                &store,
+                tier,
+                &format!("{} {}", args.action, describe_target(&args)),
+                "remember",
+            )?;
+            sync(&store)?;
+            Ok(output)
+        })
+    }
+}
+
+fn describe_target(args: &RememberArgs) -> String {
+    args.id
+        .clone()
+        .or_else(|| args.file.clone())
+        .unwrap_or_default()
+}
+
+/// One remember call, checked, applied, and described.
+fn remember_action(
+    store: &Arc<gertie_core::MemoryStore>,
+    tier: Tier,
+    args: &RememberArgs,
+) -> ToolResult {
+    use gertie_core::Op;
+    let entries = store.scan();
+    let exists = |id: &str| entries.iter().any(|entry| entry.id == id);
+    let need_id = |field: &str, id: Option<&String>| -> Result<String, String> {
+        let id = id
+            .map(|id| id.trim().trim_matches(|c| c == '[' || c == ']').to_string())
+            .filter(|id| !id.is_empty())
+            .ok_or_else(|| {
+                format!(
+                    "remember: {} needs `{field}`, an entry id like p12",
+                    args.action
+                )
+            })?;
+        if exists(&id) {
+            Ok(id)
+        } else {
+            Err(format!(
+                "remember: no entry {id}. search_memory finds entries and their ids; the \
+                 memory index in your context lists the rest"
+            ))
+        }
+    };
+    let one_line = |field: &str| -> Result<String, String> {
+        let text = args
+            .text
+            .as_deref()
+            .map(str::trim)
+            .filter(|text| !text.is_empty())
+            .ok_or_else(|| {
+                format!(
+                    "remember: {} needs `{field}`, the fact in one line",
+                    args.action
+                )
+            })?;
+        if text.lines().count() > 1 {
+            return Err(
+                "remember: one fact per call, one line; call remember again for the next fact"
+                    .into(),
+            );
+        }
+        Ok(text.to_string())
+    };
+    let topic = |file: &str| -> String {
+        let file = file.trim();
+        if file.ends_with(".md") {
+            file.to_string()
+        } else {
+            format!("{file}.md")
+        }
+    };
+    let evidence_words = |paths: &[String]| -> String {
+        if paths.is_empty() {
+            return String::new();
+        }
+        let kept: Vec<String> = store
+            .evidence_for(paths)
+            .into_iter()
+            .map(|cited| cited.path)
+            .collect();
+        let dropped: Vec<&str> = paths
+            .iter()
+            .map(String::as_str)
+            .filter(|path| {
+                !kept
+                    .iter()
+                    .any(|kept| path.trim_start_matches("./") == kept)
+            })
+            .collect();
+        let mut words = String::new();
+        if !kept.is_empty() {
+            words.push_str(&format!("; evidence: {} (hashed)", kept.join(", ")));
+        }
+        if !dropped.is_empty() {
+            words.push_str(&format!(
+                "; not evidence: {} (not a file in the workspace)",
+                dropped.join(", ")
+            ));
+        }
+        words
+    };
+    let new_id = |before: &[gertie_core::MemoryEntry]| -> Option<String> {
+        store
+            .scan()
+            .into_iter()
+            .find(|entry| !before.iter().any(|old| old.id == entry.id))
+            .map(|entry| entry.id)
+    };
+    let apply = |ops: Vec<Op>| -> Result<gertie_core::memory::ApplyReport, String> {
+        let report = store
+            .apply(&ops, 4096)
+            .map_err(|error| format!("remember: {error}"))?;
+        if !report.skipped.is_empty() {
+            return Err(format!(
+                "remember: not applied: {}",
+                report.skipped.join("; ")
+            ));
+        }
+        Ok(report)
+    };
+    let flagged_words = |report: &gertie_core::memory::ApplyReport| -> String {
+        let flagged: Vec<String> = report
+            .flagged
+            .iter()
+            .flat_map(|(_, ids)| ids.iter().cloned())
+            .collect();
+        if flagged.is_empty() {
+            String::new()
+        } else {
+            format!(
+                "; flagged for recheck (they rested on it): {}",
+                flagged.join(", ")
+            )
+        }
+    };
+
+    match args.action.as_str() {
+        "add" => {
+            let text = one_line("text")?;
+            let file = topic(args.file.as_deref().ok_or_else(|| {
+                "remember: add needs `file`, a topic file like gotchas.md".to_string()
+            })?);
+            if tier == Tier::Global {
+                gertie_core::memory::add_global(store, &file, &text, None)
+                    .map_err(|error| format!("remember: {error}"))?;
+                let id = new_id(&entries).unwrap_or_default();
+                return Ok(format!("added {id} to global/{file}"));
+            }
+            apply(vec![Op::Add {
+                file: file.clone(),
+                text,
+                source: None,
+                evidence: args.evidence.clone(),
+            }])
+            .map_err(|error| format!("{error}. A topic file is a plain name like gotchas.md"))?;
+            let id = new_id(&entries).unwrap_or_default();
+            Ok(format!(
+                "added {id} to {file}{}",
+                evidence_words(&args.evidence)
+            ))
+        }
+        "supersede" => {
+            let id = need_id("id", args.id.as_ref())?;
+            if let Some(by) = args.by.as_ref() {
+                let by = need_id("by", Some(by))?;
+                let report = apply(vec![Op::Supersede {
+                    id: id.clone(),
+                    by: Some(by.clone()),
+                }])?;
+                return Ok(format!("superseded {id} by {by}{}", flagged_words(&report)));
+            }
+            let text = one_line("text")?;
+            let file = args.file.as_deref().map(topic).unwrap_or_else(|| {
+                entries
+                    .iter()
+                    .find(|entry| entry.id == id)
+                    .map(|entry| entry.file.clone())
+                    .unwrap_or_else(|| "decisions.md".into())
+            });
+            let report = apply(vec![
+                Op::Add {
+                    file: file.clone(),
+                    text,
+                    source: None,
+                    evidence: args.evidence.clone(),
+                },
+                Op::Supersede {
+                    id: id.clone(),
+                    by: None,
+                },
+            ])?;
+            let added = new_id(&entries).unwrap_or_default();
+            Ok(format!(
+                "added {added} to {file}{} and superseded {id} by it{}",
+                evidence_words(&args.evidence),
+                flagged_words(&report)
+            ))
+        }
+        "update" => {
+            let id = need_id("id", args.id.as_ref())?;
+            let text = one_line("text")?;
+            apply(vec![Op::Update {
+                id: id.clone(),
+                text,
+            }])?;
+            Ok(format!(
+                "updated {id}'s wording (votes and evidence kept); if the fact itself \
+                 changed, supersede instead"
+            ))
+        }
+        "archive" => {
+            let id = need_id("id", args.id.as_ref())?;
+            apply(vec![Op::Archive { id: id.clone() }])?;
+            Ok(format!(
+                "archived {id}: it stays in the file as history, out of the index"
+            ))
+        }
+        "link" => {
+            let from = need_id("id", args.id.as_ref())?;
+            let to = need_id("to", args.to.as_ref())?;
+            let relation = args
+                .relation
+                .as_deref()
+                .map(|relation| relation.trim().to_ascii_lowercase())
+                .unwrap_or_default();
+            if !gertie_core::memory::RELATIONS.contains(&relation.as_str()) || from == to {
+                return Err(format!(
+                    "remember: link needs two different entries and a relation, one of {}",
+                    gertie_core::memory::RELATIONS.join(", ")
+                ));
+            }
+            apply(vec![Op::Link {
+                from: from.clone(),
+                to: to.clone(),
+                relation: relation.clone(),
+            }])?;
+            Ok(format!("linked {from} {relation} {to}"))
+        }
+        other => Err(format!(
+            "remember: unknown action {other:?}; one of add, supersede, update, archive, link"
+        )),
     }
 }
 
@@ -256,9 +609,6 @@ fn parse_view_range(range: &str, len: usize) -> Result<(usize, usize), String> {
     Ok((start, end.min(len)))
 }
 
-/// create: the file must not exist yet, parents are created, the whole
-/// content passes the sanitizer (one entrance, one cap).
-///
 /// The file name the store records entries under.
 fn file_label(path: &Path) -> String {
     path.file_name()
@@ -267,6 +617,8 @@ fn file_label(path: &Path) -> String {
         .to_string()
 }
 
+/// create: the file must not exist yet, parents are created, the whole
+/// content passes the normalizer (one entrance, one cap).
 fn create(
     store: &gertie_core::MemoryStore,
     tier: Tier,
@@ -1304,5 +1656,152 @@ mod tests {
             "{lines:?}"
         );
         assert_eq!(store.scan().len(), 2);
+    }
+
+    fn remember(tool: &Remember, arguments: serde_json::Value) -> ToolResult {
+        let text = arguments.to_string();
+        let mut future = tool.run(&text);
+        settle(&mut future)
+    }
+
+    fn seeded(lines: &str) -> (tempfile::TempDir, Arc<gertie_core::MemoryStore>, Remember) {
+        let (tmp, store, _) = grammar_fixture();
+        std::fs::create_dir_all(tmp.path().join("project")).unwrap();
+        if !lines.is_empty() {
+            std::fs::write(tmp.path().join("project/gotchas.md"), lines).unwrap();
+        }
+        store.sync().unwrap();
+        let tool = Remember::new(store.clone());
+        (tmp, store, tool)
+    }
+
+    #[test]
+    fn remember_add_hashes_evidence_and_says_what_landed() {
+        let (tmp, store, tool) = seeded("");
+        std::fs::write(tmp.path().join("pool.rs"), "fn pool() {}\n").unwrap();
+        let out = remember(
+            &tool,
+            json!({"action": "add", "file": "gotchas", "text": "the pool warms at boot",
+                   "evidence": ["pool.rs", "gone.rs"]}),
+        )
+        .unwrap();
+        let entry = store.scan().pop().unwrap();
+        assert_eq!(entry.file, "gotchas.md", "the .md is the harness's job");
+        assert_eq!(entry.evidence.len(), 1);
+        assert_eq!(
+            entry.evidence[0].hash,
+            gertie_core::blob_hash(b"fn pool() {}\n")
+        );
+        assert!(
+            out.contains(&entry.id) && out.contains("gotchas.md"),
+            "{out}"
+        );
+        assert!(
+            out.contains("pool.rs") && out.contains("gone.rs"),
+            "kept and dropped: {out}"
+        );
+        let log = std::fs::read_to_string(tmp.path().join("project/MEMORY.md")).unwrap();
+        assert!(log.contains("remember add"), "the audit trail: {log}");
+    }
+
+    #[test]
+    fn remember_refuses_with_the_fix() {
+        let (_tmp, _store, tool) =
+            seeded("- [p1] helpful=0 harmful=0 one [source: added: 2026-11-01]\n");
+        let multi = remember(
+            &tool,
+            json!({"action": "add", "file": "gotchas.md", "text": "first fact\nsecond fact"}),
+        )
+        .unwrap_err();
+        assert!(multi.contains("one fact per call"), "{multi}");
+        let unknown = remember(&tool, json!({"action": "archive", "id": "p99"})).unwrap_err();
+        assert!(
+            unknown.contains("p99") && unknown.contains("search_memory"),
+            "{unknown}"
+        );
+        let relation = remember(
+            &tool,
+            json!({"action": "link", "id": "p1", "to": "p1", "relation": "inspired"}),
+        )
+        .unwrap_err();
+        assert!(
+            relation.contains("builds_on"),
+            "names the relations: {relation}"
+        );
+        let action = remember(&tool, json!({"action": "forget", "id": "p1"})).unwrap_err();
+        assert!(action.contains("supersede"), "{action}");
+    }
+
+    #[test]
+    fn remember_supersede_with_text_adds_the_replacement_and_flags_dependents() {
+        let (_tmp, store, tool) = seeded(
+            "- [p1] helpful=0 harmful=0 sign releases with the local key [source: added: 2026-11-01]\n\
+             - [p2] helpful=0 harmful=0 keep checksums next to the release [links: builds_on p1] [source: added: 2026-11-01]\n",
+        );
+        let out = remember(
+            &tool,
+            json!({"action": "supersede", "id": "p1", "text": "signing moved to CI"}),
+        )
+        .unwrap();
+        let entries = store.scan();
+        let old = entries.iter().find(|entry| entry.id == "p1").unwrap();
+        let new = entries
+            .iter()
+            .find(|entry| entry.text == "signing moved to CI")
+            .unwrap();
+        assert_eq!(old.superseded_by.as_deref(), Some(new.id.as_str()));
+        assert_eq!(
+            new.file, "gotchas.md",
+            "the replacement lands beside the old"
+        );
+        let dependent = entries.iter().find(|entry| entry.id == "p2").unwrap();
+        assert_eq!(dependent.recheck, vec!["p1".to_string()]);
+        assert!(
+            out.contains(&new.id) && out.contains("p2"),
+            "names the flag: {out}"
+        );
+    }
+
+    #[test]
+    fn remember_update_archive_and_link() {
+        let (_tmp, store, tool) = seeded(
+            "- [p1] helpful=3 harmful=0 the pool is tuned [source: added: 2026-11-01]\n\
+             - [p2] helpful=0 harmful=0 warm it at boot [source: added: 2026-11-01]\n\
+             - [p3] helpful=0 harmful=0 stale advice [source: added: 2026-11-01]\n",
+        );
+        remember(
+            &tool,
+            json!({"action": "update", "id": "p1", "text": "the pool is tuned for sqlite"}),
+        )
+        .unwrap();
+        remember(
+            &tool,
+            json!({"action": "link", "id": "p2", "to": "p1", "relation": "builds_on"}),
+        )
+        .unwrap();
+        remember(&tool, json!({"action": "archive", "id": "p3"})).unwrap();
+        let entries = store.scan();
+        let p1 = entries.iter().find(|entry| entry.id == "p1").unwrap();
+        assert_eq!(
+            (p1.text.as_str(), p1.helpful),
+            ("the pool is tuned for sqlite", 3)
+        );
+        let p2 = entries.iter().find(|entry| entry.id == "p2").unwrap();
+        assert_eq!(p2.links[0].to, "p1");
+        let p3 = entries.iter().find(|entry| entry.id == "p3").unwrap();
+        assert!(p3.valid_until.is_some(), "archived, never deleted");
+    }
+
+    #[test]
+    fn remember_global_tier_adds_a_global_entry() {
+        let (_tmp, store, tool) = seeded("");
+        remember(
+            &tool,
+            json!({"action": "add", "tier": "global", "file": "preferences.md",
+                   "text": "prefers commits without em dashes"}),
+        )
+        .unwrap();
+        let entry = store.scan().pop().unwrap();
+        assert!(entry.id.starts_with('g'), "{entry:?}");
     }
 }

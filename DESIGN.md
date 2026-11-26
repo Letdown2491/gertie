@@ -260,7 +260,10 @@ Eleven built-ins, each done well; MCP fills the rest:
 backend: Brave/Exa/SearXNG; **gracefully disabled with a clear message when no backend is
 configured**) · `search_history` (native, FTS5 over our own session DB) · `memory` (the
 `memory_20250818` command surface over both memory tiers, mutation audited to the index's
-own trail) · `search_memory` (FTS5 over the derived sidecar, ranked pointers).
+own trail) · `search_memory` (FTS5 over the derived sidecar, ranked pointers) · `remember`
+(the structured write path: add, supersede, update, archive, link as a JSON schema, applied
+through the same delta ops extraction uses, so any model writes valid entries without
+learning the grammar).
 
 Beside them, two surfaces the UI answers rather than the world: `ask_user` (a question
 with clickable options, answered through the permission broker) and `status` (the model's
@@ -387,6 +390,9 @@ dropped below its no-adaptation baseline, no consolidation may ever regenerate t
    guarded. The Anthropic wire serves the standard tool type; OpenAI-compatible endpoints get
    gertie's definition of the same commands, one handler, both wires. Edits apply immediately
    (the user is watching them happen); the frozen index picks them up next session.
+   Every file write passes `MemoryStore::normalize_edit`, so a model's headings, bullets,
+   rewritten counters or invented hashes never reach the store as malformed entries. The
+   `remember` tool is the preferred write path: a schema instead of a grammar.
 2. **Session end**, extraction rides the two reliable boundaries: compaction (the digest is
    already built) and settle (the ✓ is the human's "done"; process exit is not reliable).
    Eligibility first: skip short and still-active sessions; flag sessions that ingested

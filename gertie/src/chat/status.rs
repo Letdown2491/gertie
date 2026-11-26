@@ -171,11 +171,37 @@ impl StatusFacts {
                         other => other,
                     };
                     let file = target.rsplit('/').next().unwrap_or(&target);
-                    self.memory_actions
-                        .push(clip(&format!("{verb} {file}"), 80));
-                    if self.memory_actions.len() > 5 {
-                        self.memory_actions.pop();
+                    // Newest first, capped: the old push-then-pop
+                    // dropped every action after the fifth.
+                    if verb != "view" {
+                        self.memory_actions
+                            .insert(0, clip(&format!("{verb} {file}"), 80));
+                        self.memory_actions.truncate(5);
                     }
+                }
+            }
+            // The structured write path (#35): its actions are memory
+            // actions, and the entry it superseded or updated was seen.
+            "remember" => {
+                let action = field("action").unwrap_or_default();
+                let verb = match action.as_str() {
+                    "add" => "created",
+                    "supersede" => "superseded",
+                    "update" => "edited",
+                    "archive" => "archived",
+                    "link" => "linked",
+                    other => other,
+                };
+                let target = field("id").or_else(|| field("file")).unwrap_or_default();
+                if let Some(id) = field("id")
+                    && !self.consulted.contains(&id)
+                {
+                    self.consulted.push(id);
+                }
+                if !verb.is_empty() {
+                    self.memory_actions
+                        .insert(0, clip(&format!("{verb} {target}"), 80));
+                    self.memory_actions.truncate(5);
                 }
             }
             "search_memory" => {
@@ -1963,6 +1989,41 @@ fn newest_wins_ordering_moves_retouched_files_front() {
     assert_eq!(facts.touched[0].0, "src/a.rs");
     assert_eq!(facts.touched[0].1, Touch::Edited);
 }
+#[cfg(test)]
+mod memory_action_tests {
+    use super::*;
+
+    #[test]
+    fn memory_actions_are_newest_first_capped_and_skip_views() {
+        let root = std::path::Path::new("/nonexistent");
+        let mut facts = StatusFacts::default();
+        for index in 0..7 {
+            facts.fold_tool(
+                "memory",
+                &format!(r#"{{"command":"create","path":"project/t{index}.md"}}"#),
+                "created",
+                root,
+            );
+        }
+        facts.fold_tool(
+            "memory",
+            r#"{"command":"view","path":"project/t1.md"}"#,
+            "x",
+            root,
+        );
+        facts.fold_tool(
+            "remember",
+            r#"{"action":"supersede","id":"p12","text":"new"}"#,
+            "added p13",
+            root,
+        );
+        assert_eq!(facts.memory_actions.len(), 5);
+        assert_eq!(facts.memory_actions[0], "superseded p12");
+        assert_eq!(facts.memory_actions[1], "created t6.md");
+        assert!(facts.consulted.contains(&"p12".to_string()));
+    }
+}
+
 #[cfg(test)]
 mod bash_tests {
     use super::*;
