@@ -663,7 +663,10 @@ impl ChatView {
     /// Whether the column (or its rail) is on screen: a session with
     /// state, and no other side panel claiming the right edge.
     pub(crate) fn status_column_shown(&self) -> bool {
-        self.panel == Panel::None && self.status_has_content()
+        // The settings page lives over the conversation now, not on
+        // an edge: only the memory panel (a true right-edge panel)
+        // retires the column.
+        self.panel != Panel::Memory && self.status_has_content()
     }
 
     pub(crate) fn toggle_status_column(&mut self, cx: &mut Context<Self>) {

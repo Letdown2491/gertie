@@ -6373,6 +6373,9 @@ impl ChatView {
 
 impl Render for ChatView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // Owned copy: the overlay below reads it after the mutable
+        // cx borrows begin.
+        let theme = cx.theme().clone();
         // The tail-follow snapshot: taken here, outside the list's
         // paint (which holds the state's borrow and would panic on a
         // read), after this frame's scroll events have landed. The
@@ -6449,17 +6452,6 @@ impl Render for ChatView {
             // and the transcript list keeps its flex sizing.
             .items_stretch()
             .relative()
-            // Settings opens on the LEFT: it belongs with the
-            // sidebar's chrome, not over the session state the
-            // status column owns on the right.
-            .when(self.panel == Panel::Settings, |row| {
-                row.child(
-                    div()
-                        .key_context("SettingsPanel")
-                        .track_focus(&self.side_focus)
-                        .child(self.settings_panel.clone()),
-                )
-            })
             .child(self.render_sidebar(&mut *cx))
             .child(
                 h_flex()
@@ -6516,6 +6508,24 @@ impl Render for ChatView {
                                         .pb_4(),
                                     ),
                             )
+                            .when(self.panel == Panel::Settings, |area| {
+                                // Settings is a full page over the
+                                // conversation, not a strip on an edge:
+                                // the sidebars stay, the transcript
+                                // yields. Opaque background so the list
+                                // doesn't bleed through.
+                                area.child(
+                                    div()
+                                        .absolute()
+                                        .inset_0()
+                                        .flex()
+                                        .justify_center()
+                                        .key_context("SettingsPanel")
+                                        .track_focus(&self.side_focus)
+                                        .bg(theme.background)
+                                        .child(self.settings_panel.clone()),
+                                )
+                            })
                             // Empty state: the transcript is quiet until
                             // it isn't, say so, quietly. The state says
                             // more when a first-run needs to know it

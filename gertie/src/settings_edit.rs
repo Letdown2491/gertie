@@ -24,7 +24,8 @@ use gpui_kit::component::switch::Switch;
 use gpui_kit::component::{h_flex, v_flex};
 use gpui_kit::prelude::*;
 use gpui_kit::{
-    App, Context, Entity, EventEmitter, IntoElement, Render, SharedString, Window, div, px,
+    AnyElement, App, Context, Entity, EventEmitter, IntoElement, Render, SharedString, Window, div,
+    px,
 };
 
 /// Emitted after a successful save, the workspace reloads the
@@ -190,6 +191,39 @@ pub struct SettingsPanelView {
     mcp_command: Option<Entity<InputState>>,
     /// Last save result: (message, is_error).
     status: Option<(String, bool)>,
+    /// The section the two-pane page shows; the nav on the page's
+    /// left switches it.
+    section: SettingsSection,
+}
+
+/// The settings page's sections, in nav order. One shows at a time:
+/// the old single scroll crammed eight cards into a strip.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SettingsSection {
+    Appearance,
+    Endpoints,
+    Sandbox,
+    Memory,
+    TurnBudgets,
+    Mcp,
+    Agents,
+    Config,
+}
+
+impl SettingsSection {
+    /// The element id / test handle suffix.
+    fn name(self) -> &'static str {
+        match self {
+            SettingsSection::Appearance => "appearance",
+            SettingsSection::Endpoints => "endpoints",
+            SettingsSection::Sandbox => "sandbox",
+            SettingsSection::Memory => "memory",
+            SettingsSection::TurnBudgets => "turn-budgets",
+            SettingsSection::Mcp => "mcp",
+            SettingsSection::Agents => "agents",
+            SettingsSection::Config => "config",
+        }
+    }
 }
 
 impl SettingsPanelView {
@@ -213,6 +247,7 @@ impl SettingsPanelView {
             mcp_url: None,
             mcp_command: None,
             status: None,
+            section: SettingsSection::Endpoints,
         };
         panel.reset_pending(config);
         panel
@@ -848,6 +883,64 @@ impl EventEmitter<SettingsEvent> for SettingsPanelView {}
 impl Render for SettingsPanelView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
+        let section = self.section;
+
+        // The nav: one row per section, the active one filled. The
+        // page's left pane; the content pane shows one section whole
+        // instead of eight cards in a strip.
+        let nav = v_flex()
+            .id("settings-nav")
+            .w(px(150.))
+            .h_full()
+            .flex_shrink_0()
+            .border_r_1()
+            .border_color(theme.border)
+            .pt_3()
+            .px_2()
+            .gap_0p5()
+            .child(
+                div()
+                    .px_2()
+                    .pb_2()
+                    .text_size(px(11.))
+                    .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                    .text_color(theme.muted_foreground)
+                    .child("Settings"),
+            )
+            .children(
+                [
+                    (SettingsSection::Appearance, "Appearance"),
+                    (SettingsSection::Endpoints, "Endpoints"),
+                    (SettingsSection::Sandbox, "Sandbox"),
+                    (SettingsSection::Memory, "Memory"),
+                    (SettingsSection::TurnBudgets, "Turn budgets"),
+                    (SettingsSection::Mcp, "MCP servers"),
+                    (SettingsSection::Agents, "Agents"),
+                    (SettingsSection::Config, "Config file"),
+                ]
+                .map(|(id, label)| {
+                    let active = section == id;
+                    div()
+                        .id(SharedString::from(format!("nav-{}", id.name())))
+                        .px_2()
+                        .py_1()
+                        .rounded(px(6.))
+                        .text_size(px(12.5))
+                        .cursor_pointer()
+                        .text_color(if active {
+                            theme.foreground
+                        } else {
+                            theme.muted_foreground
+                        })
+                        .when(active, |row| row.bg(theme.foreground.opacity(0.09)))
+                        .hover(|row| row.bg(theme.foreground.opacity(0.06)))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.section = id;
+                            cx.notify();
+                        }))
+                        .child(label)
+                }),
+            );
 
         let form = self.form.as_ref().map(|form| {
             let labeled = |label: &'static str, field: &Entity<InputState>| {
@@ -1014,36 +1107,55 @@ impl Render for SettingsPanelView {
         });
 
         let mcp_form_open = mcp_form.is_some();
-        v_flex()
-            .id("settings-panel")
-            .w(px(300.))
-            .h_full()
-            .flex_shrink_0()
-            .border_l_1()
-            .border_color(theme.border)
-            .pt_3()
-            .px_3()
-            .pb_3()
-            .gap_3()
-            .overflow_y_scroll()
-            .child(settings_card("Appearance", cx).child({
-                let current = gpui_kit::component::Theme::global(cx).mode;
-                h_flex()
-                    .gap_1()
-                    .children([ThemeMode::Dark, ThemeMode::Light].map(|mode| {
-                        let button =
-                            Button::new(SharedString::from(format!("theme-{}", mode.name())))
+
+        // The save-result messages live at the page's top, above nav
+        // and content, so a save reports no matter which section shows.
+        let status_line = v_flex().children(self.status.iter().map(|(message, is_error)| {
+            div()
+                .px_1()
+                .text_size(px(11.5))
+                .text_color(if *is_error {
+                    theme.danger
+                } else {
+                    theme.success
+                })
+                .child(message.clone())
+        }));
+
+        // One section's cards at a time, in nav order; the nav rows
+        // pick which. The content pane holds the active section only.
+        let mut content: Vec<AnyElement> = Vec::new();
+
+        if self.section == SettingsSection::Appearance {
+            content.push(
+                settings_card("Appearance", cx)
+                    .child({
+                        let current = gpui_kit::component::Theme::global(cx).mode;
+                        h_flex()
+                            .gap_1()
+                            .children([ThemeMode::Dark, ThemeMode::Light].map(|mode| {
+                                let button = Button::new(SharedString::from(format!(
+                                    "theme-{}",
+                                    mode.name()
+                                )))
                                 .label(mode.name())
                                 .small();
-                        let button = if current == mode {
-                            button.primary()
-                        } else {
-                            button.ghost()
-                        };
-                        button.on_click(cx.listener(move |this, _, _, cx| this.set_theme(mode, cx)))
-                    }))
-            }))
-            .child(
+                                let button = if current == mode {
+                                    button.primary()
+                                } else {
+                                    button.ghost()
+                                };
+                                button.on_click(
+                                    cx.listener(move |this, _, _, cx| this.set_theme(mode, cx)),
+                                )
+                            }))
+                    })
+                    .into_any_element(),
+            );
+        }
+
+        if self.section == SettingsSection::Endpoints {
+            content.push(
                 settings_card("Endpoints", cx)
                     .when(self.endpoints.is_empty(), |col| {
                         col.child(
@@ -1072,9 +1184,13 @@ impl Render for SettingsPanelView {
                                 this.open_form(None, window, cx);
                             })),
                     )
-                    .children(form),
-            )
-            .child(
+                    .children(form)
+                    .into_any_element(),
+            );
+        }
+
+        if self.section == SettingsSection::Sandbox {
+            content.push(
                 settings_card("Sandbox", cx)
                     .child(
                         Switch::new("sandbox-switch")
@@ -1098,9 +1214,13 @@ impl Render for SettingsPanelView {
                                 }
                             }),
                     )
-                    .child(origin_note(self.summary.sandbox_origin, cx)),
-            )
-            .child(
+                    .child(origin_note(self.summary.sandbox_origin, cx))
+                    .into_any_element(),
+            );
+        }
+
+        if self.section == SettingsSection::Memory {
+            content.push(
                 settings_card("Memory", cx)
                     .child(
                         Switch::new("memory-switch")
@@ -1150,9 +1270,13 @@ impl Render for SettingsPanelView {
                                     }
                                 }
                             }),
-                    ),
-            )
-            .child(
+                    )
+                    .into_any_element(),
+            );
+        }
+
+        if self.section == SettingsSection::TurnBudgets {
+            content.push(
                 settings_card("Turn budgets", cx).child(
                     v_flex()
                         .gap_1p5()
@@ -1183,9 +1307,13 @@ impl Render for SettingsPanelView {
                             _window,
                             cx,
                         )),
-                ),
-            )
-            .child(
+                )
+                .into_any_element(),
+            );
+        }
+
+        if self.section == SettingsSection::Mcp {
+            content.push(
                 settings_card("MCP servers", cx)
                     .when(self.mcp_servers.is_empty(), |col| {
                         col.child(
@@ -1241,9 +1369,13 @@ impl Render for SettingsPanelView {
                                 cx.notify();
                             }),
                         ))
-                    }),
-            )
-            .child(
+                    })
+                    .into_any_element(),
+            );
+        }
+
+        if self.section == SettingsSection::Agents {
+            content.push(
                 settings_card("Agents", cx)
                     .when(self.agents.is_empty(), |col| {
                         col.child(
@@ -1269,34 +1401,58 @@ impl Render for SettingsPanelView {
                                     this.open_agent_form(None, window, cx);
                                 })),
                         )
-                    }),
-            )
+                    })
+                    .into_any_element(),
+            );
+        }
+
+        if self.section == SettingsSection::Config {
+            content.push(
+                settings_card("Config file", cx)
+                    .child(
+                        div()
+                            .text_size(px(11.))
+                            .text_color(theme.muted_foreground)
+                            .child(match &self.summary.config_path {
+                                Some(path) => format!(
+                                    "Changes save to {} as you make them; its comments and \
+                                 unknown keys are kept.",
+                                    path.display()
+                                ),
+                                None => "no config file location".into(),
+                            }),
+                    )
+                    .into_any_element(),
+            );
+        }
+
+        // The two-pane page: nav left, one section's content right.
+        // The wrapper is the page the chat overlays over the
+        // transcript; it fills, so the content pane gets the width
+        // the old 300px strip could never have.
+        v_flex()
+            .id("settings-panel")
+            .w_full()
+            .h_full()
+            .flex_1()
+            .min_w_0()
+            .child(status_line)
             .child(
-                settings_card("Config file", cx).child(
-                    div()
-                        .text_size(px(11.))
-                        .text_color(theme.muted_foreground)
-                        .child(match &self.summary.config_path {
-                            Some(path) => format!(
-                                "Changes save to {} as you make them; its comments and \
-                             unknown keys are kept.",
-                                path.display()
-                            ),
-                            None => "no config file location".into(),
-                        }),
+                h_flex().flex_1().min_h_0().child(nav).child(
+                    v_flex()
+                        .id("settings-content")
+                        .flex_1()
+                        .min_w_0()
+                        .h_full()
+                        .overflow_y_scroll()
+                        .px_6()
+                        .pt_3()
+                        .pb_3()
+                        .gap_3()
+                        .max_w(px(760.))
+                        .children(content),
                 ),
             )
-            .children(self.status.iter().map(|(message, is_error)| {
-                div()
-                    .px_1()
-                    .text_size(px(11.5))
-                    .text_color(if *is_error {
-                        theme.danger
-                    } else {
-                        theme.success
-                    })
-                    .child(message.clone())
-            }))
     }
 }
 
