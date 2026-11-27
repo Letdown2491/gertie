@@ -372,6 +372,21 @@ fn emit_delta(
             delta: content.to_string(),
         });
     }
+    // A reasoning model's thinking rides its own field(s): GLM and
+    // deepseek style APIs use `reasoning_content`, some relays send
+    // `reasoning`. Dropped silently, it strands the request behind
+    // reasoning the caller never sees (the empty-extraction bug):
+    // surfaced as its own event, a thinking-only stream still proves
+    // the endpoint is up, and text-only consumers see nothing.
+    for key in ["reasoning_content", "reasoning"] {
+        if let Some(text) = delta.get(key).and_then(|text| text.as_str())
+            && !text.is_empty()
+        {
+            let _ = sender.send(Event::Reasoning {
+                delta: text.to_string(),
+            });
+        }
+    }
     if let Some(calls) = delta.get("tool_calls").and_then(|calls| calls.as_array()) {
         for call in calls {
             let Some(index) = call.get("index").and_then(count).map(|i| i as usize) else {
@@ -926,6 +941,31 @@ mod tests {
             output_tokens: 2,
             cached_input_tokens: 5,
         }));
+        assert_eq!(events.last(), Some(&Event::Done));
+    }
+
+    #[test]
+    fn reasoning_deltas_surface_as_reasoning_events() {
+        // GLM-style relays stream thinking under `reasoning_content`
+        // (some under `reasoning`). Dropped, a reasoning-only stream
+        // looks like a silent success; surfaced, a text-only consumer
+        // still sees nothing, but the envelope can tell up from dead.
+        let server = FakeServer::start(
+            "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"hmm\"}}]}\n\n\
+             data: {\"choices\":[{\"delta\":{\"reasoning\":\"aha\"}}]}\n\n\
+             data: {\"choices\":[{\"delta\":{\"content\":\"[]\"}}]}\n\n\
+             data: [DONE]\n\n",
+        );
+        let provider = OpenAICompatible::new(server.endpoint(Wire::OpenAI)).unwrap();
+        let events = drain(provider.stream(user_request()));
+
+        assert!(events.contains(&Event::Reasoning {
+            delta: "hmm".into()
+        }));
+        assert!(events.contains(&Event::Reasoning {
+            delta: "aha".into()
+        }));
+        assert!(events.contains(&Event::Token { delta: "[]".into() }));
         assert_eq!(events.last(), Some(&Event::Done));
     }
 

@@ -527,6 +527,10 @@ pub fn run_turn(spec: TurnSpec) -> BoxStream<'static, LoopEvent> {
                         assistant_text.push_str(&delta);
                         yield LoopEvent::Delta { delta };
                     }
+                    // A reasoning model's thinking: not output. The turn
+                    // ignores it, but its arrival proves the endpoint is
+                    // up and producing.
+                    crate::Event::Reasoning { .. } => {}
                     crate::Event::ToolCall { id, name, arguments } => {
                         calls.push(ToolCall { id, name, arguments });
                     }

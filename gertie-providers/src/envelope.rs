@@ -153,7 +153,12 @@ async fn fall_back(
         let mut produced = false;
         while let Some(event) = proxy_rx.recv().await {
             match &event {
-                Event::Token { .. } | Event::ToolCall { .. } | Event::Usage { .. } => {
+                Event::Token { .. }
+                | Event::ToolCall { .. }
+                | Event::Usage { .. }
+                // A reasoning model's thinking is live production: an
+                // endpoint that is only reasoning is up and working.
+                | Event::Reasoning { .. } => {
                     produced = true
                 }
                 _ if !produced => continue,

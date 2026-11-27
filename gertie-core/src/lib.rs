@@ -1567,7 +1567,15 @@ pub enum Event {
     Started,
     /// The next piece of assistant text. Providers coalesce to whatever
     /// granularity arrives over the wire; the loop may re-coalesce.
-    Token { delta: String },
+    Token {
+        delta: String,
+    },
+    /// A reasoning model's thinking, streamed under its own field
+    /// (`reasoning_content` on the OpenAI-compatible wire, `reasoning` on
+    /// some relays). Never model output: the transcript and the agent
+    /// loop ignore it, but it counts as live production (an endpoint
+    /// that is thinking is up), and a consumer that reads only text
+    /// sees nothing rather than thinking.
     /// A tool call the model wants executed. Deltas are normalized inside
     /// the provider layer, so this arrives whole, with arguments parsed.
     ToolCall {
@@ -1587,14 +1595,21 @@ pub enum Event {
     },
     /// The stream finished normally.
     Done,
+    Reasoning {
+        delta: String,
+    },
     /// The stream failed. Retries are the provider layer's job; by the time
     /// an `Error` surfaces, the policy in DESIGN.md has been exhausted.
-    Error { message: String },
+    Error {
+        message: String,
+    },
     /// The provider's usage/rate limit answered every retry. Not an
     /// error to report and forget: the turn ends *limited*, the state
     /// is persisted, and the UI offers a manual Resume: the ask is
     /// "wait, then continue", not "something broke".
-    Limited { message: String },
+    Limited {
+        message: String,
+    },
 }
 
 #[cfg(test)]

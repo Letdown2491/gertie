@@ -311,18 +311,38 @@ pub async fn run_extraction(
     let request = Request {
         messages: vec![crate::request::WireMessage::user(&prompt)],
         tools: Vec::new(),
-        max_output_tokens: Some(2048),
+        // No output cap, the same budget a chat turn gets: a reasoning
+        // model spends tokens on thinking before any content arrives,
+        // and a cap that thinking eats strands the request (the
+        // empty-extraction bug: 2048 was all reasoning, zero content).
+        max_output_tokens: None,
     };
     let mut stream = provider.stream(request);
     let mut collected = String::new();
+    let mut produced = false;
     while let Some(event) = stream.next().await {
         match event {
-            Event::Token { delta } => collected.push_str(&delta),
+            Event::Token { delta } => {
+                produced = true;
+                collected.push_str(&delta);
+            }
+            // Thinking is live production: the endpoint is up even
+            // before any content arrives.
+            Event::Reasoning { .. } => produced = true,
             Event::Error { message } => return Err(message),
             Event::Limited { message } => return Err(format!("rate limited: {message}")),
             Event::Done => break,
             _ => {}
         }
+    }
+    // Never hand an empty string to the parser: the error names the
+    // shape of the silence instead of serde's "EOF at column 0".
+    if collected.is_empty() {
+        return Err(if produced {
+            "the model reasoned but returned no content".to_string()
+        } else {
+            "the stream ended without any response".to_string()
+        });
     }
     Ok(collected)
 }
@@ -557,6 +577,63 @@ mod tests {
             tool_row("not json"),
         ];
         assert_eq!(touched_files(&messages), vec!["src/a.rs", "src/b.rs"]);
+    }
+
+    /// A canned provider: replays `events` verbatim. The smallest
+    /// possible stand-in for the wire's behavior on this endpoint.
+    struct Canned(Vec<Event>);
+
+    impl Provider for Canned {
+        fn stream(&self, _request: Request) -> futures_core::stream::BoxStream<'static, Event> {
+            let events = self.0.clone();
+            Box::pin(futures_util::stream::iter(events))
+        }
+    }
+
+    #[test]
+    fn a_reasoning_only_stream_errors_honestly_not_as_json_eof() {
+        // The glm-5.3-flash bug, distilled: the model thought until the
+        // old cap cut it off, content never arrived, and the caller
+        // read serde's "EOF at column 0" instead of the truth.
+        let provider = Arc::new(Canned(vec![
+            Event::Reasoning {
+                delta: "thinking".into(),
+            },
+            Event::Done,
+        ]));
+        let error =
+            crate::testing::block_on(run_extraction(provider, "digest", "index", &[])).unwrap_err();
+        assert!(
+            error.contains("reasoned but returned no content"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn an_empty_stream_errors_honestly_not_as_json_eof() {
+        let provider = Arc::new(Canned(vec![Event::Done]));
+        let error =
+            crate::testing::block_on(run_extraction(provider, "digest", "index", &[])).unwrap_err();
+        assert!(
+            error.contains("stream ended without any response"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn reasoning_then_content_parses_to_ops() {
+        // The fixed wire: thinking precedes the answer, the parser
+        // reads only the answer.
+        let provider = Arc::new(Canned(vec![
+            Event::Reasoning {
+                delta: "let me check the index".into(),
+            },
+            Event::Token { delta: "[]".into() },
+            Event::Done,
+        ]));
+        let ops =
+            crate::testing::block_on(run_extraction(provider, "digest", "index", &[])).unwrap();
+        assert!(parse_ops(&ops).unwrap().is_empty());
     }
 
     #[test]
