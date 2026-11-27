@@ -931,8 +931,9 @@ impl ChatView {
                     .child(
                         v_flex()
                             .id("memory-scroll")
-                            .max_h(px(150.))
+                            .max_h(px(120.))
                             .overflow_y_scroll()
+                            .occlude()
                             .gap(px(3.))
                             .children(rows),
                     )
@@ -959,13 +960,16 @@ impl ChatView {
                 .collect()
             };
             // The whole list in one scrollable window, the viewport
-            // sized to roughly ten rows: no data cap, no "+N more"
+            // sized to roughly five rows: no data cap, no "+N more"
             // continuation, and the column's height stays stable
             // whether the session touched 3 files or 300.
             let body = v_flex()
                 .id("touched-scroll")
-                .max_h(px(300.))
+                .max_h(px(150.))
                 .overflow_y_scroll()
+                // Wheel events over the section scroll the section,
+                // not the whole column behind it.
+                .occlude()
                 .gap(px(3.))
                 .children(chips(&mut facts.touched.iter()))
                 .into_any_element();
@@ -1041,7 +1045,18 @@ impl ChatView {
                 v_flex()
                     .gap_1p5()
                     .child(label(None, "GROUNDED IN".into()))
-                    .child(v_flex().gap_1p5().children(links))
+                    .child(
+                        // Three rows in the viewport, the whole list
+                        // scrollable, wheel events staying in the
+                        // section rather than scrolling the column.
+                        v_flex()
+                            .id("grounded-scroll")
+                            .max_h(px(96.))
+                            .overflow_y_scroll()
+                            .occlude()
+                            .gap(px(3.))
+                            .children(links),
+                    )
                     .into_any_element(),
             );
         }
