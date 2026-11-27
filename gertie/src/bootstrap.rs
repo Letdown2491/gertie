@@ -349,6 +349,17 @@ impl Bootstrap {
         workspace_root: PathBuf,
         global_memory: Option<PathBuf>,
     ) -> Self {
+        // Boot profiling, opt-in: GERTIE_BOOT_TRACE=1 prints each
+        // stage's duration to stderr. Cold start was slow (the user's
+        // report, 2026-11-27); this names the stage that owns the cost.
+        let trace = std::env::var("GERTIE_BOOT_TRACE").is_ok();
+        let mut stage = std::time::Instant::now();
+        let mut mark = |name: &str| {
+            if trace {
+                eprintln!("boot: {name} {}ms", stage.elapsed().as_millis());
+            }
+            stage = std::time::Instant::now();
+        };
         // First run with the default path: no config file yet means
         // gertie writes a starter of comments and pointers (no endpoint
         // is built in) and says so. An explicit --config override never
@@ -437,6 +448,7 @@ impl Bootstrap {
             std::process::exit(1);
         };
 
+        mark("store");
         // The startup sweep: chats idle past the configured days come
         // back settled, state only, never the reclaim command (that
         // runs when a human presses settle). Skipped entirely until
@@ -449,6 +461,7 @@ impl Bootstrap {
             eprintln!("warning: auto-settle sweep failed: {error}");
         }
 
+        mark("auto-settle");
         let snapshots = crate::config::Config::data_dir().and_then(|data_dir| {
             match gertie_core::SnapshotStore::open(&data_dir.join("snapshots")) {
                 Ok(store) => Some(Arc::new(store)),
@@ -537,6 +550,7 @@ impl Bootstrap {
             label.push_str(&format!(", ⚠ {warning}"));
         }
 
+        mark("skills+templates");
         // The system prompt: identity, the one policy paragraph the model
         // must know, the skill index. Terse by the two-loads rule, every
         // line is context paid on every turn.
@@ -606,6 +620,7 @@ impl Bootstrap {
                 let _ = std::fs::write(&stamp, b"");
             }
         }
+        mark("memory");
         let memory_index = render_memory_index(&memory);
         let memory_extract_provider: Option<Arc<dyn gertie_core::Provider>> = config
             .memory
@@ -810,7 +825,7 @@ impl Bootstrap {
         settings.skills = skills.len();
         let live_config = Arc::new(config.clone());
 
-        Self {
+        let boot = Self {
             config,
             config_path: config_path.map(Path::to_path_buf),
             config_error,
@@ -844,7 +859,9 @@ impl Bootstrap {
             workspace_root,
             memory_global,
             root_independent,
-        }
+        };
+        mark("memory-index+tools");
+        boot
     }
     /// Everything a chat needs to move itself to another workspace:
     /// the re-rooted registry, the prompt that names it, and the

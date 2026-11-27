@@ -795,6 +795,10 @@ pub struct ChatView {
     /// Whether the column is folded to its rail, persisted per
     /// conversation as a store flag.
     status_collapsed: bool,
+    /// Boot profiling: the view's clock, and whether the first
+    /// render has stamped itself (GERTIE_BOOT_TRACE).
+    started: std::time::Instant,
+    first_frame_done: bool,
     /// Whether the left sidebar is folded to its rail, persisted as
     /// one app-wide store flag (the sidebar is chrome, not session
     /// state).
@@ -1202,6 +1206,8 @@ impl ChatView {
             grounded_heights: Default::default(),
             grounded_cap: std::cell::Cell::new(132.0),
             status_collapsed: false,
+            started: std::time::Instant::now(),
+            first_frame_done: false,
             sidebar_collapsed,
             project_asks: Vec::new(),
             answered_from_column: Default::default(),
@@ -6376,6 +6382,13 @@ impl Render for ChatView {
         // Owned copy: the overlay below reads it after the mutable
         // cx borrows begin.
         let theme = cx.theme().clone();
+        if std::env::var_os("GERTIE_BOOT_TRACE").is_some() && !self.first_frame_done {
+            self.first_frame_done = true;
+            eprintln!(
+                "boot: view first render {}ms after start",
+                self.started.elapsed().as_millis()
+            );
+        }
         // The tail-follow snapshot: taken here, outside the list's
         // paint (which holds the state's borrow and would panic on a
         // read), after this frame's scroll events have landed. The

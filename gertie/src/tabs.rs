@@ -168,6 +168,13 @@ impl WorkspaceView {
     /// starts blank, two views on one session would diverge their
     /// in-memory histories against one database.
     pub fn new(boot: Arc<Bootstrap>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let mut trace_start = std::time::Instant::now();
+        let trace_stage = |name: &str, since: &mut std::time::Instant| {
+            if std::env::var_os("GERTIE_BOOT_TRACE").is_some() {
+                eprintln!("boot: view {name} {}ms", since.elapsed().as_millis());
+            }
+            *since = std::time::Instant::now();
+        };
         let mut this = Self {
             boot,
             tabs: Vec::new(),
@@ -186,6 +193,7 @@ impl WorkspaceView {
         // and the tab opens in that conversation's own folder; a
         // terminal launch (`cd kuma && gertie`) keeps the folder
         // rule — you named a folder, open its chat.
+        trace_stage("pre-decide", &mut trace_start);
         let first_root = this.decide_first_root();
         let first = match first_root {
             Some(root)
@@ -199,6 +207,7 @@ impl WorkspaceView {
                 // and that session is the exactly-one chat the filter
                 // matches. A refusal (gone folder, bad overlay) falls
                 // through to the plain boot-rooted view.
+                trace_stage("workspace_for_root", &mut trace_start);
                 match boot.workspace_for_root(&root) {
                     Ok(switched) => this.make_view(
                         switched.tools,
@@ -220,6 +229,7 @@ impl WorkspaceView {
             }
             _ => this.make_boot_view(window, cx),
         };
+        trace_stage("view built", &mut trace_start);
         this.push_view(first, window, cx);
         // The window-close gate: registered once, asked on every close
         // attempt (titlebar ✕, Alt+F4, WM gesture, there is no other
