@@ -27,8 +27,6 @@ pub(crate) const STATUS_WIDTH: f32 = 300.;
 /// The collapsed rail's width.
 pub(crate) const RAIL_WIDTH: f32 = 34.;
 
-/// How many touched files list before the rest fold into a count.
-
 /// Grounding rows per tier: the consulted entries, then the
 /// file-sharing ones (the weaker signal, so fewer).
 const ACTING_SHOWN: usize = 6;
