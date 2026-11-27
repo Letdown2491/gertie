@@ -7,8 +7,9 @@ use gertie_core::SessionStore;
 use gpui_kit::component::Root;
 use gpui_kit::test::TestWindowExt as _;
 use gpui_kit::{
-    AnyWindowHandle, AppContext, HeadlessAppContext, NoopTextSystem, SharedString, WeakEntity,
-    WindowHandle, component::v_flex, div, prelude::*, px, size,
+    AnyWindowHandle, AppContext, Bounds, HeadlessAppContext, NoopTextSystem, SharedString,
+    WeakEntity, WindowBounds, WindowHandle, WindowOptions, component::v_flex, div, prelude::*,
+    px, size,
 };
 use std::path::Path;
 use std::sync::Arc;
@@ -6944,4 +6945,127 @@ fn the_settings_page_groups_four_sections_and_covers_the_middle_column() {
             .panel_for_test()
     });
     assert_eq!(xed, "none", "the ✕ closes the page");
+}
+
+/// The settings column's real geometry at a window wider than the
+/// card column's max width: the column must center in the space right
+/// of the nav. The 900px default fixture is narrower than the max
+/// width, where centering never engages, and a resize does not
+/// relayout the headless window, so this test opens its own wide one.
+#[test]
+fn settings_column_centers_at_a_wide_window() {
+    let store = Arc::new(SessionStore::open(Path::new(":memory:")).expect("session store"));
+    let mut fixture = fixture_with_store(store);
+    let wide = fixture.cx.update(|cx| {
+        cx.open_window(
+            WindowOptions {
+                window_bounds: Some(WindowBounds::Windowed(Bounds {
+                    origin: Default::default(),
+                    size: size(px(1600.), px(900.)),
+                })),
+                ..Default::default()
+            },
+            |window, cx| {
+            let view = cx.new(|cx| {
+                let panel = cx.new(|_| {
+                    gertie::settings_edit::SettingsPanelView::new(
+                        &gertie::config::Config::default(),
+                        gertie::settings::SettingsSummary::from_config(
+                            &gertie::config::Config::default(),
+                        ),
+                    )
+                });
+                ChatView::new(
+                    gertie::chat::ChatViewConfig {
+                        store: fixture.store.clone(),
+                        provider: None,
+                        snapshots: None,
+                        tools: gertie_tools::builtin_tools(Path::new(".")),
+                        endpoint_label: "no endpoint configured".into(),
+                        system_prompt: None,
+                        instructions: None,
+                        memory_index: None,
+                        memory_enabled: false,
+                        memory_store: None,
+                        memory_extract_provider: None,
+                        max_tool_rounds: None,
+                        grace_rounds: None,
+                        templates: Vec::new(),
+                        workspace_root: Path::new(".").to_path_buf(),
+                        settle_command: None,
+                        verify: None,
+                        tool_guidance: gertie_core::ToolGuidance::Standard,
+                        compact_at: None,
+                        repo_map_budget: None,
+                        broker: Arc::new(gertie_core::PermissionBroker::new()),
+                        session_scope: gertie_core::SessionScope::new(),
+                        mode_scope: gertie_core::ModeScope::new(),
+                        sandbox_bash: false,
+                        default_mode: gertie_core::PermissionMode::Supervised,
+                        settings_panel: panel,
+                        resume: false,
+                        branch_naming: None,
+                        live_elsewhere: Arc::new(|_, _, _| Ok(())),
+                        switch: Arc::new(|root: &Path| {
+                            Ok(gertie::bootstrap::Switched {
+                                tools: gertie_tools::builtin_tools(root),
+                                system_prompt: None,
+                                instructions: None,
+                                memory_index: None,
+                                memory: None,
+                                memory_extract_provider: None,
+                                workspace_root: root.to_path_buf(),
+                                templates: Vec::new(),
+                                sandbox_bash: false,
+                                verify: None,
+                                warnings: Vec::new(),
+                            })
+                        }),
+                        session_router: None,
+                    },
+                    window,
+                    cx,
+                )
+            });
+                cx.new(|cx| Root::new(view, window, cx))
+            },
+        )
+        .expect("wide window")
+    });
+    let open = |fixture: &mut Fixture, wide: WindowHandle<Root>, f: &dyn Fn(&mut gpui_kit::Window, &mut gpui_kit::App)| {
+        fixture
+            .cx
+            .update_window(wide.into(), |_, window, cx| f(window, cx))
+            .expect("wide window");
+        settle(&mut fixture.cx, wide.into());
+    };
+    open(&mut fixture, wide, &|window, cx| window.press("ctrl-k", cx));
+    open(&mut fixture, wide, &|window, cx| window.input(">settings", cx));
+    open(&mut fixture, wide, &|window, cx| window.press("enter", cx));
+    open(&mut fixture, wide, &|window, _| {
+        let panel = window
+            .try_find("settings-panel")
+            .expect("panel painted")
+            .bounds();
+        assert!(panel.size.width > px(1000.), "the wide window: {panel:?}");
+        let nav = window.try_find("nav-chat").expect("nav painted").bounds();
+        let column = window
+            .try_find("settings-column")
+            .expect("card column painted")
+            .bounds();
+        println!(
+            "PROBE panel={panel:?} nav={nav:?} column={column:?}"
+        );
+        let left_gap = column.left() - nav.right();
+        let right_gap = panel.right() - column.right();
+        println!("PROBE left_gap={left_gap:?} right_gap={right_gap:?}");
+        assert!(
+            (left_gap - right_gap).abs() < px(40.),
+            "the card column centers right of the nav: left gap {left_gap:?}, right gap {right_gap:?}"
+        );
+    });
+    fixture
+        .cx
+        .update_window(wide.into(), |_, window, _| window.remove_window())
+        .ok();
 }

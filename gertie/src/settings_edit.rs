@@ -1757,6 +1757,8 @@ impl Render for SettingsPanelView {
                     .justify_center()
                     .child(
                         v_flex()
+                            .id("settings-column")
+                            .test_support()
                             .gap_3()
                             .px_6()
                             .w_full()
