@@ -6850,6 +6850,16 @@ fn the_settings_page_groups_four_sections_and_covers_the_middle_column() {
             window.try_find("nav-appearance").is_none() && window.try_find("nav-config").is_none(),
             "the eight-tab nav is gone"
         );
+        // Every open lands on Chat: the mode choices show before any
+        // nav click, and the Endpoints section does not.
+        assert!(
+            window.try_find("mode-supervised").is_some(),
+            "settings opens on the Chat section"
+        );
+        assert!(
+            window.try_find("add-endpoint").is_none(),
+            "settings does not open on Endpoints"
+        );
         // The dialog is its body's height (680px), not the window's:
         // a modal sizes to its content, no full-screen void.
         let panel = window

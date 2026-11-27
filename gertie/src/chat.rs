@@ -16,7 +16,7 @@ pub use aux::{
 };
 
 use crate::bootstrap::Reloaded;
-use crate::settings_edit::{SettingsEvent, SettingsPanelView};
+use crate::settings_edit::{SettingsEvent, SettingsPanelView, SettingsSection};
 use futures_util::StreamExt as _;
 use gertie_core::{
     AfterState, LoopEvent, MessageId, PermissionBroker, PermissionDecision, PermissionMode, Role,
@@ -2843,10 +2843,16 @@ impl ChatView {
 
     /// Opens the settings dialog, handing it focus so its Escape rule
     /// (close-settings, settingsPanelFocus) binds however it opened.
+    /// Each open lands on the Chat section, the settings people reach
+    /// for most (mode, theme, settle), instead of wherever the last
+    /// visit left off.
     fn open_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.panel != Panel::Settings {
             self.panel = Panel::Settings;
             self.total_usage = self.store.total_usage();
+            self.settings_panel.update(cx, |panel, cx| {
+                panel.show_section(SettingsSection::Chat, cx)
+            });
             cx.notify();
         }
         window.focus(&self.side_focus, cx);

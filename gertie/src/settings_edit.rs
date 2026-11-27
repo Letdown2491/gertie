@@ -229,7 +229,7 @@ pub struct SettingsPanelView {
 /// the first pass split the config file's real groups across eight
 /// near-empty tabs; four sections with substance each is the shape.
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum SettingsSection {
+pub enum SettingsSection {
     Chat,
     Endpoints,
     Memory,
@@ -1018,6 +1018,15 @@ fn settings_card(title: &'static str, cx: &App) -> gpui_kit::Div {
         )
 }
 
+impl SettingsPanelView {
+    /// Jumps the dialog to a section, what the shell does on open so
+    /// every visit starts on Chat instead of the last visit's section.
+    pub fn show_section(&mut self, section: SettingsSection, cx: &mut Context<Self>) {
+        self.section = section;
+        cx.notify();
+    }
+}
+
 impl EventEmitter<SettingsEvent> for SettingsPanelView {}
 
 impl Render for SettingsPanelView {
@@ -1767,6 +1776,8 @@ impl Render for SettingsPanelView {
             .h(px(680.))
             .relative()
             .child(nav)
+            // The ✕: a bordered circle top-right, visible at rest (the
+            // bare muted glyph hid against the background until hover).
             .child(
                 div()
                     .id("settings-close")
@@ -1774,11 +1785,17 @@ impl Render for SettingsPanelView {
                     .absolute()
                     .top_2()
                     .right_2()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .size(px(24.))
+                    .rounded_full()
+                    .border_1()
+                    .border_color(theme.border)
+                    .text_size(px(11.))
+                    .text_color(theme.foreground)
                     .cursor_pointer()
-                    .px_1()
-                    .text_size(px(13.))
-                    .text_color(theme.muted_foreground)
-                    .hover(|style| style.text_color(theme.foreground))
+                    .hover(|style| style.bg(theme.secondary).text_color(theme.foreground))
                     .on_click(cx.listener(|_, _, _, cx| {
                         cx.emit(SettingsEvent::Dismissed);
                     }))
