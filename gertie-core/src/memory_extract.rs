@@ -311,7 +311,7 @@ pub async fn run_extraction(
     let request = Request {
         messages: vec![crate::request::WireMessage::user(&prompt)],
         tools: Vec::new(),
-        max_output_tokens: Some(512),
+        max_output_tokens: Some(2048),
     };
     let mut stream = provider.stream(request);
     let mut collected = String::new();

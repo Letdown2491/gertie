@@ -3398,8 +3398,15 @@ impl ChatView {
             };
             let _ = this.update(cx, |this, cx| match proposal {
                 Err(error) => {
-                    let _ = store.mark_extracted(&digest_hash, Some(session_id.0 as i64));
-                    this.push_notice(format!("memory: extraction skipped ({error})"), cx);
+                    // An error is not a decision: the digest stays
+                    // unconsumed and the debounce clears, so the next
+                    // settle retries (a human pressed it, not a loop).
+                    this.last_memory_extract.remove(&session_id.0);
+                    eprintln!("memory: extraction failed: {error}");
+                    this.push_notice(
+                        format!("memory: extraction skipped ({error}); the next settle retries"),
+                        cx,
+                    );
                 }
                 Ok(None) => {
                     // Silence is a valid extraction outcome; the gate
