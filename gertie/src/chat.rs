@@ -78,6 +78,16 @@ enum AttachmentKind {
     Paste { name: String, content: String },
 }
 
+/// A conversation's unsent composer: the words and the chips. Parked
+/// when the conversation leaves the view, handed back when it returns,
+/// so a draft belongs to the chat it was written in and never rides
+/// into another one. The blank new chat keeps its own (keyed `None`).
+#[derive(Default)]
+struct Draft {
+    text: String,
+    attachments: Vec<Attachment>,
+}
+
 /// At this size a paste stops being a quote and starts being a
 /// document; it rides as a file, not as message text (t3code's rule).
 const PASTE_ATTACHMENT_BYTES: usize = 32 * 1024;
@@ -734,6 +744,14 @@ pub struct ChatView {
     focus_memory: std::collections::HashMap<FocusArea, gpui_kit::FocusHandle>,
     /// Images waiting to ride with the next sent message.
     attachments: Vec<Attachment>,
+    /// Unsent drafts of the conversations not in view, keyed by
+    /// session (`None` is the blank new chat). In memory: the shell
+    /// keeps a view holding one alive (`holds_unsaved`).
+    drafts: std::collections::HashMap<Option<SessionId>, Draft>,
+    /// Where sent images are filed (the DB keeps the path). `None`
+    /// when the platform names no data dir: images then ride
+    /// wire-only and don't survive a reload.
+    attachments_dir: Option<std::path::PathBuf>,
     /// Bytes of the streaming assistant row already written to the
     /// store. Deltas persist in coarse steps (a write per token would
     /// dominate the render loop); transitions flush the rest.
@@ -1159,6 +1177,8 @@ impl ChatView {
             side_focus: cx.focus_handle(),
             focus_memory: Default::default(),
             attachments: Vec::new(),
+            drafts: Default::default(),
+            attachments_dir: crate::config::Config::data_dir().map(|dir| dir.join("attachments")),
             stream_persisted: 0,
             expanded_tools: Default::default(),
             expanded_runs: Default::default(),
@@ -1188,6 +1208,7 @@ impl ChatView {
     pub fn holds_unsaved(&self, cx: &App) -> bool {
         !self.pending_deletes.is_empty()
             || !self.attachments.is_empty()
+            || !self.drafts.is_empty()
             || self.renaming.is_some()
             || !self.input.read(cx).value().trim().is_empty()
     }
@@ -1228,6 +1249,35 @@ impl ChatView {
     /// paste was consumed as a file chip.
     pub fn attach_big_paste_for_test(&mut self, text: &str, cx: &mut Context<Self>) -> bool {
         self.attach_big_paste(text, cx)
+    }
+
+    /// Parks an image chip the way a paste does (the real hook needs a
+    /// clipboard item delivered by the textarea).
+    pub fn attach_image_for_test(&mut self, id: u64, png: &[u8], cx: &mut Context<Self>) {
+        use base64::Engine as _;
+        let data_url = format!(
+            "data:image/png;base64,{}",
+            base64::engine::general_purpose::STANDARD.encode(png)
+        );
+        self.attach_chip(
+            id,
+            "image.png".into(),
+            AttachmentKind::DataUrl(data_url),
+            cx,
+        );
+    }
+
+    /// Points sent images at a test's own dir, not the user's data dir.
+    pub fn set_attachments_dir_for_test(&mut self, dir: &std::path::Path) {
+        self.attachments_dir = Some(dir.to_path_buf());
+    }
+
+    /// The queued follow-ups' stored content, oldest first, for tests.
+    pub fn queued_for_test(&self) -> Vec<String> {
+        self.queued
+            .iter()
+            .map(|draft| draft.content.clone())
+            .collect()
     }
 
     /// The footer's switch, portal-free: the closure runs and the
@@ -2027,7 +2077,9 @@ impl ChatView {
             return;
         }
         // Sessions are created lazily by the first message; "New chat" just
-        // blanks the transcript until then.
+        // blanks the transcript until then. The draft stays with the
+        // chat it was written in.
+        self.swap_draft(None, window, cx);
         self.session_id = None;
         self.pending_project = None;
         self.session_scope.set(None);
@@ -2082,20 +2134,26 @@ impl ChatView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.switch_session_state(session_id, cx);
+        self.switch_session_state(session_id, window, cx);
         window.focus(&self.input.read(cx).focus_handle(cx), cx);
     }
 
-    /// The window-free body of a session switch, the palette's confirm
-    /// callback runs with an App handle, not a window, and jumps here.
-    fn switch_session_state(&mut self, session_id: SessionId, cx: &mut Context<Self>) {
+    /// The body of a session switch, shared with the palette's jump
+    /// (which keeps focus on its hit, not the composer).
+    fn switch_session_state(
+        &mut self,
+        session_id: SessionId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if self.streaming {
             return;
         }
-        // Pending attachments are composer state, not session state,
-        // they don't hop conversations. Neither does the turn-diff
-        // panel: it answers for the session it was opened in.
-        self.attachments.clear();
+        // The composer belongs to the conversation: its draft and
+        // chips park with the one being left, and the arriving one's
+        // come back. Neither does the turn-diff panel hop: it answers
+        // for the session it was opened in.
+        self.swap_draft(Some(session_id), window, cx);
         self.close_turn_diff(cx);
         self.session_id = Some(session_id);
         self.session_scope.set(Some(session_id));
@@ -2294,7 +2352,7 @@ impl ChatView {
             self.store.record_palette_pick(&query, session_id);
         }
         if self.session_id != Some(session_id) {
-            self.switch_session_state(session_id, cx);
+            self.switch_session_state(session_id, window, cx);
         }
         let turn_index = self.turns.iter().position(|turn| match turn {
             Turn::Message {
@@ -3377,7 +3435,7 @@ impl ChatView {
     fn delete_clicked(
         &mut self,
         session_id: SessionId,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         // A streaming transcript can't be torn down; also no toast for
@@ -3395,7 +3453,10 @@ impl ChatView {
         self.renaming = None;
         if self.session_id == Some(session_id) {
             // The human asked for this transcript gone: blank it now,
-            // not after the purge, the view never contradicts ✕.
+            // not after the purge, the view never contradicts ✕. Its
+            // draft parks with it (an undo brings both back), it
+            // doesn't spill into the blank chat.
+            self.swap_draft(None, window, cx);
             self.session_id = None;
             self.turns.clear();
             self.rebuild_status_facts(cx);
@@ -3428,6 +3489,7 @@ impl ChatView {
         }
         self.pending_deletes
             .retain(|pending| pending.session_id != session_id);
+        self.drafts.remove(&Some(session_id));
         let _ = self.store.delete_session(session_id);
         self.reload_lists();
         cx.notify();
@@ -3951,6 +4013,63 @@ impl ChatView {
         cx.notify();
     }
 
+    /// Parks the composer (words and chips) with the conversation in
+    /// view and loads `to`'s draft in its place: empty when it has
+    /// none. Runs before `session_id` moves. A recall walk is over,
+    /// its history belongs to the conversation being left.
+    fn swap_draft(&mut self, to: Option<SessionId>, window: &mut Window, cx: &mut Context<Self>) {
+        let leaving = Draft {
+            text: self.input.read(cx).value().to_string(),
+            attachments: std::mem::take(&mut self.attachments),
+        };
+        if leaving.text.trim().is_empty() && leaving.attachments.is_empty() {
+            self.drafts.remove(&self.session_id);
+        } else {
+            self.drafts.insert(self.session_id, leaving);
+        }
+        let arriving = self.drafts.remove(&to).unwrap_or_default();
+        self.attachments = arriving.attachments;
+        self.recall = None;
+        self.input
+            .update(cx, |input, cx| input.set_value(arriving.text, window, cx));
+        cx.notify();
+    }
+
+    /// Turns stored image markers back into composer chips: the
+    /// queue's edit and a queue write that failed both hand a message
+    /// back to the composer, and its images come back as chips, not as
+    /// marker text. Returns the words without the markers. A file
+    /// that's gone says so instead of vanishing.
+    fn restore_marker_chips(&mut self, stored: &str, cx: &mut Context<Self>) -> String {
+        let (text, paths) = gertie_core::extract_image_markers(stored);
+        for path in paths {
+            let path = std::path::PathBuf::from(path);
+            let file_name = path
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            // Filed as `{id}-{name}`: the chip comes back as it left.
+            let (id, name) = match file_name.split_once('-') {
+                Some((id, name)) if id.parse::<u64>().is_ok() => {
+                    (id.parse::<u64>().unwrap_or_default(), name.to_string())
+                }
+                _ => {
+                    use std::hash::{Hash, Hasher as _};
+                    let mut hasher = std::hash::DefaultHasher::new();
+                    path.hash(&mut hasher);
+                    (hasher.finish(), file_name.clone())
+                }
+            };
+            match gertie_core::file_to_data_url(&path) {
+                Some(data_url) => {
+                    self.attach_chip(id, name, AttachmentKind::DataUrl(data_url), cx);
+                }
+                None => self.push_notice(format!("The attached {name} is gone from disk."), cx),
+            }
+        }
+        text
+    }
+
     /// Turns pending attachments into (inline text, storage markers,
     /// wire data URLs). Binary bytes land in the attachments dir under
     /// their content hash; the DB keeps only the path, a reload reads
@@ -3965,7 +4084,7 @@ impl ChatView {
         let mut images = Vec::new();
         let mut markers = String::new();
         let mut inline = String::new();
-        let dir = crate::config::Config::data_dir().map(|dir| dir.join("attachments"));
+        let dir = self.attachments_dir.clone();
         for attachment in std::mem::take(&mut self.attachments) {
             match attachment.kind {
                 AttachmentKind::Text(content) => {
@@ -4026,8 +4145,10 @@ impl ChatView {
                         _ => None,
                     };
                     if let Some(path) = stored {
+                        // `}}}}` is the literal `}}` that closes
+                        // the marker (format! halves braces).
                         markers.push_str(&format!(
-                            "\n\n{}{}}}",
+                            "\n\n{}{}}}}}",
                             gertie_core::IMAGE_MARKER_PREFIX,
                             path.display()
                         ));
@@ -4217,22 +4338,41 @@ impl ChatView {
         // runs as its own turn when this one ends. The queue is rows
         // in the store, so a crash keeps the words; a write that
         // can't land hands the message back, it never pretends.
+        // Attachments can't steer (a steer is words joining a running
+        // turn), so a message carrying chips always queues, and the
+        // chips ride with it: the queue row holds the stored form,
+        // image markers included, exactly what a send would persist.
         if self.streaming {
-            if queue_only || self.steer_tx.is_none() {
+            let carries_attachments = !self.attachments.is_empty();
+            if queue_only || carries_attachments || self.steer_tx.is_none() {
+                let (inline, markers, _) = self.take_attachments();
+                let stored = format!("{text}{inline}{markers}");
                 match self
                     .session_id
-                    .map(|session_id| self.store.enqueue_followup(session_id, &text))
+                    .map(|session_id| self.store.enqueue_followup(session_id, &stored))
                 {
                     Some(Ok(())) => self.sync_queue(),
                     _ => {
+                        let back = if carries_attachments {
+                            self.restore_marker_chips(&stored, cx)
+                        } else {
+                            raw
+                        };
                         self.input
-                            .update(cx, |input, cx| input.set_value(raw, window, cx));
+                            .update(cx, |input, cx| input.set_value(back, window, cx));
                         self.push_notice(
                             "The queue didn't take the message, it's back in the composer.",
                             cx,
                         );
                         return;
                     }
+                }
+                if carries_attachments && !queue_only && self.steer_tx.is_some() {
+                    self.push_notice(
+                        "Attachments can't join a running turn, so this message is queued \
+                         and goes out with them when the turn ends.",
+                        cx,
+                    );
                 }
             } else if let Some(steer_tx) = &self.steer_tx {
                 let _ = steer_tx.send(text);
@@ -4359,7 +4499,22 @@ impl ChatView {
     /// "Send now" on a queued draft: out of the queue, into the live
     /// turn as a steer, or its own turn when none runs.
     fn force_send_followup(&mut self, id: gertie_core::QueuedId, cx: &mut Context<Self>) {
-        let Some(text) = self.store.take_followup(id).ok().flatten() else {
+        // A draft carrying images can't steer: it stays queued (its
+        // turn comes when this one ends) rather than lose them.
+        if self.streaming
+            && self
+                .queued
+                .iter()
+                .any(|draft| draft.id == id && carries_image_markers(&draft.content))
+        {
+            self.push_notice(
+                "That message carries attachments, which can't join a running turn. \
+                 It stays queued and goes out when the turn ends.",
+                cx,
+            );
+            return;
+        }
+        let Some(stored) = self.store.take_followup(id).ok().flatten() else {
             // The row vanished under us: refresh the stack and move on.
             self.sync_queue();
             cx.notify();
@@ -4369,14 +4524,28 @@ impl ChatView {
         if self.streaming
             && let Some(steer_tx) = &self.steer_tx
         {
-            let _ = steer_tx.send(text);
+            let _ = steer_tx.send(stored);
             cx.notify();
             return;
         }
         let Some(session_id) = self.session_id else {
             return;
         };
-        self.deliver_message(session_id, text.clone(), text, Vec::new(), cx);
+        self.deliver_queued(session_id, stored, cx);
+    }
+
+    /// Sends a queued row as its own turn. The row is the stored form
+    /// (image markers included): the record keeps it whole, the wire
+    /// gets the words plus the images read back from disk, the same
+    /// expansion a reload does.
+    pub(crate) fn deliver_queued(
+        &mut self,
+        session_id: SessionId,
+        stored: String,
+        cx: &mut Context<Self>,
+    ) {
+        let (text, images) = queued_wire(&stored);
+        self.deliver_message(session_id, text, stored, images, cx);
     }
 
     /// "Edit" on a queued draft: pulled back into the composer (under
@@ -4391,9 +4560,10 @@ impl ChatView {
         let Some(draft) = self.queued.iter().find(|draft| draft.id == id) else {
             return;
         };
-        let text = draft.content.clone();
+        let stored = draft.content.clone();
         let _ = self.store.remove_followup(id);
         self.sync_queue();
+        let text = self.restore_marker_chips(&stored, cx);
         let existing = self.input.read(cx).value().to_string();
         let value = if existing.trim().is_empty() {
             text
@@ -6516,12 +6686,8 @@ impl Render for ChatView {
                                                     .into_iter()
                                                     .map(|draft| {
                                                         let id = draft.id.0;
-                                                        let first_line = draft
-                                                            .content
-                                                            .lines()
-                                                            .next()
-                                                            .unwrap_or_default()
-                                                            .to_string();
+                                                        let first_line =
+                                                            queued_label(&draft.content);
                                                         h_flex()
                                                             .mx_4()
                                                             .mt_2()
@@ -6938,8 +7104,42 @@ fn display_text(text: &str) -> String {
                     .unwrap_or_else(|| path.clone())
             })
             .collect();
-        format!("\n\n[attached: {}]", names.join(", "))
+        format!("{clean}\n\n[attached: {}]", names.join(", "))
+            .trim_start()
+            .to_string()
     }
+}
+
+/// A queued draft's one-line face: its first line of words, and a
+/// count of the images riding with it (the markers never show).
+fn queued_label(stored: &str) -> String {
+    let (text, images) = gertie_core::extract_image_markers(stored);
+    let first = text.lines().next().unwrap_or_default();
+    match images.len() {
+        0 => first.to_string(),
+        1 => format!("{first} (+1 image)"),
+        count => format!("{first} (+{count} images)"),
+    }
+}
+
+/// Whether stored text carries an image marker (an image filed on disk).
+fn carries_image_markers(stored: &str) -> bool {
+    !gertie_core::extract_image_markers(stored).1.is_empty()
+}
+
+/// A queued row's wire shape: the words without markers, and each
+/// marked image read back as a data URL. A file gone from disk rides
+/// as the same `[missing image]` note a reload uses.
+fn queued_wire(stored: &str) -> (String, Vec<String>) {
+    let (text, paths) = gertie_core::extract_image_markers(stored);
+    let images = paths
+        .iter()
+        .map(|path| {
+            gertie_core::file_to_data_url(std::path::Path::new(path))
+                .unwrap_or_else(|| "[missing image]".to_string())
+        })
+        .collect();
+    (text, images)
 }
 
 /// Whether a session's stored root and a tab's root are the same
@@ -7130,6 +7330,24 @@ mod tests {
     use super::*;
     use crate::chat::transcript::{DiffRow, diff_data, hunk_rows};
     use crate::diff::Line;
+
+    #[test]
+    fn a_message_with_an_image_keeps_its_words_on_screen() {
+        let stored = "look at this\n\n{{image:/data/attachments/7-image.png}}";
+        assert_eq!(
+            display_text(stored),
+            "look at this\n\n[attached: 7-image.png]"
+        );
+    }
+
+    #[test]
+    fn a_queued_row_shows_its_words_and_counts_its_images() {
+        let stored = "see this\nsecond line\n\n{{image:/a/1-x.png}}\n\n{{image:/a/2-y.png}}";
+        assert_eq!(queued_label(stored), "see this (+2 images)");
+        assert_eq!(queued_label("plain"), "plain");
+        assert!(carries_image_markers(stored));
+        assert!(!carries_image_markers("plain"));
+    }
 
     fn kinds(patch: &crate::diff::Patch) -> Vec<&'static str> {
         patch

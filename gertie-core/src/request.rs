@@ -98,6 +98,11 @@ pub const IMAGE_MARKER_PREFIX: &str = "{{image:";
 /// `{{image:path}}` marker is lifted out; what remains is the prose
 /// around the images. An unterminated marker is kept as text: it was
 /// never a marker to begin with.
+///
+/// A marker lives on one line. Gertie through 1.3.0 wrote markers
+/// closed by a single `}` (a format-string slip), and those rows are
+/// in users' stores: a line that ends in `}` with no `}}` on it reads
+/// as one of them, so old conversations get their images back.
 pub fn extract_image_markers(content: &str) -> (String, Vec<String>) {
     let mut text = String::with_capacity(content.len());
     let mut images = Vec::new();
@@ -105,10 +110,18 @@ pub fn extract_image_markers(content: &str) -> (String, Vec<String>) {
     while let Some(start) = rest.find(IMAGE_MARKER_PREFIX) {
         text.push_str(&rest[..start]);
         let tail = &rest[start + IMAGE_MARKER_PREFIX.len()..];
-        match tail.find("}}") {
-            Some(end) => {
+        let line = &tail[..tail.find('\n').unwrap_or(tail.len())];
+        let close = match line.find("}}") {
+            Some(end) => Some((end, 2)),
+            None => line
+                .trim_end()
+                .strip_suffix('}')
+                .map(|path| (path.len(), 1)),
+        };
+        match close {
+            Some((end, width)) => {
                 images.push(tail[..end].to_string());
-                rest = &tail[end + 2..];
+                rest = &tail[end + width..];
             }
             None => {
                 text.push_str(IMAGE_MARKER_PREFIX);
@@ -201,6 +214,12 @@ mod tests {
         // No markers: content passes through whole.
         assert_eq!(extract_image_markers("plain words").0, "plain words");
         assert!(extract_image_markers("plain words").1.is_empty());
+
+        // The single-brace close that 1.3.0 and earlier stored.
+        let (text, images) =
+            extract_image_markers("legacy\n\n{{image:/a/1-x.png}\n\n{{image:/a/2-y.png}");
+        assert_eq!(text, "legacy");
+        assert_eq!(images, ["/a/1-x.png", "/a/2-y.png"]);
 
         // An unterminated marker is text, never a truncation.
         let (text, images) = extract_image_markers("stubborn {{image:nope");

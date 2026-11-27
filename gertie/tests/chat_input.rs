@@ -5997,3 +5997,187 @@ fn the_riding_card_is_verb_and_why_and_leaves_with_the_run() {
         );
     });
 }
+
+/// The composer belongs to its conversation: words typed (and chips
+/// parked) in one chat stay there when New chat or another chat takes
+/// the view, and come back when it returns. Before, New chat inherited
+/// whatever was half-written.
+#[test]
+fn a_draft_stays_with_the_conversation_it_was_written_in() {
+    let mut fixture = fixture_with_store(two_session_store());
+    let composer = |fixture: &mut Fixture| {
+        fixture.cx.update(|cx| {
+            let view = fixture.view.upgrade().expect("view alive");
+            let chat = view.read(cx);
+            (
+                chat.composer_value_for_test(cx),
+                chat.attachments_count_for_test(),
+            )
+        })
+    };
+
+    fixture.act(|window, cx| window.click("session-1", cx));
+    fixture.act(|window, cx| window.input("half written", cx));
+    fixture.cx.update(|cx| {
+        let view = fixture.view.upgrade().expect("view alive");
+        view.update(cx, |chat, cx| chat.attach_image_for_test(7, b"png", cx));
+    });
+
+    // New chat starts clean: nothing from the first chat rides in.
+    fixture.act(|window, cx| window.click("new-chat", cx));
+    assert_eq!(composer(&mut fixture), (String::new(), 0));
+
+    // Another chat is clean too.
+    fixture.act(|window, cx| window.click("session-2", cx));
+    assert_eq!(composer(&mut fixture), (String::new(), 0));
+    fixture.act(|window, cx| window.input("for two", cx));
+
+    // Back to the first: its words and its chip come back.
+    fixture.act(|window, cx| window.click("session-1", cx));
+    assert_eq!(composer(&mut fixture), ("half written".to_string(), 1));
+
+    // And the second kept its own.
+    fixture.act(|window, cx| window.click("session-2", cx));
+    assert_eq!(composer(&mut fixture), ("for two".to_string(), 0));
+}
+
+/// A screenshot attached while a turn runs used to be dropped: Enter
+/// steered the running turn with the words alone, and the chip sat in
+/// the composer for some later message. Now a message carrying chips
+/// queues, the images ride in the queue row, and the drain sends them.
+#[test]
+fn an_image_sent_mid_turn_queues_and_rides_with_its_message() {
+    let scenarios = tempfile::tempdir().expect("scenario dir");
+    std::fs::write(
+        scenarios.path().join("worker.toml"),
+        "[[steps]]\ntext = ''\n\
+         [[steps.tool_calls]]\nname = 'worker_ask'\narguments = '{}'\n\
+         [[steps]]\ntext = ''\n\
+         [[steps]]\ntext = ''\n",
+    )
+    .expect("scenario file");
+    let endpoint = gertie_providers::Endpoint {
+        name: "replay".into(),
+        base_url: scenarios.path().to_string_lossy().into_owned(),
+        model: "worker".into(),
+        api_key: None,
+        context_window: None,
+        wire: gertie_providers::Wire::Replay,
+    };
+    let provider = Arc::new(
+        gertie_providers::AnyProvider::with_endpoints(vec![endpoint]).expect("replay provider"),
+    );
+    let broker = Arc::new(gertie_core::PermissionBroker::new());
+    let store = Arc::new(SessionStore::open(Path::new(":memory:")).expect("memory store"));
+    let mut fixture = fixture_built(
+        store.clone(),
+        None,
+        None,
+        None,
+        Some(provider),
+        Some(broker.clone()),
+        vec![Arc::new(WorkerAskTool {
+            broker: broker.clone(),
+        })],
+        None,
+        None,
+    );
+    let attachments = tempfile::tempdir().expect("attachments dir");
+    fixture.cx.update(|cx| {
+        let view = fixture.view.upgrade().expect("view alive");
+        view.update(cx, |chat, _| {
+            chat.set_attachments_dir_for_test(attachments.path())
+        });
+    });
+
+    // The turn parks on the worker's ask: it is running.
+    fixture.act(|window, cx| {
+        window.input("go", cx);
+        window.press("enter", cx);
+    });
+    pump(&mut fixture, 30);
+    assert!(fixture.cx.update(|cx| {
+        fixture
+            .view
+            .upgrade()
+            .expect("view alive")
+            .read(cx)
+            .streaming_state_for_test()
+    }));
+
+    // A screenshot and words, Enter: it would have been a steer.
+    fixture.cx.update(|cx| {
+        let view = fixture.view.upgrade().expect("view alive");
+        view.update(cx, |chat, cx| chat.attach_image_for_test(42, b"pixels", cx));
+    });
+    fixture.act(|window, cx| {
+        window.input("see this", cx);
+        window.press("enter", cx);
+    });
+    let (queued, chips, notices) = fixture.cx.update(|cx| {
+        let view = fixture.view.upgrade().expect("view alive");
+        let chat = view.read(cx);
+        (
+            chat.queued_for_test(),
+            chat.attachments_count_for_test(),
+            chat.notice_texts_for_test(),
+        )
+    });
+    assert_eq!(queued.len(), 1, "the message queued instead of steering");
+    assert!(queued[0].starts_with("see this"));
+    assert!(
+        queued[0].contains(gertie_core::IMAGE_MARKER_PREFIX),
+        "the image rides in the queue row: {queued:?}"
+    );
+    assert_eq!(chips, 0, "no chip left behind for a later message");
+    assert!(
+        notices
+            .iter()
+            .any(|text| text.contains("Attachments can't join a running turn"))
+    );
+
+    // The turn ends, the drain sends the queued message with its image.
+    fixture.act(|window, cx| window.click("approve-2", cx));
+    let session_id = fixture
+        .cx
+        .update(|cx| {
+            fixture
+                .view
+                .upgrade()
+                .expect("view alive")
+                .read(cx)
+                .session_id()
+        })
+        .expect("session created by send");
+    pump_until(
+        &mut fixture,
+        200,
+        |fixture| {
+            fixture
+                .store
+                .load_messages(session_id)
+                .unwrap_or_default()
+                .iter()
+                .any(|message| message.content.starts_with("see this"))
+        },
+        "the queued message to be sent",
+    );
+    let sent = store
+        .load_messages(session_id)
+        .expect("rows")
+        .into_iter()
+        .find(|message| message.content.starts_with("see this"))
+        .expect("queued message sent");
+    let (_, paths) = gertie_core::extract_image_markers(&sent.content);
+    assert_eq!(
+        paths.len(),
+        1,
+        "the sent row carries its image: {:?}",
+        sent.content
+    );
+    assert_eq!(
+        std::fs::read(&paths[0]).expect("image filed"),
+        b"pixels",
+        "the bytes on disk are the screenshot's"
+    );
+}

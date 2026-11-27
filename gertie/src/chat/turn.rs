@@ -281,13 +281,15 @@ impl ChatView {
                 if !stopped && !this.queued.is_empty() {
                     let first = this.queued[0].id;
                     match this.store.take_followup(first) {
-                        Ok(Some(text)) => {
+                        Ok(Some(stored)) => {
                             this.sync_queue();
                             let session_id = match this.session_id {
                                 Some(session_id) => session_id,
                                 None => return,
                             };
-                            this.deliver_message(session_id, text.clone(), text, Vec::new(), cx);
+                            // The row is the stored form: its images
+                            // ride back onto the wire.
+                            this.deliver_queued(session_id, stored, cx);
                         }
                         // The row vanished under us (another surface
                         // took it): drop the stale draft, run nothing.
