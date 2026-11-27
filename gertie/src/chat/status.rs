@@ -588,7 +588,47 @@ impl ChatView {
     pub(super) fn fold_status_tool(&mut self, name: &str, arguments: &str, result: &str) {
         let root = self.workspace_root.clone();
         self.status_facts.fold_tool(name, arguments, result, &root);
+        self.reverify_on_reread(name, arguments);
         self.status_version += 1;
+    }
+
+    /// The evidence flag's automation: when the session's work re-reads
+    /// a file that a consulted entry cites, the reread IS the re-check
+    /// (the content is in the model's context), so the store re-records
+    /// the hash and the flag clears without a click or a tool call. An
+    /// edit counts too: folding happens after the result, so the hash
+    /// lands on the file's post-edit state. A stale fact should still
+    /// supersede; this is for facts that survived the refactor.
+    fn reverify_on_reread(&mut self, name: &str, arguments: &str) {
+        if !matches!(name, "read_file" | "edit_file" | "write_file") {
+            return;
+        }
+        let Some(store) = self.memory_store.clone() else {
+            return;
+        };
+        let root = self.workspace_root.clone();
+        let Ok(args) = serde_json::from_str::<serde_json::Value>(arguments) else {
+            return;
+        };
+        let Some(raw) = args.get("path").and_then(|value| value.as_str()) else {
+            return;
+        };
+        let Some(shown) = normalize_path(&root, raw) else {
+            return;
+        };
+        let entries = store.scan();
+        for id in self.status_facts.consulted.clone() {
+            let Some(entry) = entries.iter().find(|entry| entry.id == id) else {
+                continue;
+            };
+            let cites = entry
+                .evidence
+                .iter()
+                .any(|cited| cited.path == shown && store.changed_evidence(entry).contains(&shown));
+            if cites {
+                let _ = store.reverify_evidence(&id);
+            }
+        }
     }
 
     pub(super) fn fold_status_user(&mut self, text: &str) {

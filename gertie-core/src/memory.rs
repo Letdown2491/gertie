@@ -318,6 +318,53 @@ impl MemoryStore {
             .collect()
     }
 
+    /// Re-records an entry's evidence hashes to the cited files'
+    /// current state, clearing the `[evidence changed]` flag. The
+    /// re-check is the caller's claim: the fold fires this when the
+    /// session's work re-read a cited file while consulting the entry,
+    /// so the reread IS the verification and no click or tool call is
+    /// owed. Entries whose facts no longer hold should supersede
+    /// instead; rehashing is for facts that survived the refactor.
+    /// Returns the paths that were refreshed (still-stale cites stay
+    /// flagged; an empty result on a fully-current entry is a no-op).
+    pub fn reverify_evidence(&self, id: &str) -> rusqlite::Result<Vec<String>> {
+        let entry = self
+            .scan()
+            .into_iter()
+            .find(|entry| entry.id == id)
+            .ok_or(rusqlite::Error::QueryReturnedNoRows)?;
+        if entry.evidence.is_empty() || entry.valid_until.is_some() {
+            return Ok(Vec::new());
+        }
+        let Some(root) = self.workspace_root() else {
+            return Ok(Vec::new());
+        };
+        let mut refreshed = Vec::new();
+        let mut evidence = entry.evidence.clone();
+        for cited in &mut evidence {
+            let bytes = match std::fs::read(root.join(&cited.path)) {
+                Ok(bytes) => bytes,
+                Err(_) => continue, // gone is still stale; keep the flag
+            };
+            let hash = blob_hash(&bytes);
+            if hash != cited.hash {
+                cited.hash = hash;
+                refreshed.push(cited.path.clone());
+            }
+        }
+        if refreshed.is_empty() {
+            return Ok(Vec::new());
+        }
+        let line = render_line(&MemoryEntry {
+            evidence,
+            ..entry.clone()
+        });
+        rewrite_line(self.root(tier_of(&entry.id)).join(&entry.file), id, |_| {
+            Ok(line)
+        })?;
+        Ok(refreshed)
+    }
+
     /// Wraps raw model text in the entry grammar, one entry per line:
     /// fresh ids, zeroed counters, provenance, date. One scan for the
     /// whole batch, ids minted sequentially against it (a per-line scan
@@ -2784,6 +2831,48 @@ mod tests {
         assert!(store.changed_evidence(&entry).is_empty());
         std::fs::remove_file(tmp.path().join("README.md")).unwrap();
         assert_eq!(store.changed_evidence(&entry), vec!["README.md"]);
+    }
+
+    #[test]
+    fn reverify_rerecords_the_hash_and_the_flag_clears() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (store, _session) = store_with_roots(&tmp);
+        std::fs::create_dir_all(tmp.path().join("src")).unwrap();
+        std::fs::write(tmp.path().join("src/pool.rs"), "const SIZE: u32 = 8;\n").unwrap();
+        add_with_evidence(&store, "the pool holds eight connections", &["src/pool.rs"]);
+        // The code moves: flagged on read.
+        std::fs::write(tmp.path().join("src/pool.rs"), "const SIZE: u32 = 16;\n").unwrap();
+        let entry = store.scan().remove(0);
+        assert_eq!(store.changed_evidence(&entry), vec!["src/pool.rs"]);
+        // The re-verify (a reread's claim): the hash re-records to the
+        // file's current state, the flag clears, and the line carries
+        // the new hash.
+        let refreshed = store.reverify_evidence("p1").unwrap();
+        assert_eq!(refreshed, vec!["src/pool.rs"]);
+        let entry = store.scan().remove(0);
+        assert!(store.changed_evidence(&entry).is_empty());
+        assert_eq!(
+            entry.evidence[0].hash,
+            blob_hash(b"const SIZE: u32 = 16;\n")
+        );
+        let line = std::fs::read_to_string(tmp.path().join("project-memory/decisions.md")).unwrap();
+        assert!(line.contains(&format!(
+            "[evidence: src/pool.rs@{}]",
+            blob_hash(b"const SIZE: u32 = 16;\n")
+        )));
+        // Idempotent: a current entry re-verifies to nothing.
+        assert!(store.reverify_evidence("p1").unwrap().is_empty());
+        // A vanished cite stays stale (a missing file is not a state
+        // to re-record): the flag survives the re-verify, the living
+        // cite's hash re-records.
+        std::fs::write(tmp.path().join("src/other.rs"), "x\n").unwrap();
+        add_with_evidence(&store, "two cites", &["src/pool.rs", "src/other.rs"]);
+        std::fs::remove_file(tmp.path().join("src/pool.rs")).unwrap();
+        std::fs::write(tmp.path().join("src/other.rs"), "y\n").unwrap();
+        let refreshed = store.reverify_evidence("p2").unwrap();
+        assert_eq!(refreshed, vec!["src/other.rs"]);
+        let entry = store.scan().remove(0);
+        assert_eq!(store.changed_evidence(&entry), vec!["src/pool.rs"]);
     }
 
     #[test]

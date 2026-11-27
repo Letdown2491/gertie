@@ -5381,7 +5381,7 @@ fn the_status_column_shows_the_session_state_and_folds_to_a_rail() {
             Arc::new(gertie_tools::Status),
             Arc::new(gertie_tools::memory::SearchMemory::new(memory.clone())),
         ],
-        Some(memory),
+        Some(memory.clone()),
         None,
     );
     fixture.hold = vec![scenarios, dir];
@@ -5433,10 +5433,18 @@ fn the_status_column_shows_the_session_state_and_folds_to_a_rail() {
     });
     let (id, flag) = riding.expect("the riding line names the consulted entry");
     assert_eq!(id, "p12");
-    let flag = flag.expect("moved evidence puts the full form in play");
+    // The reread of the cited file IS the re-check: the fold re-recorded
+    // the hash at that moment, so the flag cleared itself (no click, no
+    // tool call) and the riding line carries no correction.
+    assert!(flag.is_none(), "the reread re-verified the entry: {flag:?}");
+    let entry = memory
+        .scan()
+        .into_iter()
+        .find(|entry| entry.id == "p12")
+        .expect("the entry");
     assert!(
-        flag.contains("verified current before acting"),
-        "the work read the moved file: {flag}"
+        memory.changed_evidence(&entry).is_empty(),
+        "the stored hash is the file's current state"
     );
     // The sizing spike, kept as a guard: a permanent right column in
     // the flex row must take its width and stay inside the window, the
@@ -6616,4 +6624,106 @@ fn an_image_read_file_opens_survives_a_reload() {
     pump(&mut fixture, 10);
     assert_eq!(turn_count_of(&mut fixture), live_turns);
     fixture.hold = vec![scenarios, workspace, attachments];
+}
+
+/// The evidence flag's automation: a consulted entry whose cited file
+/// the session re-reads gets its hash re-recorded at that moment (the
+/// reread IS the re-check), so the `[evidence changed]` flag clears
+/// without a click or a tool call. The turn: search_memory consults
+/// the entry, read_file reads the (stale-hashed) cited file, done.
+#[test]
+fn a_reread_of_a_cited_file_reverifies_the_consulted_entry() {
+    let dir = tempfile::tempdir().expect("workspace");
+    std::fs::create_dir_all(dir.path().join("project")).expect("tier root");
+    std::fs::write(dir.path().join("teardown.rs"), "fn teardown() {}\n").expect("cited file");
+    // The entry cites teardown.rs with the hash of its ORIGINAL
+    // content; then the file moves, so the entry is flagged.
+    std::fs::write(
+        dir.path().join("project").join("gotchas.md"),
+        format!(
+            "- [p1] helpful=0 harmful=0 the teardown timer races the widget on retries \
+             [evidence: teardown.rs@{}] [source: added: 2026-11-27]\n",
+            gertie_core::memory::blob_hash(b"fn teardown() {}\n")
+        ),
+    )
+    .expect("topic file");
+    std::fs::write(
+        dir.path().join("teardown.rs"),
+        "fn teardown() -> bool { true }\n",
+    )
+    .expect("the cited file moves");
+    let store = Arc::new(SessionStore::open(Path::new(":memory:")).expect("session store"));
+    let memory = Arc::new(gertie_core::MemoryStore::open(
+        dir.path().join("project"),
+        dir.path().join("global"),
+        store.clone(),
+    ));
+    memory.sync().expect("sidecar sync");
+    let flagged = memory
+        .scan()
+        .into_iter()
+        .find(|entry| entry.id == "p1")
+        .expect("the entry");
+    assert_eq!(
+        memory.changed_evidence(&flagged),
+        vec!["teardown.rs"],
+        "the setup: the cited file moved, the entry is flagged"
+    );
+    let (provider, scenarios) = replay_provider(
+        "[[steps]]\ntext = ''\n\n\
+         [[steps.tool_calls]]\nname = \"search_memory\"\n\
+         arguments = '{\"query\": \"teardown\"}'\n\n\
+         [[steps]]\ntext = ''\n\n\
+         [[steps.tool_calls]]\nname = \"read_file\"\n\
+         arguments = '{\"path\": \"teardown.rs\"}'\n\n\
+         [[steps]]\ntext = 'done'\n",
+    );
+    let mut fixture = fixture_built(
+        store.clone(),
+        None,
+        Some(dir.path().to_path_buf()),
+        None,
+        Some(provider),
+        None,
+        vec![
+            Arc::new(gertie_tools::memory::SearchMemory::new(memory.clone())),
+            Arc::new(gertie_tools::ReadFile::new(dir.path().to_path_buf())),
+        ],
+        Some(memory.clone()),
+        None,
+    );
+    fixture.hold = vec![scenarios, dir];
+    fixture.act(|window, cx| {
+        window.input("why does widget_test flake?", cx);
+        window.press("enter", cx);
+    });
+    pump_until(
+        &mut fixture,
+        200,
+        |fixture| {
+            fixture.cx.update(|cx| {
+                !fixture
+                    .view
+                    .upgrade()
+                    .expect("view alive")
+                    .read(cx)
+                    .is_streaming()
+            })
+        },
+        "the scripted turn",
+    );
+    let entry = memory
+        .scan()
+        .into_iter()
+        .find(|entry| entry.id == "p1")
+        .expect("the entry");
+    assert!(
+        memory.changed_evidence(&entry).is_empty(),
+        "the reread re-recorded the hash: the flag cleared"
+    );
+    assert_eq!(
+        entry.evidence[0].hash,
+        gertie_core::memory::blob_hash(b"fn teardown() -> bool { true }\n"),
+        "the stored hash is the file's current state"
+    );
 }
