@@ -21,6 +21,7 @@ use gpui_kit::component::Sizable as _;
 use gpui_kit::component::ThemeMode;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
+use gpui_kit::component::Icon;
 use gpui_kit::component::switch::Switch;
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{h_flex, v_flex};
@@ -1800,7 +1801,13 @@ impl Render for SettingsPanelView {
                         cx.emit(SettingsEvent::Dismissed);
                     }))
                     .tooltip(|window, cx| Tooltip::new("Close (esc)").build(window, cx))
-                    .child("✕"),
+                    // The real X glyph from the icon catalog: a text
+                    // ✕ at 11px renders as a dot.
+                    .child(
+                        Icon::new(IconName::Close)
+                            .with_size(px(14.))
+                            .text_color(theme.foreground),
+                    ),
             )
             .child(
                 v_flex()
