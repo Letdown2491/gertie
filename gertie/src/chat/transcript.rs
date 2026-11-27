@@ -46,15 +46,21 @@ impl ChatView {
         // The reply input for a pending permission card must exist
         // before the turn is borrowed below: creating it takes &mut
         // self (and a window handle, which only render has), the match
-        // takes &self for the whole arm.
-        if matches!(
-            self.turns.get(index),
-            Some(Turn::Tool {
-                status: ToolStatus::Pending(_),
-                ..
-            })
-        ) {
-            self.approval_reply_for(index, window, cx);
+        // takes &self for the whole arm. An ask_user card with custom
+        // answers allowed gets the same treatment, so the "type your
+        // own" field is visible on the card instead of appearing only
+        // after some earlier focus.
+        if let Some(Turn::Tool {
+            status: ToolStatus::Pending(_),
+            call,
+            ..
+        }) = self.turns.get(index)
+        {
+            let wants_reply =
+                call.name == "ask_user" && ask_face(call).is_some_and(|face| face.allow_custom);
+            if wants_reply {
+                self.approval_reply_for(index, window, cx);
+            }
         }
         let inner = match &self.turns[index] {
             Turn::Message { role, text, .. } => {
@@ -481,30 +487,45 @@ impl ChatView {
         if call.name == "ask_user"
             && let Some(ask) = ask_face(call)
         {
-            inner =
-                inner
-                    .child(
-                        div()
-                            .text_size(px(13.))
-                            .child(SharedString::from(ask.question)),
-                    )
-                    .children(ask.options.iter().cloned().enumerate().map(
-                        |(option_index, option)| {
-                            Button::new(SharedString::from(format!("ask-{index}-{option_index}")))
-                                .label(option.clone())
-                                .small()
-                                .outline()
-                                .on_click(cx.listener(move |this, _, _, cx| {
-                                    this.decide_tool(
-                                        index,
-                                        PermissionDecision::Deny {
-                                            feedback: Some(option.clone()),
-                                        },
-                                        cx,
-                                    )
-                                }))
+            inner = inner.child(
+                div()
+                    .text_size(px(13.))
+                    .child(SharedString::from(ask.question)),
+            );
+            // The option chips wrap their full text (Button clips at
+            // one line, and a choice you cannot read is not a
+            // choice) and stack full width, so the card reads as a
+            // form, one decision per row.
+            for (option_index, option) in ask.options.iter().cloned().enumerate() {
+                let answer = option.clone();
+                let chip = div()
+                    .id(SharedString::from(format!("ask-{index}-{option_index}")))
+                    .test_support()
+                    .w_full()
+                    .px_2()
+                    .py_1p5()
+                    .rounded(px(4.))
+                    .border_1()
+                    .border_color(cx.theme().border)
+                    .text_size(px(12.))
+                    .text_color(cx.theme().foreground)
+                    .cursor_pointer()
+                    .hover(|style| {
+                        style
+                            .text_color(cx.theme().blue)
+                            .border_color(cx.theme().blue)
+                    })
+                    .child(SharedString::from(option));
+                inner = inner.child(chip.on_click(cx.listener(move |this, _, _, cx| {
+                    this.decide_tool(
+                        index,
+                        PermissionDecision::Deny {
+                            feedback: Some(answer.clone()),
                         },
-                    ));
+                        cx,
+                    )
+                })));
+            }
             if ask.allow_custom {
                 // The input exists only if the user focused the
                 // field once; an ask answered by its buttons never
