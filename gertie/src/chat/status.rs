@@ -726,11 +726,10 @@ impl ChatView {
     /// Whether the column (or its rail) is on screen: a session with
     /// state, and no other side panel claiming the right edge.
     pub(crate) fn status_column_shown(&self) -> bool {
-        // Any open panel retires the column: settings centers over
-        // the middle column, and the column painting back over its
-        // right edge left the cards visibly off-center (the 05:50
-        // screenshots); memory claims the right edge outright.
-        self.panel == Panel::None && self.status_has_content()
+        // Memory claims the right edge outright. Settings is a modal
+        // over everything now, its dimmed backdrop covers the column
+        // cleanly, so the column stands down only for memory.
+        self.panel != Panel::Memory && self.status_has_content()
     }
 
     pub(crate) fn toggle_status_column(&mut self, cx: &mut Context<Self>) {

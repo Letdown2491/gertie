@@ -7147,27 +7147,11 @@ impl Render for ChatView {
                                     .child(self.render_token_footer(cx)),
                             ),
                     )
-                    // The settings page: a full cover of the middle
-                    // column, mounted inside it so the sidebar stays
-                    // clickable and nothing of the chat paints over
-                    // the page. Last child of the column: paints on
-                    // top. Opaque, so nothing bleeds through.
-                    .when(self.panel == Panel::Settings, |col| {
-                        col.child(
-                            div()
-                                .absolute()
-                                .inset_0()
-                                .flex()
-                                .key_context("SettingsPanel")
-                                .track_focus(&self.side_focus)
-                                .occlude()
-                                .bg(theme.background)
-                                .child(self.settings_panel.clone()),
-                        )
-                    })
                     // The status column (issue #33): only while no
                     // other side panel holds the right edge, and only
-                    // when the session has state to show.
+                    // when the session has state to show. Settings is
+                    // a modal over everything now, so it no longer
+                    // asks the column to stand down.
                     .when(self.status_column_shown(), |row| {
                         row.child(self.render_status_column(cx))
                     })
@@ -7184,6 +7168,50 @@ impl Render for ChatView {
             // (opening either closes the other).
             .when_some(self.turn_diff.as_ref(), |root, panel| {
                 root.child(self.render_turn_diff(panel, cx.entity(), cx))
+            })
+            // Settings: a modal over everything (the turn-diff
+            // pattern), not a page wedged into a column. Last, so it
+            // paints over the palette's leftovers too.
+            .when(self.panel == Panel::Settings, |root| {
+                root.child(
+                    div()
+                        .id("settings-backdrop")
+                        .test_support()
+                        .absolute()
+                        .inset_0()
+                        .bg(theme.overlay)
+                        .on_mouse_down(
+                            gpui_kit::MouseButton::Left,
+                            cx.listener(|this, _, _, cx| this.toggle_settings(cx)),
+                        )
+                        .child(
+                            div()
+                                .absolute()
+                                .left_0()
+                                .right_0()
+                                .top_16()
+                                .flex()
+                                .justify_center()
+                                .child(
+                                    div()
+                                        .w(px(760.))
+                                        .max_h(px(820.))
+                                        .key_context("SettingsPanel")
+                                        .track_focus(&self.side_focus)
+                                        .on_mouse_down(
+                                            gpui_kit::MouseButton::Left,
+                                            |_, _, cx| cx.stop_propagation(),
+                                        )
+                                        .bg(theme.background)
+                                        .border_1()
+                                        .border_color(theme.border)
+                                        .rounded_lg()
+                                        .overflow_hidden()
+                                        .shadow_lg()
+                                        .child(self.settings_panel.clone()),
+                                ),
+                        ),
+                )
             })
     }
 }

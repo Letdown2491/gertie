@@ -6831,16 +6831,16 @@ fn the_settings_page_groups_four_sections_and_covers_the_middle_column() {
                 || window.try_find("settings-content").is_some(),
             "the settings page painted (settings-panel / settings-content missing)"
         );
-        // The sidebar stays clickable under the page: the page is a
-        // cover of the middle column, not of the row.
+        // The modal covers the sidebar: the button survives in the
+        // tree, and the backdrop's click closes the dialog.
         assert!(
             window.try_find("toggle-settings").is_some(),
-            "the sidebar's settings button survives under the page"
+            "the sidebar's settings button survives under the modal"
         );
-        // The page carries its own visible close affordance.
+        // The dialog carries its own visible close affordance.
         assert!(
             window.try_find("settings-close").is_some(),
-            "the page has its close ✕"
+            "the dialog has its close ✕"
         );
         assert!(
             window.try_find("nav-chat").is_some() && window.try_find("nav-tools").is_some(),
@@ -6850,38 +6850,34 @@ fn the_settings_page_groups_four_sections_and_covers_the_middle_column() {
             window.try_find("nav-appearance").is_none() && window.try_find("nav-config").is_none(),
             "the eight-tab nav is gone"
         );
-        // The page covers the composer: it overlays the whole middle
-        // column, so the composer's input is not hit-testable here.
+        // The dialog is its body's height (560px), not the window's:
+        // a modal sizes to its content, no full-screen void.
         let panel = window
             .try_find("settings-panel")
             .expect("panel painted")
             .bounds();
         assert!(
-            panel.size.height > px(400.),
-            "the page fills the column: {panel:?}"
+            (panel.size.height - px(560.)).abs() < px(2.),
+            "the dialog sizes to its body: {panel:?}"
         );
-        // The content column is centered in the space right of the
-        // nav, not hugging it (the screenshots showed cards pinned
-        // left with a void to the right): its left gap and right gap
-        // are within 40px of each other.
-        let nav = window
-            .try_find("nav-chat")
-            .expect("nav row painted")
+        // The card column fills the pane right of the nav: its gaps
+        // to the nav's edge and the dialog's edge are both the pane's
+        // padding (24px), symmetric by construction.
+        let nav = window.try_find("nav-chat").expect("nav painted").bounds();
+        let column = window
+            .try_find("settings-column")
+            .expect("card column painted")
             .bounds();
-        let content = window
-            .try_find("settings-content")
-            .expect("content painted")
-            .bounds();
-        let left_gap = content.left() - nav.right();
-        let right_gap = panel.right() - content.right();
+        let left_gap = column.left() - nav.right();
+        let right_gap = panel.right() - column.right();
         assert!(
             left_gap > px(0.),
-            "content clears the nav: nav {nav:?} content {content:?}"
+            "content clears the nav: panel {panel:?} column {column:?}"
         );
         assert!(
             (left_gap - right_gap).abs() < px(40.),
-            "the content column is centered: left gap {left_gap:?}, right gap {right_gap:?}"
-        );
+            "the card column fills its pane evenly: left gap {left_gap:?}, right gap {right_gap:?}"
+        )
     });
     // Switching sections swaps the content: Tools & agents owns the
     // sandbox switch; Chat owns the mode buttons.
@@ -6947,14 +6943,13 @@ fn the_settings_page_groups_four_sections_and_covers_the_middle_column() {
     assert_eq!(xed, "none", "the ✕ closes the page");
 }
 
-/// The settings page's centering, measured where it engages and with
+/// The settings modal's geometry, measured where it engages and with
 /// a status column present: the wide shell runs a scripted turn that
-/// sets a goal and touches a file, so the column is on screen; the
-/// settings page retires it (the 05:50 build let it paint back over
-/// the page's right edge, leaving the cards visibly off-center), and
-/// the card column centers in the full middle column.
+/// sets a goal, so the column is on screen; the modal's backdrop
+/// covers everything (page-sized settings left dead voids), the
+/// dialog centers in the window, and the column returns on close.
 #[test]
-fn settings_retire_the_status_column_and_center_at_a_wide_window() {
+fn settings_modal_covers_and_centers_at_a_wide_window() {
     let dir = tempfile::tempdir().expect("workspace");
     let store = Arc::new(SessionStore::open(Path::new(":memory:")).expect("session store"));
     let (provider, scenarios) = replay_provider(
@@ -7116,24 +7111,33 @@ fn settings_retire_the_status_column_and_center_at_a_wide_window() {
     });
     draw(&mut fixture, wide, &|window, cx| window.press("enter", cx));
     draw(&mut fixture, wide, &|window, _| {
-        assert!(
-            window.try_find("status-column").is_none(),
-            "the settings page retires the status column"
-        );
+        // The modal covers the whole window, column included: the
+        // backdrop spans everything, the dialog is centered in it,
+        // and no sidebar or column element needs measuring.
+        let backdrop = window
+            .try_find("settings-backdrop")
+            .expect("backdrop painted")
+            .bounds();
         let panel = window
             .try_find("settings-panel")
             .expect("panel painted")
             .bounds();
-        let nav = window.try_find("nav-chat").expect("nav painted").bounds();
-        let column = window
-            .try_find("settings-column")
-            .expect("card column painted")
-            .bounds();
-        let left_gap = column.left() - nav.right();
-        let right_gap = panel.right() - column.right();
+        assert!(
+            backdrop.size.width > px(1400.) && backdrop.size.height > px(800.),
+            "the backdrop covers the window: {backdrop:?}"
+        );
+        // The dialog centers in the window: its gaps to the backdrop's
+        // edges match.
+        let left_gap = panel.left() - backdrop.left();
+        let right_gap = backdrop.right() - panel.right();
         assert!(
             (left_gap - right_gap).abs() < px(40.),
-            "the card column centers: left gap {left_gap:?}, right gap {right_gap:?}"
+            "the dialog centers: left gap {left_gap:?}, right gap {right_gap:?}"
+        );
+        // The dialog is its body's height (560px), not the window's.
+        assert!(
+            (panel.size.height - px(560.)).abs() < px(2.),
+            "the dialog is its body's height: {panel:?}"
         );
     });
     // Esc closes, and the column comes back.
@@ -7141,7 +7145,7 @@ fn settings_retire_the_status_column_and_center_at_a_wide_window() {
     draw(&mut fixture, wide, &|window, _| {
         assert!(
             window.try_find("status-column").is_some(),
-            "the column returns when the page closes"
+            "the column returns when the modal closes"
         );
     });
     fixture

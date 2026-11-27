@@ -1000,8 +1000,6 @@ fn agent_row(
 /// One settings group: a titled card, the panel's unit of reading.
 /// The settings page's content column: the transcript's reading
 /// width, plus a little for forms. Centered, never hugging the nav.
-const CONTENT_WIDTH: f32 = 720.;
-
 fn settings_card(title: &'static str, cx: &App) -> gpui_kit::Div {
     v_flex()
         .w_full()
@@ -1269,23 +1267,25 @@ impl Render for SettingsPanelView {
         // save reports no matter which section shows. Inside the
         // column's width, so it reads as the page's status, not a
         // banner over everything.
-        let status_line =
-            v_flex()
-                .px_6()
-                .pt_2()
-                .child(v_flex().w_full().max_w(px(CONTENT_WIDTH)).children(
-                    self.status.iter().map(|(message, is_error)| {
-                        div()
-                            .px_1()
-                            .text_size(px(11.))
-                            .text_color(if *is_error {
-                                theme.danger
-                            } else {
-                                theme.success
-                            })
-                            .child(message.clone())
-                    }),
-                ));
+        // The save-result messages ride the dialog's top: full width
+        // of the right pane, so a save reports no matter which section
+        // shows. Empty until a save happens, so nothing paints.
+        let status_line = v_flex()
+            .px_6()
+            .pt_3()
+            .flex_shrink_0()
+            .children(self.status.iter().map(|(message, is_error)| {
+                div()
+                    .px_1()
+                    .pb_1()
+                    .text_size(px(11.))
+                    .text_color(if *is_error {
+                        theme.danger
+                    } else {
+                        theme.success
+                    })
+                    .child(message.clone())
+            }));
 
         // One section's cards at a time, in nav order; the nav rows
         // pick which. The content pane holds the active section only.
@@ -1734,79 +1734,65 @@ impl Render for SettingsPanelView {
             );
         }
 
-        // The two-pane page: nav left, one section's content centered
-        // in the rest, the way the transcript centers its reading
-        // column. The old left-hugging max_w left a void to the right
-        // (the screenshots showed it).
+        // The dialog's right pane: the save status rides on top, the
+        // section's cards scroll under it, centered like the
+        // transcript's reading column.
         let content_column = v_flex()
             .id("settings-content")
             .test_support()
             .flex_1()
             .min_w_0()
-            .h_full()
             .overflow_y_scroll()
             .pt_3()
             .pb_4()
             .gap_3()
             .child(
-                // Centered like the transcript's reading column: the
-                // cards never hug the nav, whatever the window width.
-                div()
+                // The dialog is the bounded width (760px), so the
+                // cards simply fill the pane right of the nav; no
+                // centering to engage, no void either side.
+                v_flex()
+                    .id("settings-column")
+                    .test_support()
+                    .gap_3()
+                    .px_6()
                     .w_full()
-                    .flex()
-                    .justify_center()
-                    .child(
-                        v_flex()
-                            .id("settings-column")
-                            .test_support()
-                            .gap_3()
-                            .px_6()
-                            .w_full()
-                            .max_w(px(CONTENT_WIDTH))
-                            .children(content),
-                    ),
+                    .children(content),
             )
             .child(
-                // The config-file fact, once, as the page's footer: a
+                // The config-file fact, once, at the pane's foot: a
                 // path, not a card, and not repeated per section.
                 div()
                     .w_full()
-                    .flex()
-                    .justify_center()
-                    .child(
-                        div()
-                            .w_full()
-                            .max_w(px(CONTENT_WIDTH))
-                            .px_6()
-                            .text_size(px(10.5))
-                            .text_color(theme.muted_foreground)
-                            .child(match &self.summary.config_path {
-                                Some(path) => format!(
-                                    "Saved to {} as you make them; its comments and unknown keys are kept.",
-                                    path.display()
-                                ),
-                                None => "no config file location".into(),
-                            }),
-                    ),
+                    .px_6()
+                    .text_size(px(10.5))
+                    .text_color(theme.muted_foreground)
+                    .child(match &self.summary.config_path {
+                        Some(path) => format!(
+                            "Saved to {} as you make them; its comments and unknown keys are kept.",
+                            path.display()
+                        ),
+                        None => "no config file location".into(),
+                    }),
             );
 
-        v_flex()
+        // The dialog body: nav left, the right pane carries the save
+        // status over one section's scrolling content. The shell's
+        // modal card wraps this, so the body just fills it: a definite
+        // height here sizes the card.
+        h_flex()
             .id("settings-panel")
             .test_support()
             .w_full()
-            .h_full()
-            .flex_1()
-            .min_w_0()
-            .child(status_line)
+            .h(px(560.))
+            .child(nav)
             .child(
-                h_flex().flex_1().min_h_0().child(nav).child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .h_full()
-                        .bg(theme.background)
-                        .child(content_column),
-                ),
+                v_flex()
+                    .flex_1()
+                    .min_w_0()
+                    .h_full()
+                    .bg(theme.background)
+                    .child(status_line)
+                    .child(content_column),
             )
     }
 }
