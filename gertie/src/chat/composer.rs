@@ -6,6 +6,79 @@
 use super::*;
 
 impl ChatView {
+    /// What sits between the transcript and the queue rows: steers
+    /// still on their way into the running turn, and, at rest, the
+    /// held-queue line that says queued messages are waiting and what
+    /// can be done about them. `None` when there is nothing to say.
+    pub(super) fn render_queue_status(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let muted = cx.theme().muted_foreground;
+        if self.streaming && !self.steers_in_flight.is_empty() {
+            return Some(
+                v_flex()
+                    .mx_4()
+                    .mt_2()
+                    .gap_1()
+                    .children(
+                        self.steers_in_flight
+                            .iter()
+                            .enumerate()
+                            .map(|(index, text)| {
+                                let first = text.lines().next().unwrap_or_default().to_string();
+                                h_flex()
+                                    .id(("steer-in-flight", index))
+                                    .gap_2()
+                                    .text_size(px(12.))
+                                    .text_color(muted)
+                                    .child(div().flex_none().child("steering…"))
+                                    .child(div().flex_1().truncate().child(first))
+                            }),
+                    )
+                    .into_any_element(),
+            );
+        }
+        if self.streaming || self.queued.is_empty() {
+            return None;
+        }
+        let count = self.queued.len();
+        let words = if count == 1 {
+            "1 queued message is waiting. It goes with your next message.".to_string()
+        } else {
+            format!("{count} queued messages are waiting. They go with your next message.")
+        };
+        Some(
+            h_flex()
+                .id("queue-held")
+                .mx_4()
+                .mt_2()
+                .gap_2()
+                .items_center()
+                .child(
+                    div()
+                        .flex_1()
+                        .text_size(px(12.))
+                        .text_color(muted)
+                        .child(words),
+                )
+                .child(
+                    Button::new("queue-send-all")
+                        .label("send now")
+                        .xsmall()
+                        .ghost()
+                        .tooltip("Send the queue now, as one message")
+                        .on_click(cx.listener(|this, _, _, cx| this.send_queue(Vec::new(), cx))),
+                )
+                .child(
+                    Button::new("queue-clear")
+                        .label("clear")
+                        .xsmall()
+                        .ghost()
+                        .tooltip("Drop every queued message")
+                        .on_click(cx.listener(|this, _, _, cx| this.clear_queue(cx))),
+                )
+                .into_any_element(),
+        )
+    }
+
     /// The composer column: input, popups, queues, the chrome
     /// between transcript and footer.
     pub(super) fn render_composer_area(&mut self, cx: &mut Context<Self>) -> AnyElement {
@@ -91,7 +164,7 @@ impl ChatView {
                                 .primary()
                                 .disabled(empty)
                                 .tooltip(if self.streaming {
-                                    "Steer the running turn (Enter)"
+                                    "Queue for after this turn (Enter) · Ctrl+Enter steers it now"
                                 } else {
                                     "Send (Enter)"
                                 })

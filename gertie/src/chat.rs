@@ -150,7 +150,7 @@ fn reading_column(row: AnyElement) -> AnyElement {
 /// The composer's ghost text while a turn runs: the send key's two
 /// meanings, stated where the keys are. Placeholders only render on
 /// an empty input, so the hint vanishes with anything typed.
-const STEER_PLACEHOLDER: &str = "Enter steers the running turn · Ctrl+Enter queues";
+const STEER_PLACEHOLDER: &str = "Enter queues for after this turn · Ctrl+Enter steers it now";
 
 /// One rendered turn in the transcript. Plain messages keep their row in
 /// the session store (streaming updates land in SQLite without a row per
@@ -710,11 +710,15 @@ pub struct ChatView {
     /// its future (tools and workers with it). Lives as long as the
     /// turn, like the steer channel.
     stop_tx: Option<tokio::sync::mpsc::UnboundedSender<()>>,
-    /// Follow-ups typed while streaming with the secondary Enter,
-    /// queued rows, mirrored from the store: they run as their own
-    /// turns when the current one ends, and they survive a stop, a
-    /// crash, or a restart because they were rows all along.
+    /// Follow-ups typed while a turn runs (Enter), queued rows
+    /// mirrored from the store: they go out together, as one message,
+    /// when the current turn ends. A stop holds them (so does a
+    /// restart), and they survive both because they were rows all along.
     queued: Vec<gertie_core::QueuedFollowup>,
+    /// Steers sent to the running turn that the loop hasn't confirmed
+    /// reading yet: shown above the composer until they join, and
+    /// queued if the turn ends first, so a steer is never lost.
+    steers_in_flight: Vec<String>,
     /// The prompt-recall walk (ArrowUp in an empty composer), when the
     /// composer is riding one.
     recall: Option<Recall>,
@@ -1167,6 +1171,7 @@ impl ChatView {
             steer_tx: None,
             stop_tx: None,
             queued: Vec::new(),
+            steers_in_flight: Vec::new(),
             recall: None,
             pending_rewind: None,
             live_elsewhere,
@@ -1270,6 +1275,17 @@ impl ChatView {
     /// Points sent images at a test's own dir, not the user's data dir.
     pub fn set_attachments_dir_for_test(&mut self, dir: &std::path::Path) {
         self.attachments_dir = Some(dir.to_path_buf());
+    }
+
+    /// Steers sent but not yet confirmed by the loop, for tests.
+    pub fn steers_in_flight_for_test(&self) -> Vec<String> {
+        self.steers_in_flight.clone()
+    }
+
+    /// Plants a steer the loop will never read (the race where the
+    /// words land after its last look), for tests.
+    pub fn plant_unread_steer_for_test(&mut self, text: &str) {
+        self.steers_in_flight.push(text.to_string());
     }
 
     /// The queued follow-ups' stored content, oldest first, for tests.
@@ -4249,7 +4265,9 @@ impl ChatView {
         cx.notify();
     }
 
-    fn send(&mut self, queue_only: bool, window: &mut Window, cx: &mut Context<Self>) {
+    /// `steer`: the secondary Enter (Ctrl+Enter). While a turn runs it
+    /// joins that turn; at rest both keys send.
+    fn send(&mut self, steer: bool, window: &mut Window, cx: &mut Context<Self>) {
         let raw = self.input.read(cx).value().trim().to_string();
         // Invisible characters never reach a prompt, or a title. Bidi
         // controls and zero-width letters can't be typed but paste in
@@ -4332,10 +4350,10 @@ impl ChatView {
             self.push_notice("Invisible characters were removed from the message.", cx);
         }
         let text = cleaned;
-        // The run is busy: the words still land. Enter steers the
-        // running turn (the model reads it at the next round
-        // boundary); the secondary Enter queues a follow-up that
-        // runs as its own turn when this one ends. The queue is rows
+        // The run is busy: the words still land. Enter queues a
+        // follow-up for when this turn ends (the safe default: it
+        // doesn't redirect work in flight); Ctrl+Enter steers, the
+        // model reads it at the next round boundary. The queue is rows
         // in the store, so a crash keeps the words; a write that
         // can't land hands the message back, it never pretends.
         // Attachments can't steer (a steer is words joining a running
@@ -4344,7 +4362,8 @@ impl ChatView {
         // image markers included, exactly what a send would persist.
         if self.streaming {
             let carries_attachments = !self.attachments.is_empty();
-            if queue_only || carries_attachments || self.steer_tx.is_none() {
+            let steered = steer && !carries_attachments && self.steer(text.clone());
+            if !steered {
                 let (inline, markers, _) = self.take_attachments();
                 let stored = format!("{text}{inline}{markers}");
                 match self
@@ -4367,15 +4386,13 @@ impl ChatView {
                         return;
                     }
                 }
-                if carries_attachments && !queue_only && self.steer_tx.is_some() {
+                if steer && carries_attachments {
                     self.push_notice(
                         "Attachments can't join a running turn, so this message is queued \
                          and goes out with them when the turn ends.",
                         cx,
                     );
                 }
-            } else if let Some(steer_tx) = &self.steer_tx {
-                let _ = steer_tx.send(text);
             }
             self.input
                 .update(cx, |input, cx| input.set_value("", window, cx));
@@ -4395,6 +4412,20 @@ impl ChatView {
         let (inline, markers, images) = self.take_attachments();
         let text = format!("{text}{inline}");
         let stored = format!("{text}{markers}");
+        // A held queue (a stopped turn's, or one a restart found) goes
+        // with this message, ahead of it: the order they were written.
+        let (text, stored, images) = match self.take_queue() {
+            Some(held) => {
+                let (held_text, mut held_images) = queued_wire(&held);
+                held_images.extend(images);
+                (
+                    format!("{held_text}\n\n{text}"),
+                    format!("{held}\n\n{stored}"),
+                    held_images,
+                )
+            }
+            None => (text, stored, images),
+        };
         // First message of a chat: the session is born here, titled by
         // what was typed, the invocation, not the expansion.
         let session_id = match self.session_id {
@@ -4521,10 +4552,14 @@ impl ChatView {
             return;
         };
         self.sync_queue();
-        if self.streaming
-            && let Some(steer_tx) = &self.steer_tx
-        {
-            let _ = steer_tx.send(stored);
+        if self.streaming {
+            if !self.steer(stored.clone())
+                && let Some(session_id) = self.session_id
+            {
+                // The turn can't take it after all: back in line.
+                let _ = self.store.enqueue_followup(session_id, &stored);
+                self.sync_queue();
+            }
             cx.notify();
             return;
         }
@@ -4532,6 +4567,59 @@ impl ChatView {
             return;
         };
         self.deliver_queued(session_id, stored, cx);
+    }
+
+    /// Hands words to the running turn and tracks them until the loop
+    /// confirms they joined (`on_steered`). False when no turn can take
+    /// them: the caller queues instead, nothing is dropped.
+    fn steer(&mut self, text: String) -> bool {
+        match &self.steer_tx {
+            Some(steer_tx) if steer_tx.send(text.clone()).is_ok() => {
+                self.steers_in_flight.push(text);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Takes every queued row, oldest first, joined into one stored
+    /// message. `None` when the queue is empty (or vanished under us).
+    fn take_queue(&mut self) -> Option<String> {
+        let parts: Vec<String> = self
+            .queued
+            .iter()
+            .map(|draft| draft.id)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .filter_map(|id| self.store.take_followup(id).ok().flatten())
+            .collect();
+        self.sync_queue();
+        (!parts.is_empty()).then(|| parts.join("\n\n"))
+    }
+
+    /// Sends the whole queue as one message, `lead` (steers the turn
+    /// never read) first. One turn answers all of it: three quick
+    /// follow-ups are one request, not three turns that each know a
+    /// third of the story.
+    pub(crate) fn send_queue(&mut self, lead: Vec<String>, cx: &mut Context<Self>) {
+        let Some(session_id) = self.session_id else {
+            return;
+        };
+        let mut parts = lead;
+        parts.extend(self.take_queue());
+        if parts.is_empty() {
+            return;
+        }
+        self.deliver_queued(session_id, parts.join("\n\n"), cx);
+    }
+
+    /// The held queue's Clear: every queued row goes.
+    fn clear_queue(&mut self, cx: &mut Context<Self>) {
+        for draft in std::mem::take(&mut self.queued) {
+            let _ = self.store.remove_followup(draft.id);
+        }
+        self.sync_queue();
+        cx.notify();
     }
 
     /// Sends a queued row as its own turn. The row is the stored form
@@ -6672,6 +6760,7 @@ impl Render for ChatView {
                                                 ),
                                         )
                                     })
+                                    .children(self.render_queue_status(cx))
                                     .when(!self.queued.is_empty(), |composer| {
                                         // Queued follow-ups as dashed
                                         // drafts: visible words, not a
@@ -6718,8 +6807,8 @@ impl Render for ChatView {
                                                                 .xsmall()
                                                                 .ghost()
                                                                 .tooltip(
-                                                                    "Send this one now, \
-                                                                     steers the running turn",
+                                                                    "Send this one now: steers the \
+                                                                     running turn, or sends it alone",
                                                                 )
                                                                 .on_click(cx.listener(
                                                                     move |this, _, _, cx| {

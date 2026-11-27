@@ -3576,7 +3576,7 @@ fn a_long_assistant_turn_quotes_truncated() {
 }
 
 /// The queue is rows, not UI state: a follow-up typed mid-turn
-/// (secondary Enter) persists immediately, renders as a dashed draft
+/// (Enter) persists immediately, renders as a dashed draft
 /// with real actions, and the drain fires it as its own turn when the
 /// running one ends.
 #[test]
@@ -3624,10 +3624,10 @@ fn a_queued_followup_is_a_row_that_drafts_drains_and_survives() {
     });
     pump(&mut fixture, 20);
 
-    // Mid-turn: the secondary Enter queues.
+    // Mid-turn: Enter queues.
     fixture.act(|window, cx| {
         window.input("follow up please", cx);
-        window.press("secondary-enter", cx);
+        window.press("enter", cx);
     });
     let session = fixture
         .cx
@@ -6105,14 +6105,14 @@ fn an_image_sent_mid_turn_queues_and_rides_with_its_message() {
             .streaming_state_for_test()
     }));
 
-    // A screenshot and words, Enter: it would have been a steer.
+    // A screenshot and words, Ctrl+Enter: words alone would steer.
     fixture.cx.update(|cx| {
         let view = fixture.view.upgrade().expect("view alive");
         view.update(cx, |chat, cx| chat.attach_image_for_test(42, b"pixels", cx));
     });
     fixture.act(|window, cx| {
         window.input("see this", cx);
-        window.press("enter", cx);
+        window.press("secondary-enter", cx);
     });
     let (queued, chips, notices) = fixture.cx.update(|cx| {
         let view = fixture.view.upgrade().expect("view alive");
@@ -6180,4 +6180,246 @@ fn an_image_sent_mid_turn_queues_and_rides_with_its_message() {
         b"pixels",
         "the bytes on disk are the screenshot's"
     );
+}
+
+/// A live turn parked on a write card (`approve-1`), with steps left
+/// over for the turns the queue starts afterwards.
+fn held_turn_fixture() -> Fixture {
+    let scenarios = tempfile::tempdir().expect("scenario dir");
+    std::fs::write(
+        scenarios.path().join("held.toml"),
+        "[[steps]]\ntext = ''\n\n\
+         [[steps.tool_calls]]\nname = \"write_file\"\n\
+         arguments = '{\"path\": \"q.txt\", \"content\": \"x\"}'\n\n\
+         [[steps]]\ntext = ''\n\n[[steps]]\ntext = ''\n\n[[steps]]\ntext = ''\n",
+    )
+    .expect("scenario file");
+    let workspace = tempfile::tempdir().expect("workspace dir");
+    let endpoint = gertie_providers::Endpoint {
+        name: "replay".into(),
+        base_url: scenarios.path().to_string_lossy().into_owned(),
+        model: "held".into(),
+        api_key: None,
+        context_window: None,
+        wire: gertie_providers::Wire::Replay,
+    };
+    let provider = Arc::new(
+        gertie_providers::AnyProvider::with_endpoints(vec![endpoint]).expect("replay provider"),
+    );
+    let store = Arc::new(SessionStore::open(Path::new(":memory:")).expect("memory store"));
+    let mut fixture = fixture_built(
+        store,
+        None,
+        Some(workspace.path().to_path_buf()),
+        None,
+        Some(provider),
+        None,
+        Vec::new(),
+        None,
+        None,
+    );
+    fixture.hold = vec![scenarios, workspace];
+    fixture.act(|window, cx| {
+        window.input("go", cx);
+        window.press("enter", cx);
+    });
+    pump(&mut fixture, 20);
+    fixture
+}
+
+fn the_session(fixture: &mut Fixture) -> gertie_core::SessionId {
+    fixture
+        .cx
+        .update(|cx| {
+            fixture
+                .view
+                .upgrade()
+                .expect("view alive")
+                .read(cx)
+                .session_id()
+        })
+        .expect("session born")
+}
+
+fn user_rows(fixture: &Fixture, session: gertie_core::SessionId) -> Vec<String> {
+    fixture
+        .store
+        .load_messages(session)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|row| row.role == gertie_core::Role::User)
+        .map(|row| row.content)
+        .collect()
+}
+
+/// Three quick afterthoughts are one request: the queue goes out as a
+/// single message when the turn ends, in the order it was written.
+#[test]
+fn queued_followups_go_out_together_as_one_message() {
+    let mut fixture = held_turn_fixture();
+    fixture.act(|window, cx| {
+        window.input("first thought", cx);
+        window.press("enter", cx);
+    });
+    fixture.act(|window, cx| {
+        window.input("second thought", cx);
+        window.press("enter", cx);
+    });
+    let session = the_session(&mut fixture);
+    assert_eq!(fixture.store.queued_followups(session).unwrap().len(), 2);
+
+    fixture.act(|window, cx| window.click("approve-1", cx));
+    pump_until(
+        &mut fixture,
+        200,
+        |fixture| {
+            let session = the_session(fixture);
+            user_rows(fixture, session)
+                .iter()
+                .any(|row| row == "first thought\n\nsecond thought")
+        },
+        "the combined follow-up",
+    );
+    let rows = user_rows(&fixture, session);
+    assert!(
+        !rows.iter().any(|row| row == "second thought"),
+        "no turn of its own for the second: {rows:?}"
+    );
+    assert!(fixture.store.queued_followups(session).unwrap().is_empty());
+}
+
+/// Ctrl+Enter steers: the words go to the running turn, show as in
+/// flight until the loop confirms them, and land as a user row.
+#[test]
+fn ctrl_enter_steers_and_the_steer_is_tracked_until_it_joins() {
+    let mut fixture = held_turn_fixture();
+    fixture.act(|window, cx| {
+        window.input("steer this way", cx);
+        window.press("secondary-enter", cx);
+    });
+    let session = the_session(&mut fixture);
+    let in_flight = fixture.cx.update(|cx| {
+        fixture
+            .view
+            .upgrade()
+            .expect("view alive")
+            .read(cx)
+            .steers_in_flight_for_test()
+    });
+    assert_eq!(in_flight, ["steer this way"]);
+    assert!(
+        fixture.store.queued_followups(session).unwrap().is_empty(),
+        "a steer is not a queued row"
+    );
+
+    fixture.act(|window, cx| window.click("approve-1", cx));
+    pump_until(
+        &mut fixture,
+        200,
+        |fixture| {
+            let session = the_session(fixture);
+            user_rows(fixture, session)
+                .iter()
+                .any(|row| row == "steer this way")
+        },
+        "the steer to land",
+    );
+    pump_until(
+        &mut fixture,
+        200,
+        |fixture| {
+            fixture.cx.update(|cx| {
+                let view = fixture.view.upgrade().expect("view alive");
+                let chat = view.read(cx);
+                !chat.streaming_state_for_test() && chat.steers_in_flight_for_test().is_empty()
+            })
+        },
+        "the turn to end with nothing in flight",
+    );
+}
+
+/// A steer the turn ends without reading isn't lost: it leads the
+/// next message.
+#[test]
+fn a_steer_the_turn_never_read_leads_the_next_message() {
+    let mut fixture = held_turn_fixture();
+    fixture.cx.update(|cx| {
+        let view = fixture.view.upgrade().expect("view alive");
+        view.update(cx, |chat, _| chat.plant_unread_steer_for_test("late words"));
+    });
+    let session = the_session(&mut fixture);
+    fixture.act(|window, cx| window.click("approve-1", cx));
+    pump_until(
+        &mut fixture,
+        200,
+        |fixture| {
+            let session = the_session(fixture);
+            user_rows(fixture, session)
+                .iter()
+                .any(|row| row == "late words")
+        },
+        "the unread steer to go out",
+    );
+    let _ = session;
+}
+
+/// A stop holds the queue: nothing fires, the composer area says what
+/// is waiting, and the next message carries the queue ahead of itself.
+#[test]
+fn a_stop_holds_the_queue_and_the_next_message_carries_it() {
+    let mut fixture = held_turn_fixture();
+    fixture.act(|window, cx| {
+        window.input("held thought", cx);
+        window.press("enter", cx);
+    });
+    let session = the_session(&mut fixture);
+    fixture.cx.update(|cx| {
+        let view = fixture.view.upgrade().expect("view alive");
+        view.update(cx, |chat, cx| chat.stop_turn(cx));
+    });
+    pump_until(
+        &mut fixture,
+        200,
+        |fixture| {
+            !fixture.cx.update(|cx| {
+                fixture
+                    .view
+                    .upgrade()
+                    .expect("view alive")
+                    .read(cx)
+                    .streaming_state_for_test()
+            })
+        },
+        "the stop to land",
+    );
+    pump(&mut fixture, 10);
+    assert_eq!(
+        fixture.store.queued_followups(session).unwrap().len(),
+        1,
+        "the stop held the queue"
+    );
+    assert!(
+        !user_rows(&fixture, session)
+            .iter()
+            .any(|row| row.contains("held thought"))
+    );
+    fixture.act(|window, _cx| {
+        assert!(
+            window.try_find("queue-send-all").is_some(),
+            "the held line shows"
+        );
+    });
+
+    fixture.act(|window, cx| {
+        window.input("new ask", cx);
+        window.press("enter", cx);
+    });
+    assert!(
+        user_rows(&fixture, session)
+            .iter()
+            .any(|row| row == "held thought\n\nnew ask"),
+        "the queue rode ahead of the new message: {:?}",
+        user_rows(&fixture, session)
+    );
+    assert!(fixture.store.queued_followups(session).unwrap().is_empty());
 }

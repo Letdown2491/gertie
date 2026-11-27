@@ -265,9 +265,13 @@ impl ChatView {
                 // the total showing until the next send starts fresh.
                 this.end_run();
                 // The turn is over: steering closes, the queue takes
-                // over. A queued follow-up runs as its own turn, right
+                // over. The queued follow-ups run as one turn, right
                 // now, the composer keeps whatever was typed meanwhile.
                 this.steer_tx = None;
+                // Steers the loop never read (sent in the instant
+                // after its last look) aren't lost: they lead the next
+                // message, or join the held queue after a stop.
+                let unread = std::mem::take(&mut this.steers_in_flight);
                 // No running cards survive the turn, and the composer's
                 // ghost text goes back to inviting a message, unless a
                 // queued follow-up re-opens the turn below, which swaps
@@ -276,25 +280,19 @@ impl ChatView {
                 this.sync_composer_placeholder(cx);
                 this.sessions = this.store.list_sessions().unwrap_or_default();
                 this.sync_list(cx);
-                // A stopped turn starts nothing: the queue waits for
-                // the next send.
-                if !stopped && !this.queued.is_empty() {
-                    let first = this.queued[0].id;
-                    match this.store.take_followup(first) {
-                        Ok(Some(stored)) => {
-                            this.sync_queue();
-                            let session_id = match this.session_id {
-                                Some(session_id) => session_id,
-                                None => return,
-                            };
-                            // The row is the stored form: its images
-                            // ride back onto the wire.
-                            this.deliver_queued(session_id, stored, cx);
+                // A stopped turn starts nothing: the queue is held
+                // (the composer area says so) until the human sends it,
+                // clears it, or sends a new message, which carries it.
+                if stopped {
+                    if let Some(session_id) = this.session_id {
+                        for text in &unread {
+                            let _ = this.store.enqueue_followup(session_id, text);
                         }
-                        // The row vanished under us (another surface
-                        // took it): drop the stale draft, run nothing.
-                        _ => this.sync_queue(),
                     }
+                    this.sync_queue();
+                    cx.notify();
+                } else {
+                    this.send_queue(unread, cx);
                 }
             });
         })
@@ -604,6 +602,10 @@ impl ChatView {
     /// persist and bubble it exactly like a send-time row, the loop
     /// owns the in-memory history, the DB row is ours.
     pub(crate) fn on_steered(&mut self, text: &str, cx: &mut Context<Self>) {
+        // It joined: no longer in flight.
+        if let Some(index) = self.steers_in_flight.iter().position(|sent| sent == text) {
+            self.steers_in_flight.remove(index);
+        }
         // No activity change, a steer doesn't alter what's happening,
         // but the quiet gauge restarts all the same: something happened.
         self.last_event_at = Instant::now();

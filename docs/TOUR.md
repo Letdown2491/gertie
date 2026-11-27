@@ -16,8 +16,10 @@ The agent asks *you* questions too: when a decision is genuinely ambiguous it se
 Answer by clicking; the answer rides back into the work.
 
 The composer is one box: the paperclip attaches images, PDFs, and text files (or paste
-them), and the arrow sends. Enter while a turn runs steers it; Ctrl+Enter queues a
-follow-up for after. With the composer empty, the arrow becomes Stop.
+them), and the arrow sends. Enter while a turn runs queues a follow-up for after it
+(queued messages go out together, as one message); Ctrl+Enter steers the running turn
+instead. A stop holds the queue until you send it, clear it, or send a new message. With
+the composer empty, the arrow becomes Stop.
 
 Each message has small icon actions: on your messages, fork (a new conversation from
 that point) and rewind; on the agent's, copy and quote (the reply lands in the

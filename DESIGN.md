@@ -635,11 +635,17 @@ out of git by the local exclude) and the message cites the path for the agent's
 commenting on carries a **quote** action: the response lands in the composer as a
 blockquote (bounded, enough to pin the referent, never the whole answer back into
 the prompt) and the comment types under it; sending shows the model the exact words.
-Steer and queue are verbs with a visible stack: while a turn runs, Enter steers it
-(the model reads the words at the next round boundary) and the secondary Enter queues
-a follow-up for the next one, the composer's ghost text names which action the send
-key fires, swapped in only while a turn runs and the composer sits empty (a
-placeholder renders where the user is typing, and vanishes with anything typed).
+Steer and queue are verbs with a visible stack: while a turn runs, Enter queues a
+follow-up (the safe default, it doesn't redirect work in flight) and the secondary
+Enter steers (the model reads the words at the next round boundary). The composer's
+ghost text names which action each key fires, swapped in only while a turn runs and
+the composer sits empty (a placeholder renders where the user is typing, and vanishes
+with anything typed). Queued follow-ups go out together, as one message, when the
+turn ends: one answer to all of it, not a turn per afterthought. A message carrying
+attachments always queues, since a steer is words only. A steer shows as "steering…"
+until the loop confirms it joined; one the turn ends without reading leads the next
+message instead of vanishing. A stop holds the queue, and says so, until the human
+sends it, clears it, or sends a new message (which carries it, queue first).
 Launch resume is **workspace-scoped**: the session store is one global memory across
 every folder, but the newest unsettled session resumes only when its recorded root
 (the `workspace_root` set at first send) matches the folder the app opened in,
