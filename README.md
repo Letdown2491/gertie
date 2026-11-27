@@ -3,6 +3,10 @@
 A fast, native coding-agent harness. GPU-rendered UI, a headless core that is a plain
 library, and everything local: sessions in SQLite, zero telemetry, no accounts.
 
+<p align="center">
+  <img src="assets/gertie-shot.png" alt="Gertie: a chat with the status column showing the session's working state, memory actions, and touched files" width="960">
+</p>
+
 ```
 gertie-core       headless agent core: loop, sessions, permissions, checkpoints
 gertie-providers  provider adapters (OpenAI-compatible + native Anthropic wire)
