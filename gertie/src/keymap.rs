@@ -40,6 +40,8 @@ const WHEN_CONTEXTS: &[(&str, &str)] = &[
     ("turnRunning", "TurnRunning"),
     // Focus is inside the turn-diff modal.
     ("turnDiffFocus", "TurnDiffPanel"),
+    // Focus is inside the settings page overlay.
+    ("settingsPanelFocus", "SettingsPanel"),
     // Focus is in the transcript's find bar.
     ("findBarFocus", "FindBar"),
 ];
@@ -50,6 +52,7 @@ pub const COMMANDS: &[&str] = &[
     "palette",
     "find-transcript",
     "find-close",
+    "close-settings",
     "close-turn-diff",
     "undo-delete-session",
     "recall-up",
@@ -65,6 +68,7 @@ pub fn default_rules() -> Vec<Rule> {
         ("ctrl-k", "palette", None),
         ("ctrl-f", "find-transcript", None),
         ("escape", "find-close", Some("findBarFocus")),
+        ("escape", "close-settings", Some("settingsPanelFocus")),
         ("escape", "close-turn-diff", Some("turnDiffFocus")),
         ("ctrl-z", "undo-delete-session", None),
         ("up", "recall-up", Some("editableFocus")),
@@ -113,6 +117,7 @@ fn rule_action(rule: &Rule) -> Option<(Box<dyn Action>, Option<&'static str>)> {
         "find-transcript" => Box::new(crate::chat::FindInTranscript),
         "find-close" => Box::new(crate::chat::FindClose),
         "close-turn-diff" => Box::new(crate::chat::CloseTurnDiff),
+        "close-settings" => Box::new(crate::chat::CloseSettings),
         "undo-delete-session" => Box::new(crate::chat::UndoDeleteSession),
         "recall-up" => Box::new(crate::chat::RecallUp),
         "recall-down" => Box::new(crate::chat::RecallDown),

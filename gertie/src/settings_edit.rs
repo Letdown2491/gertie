@@ -22,6 +22,7 @@ use gpui_kit::component::ThemeMode;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::switch::Switch;
+use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{h_flex, v_flex};
 use gpui_kit::prelude::*;
 use gpui_kit::{
@@ -33,6 +34,9 @@ use gpui_kit::{
 /// bootstrap and pushes the new provider into every open tab.
 pub enum SettingsEvent {
     Saved,
+    /// The page's own close affordance (the ✕ by the nav's caption);
+    /// the shell closes the page.
+    Dismissed,
 }
 
 /// One endpoint as the editor holds it, a plain-data copy of
@@ -1033,13 +1037,33 @@ impl Render for SettingsPanelView {
             .px_2()
             .gap_0p5()
             .child(
-                div()
+                h_flex()
                     .px_2()
                     .pb_2()
-                    .text_size(px(11.))
-                    .font_weight(gpui_kit::FontWeight::SEMIBOLD)
-                    .text_color(theme.muted_foreground)
-                    .child("Settings"),
+                    .items_center()
+                    .justify_between()
+                    .child(
+                        div()
+                            .text_size(px(11.))
+                            .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                            .text_color(theme.muted_foreground)
+                            .child("Settings"),
+                    )
+                    .child(
+                        div()
+                            .id("settings-close")
+                            .test_support()
+                            .cursor_pointer()
+                            .px_1()
+                            .text_size(px(12.))
+                            .text_color(theme.muted_foreground)
+                            .hover(|style| style.text_color(theme.foreground))
+                            .on_click(cx.listener(|_, _, _, cx| {
+                                cx.emit(SettingsEvent::Dismissed);
+                            }))
+                            .tooltip(|window, cx| Tooltip::new("Close (esc)").build(window, cx))
+                            .child(Button::new("settings-close-btn").label("✕").small().ghost()),
+                    ),
             )
             .children(
                 [
@@ -1707,7 +1731,7 @@ impl Render for SettingsPanelView {
                         .text_color(theme.muted_foreground)
                         .child(match &self.summary.config_path {
                             Some(path) => format!(
-                                "Changes save to {} as you make them; its comments and unknown                                  keys are kept.",
+                                "Changes save to {} as you make them; its comments and unknown keys are kept.",
                                 path.display()
                             ),
                             None => "no config file location".into(),

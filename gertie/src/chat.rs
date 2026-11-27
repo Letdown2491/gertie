@@ -223,7 +223,8 @@ actions!(
         CycleFocus,
         CycleFocusBack,
         FindInTranscript,
-        FindClose
+        FindClose,
+        CloseSettings
     ]
 );
 
@@ -1018,8 +1019,9 @@ impl ChatView {
         cx.subscribe_in(
             &settings_panel,
             window,
-            |_this, _, event: &SettingsEvent, _, cx| match event {
+            |this, _, event: &SettingsEvent, window, cx| match event {
                 SettingsEvent::Saved => cx.emit(ChatViewEvent::ConfigSaved),
+                SettingsEvent::Dismissed => this.close_settings(window, cx),
             },
         )
         .detach();
@@ -2429,7 +2431,7 @@ impl ChatView {
             }
             crate::palette::PaletteCommand::Compact => self.compact_now(cx),
             crate::palette::PaletteCommand::Export => self.export_now(cx),
-            crate::palette::PaletteCommand::Settings => self.toggle_settings(cx),
+            crate::palette::PaletteCommand::Settings => self.open_settings(window, cx),
             crate::palette::PaletteCommand::FullAccess => self.full_access_confirm(cx),
             crate::palette::PaletteCommand::Memory => self.toggle_memory(cx),
         }
@@ -2836,6 +2838,23 @@ impl ChatView {
         };
         self.total_usage = self.store.total_usage();
         cx.notify();
+    }
+
+    /// Opens the settings page, handing it focus so its Escape rule
+    /// (close-settings, settingsPanelFocus) binds.
+    fn open_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.panel != Panel::Settings {
+            self.toggle_settings(cx);
+        }
+        window.focus(&self.side_focus, cx);
+    }
+
+    /// Closes the settings page, focus going back to the composer.
+    fn close_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.panel == Panel::Settings {
+            self.toggle_settings(cx);
+            window.focus(&self.input.read(cx).focus_handle(cx), cx);
+        }
     }
 
     /// The mode menu, rendered as the chip's popup: one row per
@@ -4341,7 +4360,7 @@ impl ChatView {
                 "settings" => {
                     self.input
                         .update(cx, |input, cx| input.set_value("", window, cx));
-                    self.toggle_settings(cx);
+                    self.open_settings(window, cx);
                     return;
                 }
                 _ => {
@@ -6448,6 +6467,13 @@ impl Render for ChatView {
             .on_action(cx.listener(
                 |this, _: &CloseTurnDiff, _, cx| this.close_turn_diff(cx),
             ))
+            // Escape inside the settings page closes it (focus is
+            // handed to the page on open).
+            .on_action(cx.listener(|this, _: &CloseSettings, _, cx| {
+                if this.panel == Panel::Settings {
+                    this.toggle_settings(cx);
+                }
+            }))
             // Ctrl+Z outside the composer: undo a sidebar delete still
             // inside its window.
             .on_action(cx.listener(|this, _: &UndoDeleteSession, _, cx| {
@@ -6466,22 +6492,6 @@ impl Render for ChatView {
             .items_stretch()
             .relative()
             .child(self.render_sidebar(&mut *cx))
-            .when(self.panel == Panel::Settings, |row| {
-                // Settings is a full page over the middle column:
-                // transcript, composer, and footer all yield, the
-                // sidebars stay. Opaque, so nothing bleeds through.
-                row.child(
-                    div()
-                        .absolute()
-                        .inset_0()
-                        .flex()
-                        .justify_center()
-                        .key_context("SettingsPanel")
-                        .track_focus(&self.side_focus)
-                        .bg(theme.background)
-                        .child(self.settings_panel.clone()),
-                )
-            })
             .child(
                 h_flex()
                     .flex_1()
@@ -7137,6 +7147,24 @@ impl Render for ChatView {
                                     .child(self.render_token_footer(cx)),
                             ),
                     )
+                    // The settings page: a full cover of the middle
+                    // column, mounted inside it so the sidebar stays
+                    // clickable and nothing of the chat paints over
+                    // the page. Last child of the column: paints on
+                    // top. Opaque, so nothing bleeds through.
+                    .when(self.panel == Panel::Settings, |col| {
+                        col.child(
+                            div()
+                                .absolute()
+                                .inset_0()
+                                .flex()
+                                .key_context("SettingsPanel")
+                                .track_focus(&self.side_focus)
+                                .occlude()
+                                .bg(theme.background)
+                                .child(self.settings_panel.clone()),
+                        )
+                    })
                     // The status column (issue #33): only while no
                     // other side panel holds the right edge, and only
                     // when the session has state to show.

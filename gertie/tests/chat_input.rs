@@ -4847,20 +4847,24 @@ fn f6_cycles_focus_areas_and_shift_f6_walks_back() {
     assert_eq!(focused_area(&mut fixture), "transcript");
 
     // The right panel joins the cycle while it's open. Open it via
-    // the palette, its close hands focus back to the composer,
-    // then the cycle reads composer → panel, and the wrap crosses
-    // the panel too.
+    // the palette: the page takes focus on open (its Escape rule
+    // binds), F6 walks on from there, and the wrap crosses the
+    // panel too.
     fixture.act(|window, cx| window.press("ctrl-k", cx));
     fixture.act(|window, cx| window.input(">settings", cx));
     fixture.act(|window, cx| window.press("enter", cx));
-    assert_eq!(focused_area(&mut fixture), "composer");
-    fixture.act(|window, cx| window.press("f6", cx));
     assert_eq!(focused_area(&mut fixture), "panel");
     fixture.act(|window, cx| window.press("f6", cx));
     assert_eq!(
         focused_area(&mut fixture),
         "sidebar",
-        "the wrap crosses the panel"
+        "the cycle wraps off the panel"
+    );
+    fixture.act(|window, cx| window.press("shift-f6", cx));
+    assert_eq!(
+        focused_area(&mut fixture),
+        "panel",
+        "shift-f6 walks back onto the panel"
     );
 }
 
@@ -6826,6 +6830,17 @@ fn the_settings_page_groups_four_sections_and_covers_the_middle_column() {
                 || window.try_find("settings-content").is_some(),
             "the settings page painted (settings-panel / settings-content missing)"
         );
+        // The sidebar stays clickable under the page: the page is a
+        // cover of the middle column, not of the row.
+        assert!(
+            window.try_find("toggle-settings").is_some(),
+            "the sidebar's settings button survives under the page"
+        );
+        // The page carries its own visible close affordance.
+        assert!(
+            window.try_find("settings-close").is_some(),
+            "the page has its close ✕"
+        );
         assert!(
             window.try_find("nav-chat").is_some() && window.try_find("nav-tools").is_some(),
             "the nav has the four grouped sections"
@@ -6871,8 +6886,40 @@ fn the_settings_page_groups_four_sections_and_covers_the_middle_column() {
     });
     // Close: Esc over the page hands the middle column back.
     fixture.act(|window, cx| window.press("escape", cx));
-    fixture.act(|window, cx| {
-        window.input("back to the chat", cx);
-        window.press("escape", cx);
+    let closed = fixture.cx.update(|cx| {
+        fixture
+            .view
+            .upgrade()
+            .expect("view alive")
+            .read(cx)
+            .panel_for_test()
     });
+    assert_eq!(closed, "none", "escape closes the page");
+    fixture.act(|window, cx| {
+        assert!(
+            window.try_find("settings-panel").is_none(),
+            "the page is gone after esc"
+        );
+    });
+    // The ✕ closes too: reopen, click it.
+    fixture.act(|window, cx| window.click("toggle-settings", cx));
+    let reopened = fixture.cx.update(|cx| {
+        fixture
+            .view
+            .upgrade()
+            .expect("view alive")
+            .read(cx)
+            .panel_for_test()
+    });
+    assert_eq!(reopened, "settings", "the sidebar's toggle reopens");
+    fixture.act(|window, cx| window.click("settings-close", cx));
+    let xed = fixture.cx.update(|cx| {
+        fixture
+            .view
+            .upgrade()
+            .expect("view alive")
+            .read(cx)
+            .panel_for_test()
+    });
+    assert_eq!(xed, "none", "the ✕ closes the page");
 }
