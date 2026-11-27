@@ -28,7 +28,6 @@ pub(crate) const STATUS_WIDTH: f32 = 300.;
 pub(crate) const RAIL_WIDTH: f32 = 34.;
 
 /// How many touched files list before the rest fold into a count.
-const TOUCHED_SHOWN: usize = 10;
 
 /// Grounding rows per tier: the consulted entries, then the
 /// file-sharing ones (the weaker signal, so fewer).
@@ -917,17 +916,30 @@ impl ChatView {
                         cx,
                     )
                 })
-                .collect();
-            sections.push(section(
-                label(
-                    None,
-                    format!(
-                        "MEMORY · {count} action{}",
-                        if count == 1 { "" } else { "s" }
-                    ),
-                ),
-                rows,
-            ));
+                .collect::<Vec<_>>();
+            // Five rows in the viewport, the whole list scrollable:
+            // memory actions are rarer and the section yields the
+            // column's height to TOUCHED.
+            sections.push(
+                v_flex()
+                    .gap_1p5()
+                    .child(label(
+                        None,
+                        format!(
+                            "MEMORY · {count} action{}",
+                            if count == 1 { "" } else { "s" }
+                        ),
+                    ))
+                    .child(
+                        v_flex()
+                            .id("memory-scroll")
+                            .max_h(px(150.))
+                            .overflow_y_scroll()
+                            .gap(px(3.))
+                            .children(rows),
+                    )
+                    .into_any_element(),
+            );
         }
 
         if !facts.touched.is_empty() {
@@ -948,16 +960,16 @@ impl ChatView {
                 })
                 .collect()
             };
-            // Ten files, the whole list in one scrollable window: no
-            // "+N more" continuation (the hand test read it as a
-            // control that wasn't), and the column's height stays
-            // stable whether the session touched 3 files or 300.
+            // The whole list in one scrollable window, the viewport
+            // sized to roughly ten rows: no data cap, no "+N more"
+            // continuation, and the column's height stays stable
+            // whether the session touched 3 files or 300.
             let body = v_flex()
                 .id("touched-scroll")
-                .max_h(px(240.))
+                .max_h(px(300.))
                 .overflow_y_scroll()
                 .gap(px(3.))
-                .children(chips(&mut facts.touched.iter().take(TOUCHED_SHOWN)))
+                .children(chips(&mut facts.touched.iter()))
                 .into_any_element();
             sections.push(
                 v_flex()
