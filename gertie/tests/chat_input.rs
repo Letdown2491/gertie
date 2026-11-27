@@ -2101,6 +2101,35 @@ fn a_filed_chat_leaves_its_project_in_one_click() {
     );
 }
 
+/// #41: each session keeps its own frozen map. Switching to another
+/// chat and back hands the first chat the same map, not a re-render
+/// (which could differ and miss the prompt cache).
+#[test]
+fn a_chat_keeps_its_repo_map_across_a_switch() {
+    let (store, _) = project_store();
+    let mut fixture = fixture_with_store(store);
+    let map_now = |fixture: &mut Fixture| {
+        fixture.cx.update(|cx| {
+            let view = fixture.view.upgrade().expect("view alive");
+            view.update(cx, |chat, _| {
+                chat.set_repo_map_budget_for_test(Some(500));
+                chat.repo_map_for_test().expect("the map is on")
+            })
+        })
+    };
+    fixture.act(|window, cx| window.click("session-1", cx));
+    let first = map_now(&mut fixture);
+    fixture.act(|window, cx| window.click("session-2", cx));
+    let second = map_now(&mut fixture);
+    fixture.act(|window, cx| window.click("session-1", cx));
+    let back = map_now(&mut fixture);
+    assert!(
+        back.same_as(&first),
+        "switching back reuses the first chat's map"
+    );
+    assert!(!second.same_as(&first), "another chat has its own");
+}
+
 /// A project's + opens a blank chat in the current folder, filed
 /// under the project when the first message creates it.
 #[test]

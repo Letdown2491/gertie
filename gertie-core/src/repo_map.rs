@@ -65,6 +65,12 @@ impl SessionMap {
         self.frozen.get_or_init(|| rendered).clone()
     }
 
+    /// Whether `other` is this same session's map (they share the
+    /// frozen text), not just an equal one.
+    pub fn same_as(&self, other: &SessionMap) -> bool {
+        Arc::ptr_eq(&self.frozen, &other.frozen)
+    }
+
     /// Whether the text is already frozen (tests, and the GUI deciding
     /// whether a session needs a new map).
     pub fn is_frozen(&self) -> bool {

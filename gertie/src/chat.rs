@@ -568,13 +568,14 @@ pub struct ChatView {
     compact_at: Option<u64>,
     /// The repo map's budget in tokens (#41), None when it is off.
     repo_map_budget: Option<usize>,
-    /// The current session's map and the root it maps: rendered on the
-    /// session's first turn, reused (frozen) while both stay the same.
-    session_map: Option<(
-        Option<SessionId>,
-        std::path::PathBuf,
+    /// Each session's map, per root it ran in: rendered on the session's
+    /// first turn in this process, then frozen, so switching away and
+    /// back sends the same bytes (one slot used to re-render on every
+    /// switch back, missing the prompt cache once each time).
+    session_maps: std::collections::HashMap<
+        (SessionId, std::path::PathBuf),
         gertie_core::repo_map::SessionMap,
-    )>,
+    >,
     /// The command palette (Ctrl+K): the kit's field + keyboard nav,
     /// pointed at the store's FTS index by the callbacks in render.
     palette: Entity<CommandState>,
@@ -1058,7 +1059,7 @@ impl ChatView {
             tool_guidance,
             compact_at,
             repo_map_budget,
-            session_map: None,
+            session_maps: Default::default(),
             palette,
             palette_open: false,
             palette_hits: Vec::new(),
@@ -1475,6 +1476,16 @@ impl ChatView {
     /// `/compact`, for tests.
     pub fn compact_for_test(&mut self, cx: &mut Context<Self>) {
         self.compact_now(cx);
+    }
+
+    /// Turns the repo map on at `budget`, for tests.
+    pub fn set_repo_map_budget_for_test(&mut self, budget: Option<usize>) {
+        self.repo_map_budget = budget;
+    }
+
+    /// The map the next turn would carry, for tests.
+    pub fn repo_map_for_test(&mut self) -> Option<gertie_core::repo_map::SessionMap> {
+        self.repo_map_for_turn()
     }
 
     /// Whether a run clock is going, for tests.

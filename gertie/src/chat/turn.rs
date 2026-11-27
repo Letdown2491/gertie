@@ -46,27 +46,7 @@ impl ChatView {
         // sender drops and Enter queues instead.
         let (steer_tx, steer_rx) = tokio::sync::mpsc::unbounded_channel();
         let (stop_tx, mut stop_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
-        // The session's repo map (#41): one per session and root, so a
-        // new chat or a re-rooted tab renders a fresh one and every
-        // later turn of the session reuses the frozen text.
-        let repo_map = self.repo_map_budget.map(|budget| match &self.session_map {
-            Some((session, root, map))
-                if self.session_id.is_some()
-                    && *session == self.session_id
-                    && *root == self.workspace_root =>
-            {
-                map.clone()
-            }
-            _ => {
-                let map = gertie_core::repo_map::SessionMap::new(
-                    gertie_tools::repo_map::RepoMap::for_root(&self.workspace_root),
-                    budget,
-                );
-                self.session_map =
-                    Some((self.session_id, self.workspace_root.clone(), map.clone()));
-                map
-            }
-        });
+        let repo_map = self.repo_map_for_turn();
         let stream = run_turn(TurnSpec {
             provider,
             tools: self.tools.clone(),
@@ -578,6 +558,28 @@ impl ChatView {
     /// card, not hidden magic. Not persisted: DB rows stay whole, the
     /// compaction is the in-memory view (a reload restores full history
     /// and the loop re-compacts if the threshold trips again).
+    /// The session's repo map (#41): one per session and root, so a new
+    /// chat or a re-rooted tab renders a fresh one, and every later turn
+    /// of the session, after any switch away and back, reuses the frozen
+    /// text. None when the map is off.
+    pub(crate) fn repo_map_for_turn(&mut self) -> Option<gertie_core::repo_map::SessionMap> {
+        let budget = self.repo_map_budget?;
+        let fresh = || {
+            gertie_core::repo_map::SessionMap::new(
+                gertie_tools::repo_map::RepoMap::for_root(&self.workspace_root),
+                budget,
+            )
+        };
+        Some(match self.session_id {
+            Some(session) => self
+                .session_maps
+                .entry((session, self.workspace_root.clone()))
+                .or_insert_with(fresh)
+                .clone(),
+            None => fresh(),
+        })
+    }
+
     pub(crate) fn on_compacted(&mut self, kept: usize, total: usize, cx: &mut Context<Self>) {
         let session_id = self.session_id;
         if let Some(session_id) = session_id {
