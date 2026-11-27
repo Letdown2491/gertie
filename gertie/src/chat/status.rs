@@ -339,15 +339,7 @@ pub fn normalize_path(root: &std::path::Path, raw: &str) -> Option<String> {
     (!text.is_empty()).then_some(text)
 }
 
-fn clip(text: &str, cap: usize) -> String {
-    if text.chars().count() <= cap {
-        text.to_string()
-    } else {
-        let mut clipped: String = text.chars().take(cap.saturating_sub(1)).collect();
-        clipped.push('…');
-        clipped
-    }
-}
+use gertie_core::text::ellipsize as clip;
 
 /// GROUNDED IN's cache: the rows, keyed by the memory store's
 /// fingerprint and the facts' version.

@@ -717,30 +717,7 @@ mod tests {
         assert!(out.contains("nothing in the session record"), "{out}");
     }
 
-    /// Tests run outside a runtime; `blocking` futures are computed on
-    /// first poll, so a plain poll loop suffices (same as mcp.rs).
-    fn futures_now(
-        mut future: std::pin::Pin<Box<dyn Future<Output = ToolResult> + Send + '_>>,
-    ) -> ToolResult {
-        use std::task::{Context, Poll, Waker};
-        let started = std::time::Instant::now();
-        let waker = Waker::noop();
-        let mut cx = Context::from_waker(waker);
-        loop {
-            match std::pin::Pin::new(&mut future).poll(&mut cx) {
-                Poll::Ready(result) => return result,
-                Poll::Pending => {
-                    // The hang guard: a future that never resolves must
-                    // fail the test fast and by name, never spin
-                    // politely forever.
-                    if started.elapsed() > std::time::Duration::from_secs(10) {
-                        panic!("the future stayed Pending for 10s, an await never resolved");
-                    }
-                    std::thread::sleep(std::time::Duration::from_millis(10));
-                }
-            }
-        }
-    }
+    use gertie_core::testing::block_on as futures_now;
 
     #[test]
     fn html_strips_to_readable_text() {

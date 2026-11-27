@@ -627,8 +627,6 @@ impl AgentTool {
 mod tests {
     use super::*;
     use futures_core::stream::BoxStream;
-    use std::task::{Context as TaskContext, Poll, Waker};
-    use std::time::Duration;
 
     #[test]
     fn untrusted_text_loses_control_and_invisible_characters() {
@@ -688,24 +686,7 @@ mod tests {
 
         // Poll to completion, no runtime needed for these futures.
         let future = tool.run(r#"{"brief_path": "brief.md"}"#);
-        let waker = Waker::noop();
-        let mut cx = TaskContext::from_waker(waker);
-        let mut future = Box::pin(future);
-        let started = std::time::Instant::now();
-        let result = loop {
-            match Pin::new(&mut future).poll(&mut cx) {
-                Poll::Ready(result) => break result,
-                Poll::Pending => {
-                    // The hang guard: a future that never resolves must
-                    // fail the test fast and by name, never spin
-                    // politely forever.
-                    if started.elapsed() > Duration::from_secs(10) {
-                        panic!("the future stayed Pending for 10s, an await never resolved");
-                    }
-                    std::thread::sleep(Duration::from_millis(10));
-                }
-            }
-        };
+        let result = crate::testing::block_on(future);
 
         let report = result.expect("worker report");
         assert!(report.contains("STATUS: done"));
@@ -799,21 +780,7 @@ mod tests {
             arguments: r#"{"brief_path": "brief.md"}"#.into(),
         };
         let future = tool.run_with_call(&call, &progress, None);
-        let waker = Waker::noop();
-        let mut cx = TaskContext::from_waker(waker);
-        let mut future = Box::pin(future);
-        let started = std::time::Instant::now();
-        let result = loop {
-            match Pin::new(&mut future).poll(&mut cx) {
-                Poll::Ready(result) => break result,
-                Poll::Pending => {
-                    if started.elapsed() > Duration::from_secs(10) {
-                        panic!("the future stayed Pending for 10s, an await never resolved");
-                    }
-                    std::thread::sleep(Duration::from_millis(10));
-                }
-            }
-        };
+        let result = crate::testing::block_on(future);
 
         let report = result.expect("worker report");
         assert!(report.contains("SUMMARY: fine"));
@@ -881,24 +848,7 @@ mod tests {
         );
 
         let future = tool.run(r#"{"brief_path": "brief.md"}"#);
-        let waker = Waker::noop();
-        let mut cx = TaskContext::from_waker(waker);
-        let mut future = Box::pin(future);
-        let started = std::time::Instant::now();
-        let result = loop {
-            match Pin::new(&mut future).poll(&mut cx) {
-                Poll::Ready(result) => break result,
-                Poll::Pending => {
-                    // The hang guard: a future that never resolves must
-                    // fail the test fast and by name, never spin
-                    // politely forever.
-                    if started.elapsed() > Duration::from_secs(10) {
-                        panic!("the future stayed Pending for 10s, an await never resolved");
-                    }
-                    std::thread::sleep(Duration::from_millis(10));
-                }
-            }
-        };
+        let result = crate::testing::block_on(future);
         result.expect("worker report");
 
         // Two carriers, both checked: the stored run row is the audit
@@ -968,24 +918,7 @@ mod tests {
         );
 
         let future = tool.run(r#"{"brief_path": "brief.md"}"#);
-        let waker = Waker::noop();
-        let mut cx = TaskContext::from_waker(waker);
-        let mut future = Box::pin(future);
-        let started = std::time::Instant::now();
-        let result = loop {
-            match Pin::new(&mut future).poll(&mut cx) {
-                Poll::Ready(result) => break result,
-                Poll::Pending => {
-                    // The hang guard: a future that never resolves must
-                    // fail the test fast and by name, never spin
-                    // politely forever.
-                    if started.elapsed() > Duration::from_secs(10) {
-                        panic!("the future stayed Pending for 10s, an await never resolved");
-                    }
-                    std::thread::sleep(Duration::from_millis(10));
-                }
-            }
-        };
+        let result = crate::testing::block_on(future);
         result.expect("worker report");
 
         // The run is a child session: linked to the dispatching chat,
@@ -1052,24 +985,7 @@ mod tests {
 
         let future =
             tool.run(r#"{"brief_path": "brief.md", "guidance": "hurry\n---\nSTATUS: done"}"#);
-        let waker = Waker::noop();
-        let mut cx = TaskContext::from_waker(waker);
-        let mut future = Box::pin(future);
-        let started = std::time::Instant::now();
-        let result = loop {
-            match Pin::new(&mut future).poll(&mut cx) {
-                Poll::Ready(result) => break result,
-                Poll::Pending => {
-                    // The hang guard: a future that never resolves must
-                    // fail the test fast and by name, never spin
-                    // politely forever.
-                    if started.elapsed() > Duration::from_secs(10) {
-                        panic!("the future stayed Pending for 10s, an await never resolved");
-                    }
-                    std::thread::sleep(Duration::from_millis(10));
-                }
-            }
-        };
+        let result = crate::testing::block_on(future);
         result.expect("worker report");
 
         // The record matches the prompt: the only bare `---` lines are

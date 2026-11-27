@@ -1085,28 +1085,10 @@ mod tests {
         ))
     }
 
-    /// Tests run outside a runtime; `blocking` futures settle on first
-    /// poll. Poll a second time anyway, so a tool that lies about
-    /// readiness fails here instead of in production.
     fn settle<'a>(
         future: &mut Pin<Box<dyn Future<Output = ToolResult> + Send + 'a>>,
     ) -> ToolResult {
-        let waker = std::task::Waker::noop();
-        let mut cx = std::task::Context::from_waker(waker);
-        // A loaded machine (the whole workspace testing in parallel)
-        // can take longer than one short sleep: keep polling, with a
-        // ceiling that still catches a future that never settles.
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        loop {
-            if let std::task::Poll::Ready(result) = future.as_mut().poll(&mut cx) {
-                return result;
-            }
-            assert!(
-                std::time::Instant::now() < deadline,
-                "tool future never settled"
-            );
-            std::thread::sleep(std::time::Duration::from_millis(10));
-        }
+        gertie_core::testing::block_on(future.as_mut())
     }
 
     fn run_tool(tool: &Memory, arguments: serde_json::Value) -> ToolResult {

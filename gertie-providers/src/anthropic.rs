@@ -212,15 +212,24 @@ impl Anthropic {
         // a transient.
         if status.as_u16() == 429 {
             let detail = response.text().await.unwrap_or_default();
-            return Outcome::Limited(format!("{status}: {}", crate::truncate(&detail, 200)));
+            return Outcome::Limited(format!(
+                "{status}: {}",
+                gertie_core::text::prefix_chars(&detail, 200)
+            ));
         }
         if status.is_server_error() || status.as_u16() == 529 {
             let detail = response.text().await.unwrap_or_default();
-            return Outcome::Transient(format!("{status}: {}", crate::truncate(&detail, 200)));
+            return Outcome::Transient(format!(
+                "{status}: {}",
+                gertie_core::text::prefix_chars(&detail, 200)
+            ));
         }
         if !status.is_success() {
             let detail = response.text().await.unwrap_or_default();
-            return Outcome::Fatal(format!("{status}: {}", crate::truncate(&detail, 200)));
+            return Outcome::Fatal(format!(
+                "{status}: {}",
+                gertie_core::text::prefix_chars(&detail, 200)
+            ));
         }
 
         parse_sse(response.bytes_stream(), sender).await

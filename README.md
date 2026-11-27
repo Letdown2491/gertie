@@ -41,7 +41,8 @@ fronts, nothing shared over the network.
 - **Parallel and worktree chats**: a running turn keeps going while you open another
   conversation from the sidebar, which marks it running or finished. New worktree chat
   starts a chat in its own `git worktree`, so two agents can edit the
-  same repo without colliding. Stop ends a running turn.
+  same repo without colliding. Stop ends a running turn and cancels the model's
+  request, so a stopped reply stops costing output tokens.
 - **Any endpoint**: speaks the OpenAI-compatible wire (ppq.ai, OpenRouter, Ollama,
   vLLM, Gemini's compat endpoint) plus a native Anthropic adapter. Fallback chains: when
   an endpoint dies before producing content, the next one takes over invisibly.

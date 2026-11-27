@@ -34,17 +34,6 @@ pub struct Reloaded {
     pub settings: Arc<crate::settings::SettingsSummary>,
 }
 
-/// Everything a re-rooted registry carries: the rebuilt tools, the
-/// prompt, the always-layer, the memory index and store. `Switched`
-/// spreads these into a tab.
-pub type RootedRegistry = (
-    gertie_core::ToolRegistry,
-    Option<String>,
-    Option<String>,
-    Option<String>,
-    Option<Arc<gertie_core::MemoryStore>>,
-);
-
 pub struct Bootstrap {
     pub config: crate::config::Config,
     /// The `--config` override, if any, reload reads the same file
@@ -100,13 +89,13 @@ pub struct Bootstrap {
     /// skills, MCP connections, agent types, set up once at load.
     capability_suffix: String,
     skill_count: usize,
+    /// The global memory tier every root's store shares (the boot's
+    /// override in evals, else the user's).
+    memory_global: PathBuf,
     /// Tool names that don't capture the workspace root (web, history,
     /// MCP, skills), a re-rooted registry carries these over as-is
     /// instead of rebuilding or reconnecting them.
     root_independent: Vec<String>,
-    /// The skills index prompt section, shared by every registry's
-    /// system prompt (skills are repo content, identical per worktree).
-    skill_index: String,
     /// Discovered prompt templates, `/name` expansion in the
     /// composer. Load-time setup; reload carries the same set.
     pub templates: Vec<gertie_tools::templates::Template>,
@@ -585,16 +574,11 @@ impl Bootstrap {
         let (provider, agent_endpoint) = provider_chain(&config);
         // Memory: one store over the repo's tier and the user's global
         // tier, same sidecar as the sessions. Root-independent as
-        // registered here; worktree tabs re-root the project tier
-        // through registry_for_root, the global tier stays shared.
-        let memory = Arc::new(gertie_core::MemoryStore::open(
-            workspace_root.join(".gertie/memory"),
-            global_memory.unwrap_or_else(memory_global_root),
-            store.clone(),
-        ));
-        memory
-            .sync()
-            .unwrap_or_else(|error| eprintln!("warning: memory sync: {error}"));
+        // registered here; another root (a switch, a worktree tab)
+        // re-roots the project tier through workspace_for_root, the
+        // global tier stays shared.
+        let memory_global = global_memory.unwrap_or_else(memory_global_root);
+        let memory = open_memory(&workspace_root, memory_global.clone(), store.clone());
         // Dreaming rides the same sweep: idle-gated, opt-in, and only
         // when memory is on. The changelog lands in the tier's dreams/.
         if config.memory_enabled() && config.memory_dream_days() > 0 {
@@ -632,23 +616,10 @@ impl Bootstrap {
                     .clone()
                     .map(|provider| provider as Arc<dyn gertie_core::Provider>)
             });
-        map.insert(
-            "memory".into(),
-            memory_tool(&memory, config.memory_writes()),
-        );
-        root_independent.push("memory".into());
-        map.insert(
-            "search_memory".into(),
-            Arc::new(gertie_tools::memory::SearchMemory::new(memory.clone())),
-        );
-        root_independent.push("search_memory".into());
-        // The structured write path (#35): any model fills a schema,
-        // the harness writes the grammar, one path with extraction's.
-        map.insert(
-            "remember".into(),
-            Arc::new(gertie_tools::memory::Remember::new(memory.clone())),
-        );
-        root_independent.push("remember".into());
+        for (name, tool) in memory_tools(&memory, config.memory_writes()) {
+            map.insert(name.into(), tool);
+            root_independent.push(name.into());
+        }
 
         // The structured question: the loop intercepts `ask_user`
         // before any tool's run (the answer rides the permission
@@ -866,8 +837,8 @@ impl Bootstrap {
             memory: Some(Arc::clone(&memory)),
             memory_extract_provider,
             workspace_root,
+            memory_global,
             root_independent,
-            skill_index,
         }
     }
     /// Everything a chat needs to move itself to another workspace:
@@ -899,29 +870,13 @@ impl Bootstrap {
         }
         // Memory's project tier follows the (possibly new) root; the
         // global tier and the sidecar are the boot's shared state.
-        let memory = Arc::new(gertie_core::MemoryStore::open(
-            root.join(".gertie/memory"),
-            memory_global_root(),
-            self.store.clone(),
-        ));
-        memory
-            .sync()
-            .unwrap_or_else(|error| eprintln!("warning: memory sync: {error}"));
+        let memory = open_memory(&root, self.memory_global.clone(), self.store.clone());
         let memory_index = render_memory_index(&memory);
         {
             let map = Arc::get_mut(&mut tools).expect("registry not yet shared");
-            map.insert(
-                "memory".into(),
-                memory_tool(&memory, self.live_config().memory_writes()),
-            );
-            map.insert(
-                "search_memory".into(),
-                Arc::new(gertie_tools::memory::SearchMemory::new(Arc::clone(&memory))),
-            );
-            map.insert(
-                "remember".into(),
-                Arc::new(gertie_tools::memory::Remember::new(Arc::clone(&memory))),
-            );
+            for (name, tool) in memory_tools(&memory, config.memory_writes()) {
+                map.insert(name.into(), tool);
+            }
         }
 
         // Skills: the user dir rides along; the project dir is the new
@@ -1016,108 +971,46 @@ impl Bootstrap {
             warnings,
         })
     }
+}
 
-    /// A registry re-rooted at `root`, plus its system prompt: the
-    /// built-ins are rebuilt (they capture the workspace root), agent
-    /// tools are rebuilt against the new base (a worker dispatched from
-    /// this registry works in the same tree), and root-independent
-    /// tools, web, history, MCP connections, skills, are carried over
-    /// as-is rather than duplicated. Shared infrastructure (broker,
-    /// store, snapshots) is untouched: one approval queue, one history.
-    pub fn registry_for_root(&self, root: &Path) -> RootedRegistry {
-        let sandbox = self
-            .live_config()
-            .resolve_sandbox_bash(self.overlay.as_ref())
-            .value
-            .then(|| std::sync::Arc::new(gertie_tools::sandbox::Sandbox::new(root.to_path_buf())));
-        let mut tools = gertie_tools::builtin_tools_with(root, sandbox);
-        without_repo_map(&mut tools, &self.live_config());
-        {
-            let map = Arc::get_mut(&mut tools).expect("registry not yet shared");
-            for name in &self.root_independent {
-                if let Some(tool) = self.tools.get(name) {
-                    map.insert(name.clone(), tool.clone());
-                }
-            }
-        }
-        // Memory's project tier follows the tab's root; the global tier
-        // and the sidecar are the boot's shared state.
-        let memory = Arc::new(gertie_core::MemoryStore::open(
-            root.join(".gertie/memory"),
-            memory_global_root(),
-            self.store.clone(),
-        ));
-        memory
-            .sync()
-            .unwrap_or_else(|error| eprintln!("warning: memory sync: {error}"));
-        let memory_index = render_memory_index(&memory);
-        {
-            let map = Arc::get_mut(&mut tools).expect("registry not yet shared");
-            map.insert(
-                "memory".into(),
-                memory_tool(&memory, self.live_config().memory_writes()),
-            );
-            map.insert(
-                "search_memory".into(),
-                Arc::new(gertie_tools::memory::SearchMemory::new(Arc::clone(&memory))),
-            );
-            map.insert(
-                "remember".into(),
-                Arc::new(gertie_tools::memory::Remember::new(Arc::clone(&memory))),
-            );
-        }
-        if let (Some(endpoint), Some(leader_provider)) = (self.agent_endpoint(), self.provider()) {
-            let (types, type_warnings) = agent_types(&self.config, &endpoint);
-            for warning in type_warnings {
-                eprintln!("warning: {warning}");
-            }
-            let mut additions: Vec<(String, Arc<dyn gertie_core::Tool>)> = Vec::new();
-            for target in &types {
-                let (worker_provider, context_window) =
-                    match worker_backend(target, &endpoint, &leader_provider) {
-                        Ok(backend) => backend,
-                        Err(error) => {
-                            eprintln!("warning: agent {}: {error}", target.agent_type.name);
-                            continue;
-                        }
-                    };
-                let tool = gertie_core::AgentTool::new(
-                    target.agent_type.clone(),
-                    worker_provider,
-                    &tools,
-                    self.snapshots.clone(),
-                    self.broker.clone(),
-                    context_window,
-                    root.to_path_buf(),
-                    Some(self.store.clone()),
-                    self.session_scope.clone(),
-                    self.mode_scope.clone(),
-                    self.sandbox_bash,
-                );
-                additions.push((tool.name().to_string(), Arc::new(tool)));
-            }
-            let map = Arc::get_mut(&mut tools).expect("registry not yet shared");
-            for (name, tool) in additions {
-                map.insert(name, tool);
-            }
-        }
-        // Per-root instructions: the global tier plus this root's own
-        // project tier. Never the boot's joined text: that already
-        // carries the boot root's project file, which would then ride
-        // every other root's sessions (twice, in a worktree of the
-        // same repo).
-        let global = load_global_instructions();
-        let project = load_project_instructions(root);
-        let instructions = join_instructions(global.as_deref(), project.as_deref());
-        let system_prompt = system_prompt_for(root, &self.skill_index, project.as_deref());
+/// One tier pair's store: the project tier under `root`, the shared
+/// global tier, the session store's sidecar, synced now. Writers are
+/// serialized by the store's own file lock, so every tab's store over
+/// one root can write safely.
+fn open_memory(
+    root: &Path,
+    global: PathBuf,
+    store: Arc<gertie_core::SessionStore>,
+) -> Arc<gertie_core::MemoryStore> {
+    let memory = Arc::new(gertie_core::MemoryStore::open(
+        root.join(".gertie/memory"),
+        global,
+        store,
+    ));
+    memory
+        .sync()
+        .unwrap_or_else(|error| eprintln!("warning: memory sync: {error}"));
+    memory
+}
+
+/// The three memory tools over one store, by registry name: the file
+/// tool (full or view-only per the endpoint, #42), search, and the
+/// structured write path (#35).
+fn memory_tools(
+    memory: &Arc<gertie_core::MemoryStore>,
+    writes: bool,
+) -> [(&'static str, Arc<dyn gertie_core::Tool>); 3] {
+    [
+        ("memory", memory_tool(memory, writes)),
         (
-            tools,
-            system_prompt,
-            instructions,
-            memory_index,
-            Some(Arc::clone(&memory)),
-        )
-    }
+            "search_memory",
+            Arc::new(gertie_tools::memory::SearchMemory::new(Arc::clone(memory))),
+        ),
+        (
+            "remember",
+            Arc::new(gertie_tools::memory::Remember::new(Arc::clone(memory))),
+        ),
+    ]
 }
 
 /// The memory index, rendered once per boot/switch and frozen: the

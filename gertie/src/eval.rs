@@ -401,30 +401,10 @@ pub fn evaluate(
     endpoints: &[String],
     overrides: &Overrides,
 ) -> Result<Vec<Row>, String> {
-    let raw = std::fs::read_to_string(config_path)
-        .map_err(|error| format!("{}: {error}", config_path.display()))?;
-    let config = crate::config::Config::load_from(config_path)?;
-    let names: Vec<String> = if endpoints.is_empty() {
-        config
-            .resolved_endpoints()
-            .into_iter()
-            .map(|endpoint| endpoint.name)
-            .collect()
-    } else {
-        endpoints.to_vec()
-    };
-    if names.is_empty() {
-        return Err("no endpoints configured".into());
-    }
+    let (raw, targets) = targets(config_path, endpoints)?;
     let mut rows = Vec::new();
-    for name in names {
-        let Some(endpoint) = config
-            .endpoints
-            .iter()
-            .find(|endpoint| endpoint.name == name)
-        else {
-            return Err(format!("no endpoint named {name:?} in the config"));
-        };
+    for endpoint in targets {
+        let name = endpoint.name.clone();
         let model = endpoint.model.clone();
         let memory_writes = overrides
             .memory_writes
@@ -763,6 +743,81 @@ pub fn record(rows: &[Row], date: &str) -> Vec<String> {
         .collect()
 }
 
+/// Every suite's preamble: the config's raw text (each run's config is
+/// written from it) and the endpoints to run, the named ones or else
+/// every configured one.
+pub(crate) fn targets(
+    config_path: &Path,
+    endpoints: &[String],
+) -> Result<(String, Vec<crate::config::EndpointConfig>), String> {
+    let raw = std::fs::read_to_string(config_path)
+        .map_err(|error| format!("{}: {error}", config_path.display()))?;
+    let config = crate::config::Config::load_from(config_path)?;
+    let names: Vec<String> = if endpoints.is_empty() {
+        config
+            .resolved_endpoints()
+            .into_iter()
+            .map(|endpoint| endpoint.name)
+            .collect()
+    } else {
+        endpoints.to_vec()
+    };
+    if names.is_empty() {
+        return Err("no endpoints configured".into());
+    }
+    names
+        .into_iter()
+        .map(|name| {
+            config
+                .endpoints
+                .iter()
+                .find(|endpoint| endpoint.name == name)
+                .cloned()
+                .ok_or_else(|| format!("no endpoint named {name:?} in the config"))
+        })
+        .collect::<Result<Vec<_>, _>>()
+        .map(|targets| (raw, targets))
+}
+
+/// Every suite's ending: print the table (against the recorded runs in
+/// `<data dir>/eval/<file>`), then append this run's lines there.
+pub(crate) fn publish<R>(
+    file: &str,
+    rows: &[R],
+    render: fn(&[R], &[String]) -> String,
+    record: fn(&[R], &str) -> Vec<String>,
+) {
+    let path = crate::config::Config::data_dir().map(|dir| dir.join("eval").join(file));
+    let history: Vec<String> = path
+        .as_ref()
+        .and_then(|path| std::fs::read_to_string(path).ok())
+        .map(|text| text.lines().map(str::to_string).collect())
+        .unwrap_or_default();
+    print!("{}", render(rows, &history));
+    let Some(path) = path else {
+        return;
+    };
+    let lines: String = record(rows, &today())
+        .into_iter()
+        .map(|line| line + "\n")
+        .collect();
+    let written = path
+        .parent()
+        .map_or(Ok(()), std::fs::create_dir_all)
+        .and_then(|_| {
+            use std::io::Write as _;
+            std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&path)?
+                .write_all(lines.as_bytes())
+        });
+    match written {
+        Ok(()) => println!("\nrecorded in {}", path.display()),
+        Err(error) => eprintln!("warning: could not record results: {error}"),
+    }
+}
+
 /// Today in UTC, from SQLite's clock (the one memory dates use).
 pub(crate) fn today() -> String {
     gertie_core::SessionStore::open(Path::new(":memory:"))
@@ -794,32 +849,7 @@ pub fn run(config_path: Option<PathBuf>, endpoints: Vec<String>, settings: Vec<S
     };
     match evaluate(&config_path, &endpoints, &overrides) {
         Ok(rows) => {
-            let path = crate::config::Config::data_dir().map(|dir| dir.join("eval/memory.jsonl"));
-            let history: Vec<String> = path
-                .as_ref()
-                .and_then(|path| std::fs::read_to_string(path).ok())
-                .map(|text| text.lines().map(str::to_string).collect())
-                .unwrap_or_default();
-            print!("{}", render(&rows, &history));
-            if let Some(dir) = crate::config::Config::data_dir().map(|dir| dir.join("eval")) {
-                let path = dir.join("memory.jsonl");
-                let lines: String = record(&rows, &today())
-                    .into_iter()
-                    .map(|line| line + "\n")
-                    .collect();
-                let written = std::fs::create_dir_all(&dir).and_then(|_| {
-                    use std::io::Write as _;
-                    std::fs::OpenOptions::new()
-                        .create(true)
-                        .append(true)
-                        .open(&path)?
-                        .write_all(lines.as_bytes())
-                });
-                match written {
-                    Ok(()) => println!("\nrecorded in {}", path.display()),
-                    Err(error) => eprintln!("warning: could not record results: {error}"),
-                }
-            }
+            publish("memory.jsonl", &rows, render, record);
             0
         }
         Err(error) => {

@@ -408,7 +408,7 @@ fn ask_permission(
 /// One line summarizing a tool result for stderr.
 fn brief(result: &str) -> String {
     let first = result.lines().next().unwrap_or("").trim();
-    truncate(first, 120)
+    gertie_core::text::ellipsize(first, 120)
 }
 
 /// What the human sees before deciding: the command for bash, the path
@@ -427,16 +427,7 @@ fn describe(call: &gertie_core::ToolCall) -> String {
         }
         None => call.arguments.clone(),
     };
-    truncate(&summary, 300)
-}
-
-fn truncate(text: &str, cap: usize) -> String {
-    if text.chars().count() <= cap {
-        text.to_string()
-    } else {
-        let head: String = text.chars().take(cap).collect();
-        format!("{head}…")
-    }
+    gertie_core::text::ellipsize(&summary, 300)
 }
 
 /// Persists the transcript the way the GUI does: assistant text lands as
@@ -685,31 +676,13 @@ mod tests {
             .append_message(session, None, Role::User, "do it")
             .unwrap();
         let stream = run_turn(TurnSpec {
-            provider,
-            tools,
-            history: Arc::new(tokio::sync::Mutex::new(Vec::new())),
             user_message: Some("do it".into()),
-            snapshots: None,
-            checkpoint_session: None,
-            workspace_root: None,
-            context_window: None,
             permission_broker: Some(broker.clone()),
-            permission_mode: gertie_core::PermissionMode::Supervised,
-            sandbox_bash: false,
-            prompt_source: gertie_core::PromptSource::Leader,
-            turn_token: None,
-            system_prompt: None,
-            instructions: None,
-            memory_index: None,
-            repo_map: None,
-            memory: None,
-            steer: None,
-            user_attachments: Vec::new(),
-            max_tool_rounds: None,
-            grace_rounds: None,
-            worker_progress: gertie_core::WorkerProgress::default(),
-            verify: None,
-            tool_guidance: gertie_core::ToolGuidance::Standard,
+            ..TurnSpec::new(
+                provider,
+                tools,
+                Arc::new(tokio::sync::Mutex::new(Vec::new())),
+            )
         });
         let mut approvals = 0;
         let (outcome, text) = pump(
@@ -773,31 +746,13 @@ mod tests {
             .insert("fake_write".into(), Arc::new(YesTool));
         let broker = Arc::new(PermissionBroker::new());
         let stream = run_turn(TurnSpec {
-            provider,
-            tools,
-            history: Arc::new(tokio::sync::Mutex::new(Vec::new())),
             user_message: Some("do it".into()),
-            snapshots: None,
-            checkpoint_session: None,
-            workspace_root: None,
-            context_window: None,
             permission_broker: Some(broker.clone()),
-            permission_mode: gertie_core::PermissionMode::Supervised,
-            sandbox_bash: false,
-            prompt_source: gertie_core::PromptSource::Leader,
-            turn_token: None,
-            system_prompt: None,
-            instructions: None,
-            memory_index: None,
-            repo_map: None,
-            memory: None,
-            steer: None,
-            user_attachments: Vec::new(),
-            max_tool_rounds: None,
-            grace_rounds: None,
-            worker_progress: gertie_core::WorkerProgress::default(),
-            verify: None,
-            tool_guidance: gertie_core::ToolGuidance::Standard,
+            ..TurnSpec::new(
+                provider,
+                tools,
+                Arc::new(tokio::sync::Mutex::new(Vec::new())),
+            )
         });
         let mut approvals = 0;
         let (outcome, _) = pump(

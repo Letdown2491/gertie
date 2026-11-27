@@ -143,20 +143,7 @@ mod tests {
         }
     }
 
-    /// A tiny executor: the futures here only wait on a thread.
-    fn block_on<F: std::future::Future>(future: F) -> F::Output {
-        let mut future = std::pin::pin!(future);
-        let waker = std::task::Waker::noop();
-        let mut cx = std::task::Context::from_waker(waker);
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        loop {
-            if let std::task::Poll::Ready(value) = future.as_mut().poll(&mut cx) {
-                return value;
-            }
-            assert!(std::time::Instant::now() < deadline, "never settled");
-            std::thread::sleep(std::time::Duration::from_millis(2));
-        }
-    }
+    use crate::testing::block_on;
 
     /// Rendered once, then frozen: a later turn with other hints gets
     /// the same bytes, the cache rule.

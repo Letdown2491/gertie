@@ -458,31 +458,41 @@ impl WorkspaceView {
                     .background_executor()
                     .spawn(async move { crate::worktree::create(&repo_root, &name) })
                     .await;
-                let _ = this.update_in(cx, |this, window, cx| match created {
-                    Ok(root) => {
-                        let (tools, system_prompt, instructions, memory_index, memory) =
-                            this.boot.registry_for_root(&root);
-                        let naming = crate::worktree::BranchNaming {
-                            root: root.clone(),
-                            prefix,
-                        };
-                        let view = this.make_view(
-                            tools.clone(),
-                            system_prompt.clone(),
-                            instructions.clone(),
-                            memory_index.clone(),
-                            this.boot.memory_enabled(),
-                            memory,
-                            this.boot.memory_extract_provider(),
-                            Some(naming),
-                            false,
-                            window,
-                            cx,
-                        );
-                        this.push_view(view, window, cx);
-                    }
-                    Err(error) => {
-                        this.tell_active(format!("No worktree chat: {error}"), cx);
+                let _ = this.update_in(cx, |this, window, cx| {
+                    // The same per-root build a workspace switch uses:
+                    // one place decides what a root's registry holds.
+                    let switched = created.and_then(|root| {
+                        this.boot
+                            .workspace_for_root(&root)
+                            .map(|switched| (root, switched))
+                    });
+                    match switched {
+                        Ok((root, switched)) => {
+                            let naming = crate::worktree::BranchNaming { root, prefix };
+                            let view = this.make_view(
+                                switched.tools,
+                                switched.system_prompt,
+                                switched.instructions,
+                                switched.memory_index,
+                                this.boot.memory_enabled(),
+                                switched.memory,
+                                switched.memory_extract_provider,
+                                Some(naming),
+                                false,
+                                window,
+                                cx,
+                            );
+                            let warnings = switched.warnings;
+                            view.update(cx, |view, cx| {
+                                for warning in &warnings {
+                                    view.warn(warning, cx);
+                                }
+                            });
+                            this.push_view(view, window, cx);
+                        }
+                        Err(error) => {
+                            this.tell_active(format!("No worktree chat: {error}"), cx);
+                        }
                     }
                 });
             })

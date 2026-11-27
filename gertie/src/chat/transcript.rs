@@ -532,6 +532,10 @@ impl ChatView {
                     .label("Dismiss")
                     .small()
                     .ghost()
+                    // Approve is the ask's "closed unanswered" (answers
+                    // ride Deny's feedback); the loop words it as a
+                    // refusal. Changing this variant changes that
+                    // meaning: see the ask arm in agent_loop.rs.
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.decide_tool(index, PermissionDecision::Approve, cx)
                     })),

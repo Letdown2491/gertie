@@ -763,30 +763,7 @@ mod tests {
         assert!(result.contains("[truncated]"), "the cap must say so");
     }
 
-    /// Tests run outside a runtime; our tools' futures are already
-    /// computed by `blocking`, so a plain poll loop suffices.
-    fn futures_now(
-        mut future: Pin<Box<dyn Future<Output = ToolResult> + Send + '_>>,
-    ) -> ToolResult {
-        use std::task::{Context, Poll, Waker};
-        let started = std::time::Instant::now();
-        let waker = Waker::noop();
-        let mut cx = Context::from_waker(waker);
-        loop {
-            match Pin::new(&mut future).poll(&mut cx) {
-                Poll::Ready(result) => return result,
-                Poll::Pending => {
-                    // The hang guard: a future that never resolves must
-                    // fail the test fast and by name, never spin
-                    // politely forever.
-                    if started.elapsed() > Duration::from_secs(10) {
-                        panic!("the future stayed Pending for 10s, an await never resolved");
-                    }
-                    std::thread::sleep(Duration::from_millis(10));
-                }
-            }
-        }
-    }
+    use gertie_core::testing::block_on as futures_now;
 
     #[test]
     fn descriptions_are_sanitized_and_capped() {

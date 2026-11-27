@@ -249,6 +249,47 @@ pub struct TurnSpec {
     pub tool_guidance: crate::tool::ToolGuidance,
 }
 
+impl TurnSpec {
+    /// A spec with every optional part off: no user message, no
+    /// snapshots, no framing, supervised, leader-sourced, the built-in
+    /// round budgets. Callers set what their turn has with struct
+    /// update syntax, so a new field is a change here, not at every
+    /// construction site.
+    pub fn new(
+        provider: Arc<dyn crate::provider::Provider>,
+        tools: ToolRegistry,
+        history: SharedHistory,
+    ) -> Self {
+        Self {
+            provider,
+            tools,
+            history,
+            user_message: None,
+            snapshots: None,
+            checkpoint_session: None,
+            workspace_root: None,
+            context_window: None,
+            permission_broker: None,
+            permission_mode: PermissionMode::Supervised,
+            sandbox_bash: false,
+            prompt_source: crate::PromptSource::Leader,
+            turn_token: None,
+            system_prompt: None,
+            instructions: None,
+            memory_index: None,
+            repo_map: None,
+            memory: None,
+            steer: None,
+            user_attachments: Vec::new(),
+            max_tool_rounds: None,
+            grace_rounds: None,
+            worker_progress: crate::tool::WorkerProgress::default(),
+            verify: None,
+            tool_guidance: crate::tool::ToolGuidance::Standard,
+        }
+    }
+}
+
 /// Runs one user turn to completion: request → (text | tool calls)* →
 /// tool execution → repeat, until the model answers without tools, the
 /// round budget is spent, or an error surfaces.
@@ -592,6 +633,15 @@ pub fn run_turn(spec: TurnSpec) -> BoxStream<'static, LoopEvent> {
                                     };
                                     Ok(match answer.await {
                                         Err(_) => "the ask went unanswered".to_string(),
+                                        // An ask reuses the permission reply: a
+                                        // choice or typed answer comes back as Deny
+                                        // with the text as feedback, and the card's
+                                        // Dismiss button sends a bare Approve. So
+                                        // here Approve means "closed unanswered",
+                                        // never consent: keep this wording refusing,
+                                        // whatever the variant's name suggests (the
+                                        // Dismiss button in transcript.rs pins the
+                                        // other end).
                                         Ok(PermissionDecision::Approve) => {
                                             "the user dismissed the question without \
                                              answering: no choice was made and nothing is \
@@ -1761,31 +1811,9 @@ mod tests {
         let broker = Arc::new(PermissionBroker::new());
         (
             TurnSpec {
-                provider,
-                tools,
-                history,
                 user_message: Some(message.into()),
-                snapshots: None,
-                checkpoint_session: None,
-                workspace_root: None,
-                context_window: None,
                 permission_broker: Some(broker.clone()),
-                permission_mode: crate::permissions::PermissionMode::Supervised,
-                sandbox_bash: false,
-                prompt_source: crate::PromptSource::Leader,
-                turn_token: None,
-                system_prompt: None,
-                instructions: None,
-                memory_index: None,
-                repo_map: None,
-                memory: None,
-                steer: None,
-                user_attachments: Vec::new(),
-                max_tool_rounds: None,
-                grace_rounds: None,
-                worker_progress: crate::tool::WorkerProgress::default(),
-                verify: None,
-                tool_guidance: crate::tool::ToolGuidance::Standard,
+                ..TurnSpec::new(provider, tools, history)
             },
             broker,
         )

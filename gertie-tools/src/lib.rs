@@ -1155,19 +1155,7 @@ mod tests {
         tempfile::tempdir().unwrap()
     }
 
-    fn await_sync<F: Future>(future: F) -> F::Output {
-        // Local tool futures complete on their first poll (no awaits
-        // inside), so a manual poll loop suffices in tests.
-        let waker = std::task::Waker::noop();
-        let mut cx = std::task::Context::from_waker(waker);
-        let mut future = std::pin::pin!(future);
-        loop {
-            match future.as_mut().poll(&mut cx) {
-                std::task::Poll::Ready(output) => return output,
-                std::task::Poll::Pending => std::thread::yield_now(),
-            }
-        }
-    }
+    use gertie_core::testing::block_on as await_sync;
 
     #[test]
     fn resolve_containment_math() {

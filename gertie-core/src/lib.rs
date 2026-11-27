@@ -17,6 +17,9 @@ pub mod prune;
 pub mod repo_map;
 pub mod request;
 pub mod snapshot;
+#[doc(hidden)]
+pub mod testing;
+pub mod text;
 pub mod tool;
 
 pub use agent::{AgentTool, AgentType, builtin_agent_types, sanitize_untrusted, worker_registry};

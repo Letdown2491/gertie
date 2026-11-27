@@ -11,7 +11,7 @@
 //! task passes when the target holds the new value and no other file
 //! changed.
 
-use crate::eval::{Outcome, Overrides, config_for, run_fixture, today};
+use crate::eval::{Outcome, Overrides, config_for, publish, run_fixture, targets};
 use std::path::{Path, PathBuf};
 
 /// One navigation task.
@@ -212,31 +212,11 @@ fn score(task: &Task, outcome: &Outcome) -> Run {
 
 /// Every task, with and without the map, against every named endpoint.
 pub fn evaluate(config_path: &Path, endpoints: &[String]) -> Result<Vec<Row>, String> {
-    let raw = std::fs::read_to_string(config_path)
-        .map_err(|error| format!("{}: {error}", config_path.display()))?;
-    let config = crate::config::Config::load_from(config_path)?;
-    let names: Vec<String> = if endpoints.is_empty() {
-        config
-            .resolved_endpoints()
-            .into_iter()
-            .map(|endpoint| endpoint.name)
-            .collect()
-    } else {
-        endpoints.to_vec()
-    };
-    if names.is_empty() {
-        return Err("no endpoints configured".into());
-    }
+    let (raw, targets) = targets(config_path, endpoints)?;
     let mut rows = Vec::new();
-    for name in names {
-        let Some(endpoint) = config
-            .endpoints
-            .iter()
-            .find(|endpoint| endpoint.name == name)
-        else {
-            return Err(format!("no endpoint named {name:?} in the config"));
-        };
-        let model = endpoint.model.clone();
+    for endpoint in targets {
+        let name = endpoint.name;
+        let model = endpoint.model;
         let dir = tempfile::tempdir().map_err(|error| error.to_string())?;
         let on_dir = dir.path().join("on");
         let off_dir = dir.path().join("off");
@@ -430,10 +410,6 @@ pub fn record(rows: &[Row], date: &str) -> Vec<String> {
         .collect()
 }
 
-fn results_path() -> Option<PathBuf> {
-    crate::config::Config::data_dir().map(|dir| dir.join("eval/nav.jsonl"))
-}
-
 /// `gertie eval nav`.
 pub fn run(config_path: Option<PathBuf>, endpoints: Vec<String>) -> i32 {
     let Some(config_path) = config_path.or_else(crate::config::Config::path) else {
@@ -442,34 +418,7 @@ pub fn run(config_path: Option<PathBuf>, endpoints: Vec<String>) -> i32 {
     };
     match evaluate(&config_path, &endpoints) {
         Ok(rows) => {
-            let path = results_path();
-            let history: Vec<String> = path
-                .as_ref()
-                .and_then(|path| std::fs::read_to_string(path).ok())
-                .map(|text| text.lines().map(str::to_string).collect())
-                .unwrap_or_default();
-            print!("{}", render(&rows, &history));
-            if let Some(path) = path {
-                let lines: String = record(&rows, &today())
-                    .into_iter()
-                    .map(|line| line + "\n")
-                    .collect();
-                let written = path
-                    .parent()
-                    .map_or(Ok(()), std::fs::create_dir_all)
-                    .and_then(|_| {
-                        use std::io::Write as _;
-                        std::fs::OpenOptions::new()
-                            .create(true)
-                            .append(true)
-                            .open(&path)?
-                            .write_all(lines.as_bytes())
-                    });
-                match written {
-                    Ok(()) => println!("\nrecorded in {}", path.display()),
-                    Err(error) => eprintln!("warning: could not record results: {error}"),
-                }
-            }
+            publish("nav.jsonl", &rows, render, record);
             0
         }
         Err(error) => {

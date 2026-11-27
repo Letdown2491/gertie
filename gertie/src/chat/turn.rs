@@ -80,10 +80,6 @@ impl ChatView {
         // has not spoken this round), so the plain label until its
         // first words stream or a tool runs.
         self.set_activity("Thinking…");
-        // Turn start: fresh narration is not yet available (the model
-        // has not spoken this round), so the plain label until its
-        // first words stream or a tool runs.
-        self.set_activity("Thinking…");
         // Subagent asks arrive here, not on the leader's stream: a
         // worker's loop runs inside a tool, so nobody drains its
         // events. The filter keeps other turns' worker asks away.

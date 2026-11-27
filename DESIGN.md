@@ -689,6 +689,9 @@ workspace root, a relative tool argument now snapshots the file the tool will ac
 touch, not whatever the process CWD reads, and each checkpoint keeps the workspace its
 turn ran in, so after a mid-session switch a restore writes back where the turn wrote
 (not where the chat now stands), and the rewind guard watches that recorded checkout.
+Checkpoints of deleted sessions are swept once per launch, on their own thread: their
+ledger rows go, then every object no remaining row names (objects younger than an hour
+are spared, so a turn recording right then never loses one).
 
 Runs of finished tool calls collapse into one expandable summary, under honesty rules
 transcribed from t3code's activity-log chapter and binding on the collapse code: the

@@ -258,15 +258,24 @@ impl RequestScoped {
         // own outcome: retried like a transient, terminal as Limited.
         if status.as_u16() == 429 {
             let detail = response.text().await.unwrap_or_default();
-            return Outcome::Limited(format!("{status}: {}", truncate(&detail, 200)));
+            return Outcome::Limited(format!(
+                "{status}: {}",
+                gertie_core::text::prefix_chars(&detail, 200)
+            ));
         }
         if status.is_server_error() {
             let detail = response.text().await.unwrap_or_default();
-            return Outcome::Transient(format!("{status}: {}", truncate(&detail, 200)));
+            return Outcome::Transient(format!(
+                "{status}: {}",
+                gertie_core::text::prefix_chars(&detail, 200)
+            ));
         }
         if !status.is_success() {
             let detail = response.text().await.unwrap_or_default();
-            return Outcome::Fatal(format!("{status}: {}", truncate(&detail, 200)));
+            return Outcome::Fatal(format!(
+                "{status}: {}",
+                gertie_core::text::prefix_chars(&detail, 200)
+            ));
         }
 
         parse_sse(response.bytes_stream(), sender).await
@@ -519,13 +528,6 @@ fn count(value: &serde_json::Value) -> Option<u64> {
     value
         .as_u64()
         .or_else(|| value.as_i64().map(|n| n.max(0) as u64))
-}
-
-pub(crate) fn truncate(text: &str, limit: usize) -> &str {
-    match text.char_indices().nth(limit) {
-        Some((index, _)) => &text[..index],
-        None => text,
-    }
 }
 
 #[cfg(test)]
