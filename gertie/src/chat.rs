@@ -760,13 +760,13 @@ pub struct ChatView {
     /// Bumped whenever the facts change or the tab comes back: the
     /// grounding cache's key, with the memory store's fingerprint.
     status_version: u64,
-    /// GROUNDED IN, cached (the evidence check hashes files).
+    /// DEPENDS ON, cached (the evidence check hashes files).
     status_ground: std::cell::RefCell<Option<status::GroundCache>>,
-    /// Each GROUNDED IN row's measured height, in render order: rows
+    /// Each DEPENDS ON row's measured height, in render order: rows
     /// free-wrap, so no constant says how tall they are. Filled by the
     /// rows' paint probes, read when sizing the viewport.
     grounded_heights: std::cell::RefCell<Vec<f32>>,
-    /// The GROUNDED IN viewport's max height: three measured rows plus
+    /// The DEPENDS ON viewport's max height: three measured rows plus
     /// their gaps, so whole rows show whatever the text wrapped to.
     /// Starts at the old constant until the first measurement lands.
     grounded_cap: std::cell::Cell<f32>,

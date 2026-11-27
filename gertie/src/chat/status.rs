@@ -1,16 +1,16 @@
 //! The status column (issue #33): the open session's durable state
-//! beside the transcript, and the riding line's grounding on the
+//! beside the transcript, and the riding line's dependency note on the
 //! activity row (momentary state, latest turn only).
 //!
 //! Sections, in column order, each rendered only when it has
-//! something to say: GOAL (the model's `status` goal, else the latest
-//! prompt) with the run clock, NEXT (the model's `status` next step),
-//! MEMORY (the session's memory writes, newest last), TOUCHED
-//! (read/edited per file, from the session's tool calls, edited
-//! wins), GROUNDED IN (memory the work consulted, then entries whose
-//! evidence shares a file with the work), WAITING ON YOU (asks from
-//! the other open chats of this chat's project), CORRECTION CHAIN
-//! (the walk behind a flagged grounding entry).
+//! something to say: WORKING ON (the model's `status` goal, else the
+//! latest prompt) with the run clock, NEXT UP (the model's `status`
+//! next step), WAITING ON YOU (asks from the other open chats of this
+//! chat's project), REMEMBERED (the session's memory writes, newest
+//! last), TOUCHED (read/edited per file, from the session's tool
+//! calls, edited wins), DEPENDS ON (memory the work consulted, then
+//! entries whose evidence shares a file with the work), CORRECTIONS
+//! (the walk behind a flagged dependency entry).
 //!
 //! The facts fold from the session's rows (a background load on open)
 //! and then from live events; nothing here asks the model anything.
@@ -133,7 +133,7 @@ impl StatusFacts {
                 // model's natural path (it reads the files; it does
                 // not call search_memory). The read result carries the
                 // entry lines, so the ids come free. This is what
-                // makes GROUNDED IN and the riding card fire on the
+                // makes DEPENDS ON and the riding card fire on the
                 // natural path — the live session's gap.
                 if path.contains(".gertie/memory") {
                     for id in memory_hit_ids(result) {
@@ -338,11 +338,11 @@ pub fn normalize_path(root: &std::path::Path, raw: &str) -> Option<String> {
 
 use gertie_core::text::ellipsize as clip;
 
-/// GROUNDED IN's cache: the rows, keyed by the memory store's
+/// DEPENDS ON's cache: the rows, keyed by the memory store's
 /// fingerprint and the facts' version.
 pub(crate) type GroundCache = ((u64, u64), Vec<GroundRow>);
 
-/// One GROUNDED IN row.
+/// One DEPENDS ON row.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GroundRow {
     pub id: String,
@@ -417,7 +417,7 @@ impl GroundRow {
     }
 }
 
-/// The GROUNDED IN rows: consulted entries first (in consult order),
+/// The DEPENDS ON rows: consulted entries first (in consult order),
 /// then live entries whose evidence names a touched file. `changed`
 /// is the store's evidence check (`MemoryStore::changed_evidence`),
 /// injected so the rule is testable without files.
@@ -632,7 +632,7 @@ impl ChatView {
         self.status_version += 1;
     }
 
-    /// The GROUNDED IN rows, cached: the evidence check hashes files,
+    /// The DEPENDS ON rows, cached: the evidence check hashes files,
     /// so it runs when the facts or the store change (a tool finished,
     /// the tab came back, a memory write), never per frame.
     pub(crate) fn ground_rows(&self) -> Vec<GroundRow> {
@@ -832,7 +832,8 @@ impl ChatView {
         let ground = self.ground_rows();
         let asks = self.column_asks();
         // The section label: the dot (when live) leads, as in the
-        // mockup's `GOAL · run 12:30` and `WAITING ON YOU`.
+        // mockup's `GOAL · run 12:30` (renamed WORKING ON: the slot
+        // holds the latest prompt when no goal was stated).
         let label = |dot: Option<Hsla>, text: String| {
             h_flex()
                 .gap_1p5()
@@ -853,11 +854,11 @@ impl ChatView {
         };
         // The sections container's visible bottom edge, probed at
         // paint (it is flex_1 in a full-height column, so its bottom
-        // is the window edge the user actually sees). The GROUNDED IN
+        // is the window edge the user actually sees). The DEPENDS ON
         // settle reads it as the viewport's outer bound.
         let visible = std::rc::Rc::new(std::cell::Cell::new(0.0f32));
         let visible_probe = visible.clone();
-        // Where the GROUNDED IN section starts, same coordinate
+        // Where the DEPENDS ON section starts, same coordinate
         // space: the space the section may use is the distance
         // between the two probes.
         let section_top = std::rc::Rc::new(std::cell::Cell::new(0.0f32));
@@ -867,8 +868,8 @@ impl ChatView {
             let head = label(
                 self.streaming.then_some(theme.success),
                 match self.status_run_words() {
-                    Some(run) => format!("GOAL · run {run}"),
-                    None => "GOAL".into(),
+                    Some(run) => format!("WORKING ON · run {run}"),
+                    None => "WORKING ON".into(),
                 },
             );
             sections.push(section(
@@ -885,7 +886,7 @@ impl ChatView {
 
         if let Some(next) = &facts.next {
             sections.push(section(
-                label(None, "NEXT".into()),
+                label(None, "NEXT UP".into()),
                 vec![
                     div()
                         .text_size(px(12.5))
@@ -936,7 +937,7 @@ impl ChatView {
                     .child(label(
                         None,
                         format!(
-                            "MEMORY · {count} action{}",
+                            "REMEMBERED · {count} action{}",
                             if count == 1 { "" } else { "s" }
                         ),
                     ))
@@ -948,6 +949,23 @@ impl ChatView {
                             .occlude()
                             .gap(px(3.))
                             .children(rows),
+                    )
+                    .into_any_element(),
+            );
+        }
+
+        // WAITING ON YOU outranks the ledgers: anything needing an
+        // action beats anything that is only a record (the ask that
+        // sat below TOUCHED's fold in the hand test).
+        if !asks.is_empty() {
+            sections.push(
+                v_flex()
+                    .gap_1p5()
+                    .child(label(Some(theme.danger), "WAITING ON YOU".into()))
+                    .child(
+                        v_flex()
+                            .gap_1p5()
+                            .children(asks.iter().map(|ask| self.render_project_ask(ask, cx))),
                     )
                     .into_any_element(),
             );
@@ -1114,7 +1132,7 @@ impl ChatView {
                         .absolute()
                         .inset_0()
                     })
-                    .child(label(None, "GROUNDED IN".into()))
+                    .child(label(None, "DEPENDS ON".into()))
                     .child({
                         // Rows free-wrap, so nothing knows a row's
                         // height until gpui lays it out. Every row
@@ -1211,20 +1229,6 @@ impl ChatView {
             );
         }
 
-        if !asks.is_empty() {
-            sections.push(
-                v_flex()
-                    .gap_1p5()
-                    .child(label(Some(theme.danger), "WAITING ON YOU".into()))
-                    .child(
-                        v_flex()
-                            .gap_1p5()
-                            .children(asks.iter().map(|ask| self.render_project_ask(ask, cx))),
-                    )
-                    .into_any_element(),
-            );
-        }
-
         // The correction chain as the walk it is: CORRECTED, then the
         // successor the work follows instead (the accent edge), then
         // the entry the correction flagged and why.
@@ -1280,10 +1284,19 @@ impl ChatView {
             }
         }
         if !walk_links.is_empty() {
+            // The corrections ride inside the DEPENDS ON block: they
+            // are that block's failure states (a depended-on entry
+            // was corrected), so one red heading covers the walk and
+            // the flags live next to what they flag.
+            let head = if ground.is_empty() {
+                label(None, "CORRECTIONS · this session".into())
+            } else {
+                label(Some(theme.danger), "CORRECTIONS".into())
+            };
             sections.push(
                 v_flex()
                     .gap_1p5()
-                    .child(label(None, "CORRECTION CHAIN · this session".into()))
+                    .child(head)
                     .child(v_flex().gap_1p5().children(walk_links))
                     .into_any_element(),
             );
@@ -1581,7 +1594,7 @@ impl ChatView {
                         .gap_1()
                         .items_center()
                         .text_color(theme.muted_foreground)
-                        .child(div().flex_shrink_0().child("· grounded in"))
+                        .child(div().flex_shrink_0().child("· depends on"))
                         .child(
                             div()
                                 .flex_shrink_0()
@@ -1658,7 +1671,7 @@ impl ChatView {
 
 impl ChatView {
     /// The column's facts as the tests read them: the goal text, the
-    /// next step, touched files with their word, GROUNDED IN's ids.
+    /// next step, touched files with their word, DEPENDS ON's ids.
     #[allow(clippy::type_complexity)]
     pub fn status_for_test(
         &self,

@@ -5448,7 +5448,7 @@ fn the_status_column_shows_the_session_state_and_folds_to_a_rail() {
         );
         assert!(
             window.try_find("status-ground-p12").is_some(),
-            "GROUNDED IN lists the entry"
+            "DEPENDS ON lists the entry"
         );
     });
 
