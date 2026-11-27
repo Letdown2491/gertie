@@ -318,25 +318,10 @@ impl MemoryStore {
             .collect()
     }
 
-    /// Wraps raw model text in the entry grammar: fresh id, zeroed
-    /// counters, provenance, date. **Single-line writes only**: the
-    /// id mints against a fresh scan, so two calls in one breath (the
-    /// file not yet written) collide — the probe caught g4 twice.
-    /// Multi-line content goes through [`entry_lines`](Self::entry_lines),
-    /// which scans once and increments.
-    pub fn entry_line(&self, tier: Tier, text: &str) -> rusqlite::Result<String> {
-        self.entry_lines(tier, text).map(|mut lines| {
-            assert_eq!(lines.len(), 1, "entry_line is single-line");
-            lines.pop().expect("one line")
-        })
-    }
-
-    /// The batch form of [`entry_line`](Self::entry_line): one scan
-    /// for the whole batch, ids minted sequentially against it. The
-    /// per-line form re-scans per line, so a create of N lines — none
-    /// on disk yet — minted the SAME id N times (the hand test's
-    /// duplicate-ids finding); the batch scans once and increments
-    /// past every id it has claimed in this call.
+    /// Wraps raw model text in the entry grammar, one entry per line:
+    /// fresh ids, zeroed counters, provenance, date. One scan for the
+    /// whole batch, ids minted sequentially against it (a per-line scan
+    /// minted the SAME id for every line of a create, none on disk yet).
     pub fn entry_lines(&self, tier: Tier, text: &str) -> rusqlite::Result<Vec<String>> {
         let prefix = tier.prefix();
         let mut next = self
@@ -452,6 +437,20 @@ impl MemoryStore {
                         }
                     }
                     _ => {
+                        // An id that lives in another file: retiring it
+                        // here would mint a phantom (a new entry born
+                        // retired) and leave the real one live.
+                        if let Some(elsewhere) = known
+                            .iter()
+                            .find(|known| known.id == entry.id && known.file != file)
+                            && (entry.valid_until.is_some() || entry.superseded_by.is_some())
+                        {
+                            return Err(format!(
+                                "memory: [{}] lives in {}, not {file}. Retire it there, or call \
+                                 remember with action supersede and id {}",
+                                entry.id, elsewhere.file, entry.id
+                            ));
+                        }
                         let paths = entry
                             .evidence
                             .iter()
@@ -505,6 +504,14 @@ impl MemoryStore {
                             ..original.clone()
                         }),
                         None => {
+                            // A brand-new fact cannot be born retired.
+                            if entry.valid_until.is_some() || entry.superseded_by.is_some() {
+                                return Err(format!(
+                                    "memory: a new entry cannot carry [valid until] or \
+                                     [superseded by]: write the new fact plainly, and retire \
+                                     the old one on its own line ({text})"
+                                ));
+                            }
                             let id = format!("{prefix}{next}");
                             next += 1;
                             render_line(&MemoryEntry {
@@ -515,8 +522,8 @@ impl MemoryStore {
                                 harmful: 0,
                                 source_session: None,
                                 added_at: Some(today.clone()),
-                                valid_until: entry.valid_until,
-                                superseded_by: entry.superseded_by,
+                                valid_until: None,
+                                superseded_by: None,
                                 links: entry.links,
                                 evidence: self.evidence_for(&paths),
                                 recheck: Vec::new(),
@@ -912,6 +919,31 @@ impl MemoryStore {
     /// budget caps the total text this call may add or rewrite, so a
     /// runaway extraction cannot balloon the store in one pass.
     pub fn apply(&self, ops: &[Op], budget_tokens: usize) -> rusqlite::Result<ApplyReport> {
+        self.locked(|| self.apply_unlocked(ops, budget_tokens))
+    }
+
+    /// Runs `write` holding the store's write lock: an exclusive flock
+    /// on each tier directory, project then global. Ids mint by
+    /// scanning the files then writing them, so two writers in the
+    /// window (two tabs on one workspace, or the app and a headless
+    /// run) could mint the same id. flock locks belong to the open file
+    /// description, so this excludes other threads of this process too.
+    /// Not reentrant: nothing inside `write` may take it again. Best
+    /// effort where the filesystem refuses directory locks.
+    pub fn locked<T>(&self, write: impl FnOnce() -> T) -> T {
+        let _held: Vec<std::fs::File> = [&self.project_root, &self.global_root]
+            .into_iter()
+            .filter_map(|root| {
+                std::fs::create_dir_all(root).ok()?;
+                let handle = std::fs::File::open(root).ok()?;
+                handle.lock().ok()?;
+                Some(handle)
+            })
+            .collect();
+        write()
+    }
+
+    fn apply_unlocked(&self, ops: &[Op], budget_tokens: usize) -> rusqlite::Result<ApplyReport> {
         let mut report = ApplyReport::default();
         let mut spent = 0usize;
         // A supersede that names nothing, in a batch with exactly one
@@ -2322,6 +2354,43 @@ mod tests {
             render_line(&entries[0]),
             "- [p1] helpful=2 harmful=0 cite the flake before blaming the test [source: 388; added: 2026-07-11]"
         );
+    }
+
+    /// Two stores on the same roots (two tabs on one workspace) adding
+    /// at once must never mint the same id.
+    #[test]
+    fn concurrent_writers_mint_unique_ids() {
+        let tmp = tempfile::tempdir().unwrap();
+        let writers: Vec<_> = (0..4)
+            .map(|writer| {
+                let (store, _session) = store_with_roots(&tmp);
+                std::thread::spawn(move || {
+                    for n in 0..10 {
+                        store
+                            .apply(
+                                &[Op::Add {
+                                    file: "race.md".into(),
+                                    text: format!("writer {writer} fact {n}"),
+                                    source: None,
+                                    evidence: Vec::new(),
+                                }],
+                                256,
+                            )
+                            .unwrap();
+                    }
+                })
+            })
+            .collect();
+        for writer in writers {
+            writer.join().unwrap();
+        }
+        let (store, _session) = store_with_roots(&tmp);
+        let entries = store.scan();
+        assert_eq!(entries.len(), 40, "every add landed: {entries:?}");
+        let mut ids: Vec<&str> = entries.iter().map(|entry| entry.id.as_str()).collect();
+        ids.sort();
+        ids.dedup();
+        assert_eq!(ids.len(), 40, "unique ids");
     }
 
     #[test]

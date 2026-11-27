@@ -42,19 +42,6 @@ const TOOL_CHARS: usize = 8_000;
 /// One file line's cap in the framing, in characters.
 const LINE_CHARS: usize = 220;
 
-/// Directories never walked: build output, dependencies, VCS, caches.
-const SKIPPED_DIRS: [&str; 9] = [
-    ".git",
-    "target",
-    "node_modules",
-    "vendor",
-    "dist",
-    "build",
-    "__pycache__",
-    ".venv",
-    ".pixi",
-];
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Lang {
     Rust,
@@ -140,29 +127,10 @@ impl RepoMap {
     fn files_under(&self, base: &Path) -> (Vec<String>, bool) {
         let mut files = Vec::new();
         let mut capped = false;
-        let walk = walkdir::WalkDir::new(base)
-            .follow_links(false)
-            .sort_by_file_name()
-            .into_iter()
-            .filter_entry(|entry| {
-                entry.depth() == 0 || {
-                    let name = entry.file_name().to_string_lossy();
-                    !name.starts_with('.')
-                        && !(entry.file_type().is_dir() && SKIPPED_DIRS.contains(&name.as_ref()))
-                }
-            });
-        for entry in walk.filter_map(Result::ok) {
-            if !entry.file_type().is_file() {
-                continue;
-            }
-            let Ok(relative) = entry.path().strip_prefix(&self.root) else {
+        for entry in crate::walk::files(base, false) {
+            let Some(relative) = crate::walk::relative(&self.root, entry.path()) else {
                 continue;
             };
-            let relative = relative
-                .components()
-                .map(|part| part.as_os_str().to_string_lossy())
-                .collect::<Vec<_>>()
-                .join("/");
             if Lang::of(&relative).is_none() {
                 continue;
             }

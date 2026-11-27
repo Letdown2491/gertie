@@ -20,7 +20,7 @@ serde_json = "1"
 # Replay scenarios are TOML files, same format as everything else the
 # user touches.
 toml = "0.9"
-tokio = { version = "1", features = ["rt-multi-thread", "sync", "time"] }
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros"] }
 tokio-stream = "0.1"
 
 [dev-dependencies]

@@ -11,8 +11,8 @@ pub mod turn;
 use transcript::resolve_tool_path;
 
 pub use aux::{
-    MentionMatch, human_tokens, memory_chain, mention_matches, mention_matches_for_test,
-    mode_menu_rows, tildify,
+    MentionMatch, human_tokens, memory_chain, mention_files, mention_matches,
+    mention_matches_for_test, mode_menu_rows, tildify,
 };
 
 use crate::bootstrap::Reloaded;
@@ -395,6 +395,19 @@ struct PendingDelete {
     title: String,
 }
 
+/// A workspace listing for @-mentions: the root, when it was walked,
+/// and the sorted paths.
+type MentionListing = std::cell::RefCell<
+    Option<(
+        std::path::PathBuf,
+        std::time::Instant,
+        std::rc::Rc<Vec<String>>,
+    )>,
+>;
+
+/// How long a mention listing is reused before the next walk.
+const MENTION_LISTING_FRESH: std::time::Duration = std::time::Duration::from_secs(5);
+
 pub struct ChatView {
     store: Arc<SessionStore>,
     provider: Option<Arc<AnyProvider>>,
@@ -423,9 +436,12 @@ pub struct ChatView {
     /// from anywhere (panel, agent, editor) shows on the next frame.
     memory_word: std::cell::RefCell<Option<(u64, Option<String>)>>,
     /// The @-mention popup's last answer, keyed by the query and the
-    /// root: matching walks the workspace, and the composer's popup
-    /// asks every frame while it is open.
+    /// root: the composer's popup asks every frame while it is open.
     mention_cache: std::cell::RefCell<Option<(String, std::path::PathBuf, Vec<MentionMatch>)>>,
+    /// The workspace listing @-mentions filter, walked once per root
+    /// and reused while fresh: a keystroke filters a list in memory
+    /// instead of walking the tree on the UI thread.
+    mention_listing: MentionListing,
     /// The extraction provider, resolved at construction (the named
     /// endpoint, else the session's own). None = extraction disabled.
     memory_extract_provider: Option<Arc<dyn gertie_core::Provider>>,
@@ -1041,6 +1057,7 @@ impl ChatView {
             memory_store,
             memory_word: Default::default(),
             mention_cache: Default::default(),
+            mention_listing: Default::default(),
             memory_extract_provider,
             max_tool_rounds,
             grace_rounds,
@@ -5447,8 +5464,9 @@ impl ChatView {
     /// either way. Truly empty stores show nothing (a memoryless
     /// session pays zero attention). Cached, see `memory_word`.
     /// The @-mention matches for the composer's text, memoized on the
-    /// text and the root (see `mention_cache`). A file created while
-    /// the popup is open shows once the query changes.
+    /// text and the root (see `mention_cache`), filtered from a listing
+    /// at most [`MENTION_LISTING_FRESH`] old, so a file created while
+    /// the popup is open shows within seconds.
     fn mentions(&self, input: &str) -> Vec<MentionMatch> {
         if let Some((query, root, matches)) = self.mention_cache.borrow().as_ref()
             && query == input
@@ -5456,7 +5474,26 @@ impl ChatView {
         {
             return matches.clone();
         }
-        let matches = mention_matches(input, &self.workspace_root);
+        let files = {
+            let mut listing = self.mention_listing.borrow_mut();
+            match listing.as_ref() {
+                Some((root, at, files))
+                    if *root == self.workspace_root && at.elapsed() < MENTION_LISTING_FRESH =>
+                {
+                    files.clone()
+                }
+                _ => {
+                    let files = std::rc::Rc::new(mention_files(&self.workspace_root));
+                    *listing = Some((
+                        self.workspace_root.clone(),
+                        std::time::Instant::now(),
+                        files.clone(),
+                    ));
+                    files
+                }
+            }
+        };
+        let matches = mention_matches(input, &files);
         self.mention_cache.replace(Some((
             input.to_string(),
             self.workspace_root.clone(),

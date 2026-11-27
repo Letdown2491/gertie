@@ -5,17 +5,15 @@
 //! event shapes (content blocks with `input_json_delta` fragments), and
 //! the auth header (`x-api-key`, not a bearer token).
 //!
-//! The retry + fallback envelope is the same shape as the OpenAI
-//! adapter's: silent retries, fallback across endpoints until one
-//! produces content, commit on first content. Two adapters share the
-//! shape; a third would justify extracting it.
+//! The retry + fallback envelope is the shared one in `envelope`: this
+//! wire supplies only its single attempt.
 
-use crate::{Endpoint, Outcome, RequestScoped, Terminal};
+use crate::envelope;
+use crate::{Endpoint, Outcome, RequestScoped};
 use futures_core::stream::BoxStream;
 use futures_util::StreamExt;
 use gertie_core::Event;
 use gertie_core::request::Request;
-use tokio_stream::wrappers::UnboundedReceiverStream;
 
 /// Anthropic requires max_tokens on every request; the loop fills it
 /// when it knows better, this is the floor.
@@ -24,8 +22,6 @@ const ANTHROPIC_VERSION: &str = "2023-06-01";
 
 pub struct Anthropic {
     endpoints: Vec<Endpoint>,
-    client: reqwest::Client,
-    runtime: tokio::runtime::Runtime,
 }
 
 impl Anthropic {
@@ -42,17 +38,7 @@ impl Anthropic {
     }
 
     pub fn with_endpoints(endpoints: Vec<Endpoint>) -> Result<Self, reqwest::Error> {
-        let client = reqwest::Client::builder().build()?;
-        let runtime = tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(2)
-            .enable_all()
-            .build()
-            .expect("tokio runtime");
-        Ok(Self {
-            endpoints,
-            client,
-            runtime,
-        })
+        Ok(Self { endpoints })
     }
 }
 
@@ -175,7 +161,7 @@ impl Anthropic {
     async fn attempt_once(
         scoped: &RequestScoped,
         request: &Request,
-        sender: &tokio::sync::mpsc::UnboundedSender<Event>,
+        sender: &envelope::Sender,
     ) -> Outcome {
         let (system, messages) = wire_messages(request);
         let mut body = serde_json::json!({
@@ -243,92 +229,11 @@ impl Anthropic {
 
 impl gertie_core::Provider for Anthropic {
     fn stream(&self, request: Request) -> BoxStream<'static, Event> {
-        let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
-        let endpoints = self.endpoints.clone();
-        let client = self.client.clone();
-        self.runtime.spawn(async move {
-            let mut last_error: Option<String> = None;
-            for endpoint in endpoints {
-                let scoped = RequestScoped {
-                    endpoint,
-                    client: client.clone(),
-                };
-                let (proxy, mut proxy_rx) = tokio::sync::mpsc::unbounded_channel();
-                let request = request.clone();
-                let driver = tokio::spawn(async move {
-                    // One endpoint's full retry policy: silent retries
-                    // (an Event::Error is terminal for the turn), the
-                    // same contract as the OpenAI envelope. The proxy
-                    // sender is owned here so its drop marks the end of
-                    // the stream for the forwarder.
-                    let mut attempt = 0;
-                    loop {
-                        attempt += 1;
-                        let _ = proxy.send(Event::Started);
-                        match Anthropic::attempt_once(&scoped, &request, &proxy).await {
-                            Outcome::Done => break Ok(()),
-                            Outcome::Fatal(message) => break Err(Terminal::Error(message)),
-                            Outcome::Transient(message) => {
-                                if attempt >= crate::MAX_ATTEMPTS {
-                                    break Err(Terminal::Error(format!(
-                                        "{message} (after {attempt} attempts)"
-                                    )));
-                                }
-                                tokio::time::sleep(crate::backoff(attempt)).await;
-                            }
-                            Outcome::Limited(message) => {
-                                if attempt >= crate::MAX_ATTEMPTS {
-                                    break Err(Terminal::Limited(format!(
-                                        "{message} (after {attempt} attempts)"
-                                    )));
-                                }
-                                tokio::time::sleep(crate::backoff(attempt)).await;
-                            }
-                        }
-                    }
-                });
-                // Forward live, but hold everything back until this
-                // endpoint has produced content (same contract as the
-                // OpenAI envelope).
-                let mut produced = false;
-                while let Some(event) = proxy_rx.recv().await {
-                    match &event {
-                        Event::Token { .. } | Event::ToolCall { .. } | Event::Usage { .. } => {
-                            produced = true
-                        }
-                        _ if !produced => continue,
-                        _ => {}
-                    }
-                    let _ = sender.send(event);
-                }
-                if produced {
-                    return;
-                }
-                let outcome = driver
-                    .await
-                    .unwrap_or_else(|_| Err(Terminal::Error("stream driver failed".into())));
-                match outcome {
-                    Ok(()) => {
-                        let _ = sender.send(Event::Done);
-                        return;
-                    }
-                    Err(Terminal::Error(message)) => last_error = Some(message),
-                    // A limit isn't an endpoint failure to fall back
-                    // from. Other endpoints share the same account.
-                    Err(Terminal::Limited(message)) => {
-                        let _ = sender.send(Event::Limited {
-                            message: format!("rate limited: {message}"),
-                        });
-                        return;
-                    }
-                }
-            }
-            let detail = last_error.unwrap_or_else(|| "no endpoints configured".into());
-            let _ = sender.send(Event::Error {
-                message: format!("all endpoints failed: {detail}"),
-            });
-        });
-        Box::pin(UnboundedReceiverStream::new(receiver))
+        envelope::stream(
+            self.endpoints.clone(),
+            request,
+            |scoped, request, sender| Box::pin(Anthropic::attempt_once(scoped, request, sender)),
+        )
     }
 }
 
@@ -339,10 +244,10 @@ impl gertie_core::Provider for Anthropic {
 /// whole calls, same contract as the OpenAI path.
 async fn parse_sse(
     stream: impl futures_core::Stream<Item = Result<bytes::Bytes, reqwest::Error>>,
-    sender: &tokio::sync::mpsc::UnboundedSender<Event>,
+    sender: &envelope::Sender,
 ) -> Outcome {
     let mut stream = std::pin::pin!(stream);
-    let mut buffer: Vec<u8> = Vec::new();
+    let mut lines = envelope::SseLines::default();
     let mut partials: Vec<(usize, PartialToolUse)> = Vec::new();
     let mut input_tokens: Option<u64> = None;
     let mut cache_read: Option<u64> = None;
@@ -350,10 +255,11 @@ async fn parse_sse(
         let Ok(chunk) = chunk else {
             break; // transport died mid-stream; what landed still stands
         };
-        buffer.extend_from_slice(&chunk);
-        while let Some(line_end) = buffer.iter().position(|byte| *byte == b'\n') {
-            let line: Vec<u8> = buffer.drain(..=line_end).collect();
-            let line = String::from_utf8_lossy(&line);
+        if let Err(message) = lines.push(&chunk) {
+            let _ = sender.send(Event::Error { message });
+            return Outcome::Done;
+        }
+        while let Some(line) = lines.next_line() {
             let Some(payload) = line.trim().strip_prefix("data:") else {
                 continue;
             };

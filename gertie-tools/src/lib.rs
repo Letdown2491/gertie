@@ -12,6 +12,7 @@ pub mod sandbox;
 pub mod shape;
 pub mod skills;
 pub mod templates;
+pub mod walk;
 pub mod web;
 
 use gertie_core::{Tool, ToolResult};
@@ -738,20 +739,57 @@ impl Tool for EditFile {
 /// child holding them) before bash returns what it has.
 const DRAIN_GRACE: std::time::Duration = std::time::Duration::from_millis(400);
 
-/// Bytes kept per pipe. Past it the drain keeps reading (so the child
-/// never blocks) and discards; `limit` cuts far below this anyway.
-const DRAIN_CAP: usize = 2 * 1024 * 1024;
+/// Bytes kept per pipe, from each end. A long build's verdict is at
+/// its end: past the head the drain keeps a rolling tail (and keeps
+/// reading, so the child never blocks), and the middle is what goes.
+const DRAIN_HEAD: usize = 1024 * 1024;
+const DRAIN_TAIL: usize = 1024 * 1024;
+
+/// One pipe's kept output: the head, a rolling tail, and how many bytes
+/// fell out between them.
+#[derive(Default)]
+struct Captured {
+    head: Vec<u8>,
+    tail: std::collections::VecDeque<u8>,
+    dropped: u64,
+}
+
+impl Captured {
+    fn push(&mut self, mut chunk: &[u8]) {
+        let room = DRAIN_HEAD.saturating_sub(self.head.len());
+        let (head, rest) = chunk.split_at(room.min(chunk.len()));
+        self.head.extend_from_slice(head);
+        chunk = rest;
+        self.tail.extend(chunk);
+        let excess = self.tail.len().saturating_sub(DRAIN_TAIL);
+        if excess > 0 {
+            self.tail.drain(..excess);
+            self.dropped += excess as u64;
+        }
+    }
+
+    fn text(&self) -> String {
+        let mut bytes = self.head.clone();
+        if self.dropped > 0 {
+            bytes.extend_from_slice(
+                format!("\n… [{} bytes of output omitted] …\n", self.dropped).as_bytes(),
+            );
+        }
+        bytes.extend(self.tail.iter());
+        String::from_utf8_lossy(&bytes).into_owned()
+    }
+}
 
 /// One pipe read to EOF on its own thread, into a shared buffer the
 /// caller can take from at any time, finished or not.
 struct Drain {
-    buffer: Arc<std::sync::Mutex<Vec<u8>>>,
+    buffer: Arc<std::sync::Mutex<Captured>>,
     done: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl Drain {
     fn start(pipe: Option<impl std::io::Read + Send + 'static>) -> Self {
-        let buffer = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let buffer = Arc::new(std::sync::Mutex::new(Captured::default()));
         let done = Arc::new(std::sync::atomic::AtomicBool::new(pipe.is_none()));
         if let Some(mut pipe) = pipe {
             let (buffer, done) = (buffer.clone(), done.clone());
@@ -760,11 +798,7 @@ impl Drain {
                 loop {
                     match pipe.read(&mut chunk) {
                         Ok(0) => break,
-                        Ok(n) => {
-                            let mut buffer = buffer.lock().unwrap();
-                            let room = DRAIN_CAP.saturating_sub(buffer.len());
-                            buffer.extend_from_slice(&chunk[..n.min(room)]);
-                        }
+                        Ok(n) => buffer.lock().unwrap().push(&chunk[..n]),
                         Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
                         Err(_) => break,
                     }
@@ -780,7 +814,7 @@ impl Drain {
     }
 
     fn text(&self) -> String {
-        String::from_utf8_lossy(&self.buffer.lock().unwrap()).into_owned()
+        self.buffer.lock().unwrap().text()
     }
 }
 
@@ -929,7 +963,9 @@ impl Tool for Glob {
 
     fn description(&self) -> String {
         "Find files by glob pattern relative to the workspace root, \
-         e.g. `src/**/*.rs`. Returns workspace-relative paths, sorted."
+         e.g. `src/**/*.rs`. Returns workspace-relative paths, sorted. \
+         Build output and dependencies (target/, node_modules/, ...) are \
+         skipped unless the pattern starts inside them."
             .into()
     }
 
@@ -951,27 +987,76 @@ impl Tool for Glob {
         let arguments = arguments.to_string();
         blocking(move || {
             let args: GlobArgs = parse(&arguments, "glob")?;
-            let full = resolve(&root, &args.pattern)?;
-            let mut matches: Vec<String> = glob::glob(&full.to_string_lossy())
-                .map_err(|error| format!("glob: bad pattern ({error})"))?
-                .filter_map(|entry| entry.ok())
-                .filter(|path| path.is_file())
-                .map(|path| {
-                    path.strip_prefix(&root)
-                        .unwrap_or(&path)
-                        .to_string_lossy()
-                        .to_string()
-                })
-                .collect();
-            matches.sort();
-            Ok(limit(if matches.is_empty() {
-                "(no matches)".into()
-            } else {
-                matches.join("\n")
-            }))
+            glob_files(&root, &args.pattern)
         })
     }
 }
+
+/// Most paths a glob answer lists: past this the model needs a
+/// narrower pattern, not a longer list.
+const GLOB_MATCHES: usize = 1000;
+
+/// The glob tool's walk: from the pattern's literal directory, through
+/// the shared walker (no symlinks followed, build output skipped below
+/// the base), matching workspace-relative paths.
+fn glob_files(root: &Path, pattern: &str) -> ToolResult {
+    let mut pattern = pattern.trim().trim_start_matches("./").to_string();
+    // An absolute pattern inside the workspace is a relative one.
+    if Path::new(&pattern).is_absolute() {
+        pattern = match Path::new(&pattern).strip_prefix(root) {
+            Ok(rest) => rest.to_string_lossy().into_owned(),
+            Err(_) => return Err(format!("path escapes the workspace: {pattern}")),
+        };
+    }
+    let prefix = walk::literal_prefix(&pattern);
+    // Containment (lexical and through symlinks) for where the walk
+    // starts; the walk itself never leaves it.
+    let base = resolve(root, if prefix.is_empty() { "." } else { prefix })?;
+    let matcher =
+        glob::Pattern::new(&pattern).map_err(|error| format!("glob: bad pattern ({error})"))?;
+    let options = glob::MatchOptions {
+        case_sensitive: true,
+        require_literal_separator: true,
+        require_literal_leading_dot: false,
+    };
+    let mut matches: Vec<String> = Vec::new();
+    let mut capped = false;
+    for entry in walk::files(&base, true) {
+        // Relative to the base, then prefixed: `resolve` canonicalizes
+        // the base, and the root may not be canonical (`/home` is a
+        // link to `/var/home` on some systems).
+        let Some(below) = walk::relative(&base, entry.path()) else {
+            continue;
+        };
+        let relative = match (prefix.is_empty(), below.is_empty()) {
+            (true, _) => below,
+            (false, true) => prefix.to_string(),
+            (false, false) => format!("{prefix}/{below}"),
+        };
+        if !matcher.matches_with(&relative, options) {
+            continue;
+        }
+        if matches.len() == GLOB_MATCHES {
+            capped = true;
+            break;
+        }
+        matches.push(relative);
+    }
+    matches.sort();
+    if matches.is_empty() {
+        return Ok("(no matches)".into());
+    }
+    let mut out = matches.join("\n");
+    if capped {
+        out.push_str(&format!(
+            "\n… [stopped at {GLOB_MATCHES} matches: narrow the pattern]"
+        ));
+    }
+    Ok(limit(out))
+}
+
+/// Files larger than this are skipped by grep.
+const GREP_FILE_BYTES: u64 = 4 * 1024 * 1024;
 
 impl Tool for Grep {
     fn name(&self) -> &'static str {
@@ -980,8 +1065,9 @@ impl Tool for Grep {
 
     fn description(&self) -> String {
         "Search file contents with a regular expression across the \
-         workspace (skips binary files, hidden dirs, target/, and \
-         node_modules/). Returns `path:line: text` matches."
+         workspace (skips binary and very large files, hidden dirs, build \
+         output and dependencies such as target/ and node_modules/). \
+         Returns `path:line: text` matches."
             .into()
     }
 
@@ -1012,23 +1098,15 @@ impl Tool for Grep {
             };
 
             let mut matches: Vec<String> = Vec::new();
-            for entry in walkdir::WalkDir::new(&base)
-                .follow_links(false)
-                .into_iter()
-                // Depth-0 is the search root itself, tempdir names start
-                // with '.', and it must never filter itself out.
-                .filter_entry(|entry| {
-                    entry.depth() == 0 || {
-                        let name = entry.file_name().to_string_lossy();
-                        !matches!(
-                            name.as_ref(),
-                            ".git" | "target" | "node_modules" | ".pixi" | ".venv"
-                        ) && !name.starts_with('.')
-                    }
-                })
-                .filter_map(|entry| entry.ok())
-                .filter(|entry| entry.file_type().is_file())
-            {
+            for entry in walk::files(&base, false) {
+                // A data dump or a disk image is not source: reading it
+                // whole would stall the tool and the memory with it.
+                if entry
+                    .metadata()
+                    .map_or(true, |meta| meta.len() > GREP_FILE_BYTES)
+                {
+                    continue;
+                }
                 let Ok(mut file) = std::fs::File::open(entry.path()) else {
                     continue;
                 };
@@ -1396,6 +1474,51 @@ mod tests {
             tool.vet(command)
                 .unwrap_or_else(|e| panic!("{command}: {e}"));
         }
+    }
+
+    /// A directory symlink out of the workspace is never followed, and
+    /// build output is skipped unless the pattern starts inside it.
+    #[cfg(unix)]
+    #[test]
+    fn glob_stays_in_the_workspace_and_out_of_build_output() {
+        let dir = workspace();
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("secret.rs"), "").unwrap();
+        std::os::unix::fs::symlink(outside.path(), dir.path().join("link")).unwrap();
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        std::fs::create_dir_all(dir.path().join("target/debug")).unwrap();
+        std::fs::write(dir.path().join("src/a.rs"), "").unwrap();
+        std::fs::write(dir.path().join("target/debug/b.rs"), "").unwrap();
+        let tool = Glob::new(dir.path().into());
+        let all = await_sync(tool.run(r#"{"pattern": "**/*.rs"}"#)).unwrap();
+        assert_eq!(all, "src/a.rs");
+        let built = await_sync(tool.run(r#"{"pattern": "target/**/*.rs"}"#)).unwrap();
+        assert_eq!(built, "target/debug/b.rs");
+        let linked = await_sync(tool.run(r#"{"pattern": "link/*.rs"}"#));
+        assert!(
+            linked.is_err(),
+            "a base through a link out is refused: {linked:?}"
+        );
+        let escape = await_sync(tool.run(r#"{"pattern": "../**/*.rs"}"#));
+        assert!(escape.is_err());
+    }
+
+    /// A huge output keeps its head and its end (where a build's
+    /// verdict is); the middle is what goes, and says so.
+    #[test]
+    fn captured_output_keeps_both_ends() {
+        let mut captured = Captured::default();
+        captured.push(b"START\n");
+        let filler = vec![b'x'; 8192];
+        for _ in 0..(3 * 1024 * 1024 / 8192) {
+            captured.push(&filler);
+        }
+        captured.push(b"\nerror: the verdict\n");
+        let text = captured.text();
+        assert!(text.starts_with("START"));
+        assert!(text.ends_with("error: the verdict\n"));
+        assert!(text.contains("bytes of output omitted"));
+        assert!(text.len() <= DRAIN_HEAD + DRAIN_TAIL + 64);
     }
 
     #[test]

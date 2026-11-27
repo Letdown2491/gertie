@@ -21,7 +21,6 @@ use serde::Deserialize;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
-use tokio_stream::wrappers::UnboundedReceiverStream;
 
 /// The dev scenario: prose, a real read, and a markdown answer.
 const SHOWCASE: &str = include_str!("replay/showcase.toml");
@@ -66,8 +65,10 @@ pub struct ReplayProvider {
     /// Pause between simulated text deltas, so the UI sees streaming
     /// rather than one dump. Zero in tests.
     delta_delay: Duration,
-    /// Own runtime: spawned stream tasks must progress without any
-    /// caller entering the runtime (same pattern as OpenAICompatible).
+    /// Own runtime, not the shared network one: replay paces deltas in
+    /// real time, and the GUI tests run many replays in parallel against
+    /// pass budgets, so one replay's pacing must not queue behind
+    /// another's.
     runtime: tokio::runtime::Runtime,
     /// Which scripted step answers the next request. One provider
     /// instance drives one conversation; the counter only advances
@@ -149,7 +150,6 @@ fn text_chunks(text: &str, size: usize) -> impl Iterator<Item = &str> {
 
 impl gertie_core::Provider for ReplayProvider {
     fn stream(&self, request: Request) -> BoxStream<'static, Event> {
-        let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
         let model = self
             .endpoints
             .first()
@@ -164,7 +164,7 @@ impl gertie_core::Provider for ReplayProvider {
             .map(|message| message.content.as_deref().unwrap_or("").len())
             .sum::<usize>()
             / 4) as u64;
-        self.runtime.spawn(async move {
+        crate::envelope::spawn_stream_on(&self.runtime, move |sender| async move {
             let _ = sender.send(Event::Started);
             let scenario = match load_scenario(&model, path.as_deref()) {
                 Ok(scenario) => scenario,
@@ -217,8 +217,7 @@ impl gertie_core::Provider for ReplayProvider {
                 cached_input_tokens: 0,
             });
             let _ = sender.send(Event::Done);
-        });
-        Box::pin(UnboundedReceiverStream::new(receiver))
+        })
     }
 }
 

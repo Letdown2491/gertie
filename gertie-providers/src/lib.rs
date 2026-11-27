@@ -10,7 +10,6 @@ use futures_util::StreamExt;
 use gertie_core::Event;
 use gertie_core::request::{Request, WireMessage};
 use std::time::Duration;
-use tokio_stream::wrappers::UnboundedReceiverStream;
 
 // The Provider trait and Request shape are core concepts (the loop drives
 // them directly); this crate only implements them.
@@ -80,6 +79,7 @@ pub(crate) const MAX_ATTEMPTS: u32 = 3;
 const INITIAL_BACKOFF: Duration = Duration::from_millis(500);
 
 pub mod anthropic;
+mod envelope;
 pub mod replay;
 
 pub use anthropic::Anthropic;
@@ -133,11 +133,6 @@ pub struct OpenAICompatible {
     /// streams content the turn is committed to it. A model switch
     /// mid-reply would orphan what the user already saw.
     endpoints: Vec<Endpoint>,
-    client: reqwest::Client,
-    /// Own multi-thread runtime: spawned tasks must make progress without
-    /// any caller entering the runtime (the UI polls the returned stream
-    /// on gpui's executor instead).
-    runtime: tokio::runtime::Runtime,
 }
 
 impl OpenAICompatible {
@@ -203,132 +198,22 @@ impl OpenAICompatible {
     /// first one), so nothing is emitted until every endpoint is
     /// exhausted.
     pub fn with_endpoints(endpoints: Vec<Endpoint>) -> Result<Self, reqwest::Error> {
-        let client = reqwest::Client::builder().build()?;
-        let runtime = tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(2)
-            .enable_all()
-            .build()
-            .expect("tokio runtime");
-        Ok(Self {
-            endpoints,
-            client,
-            runtime,
-        })
+        Ok(Self { endpoints })
     }
 }
 
 impl Provider for OpenAICompatible {
     fn stream(&self, request: Request) -> BoxStream<'static, Event> {
-        let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
-        let endpoints = self.endpoints.clone();
-        let client = self.client.clone();
-        self.runtime.spawn(async move {
-            let mut last_error: Option<String> = None;
-            for endpoint in endpoints {
-                let scoped = RequestScoped {
-                    endpoint,
-                    client: client.clone(),
-                };
-                let (proxy, mut proxy_rx) = tokio::sync::mpsc::unbounded_channel();
-                let request = request.clone();
-                let driver =
-                    tokio::spawn(async move { run_with_retries(&scoped, &request, &proxy).await });
-                // Forward live, but hold everything back until this
-                // endpoint has produced content: pre-content, the only
-                // events are Started (the loop ignores it), Done (which
-                // would end the turn early), and errors (held for the
-                // fallback decision).
-                let mut produced = false;
-                while let Some(event) = proxy_rx.recv().await {
-                    match &event {
-                        Event::Token { .. } | Event::ToolCall { .. } | Event::Usage { .. } => {
-                            produced = true
-                        }
-                        _ if !produced => continue,
-                        _ => {}
-                    }
-                    let _ = sender.send(event);
-                }
-                if produced {
-                    // Committed to this endpoint; its whole stream
-                    // (errors after content included) already passed.
-                    return;
-                }
-                let outcome = driver
-                    .await
-                    .unwrap_or_else(|_| Err(Terminal::Error("stream driver failed".into())));
-                match outcome {
-                    // Clean end with no content: the server chose to
-                    // send nothing. Report Done, don't fall back.
-                    Ok(()) => {
-                        let _ = sender.send(Event::Done);
-                        return;
-                    }
-                    Err(Terminal::Error(message)) => last_error = Some(message),
-                    // A limit isn't an endpoint failure to fall back
-                    // from. Other endpoints share the same account.
-                    // End the turn limited.
-                    Err(Terminal::Limited(message)) => {
-                        let _ = sender.send(Event::Limited {
-                            message: format!("rate limited: {message}"),
-                        });
-                        return;
-                    }
-                }
-            }
-            let detail = last_error.unwrap_or_else(|| "no endpoints configured".into());
-            let _ = sender.send(Event::Error {
-                message: format!("all endpoints failed: {detail}"),
-            });
-        });
-        Box::pin(UnboundedReceiverStream::new(receiver))
-    }
-}
-
-/// One endpoint's full retry policy. Returns the terminal outcome: Ok
-/// when the stream completed, Err with the reason once retries are
-/// exhausted (auth/config errors return immediately). Retry delays are
-/// silent. An Event::Error is terminal for the turn (the loop stops
-/// on the first one), so a "retrying" note would kill the turn it was
-/// trying to save.
-async fn run_with_retries(
-    scoped: &RequestScoped,
-    request: &Request,
-    sender: &tokio::sync::mpsc::UnboundedSender<Event>,
-) -> Result<(), Terminal> {
-    let mut attempt = 0;
-    loop {
-        attempt += 1;
-        let _ = sender.send(Event::Started);
-        match scoped.attempt_once(request, sender).await {
-            Outcome::Done => return Ok(()),
-            Outcome::Fatal(message) => return Err(Terminal::Error(message)),
-            Outcome::Transient(message) => {
-                if attempt >= MAX_ATTEMPTS {
-                    return Err(Terminal::Error(format!(
-                        "{message} (after {attempt} attempts)"
-                    )));
-                }
-                tokio::time::sleep(backoff(attempt)).await;
-            }
-            Outcome::Limited(message) => {
-                if attempt >= MAX_ATTEMPTS {
-                    return Err(Terminal::Limited(format!(
-                        "{message} (after {attempt} attempts)"
-                    )));
-                }
-                tokio::time::sleep(backoff(attempt)).await;
-            }
-        }
+        envelope::stream(
+            self.endpoints.clone(),
+            request,
+            |scoped, request, sender| Box::pin(scoped.attempt_once(request, sender)),
+        )
     }
 }
 
 impl RequestScoped {
-    async fn attempt_once(
-        &self,
-        request: &Request,
-        sender: &tokio::sync::mpsc::UnboundedSender<Event>,
-    ) -> Outcome {
+    async fn attempt_once(&self, request: &Request, sender: &envelope::Sender) -> Outcome {
         let mut body = serde_json::json!({
             "model": self.endpoint.model,
             "messages": wire_messages(&request.messages),
@@ -392,19 +277,20 @@ impl RequestScoped {
 /// on a final chunk when the server supports include_usage.
 async fn parse_sse(
     stream: impl futures_core::Stream<Item = Result<bytes::Bytes, reqwest::Error>>,
-    sender: &tokio::sync::mpsc::UnboundedSender<Event>,
+    sender: &envelope::Sender,
 ) -> Outcome {
     let mut stream = std::pin::pin!(stream);
-    let mut buffer = Vec::new();
+    let mut lines = envelope::SseLines::default();
     let mut tool_calls: Vec<PartialToolCall> = Vec::new();
     while let Some(chunk) = stream.next().await {
         let Ok(chunk) = chunk else {
             break; // transport died mid-stream; what landed still stands
         };
-        buffer.extend_from_slice(&chunk);
-        while let Some(line_end) = buffer.iter().position(|byte| *byte == b'\n') {
-            let line: Vec<u8> = buffer.drain(..=line_end).collect();
-            let line = String::from_utf8_lossy(&line);
+        if let Err(message) = lines.push(&chunk) {
+            let _ = sender.send(Event::Error { message });
+            return Outcome::Done;
+        }
+        while let Some(line) = lines.next_line() {
             let Some(payload) = line.trim().strip_prefix("data:") else {
                 continue;
             };
@@ -454,7 +340,7 @@ async fn parse_sse(
 fn emit_delta(
     value: &serde_json::Value,
     tool_calls: &mut Vec<PartialToolCall>,
-    sender: &tokio::sync::mpsc::UnboundedSender<Event>,
+    sender: &envelope::Sender,
 ) {
     let Some(delta) = value
         .get("choices")
@@ -494,10 +380,7 @@ fn emit_delta(
     }
 }
 
-fn flush_tool_calls(
-    tool_calls: &[PartialToolCall],
-    sender: &tokio::sync::mpsc::UnboundedSender<Event>,
-) {
+fn flush_tool_calls(tool_calls: &[PartialToolCall], sender: &envelope::Sender) {
     for call in tool_calls {
         if call.name.is_empty() {
             continue;

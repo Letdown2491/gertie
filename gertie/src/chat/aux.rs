@@ -78,7 +78,7 @@ pub fn tildify(path: &std::path::Path) -> String {
 /// The @-mention matcher, exposed for tests (doc'ed, not hidden: the
 /// integration tests reach it through the crate's public surface).
 pub fn mention_matches_for_test(input: &str, root: &std::path::Path) -> Vec<MentionMatch> {
-    mention_matches(input, root)
+    mention_matches(input, &mention_files(root))
 }
 
 /// One row of the @-mention popup: a workspace file the picker offers.
@@ -90,13 +90,12 @@ pub struct MentionMatch {
     pub token: String,
 }
 
-/// The @-mention's candidate list: files under the workspace root
-/// whose relative path contains the query, directory scratch
-/// (.git, target, node_modules, .gertie) excluded, capped so a big
-/// repo renders a popup, not a novel. The bare `@` lists nothing
-/// until a character narrows it: with thousands of files the first
-/// keystroke should already mean something.
-pub fn mention_matches(input: &str, root: &std::path::Path) -> Vec<MentionMatch> {
+/// The @-mention's candidate list for a file listing: paths whose text
+/// contains the query, capped so a big repo renders a popup, not a
+/// novel. The bare `@` lists nothing until a character narrows it:
+/// with thousands of files the first keystroke should already mean
+/// something.
+pub fn mention_matches(input: &str, files: &[String]) -> Vec<MentionMatch> {
     // The token: an `@` that starts the input or follows whitespace,
     // up to the caret (the input state's value is all we see; the
     // token is the whole trailing `@...` run, mentions are typed at
@@ -119,65 +118,29 @@ pub fn mention_matches(input: &str, root: &std::path::Path) -> Vec<MentionMatch>
         return Vec::new();
     }
     let token = input[at..].to_string();
-    // The walk's budget in directory entries: a repo with a vendored
-    // tree or a data directory is millions of entries, and the popup
-    // owes an answer now, not a complete one.
-    const MAX_VISITED: usize = 50_000;
-    let mut visited = 0usize;
-    let mut files = Vec::new();
-    let mut stack = vec![root.to_path_buf()];
-    while let Some(dir) = stack.pop() {
-        let Ok(read) = std::fs::read_dir(&dir) else {
-            continue;
-        };
-        for entry in read.flatten() {
-            visited += 1;
-            if visited > MAX_VISITED {
-                stack.clear();
-                break;
-            }
-            let path = entry.path();
-            let Ok(file_type) = entry.file_type() else {
-                continue;
-            };
-            let name = entry.file_name().to_string_lossy().into_owned();
-            if file_type.is_dir() {
-                if matches!(
-                    name.as_str(),
-                    ".git" | ".gertie" | "target" | "node_modules" | "dist"
-                ) {
-                    continue;
-                }
-                stack.push(path);
-                continue;
-            }
-            let relative = path
-                .strip_prefix(root)
-                .map(|p| p.to_string_lossy().into_owned())
-                .unwrap_or(name.clone());
-            if !relative.contains(query) {
-                continue;
-            }
-            files.push(relative);
-            if files.len() >= 64 {
-                return files
-                    .into_iter()
-                    .map(|path| MentionMatch {
-                        path,
-                        token: token.clone(),
-                    })
-                    .collect();
-            }
-        }
-    }
-    files.sort();
     files
-        .into_iter()
+        .iter()
+        .filter(|path| path.contains(query))
+        .take(64)
         .map(|path| MentionMatch {
-            path,
+            path: path.clone(),
             token: token.clone(),
         })
         .collect()
+}
+
+/// The workspace's files for @-mentions, sorted: the shared walk
+/// (build output, dependencies and VCS skipped), bounded, because a
+/// repo with a vendored tree or a data directory is millions of
+/// entries and the popup owes an answer now, not a complete one.
+pub fn mention_files(root: &std::path::Path) -> Vec<String> {
+    const MAX_FILES: usize = 50_000;
+    let mut files: Vec<String> = gertie_tools::walk::files(root, true)
+        .take(MAX_FILES)
+        .filter_map(|entry| gertie_tools::walk::relative(root, entry.path()))
+        .collect();
+    files.sort();
+    files
 }
 
 #[cfg(test)]

@@ -909,10 +909,14 @@ fn mutate(
     command: &str,
     run: impl FnOnce() -> ToolResult,
 ) -> ToolResult {
-    let output = run()?;
-    audit(store, tier, given, command)?;
-    sync(store)?;
-    Ok(output)
+    // The read, the id mint and the write are one step under the
+    // store's write lock: another tab must not mint between them.
+    store.locked(|| {
+        let output = run()?;
+        audit(store, tier, given, command)?;
+        sync(store)?;
+        Ok(output)
+    })
 }
 
 /// The one-line audit trail: every mutating command appends
@@ -1771,6 +1775,51 @@ mod tests {
             assert_eq!(entry.evidence[0].path, "pool.rs");
             assert_eq!(entry.evidence[0].hash, real, "gertie hashes, not the model");
         }
+    }
+
+    /// Retiring an entry from the wrong file used to mint a phantom
+    /// (a new entry born retired) and leave the real one live.
+    #[test]
+    fn retiring_another_files_entry_is_refused_with_the_way() {
+        let (tmp, store, tool) = grammar_fixture();
+        std::fs::create_dir_all(tmp.path().join("project")).unwrap();
+        std::fs::write(
+            tmp.path().join("project/a.md"),
+            "- [p1] helpful=0 harmful=0 the pool is 4 [source: added: 2026-11-01]\n",
+        )
+        .unwrap();
+        std::fs::write(
+            tmp.path().join("project/b.md"),
+            "- [p2] helpful=0 harmful=0 the pool is 8 [source: added: 2026-11-02]\n",
+        )
+        .unwrap();
+        let error = run_tool(
+            &tool,
+            json!({"command": "insert", "path": "project/b.md", "insert_line": 1,
+                   "new_str": "- [p1] helpful=0 harmful=0 the pool is 4 [superseded by: p2; valid until: 2026-11-02]"}),
+        )
+        .unwrap_err();
+        assert!(
+            error.contains("p1") && error.contains("a.md") && error.contains("supersede"),
+            "{error}"
+        );
+        let entries = store.scan();
+        assert_eq!(entries.len(), 2, "no phantom: {entries:?}");
+        assert!(entries.iter().all(|entry| entry.valid_until.is_none()));
+    }
+
+    #[test]
+    fn a_new_entry_cannot_be_born_retired() {
+        let (tmp, store, tool) = grammar_fixture();
+        std::fs::create_dir_all(tmp.path().join("project")).unwrap();
+        let error = run_tool(
+            &tool,
+            json!({"command": "create", "path": "project/c.md",
+                   "content": "- [p9] helpful=0 harmful=0 a fact [valid until: 2026-11-01]\n"}),
+        )
+        .unwrap_err();
+        assert!(error.contains("new entry"), "{error}");
+        assert!(store.scan().is_empty());
     }
 
     #[test]
