@@ -99,9 +99,7 @@ impl StatusFacts {
         // model is consulted, whichever tool carried it and whether or
         // not the model ever searched.
         for id in gertie_core::memory_recall::recalled_ids(result) {
-            if !self.consulted.contains(&id) {
-                self.consulted.push(id);
-            }
+            self.consult(id);
         }
         let args: serde_json::Value = serde_json::from_str(arguments).unwrap_or_default();
         let field = |key: &str| {
@@ -139,9 +137,7 @@ impl StatusFacts {
                 // natural path — the live session's gap.
                 if path.contains(".gertie/memory") {
                     for id in memory_hit_ids(result) {
-                        if !self.consulted.contains(&id) {
-                            self.consulted.push(id);
-                        }
+                        self.consult(id);
                     }
                 }
             }
@@ -160,9 +156,7 @@ impl StatusFacts {
                 // search_memory — the live test's gap.
                 if matches!(command.as_str(), "view" | "str_replace" | "insert") {
                     for id in memory_hit_ids(result) {
-                        if !self.consulted.contains(&id) {
-                            self.consulted.push(id);
-                        }
+                        self.consult(id);
                     }
                 }
                 if !command.is_empty() {
@@ -182,7 +176,6 @@ impl StatusFacts {
                     if verb != "view" {
                         self.memory_actions
                             .insert(0, clip(&format!("{verb} {file}"), 80));
-                        self.memory_actions.truncate(5);
                     }
                 }
             }
@@ -199,22 +192,17 @@ impl StatusFacts {
                     other => other,
                 };
                 let target = field("id").or_else(|| field("file")).unwrap_or_default();
-                if let Some(id) = field("id")
-                    && !self.consulted.contains(&id)
-                {
-                    self.consulted.push(id);
+                if let Some(id) = field("id") {
+                    self.consult(id);
                 }
                 if !verb.is_empty() {
                     self.memory_actions
                         .insert(0, clip(&format!("{verb} {target}"), 80));
-                    self.memory_actions.truncate(5);
                 }
             }
             "search_memory" => {
                 for id in memory_hit_ids(result) {
-                    if !self.consulted.contains(&id) {
-                        self.consulted.push(id);
-                    }
+                    self.consult(id);
                 }
             }
             "status" => {
@@ -259,6 +247,17 @@ impl StatusFacts {
                 self.touched.insert(0, entry);
             }
             None => self.touched.insert(0, (path, touch)),
+        }
+    }
+
+    /// One consultation, newest-wins ordering: a re-consulted entry
+    /// moves to the front, matching `touch`'s treatment of files.
+    fn consult(&mut self, id: String) {
+        if let Some(index) = self.consulted.iter().position(|seen| seen == &id) {
+            let entry = self.consulted.remove(index);
+            self.consulted.insert(0, entry);
+        } else {
+            self.consulted.insert(0, id);
         }
     }
 
@@ -931,7 +930,7 @@ impl ChatView {
                     .child(
                         v_flex()
                             .id("memory-scroll")
-                            .max_h(px(120.))
+                            .max_h(px(150.))
                             .overflow_y_scroll()
                             .occlude()
                             .gap(px(3.))
@@ -1051,7 +1050,7 @@ impl ChatView {
                         // section rather than scrolling the column.
                         v_flex()
                             .id("grounded-scroll")
-                            .max_h(px(96.))
+                            .max_h(px(132.))
                             .overflow_y_scroll()
                             .occlude()
                             .gap(px(3.))
@@ -1756,6 +1755,8 @@ mod tests {
             "[p12] a.md, added -\n",
             &root,
         );
+        // Newest-first: the re-consulted p12 moved to the front, g3
+        // stays below it (no duplicate from the second hit).
         assert_eq!(facts.consulted, vec!["p12", "g3"]);
         facts.fold_tool(
             "search_memory",
@@ -1764,6 +1765,14 @@ mod tests {
             &root,
         );
         assert_eq!(facts.consulted.len(), 2);
+        facts.fold_tool(
+            "search_memory",
+            r#"{"query":"z"}"#,
+            "[g3] b.md, added -\n",
+            &root,
+        );
+        // A fresh consultation lands at the front.
+        assert_eq!(facts.consulted, vec!["g3", "p12"]);
     }
 
     fn entry(id: &str, evidence: &[&str]) -> MemoryEntry {
@@ -2051,9 +2060,14 @@ mod memory_action_tests {
             "added p13",
             root,
         );
-        assert_eq!(facts.memory_actions.len(), 5);
+        assert_eq!(
+            facts.memory_actions.len(),
+            8,
+            "no data cap: all 7 creates + the supersede"
+        );
         assert_eq!(facts.memory_actions[0], "superseded p12");
         assert_eq!(facts.memory_actions[1], "created t6.md");
+        assert_eq!(facts.memory_actions[7], "created t0.md", "oldest last");
         assert!(facts.consulted.contains(&"p12".to_string()));
     }
 }
