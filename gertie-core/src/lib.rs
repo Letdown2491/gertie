@@ -39,7 +39,8 @@ pub use request::{
 };
 use rusqlite::Connection;
 pub use snapshot::{
-    AfterState, Checkpoint, CheckpointId, SnapshotStore, TurnBounds, TurnFileChange, TurnId,
+    AfterState, Checkpoint, CheckpointId, PruneReport, SnapshotStore, TurnBounds, TurnFileChange,
+    TurnId,
 };
 use std::path::Path;
 pub use tool::{Tool, ToolGuidance, ToolResult, WorkerProgress, WorkerStep};
@@ -523,6 +524,17 @@ impl SessionStore {
     /// orders by last activity; sessions with no messages yet sink
     /// below every active one and fall back to creation order among
     /// themselves.
+    /// Every session id, of every kind (chats, workers, headless runs):
+    /// what may still own checkpoints.
+    pub fn session_ids(&self) -> Result<std::collections::HashSet<i64>, rusqlite::Error> {
+        let connection = self.connection.lock().unwrap();
+        let mut statement = connection.prepare("SELECT id FROM sessions")?;
+        let ids = statement
+            .query_map([], |row| row.get(0))?
+            .collect::<Result<_, _>>()?;
+        Ok(ids)
+    }
+
     pub fn list_sessions(&self) -> Result<Vec<SessionSummary>, rusqlite::Error> {
         let connection = self.connection.lock().unwrap();
         let mut statement = connection.prepare(

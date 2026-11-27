@@ -466,6 +466,20 @@ impl Bootstrap {
                 }
             }
         });
+        // Deleted sessions' checkpoints, swept once per launch on its
+        // own thread. Only against the real store: an ephemeral run's
+        // in-memory sessions would make every real one look deleted.
+        if !ephemeral && let Some(snapshots) = snapshots.clone() {
+            let store = store.clone();
+            std::thread::spawn(move || {
+                let Ok(live) = store.session_ids() else {
+                    return;
+                };
+                if let Err(error) = snapshots.prune(&live) {
+                    eprintln!("warning: checkpoint sweep failed: {error}");
+                }
+            });
+        }
         // Sandbox: opt-in Landlock isolation for bash children,
         // yours, else the repo overlay's, else off.
         let sandbox = config

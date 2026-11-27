@@ -100,22 +100,26 @@ pub struct RepoMap {
 }
 
 /// One map per root, process-wide: the tool and the framing share the
-/// cache, and a re-rooted registry finds the map it had.
-static MAPS: Mutex<Option<HashMap<PathBuf, Arc<RepoMap>>>> = Mutex::new(None);
+/// cache, and a re-rooted registry finds the map it had. Weak: a map
+/// (and its parse cache) lives as long as a registry or a session holds
+/// it, so a removed worktree's map goes with its last holder.
+static MAPS: Mutex<Option<HashMap<PathBuf, std::sync::Weak<RepoMap>>>> = Mutex::new(None);
 
 impl RepoMap {
     /// The map for `root`, created on first use.
     pub fn for_root(root: &Path) -> Arc<Self> {
         let mut maps = MAPS.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-        maps.get_or_insert_with(HashMap::new)
-            .entry(root.to_path_buf())
-            .or_insert_with(|| {
-                Arc::new(Self {
-                    root: root.to_path_buf(),
-                    cache: Mutex::new(HashMap::new()),
-                })
-            })
-            .clone()
+        let maps = maps.get_or_insert_with(HashMap::new);
+        maps.retain(|_, map| map.strong_count() > 0);
+        if let Some(map) = maps.get(root).and_then(std::sync::Weak::upgrade) {
+            return map;
+        }
+        let map = Arc::new(Self {
+            root: root.to_path_buf(),
+            cache: Mutex::new(HashMap::new()),
+        });
+        maps.insert(root.to_path_buf(), Arc::downgrade(&map));
+        map
     }
 
     /// The workspace's source files, relative, sorted; true when the

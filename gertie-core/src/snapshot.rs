@@ -18,6 +18,14 @@ use sha2::{Digest, Sha256};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
+/// What a [`SnapshotStore::prune`] removed.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PruneReport {
+    pub rows: usize,
+    pub objects: usize,
+    pub bytes: u64,
+}
+
 /// Identifies one checkpoint in the ledger.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct CheckpointId(pub u64);
@@ -159,6 +167,13 @@ impl SnapshotStore {
             file.write_all(content_before)?;
             drop(file);
             std::fs::rename(&temporary, &object)?;
+        } else {
+            // Reused: freshen it, so a prune racing this record (it
+            // spares young objects) cannot take it before the row lands.
+            let _ = std::fs::File::options()
+                .write(true)
+                .open(&object)
+                .and_then(|file| file.set_modified(std::time::SystemTime::now()));
         }
         let connection = self.connection.lock().unwrap();
         connection
@@ -443,6 +458,68 @@ impl SnapshotStore {
         Ok(changes)
     }
 
+    /// Drops what no live session can use: ledger rows (checkpoints and
+    /// turns) of sessions not in `live`, legacy rows with no session,
+    /// then every object no remaining row names. Objects younger than an
+    /// hour are kept whatever the ledger says: `record` writes the
+    /// object before its row, and a concurrent turn must not lose one.
+    /// `live` must be the canonical store's sessions, never an
+    /// ephemeral run's.
+    pub fn prune(
+        &self,
+        live: &std::collections::HashSet<i64>,
+    ) -> Result<PruneReport, SnapshotError> {
+        let mut report = PruneReport::default();
+        let referenced: std::collections::HashSet<String> = {
+            let connection = self.connection.lock().unwrap();
+            let sessions: Vec<Option<i64>> = connection
+                .prepare("SELECT DISTINCT session_id FROM checkpoints")?
+                .query_map([], |row| row.get(0))?
+                .collect::<Result<_, _>>()?;
+            for session in sessions {
+                match session {
+                    Some(id) if live.contains(&id) => {}
+                    Some(id) => {
+                        report.rows += connection
+                            .execute("DELETE FROM checkpoints WHERE session_id = ?1", [id])?;
+                        connection.execute("DELETE FROM turns WHERE session_id = ?1", [id])?;
+                    }
+                    None => {
+                        report.rows += connection
+                            .execute("DELETE FROM checkpoints WHERE session_id IS NULL", [])?;
+                    }
+                }
+            }
+            connection
+                .prepare("SELECT DISTINCT hash FROM checkpoints")?
+                .query_map([], |row| row.get(0))?
+                .collect::<Result<_, _>>()?
+        };
+        let young = std::time::Duration::from_secs(3600);
+        for entry in std::fs::read_dir(&self.objects)?.flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if referenced.contains(&name) {
+                continue;
+            }
+            let recent = entry
+                .metadata()
+                .and_then(|meta| meta.modified())
+                .ok()
+                .and_then(|modified| modified.elapsed().ok())
+                .is_none_or(|age| age < young);
+            if recent {
+                continue;
+            }
+            if let Ok(meta) = entry.metadata()
+                && std::fs::remove_file(entry.path()).is_ok()
+            {
+                report.objects += 1;
+                report.bytes += meta.len();
+            }
+        }
+        Ok(report)
+    }
+
     /// Reads a checkpoint object's bytes back, the diff view's "before".
     pub fn read_object(&self, hash: &str) -> std::io::Result<Vec<u8>> {
         std::fs::read(self.objects.join(hash))
@@ -524,6 +601,36 @@ mod tests {
 
     fn store_in(dir: &Path) -> SnapshotStore {
         SnapshotStore::open(dir).expect("open snapshot store")
+    }
+
+    #[test]
+    fn prune_drops_dead_sessions_and_their_unshared_objects() {
+        let tmp = tempfile::tempdir().unwrap();
+        let store = store_in(&tmp.path().join("snaps"));
+        let file = tmp.path().join("notes.txt");
+        for (session, content) in [(1, "kept"), (2, "dropped"), (2, "kept")] {
+            std::fs::write(&file, content).unwrap();
+            store
+                .record_file(Some(crate::SessionId(session)), &file, None, None)
+                .unwrap();
+        }
+        // Age every object past the young-object grace.
+        let old = std::time::SystemTime::now() - std::time::Duration::from_secs(7200);
+        for entry in std::fs::read_dir(tmp.path().join("snaps/objects")).unwrap() {
+            let file = std::fs::File::options()
+                .write(true)
+                .open(entry.unwrap().path())
+                .unwrap();
+            file.set_modified(old).unwrap();
+        }
+        let live = std::collections::HashSet::from([1]);
+        let report = store.prune(&live).unwrap();
+        assert_eq!(report.rows, 2, "session 2's rows");
+        assert_eq!(report.objects, 1, "only the object nobody else names");
+        let left = store.list(crate::SessionId(1)).unwrap();
+        assert_eq!(left.len(), 1);
+        assert!(store.list(crate::SessionId(2)).unwrap().is_empty());
+        assert_eq!(store.prune(&live).unwrap(), PruneReport::default());
     }
 
     #[test]
