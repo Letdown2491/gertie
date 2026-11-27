@@ -6859,6 +6859,28 @@ fn the_settings_page_groups_four_sections_and_covers_the_middle_column() {
             panel.size.height > px(400.),
             "the page fills the column: {panel:?}"
         );
+        // The content column is centered in the space right of the
+        // nav, not hugging it (the screenshots showed cards pinned
+        // left with a void to the right): its left gap and right gap
+        // are within 40px of each other.
+        let nav = window
+            .try_find("nav-chat")
+            .expect("nav row painted")
+            .bounds();
+        let content = window
+            .try_find("settings-content")
+            .expect("content painted")
+            .bounds();
+        let left_gap = content.left() - nav.right();
+        let right_gap = panel.right() - content.right();
+        assert!(
+            left_gap > px(0.),
+            "content clears the nav: nav {nav:?} content {content:?}"
+        );
+        assert!(
+            (left_gap - right_gap).abs() < px(40.),
+            "the content column is centered: left gap {left_gap:?}, right gap {right_gap:?}"
+        );
     });
     // Switching sections swaps the content: Tools & agents owns the
     // sandbox switch; Chat owns the mode buttons.

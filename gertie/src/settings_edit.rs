@@ -998,6 +998,10 @@ fn agent_row(
 
 /// The section-header styling for this panel.
 /// One settings group: a titled card, the panel's unit of reading.
+/// The settings page's content column: the transcript's reading
+/// width, plus a little for forms. Centered, never hugging the nav.
+const CONTENT_WIDTH: f32 = 720.;
+
 fn settings_card(title: &'static str, cx: &App) -> gpui_kit::Div {
     v_flex()
         .w_full()
@@ -1261,19 +1265,27 @@ impl Render for SettingsPanelView {
                 )
         });
 
-        // The save-result messages live at the page's top, above nav
-        // and content, so a save reports no matter which section shows.
-        let status_line = v_flex().children(self.status.iter().map(|(message, is_error)| {
-            div()
-                .px_1()
-                .text_size(px(11.5))
-                .text_color(if *is_error {
-                    theme.danger
-                } else {
-                    theme.success
-                })
-                .child(message.clone())
-        }));
+        // The save-result messages live above the content column, so a
+        // save reports no matter which section shows. Inside the
+        // column's width, so it reads as the page's status, not a
+        // banner over everything.
+        let status_line =
+            v_flex()
+                .px_6()
+                .pt_2()
+                .child(v_flex().w_full().max_w(px(CONTENT_WIDTH)).children(
+                    self.status.iter().map(|(message, is_error)| {
+                        div()
+                            .px_1()
+                            .text_size(px(11.))
+                            .text_color(if *is_error {
+                                theme.danger
+                            } else {
+                                theme.success
+                            })
+                            .child(message.clone())
+                    }),
+                ));
 
         // One section's cards at a time, in nav order; the nav rows
         // pick which. The content pane holds the active section only.
@@ -1324,7 +1336,7 @@ impl Render for SettingsPanelView {
             content.push(
                 settings_card("New sessions start in", cx)
                     .child(section_note(
-                        "The composer's mode chip overrides per conversation. Auto needs the                          sandbox on to run bash unasked; with it off, Auto asks like Accept edits.",
+                        "The composer's mode chip overrides per conversation. Auto needs the sandbox on to run bash unasked; with it off, Auto asks like Accept edits.",
                     ))
                     .child(
                         h_flex().gap_1().flex_wrap().children(modes.map(|(mode, label)| {
@@ -1385,7 +1397,7 @@ impl Render for SettingsPanelView {
             content.push(
                 settings_card("Check before a turn ends", cx)
                     .child(section_note(
-                        "The check gertie runs before an editing turn ends. Each workspace's                          inference (a Makefile, scripts/build.sh) wins when there is one; a                          command here overrides it everywhere.",
+                        "The check gertie runs before an editing turn ends. Each workspace's inference (a Makefile, scripts/build.sh) wins when there is one; a command here overrides it everywhere.",
                     ))
                     .child({
                         let panel = cx.entity().downgrade();
@@ -1511,7 +1523,7 @@ impl Render for SettingsPanelView {
             content.push(
                 settings_card("Web search", cx)
                     .child(section_note(
-                        "web_search's backend. None leaves the tool explaining how to configure                          it instead of failing mysteriously. Applies on restart.",
+                        "web_search's backend. None leaves the tool explaining how to configure it instead of failing mysteriously. Applies on restart.",
                     ))
                     .child(
                         h_flex().gap_1().children(
@@ -1692,7 +1704,7 @@ impl Render for SettingsPanelView {
             content.push(
                 settings_card("Repo map", cx)
                     .child(section_note(&format!(
-                        "The ranked map of the workspace's code, sent at session start, and the                          repo_map tool. Budget {}/tokens frames it; empty = the default.",
+                        "The ranked map of the workspace's code, sent at session start, and the repo_map tool. Budget {}/tokens frames it; empty = the default.",
                         self.summary.repo_map_budget
                     )))
                     .child({
@@ -1722,28 +1734,60 @@ impl Render for SettingsPanelView {
             );
         }
 
-        // The config file note: a footer fact, not a section.
-        content.push(
-            settings_card("Config file", cx)
-                .child(
-                    div()
-                        .text_size(px(11.))
-                        .text_color(theme.muted_foreground)
-                        .child(match &self.summary.config_path {
-                            Some(path) => format!(
-                                "Changes save to {} as you make them; its comments and unknown keys are kept.",
-                                path.display()
-                            ),
-                            None => "no config file location".into(),
-                        }),
-                )
-                .into_any_element(),
-        );
+        // The two-pane page: nav left, one section's content centered
+        // in the rest, the way the transcript centers its reading
+        // column. The old left-hugging max_w left a void to the right
+        // (the screenshots showed it).
+        let content_column = v_flex()
+            .id("settings-content")
+            .test_support()
+            .flex_1()
+            .min_w_0()
+            .h_full()
+            .overflow_y_scroll()
+            .pt_3()
+            .pb_4()
+            .gap_3()
+            .child(
+                // Centered like the transcript's reading column: the
+                // cards never hug the nav, whatever the window width.
+                div()
+                    .w_full()
+                    .flex()
+                    .justify_center()
+                    .child(
+                        v_flex()
+                            .gap_3()
+                            .px_6()
+                            .w_full()
+                            .max_w(px(CONTENT_WIDTH))
+                            .children(content),
+                    ),
+            )
+            .child(
+                // The config-file fact, once, as the page's footer: a
+                // path, not a card, and not repeated per section.
+                div()
+                    .w_full()
+                    .flex()
+                    .justify_center()
+                    .child(
+                        div()
+                            .w_full()
+                            .max_w(px(CONTENT_WIDTH))
+                            .px_6()
+                            .text_size(px(10.5))
+                            .text_color(theme.muted_foreground)
+                            .child(match &self.summary.config_path {
+                                Some(path) => format!(
+                                    "Saved to {} as you make them; its comments and unknown keys are kept.",
+                                    path.display()
+                                ),
+                                None => "no config file location".into(),
+                            }),
+                    ),
+            );
 
-        // The two-pane page: nav left, one section's content right.
-        // The wrapper is the page the chat overlays over the
-        // transcript; it fills, so the content pane gets the width
-        // the old 300px strip could never have.
         v_flex()
             .id("settings-panel")
             .test_support()
@@ -1754,18 +1798,12 @@ impl Render for SettingsPanelView {
             .child(status_line)
             .child(
                 h_flex().flex_1().min_h_0().child(nav).child(
-                    v_flex()
-                        .id("settings-content")
+                    div()
                         .flex_1()
                         .min_w_0()
                         .h_full()
-                        .overflow_y_scroll()
-                        .px_6()
-                        .pt_3()
-                        .pb_3()
-                        .gap_3()
-                        .max_w(px(760.))
-                        .children(content),
+                        .bg(theme.background)
+                        .child(content_column),
                 ),
             )
     }
