@@ -1783,7 +1783,7 @@ impl Render for SettingsPanelView {
             .id("settings-panel")
             .test_support()
             .w_full()
-            .h(px(560.))
+            .h(px(680.))
             .child(nav)
             .child(
                 v_flex()

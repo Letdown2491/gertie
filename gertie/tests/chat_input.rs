@@ -6850,14 +6850,14 @@ fn the_settings_page_groups_four_sections_and_covers_the_middle_column() {
             window.try_find("nav-appearance").is_none() && window.try_find("nav-config").is_none(),
             "the eight-tab nav is gone"
         );
-        // The dialog is its body's height (560px), not the window's:
+        // The dialog is its body's height (680px), not the window's:
         // a modal sizes to its content, no full-screen void.
         let panel = window
             .try_find("settings-panel")
             .expect("panel painted")
             .bounds();
         assert!(
-            (panel.size.height - px(560.)).abs() < px(2.),
+            (panel.size.height - px(680.)).abs() < px(2.),
             "the dialog sizes to its body: {panel:?}"
         );
         // The card column fills the pane right of the nav: its gaps
@@ -7136,7 +7136,7 @@ fn settings_modal_covers_and_centers_at_a_wide_window() {
         );
         // The dialog is its body's height (560px), not the window's.
         assert!(
-            (panel.size.height - px(560.)).abs() < px(2.),
+            (panel.size.height - px(680.)).abs() < px(2.),
             "the dialog is its body's height: {panel:?}"
         );
     });
