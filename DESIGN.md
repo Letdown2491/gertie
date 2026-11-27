@@ -535,6 +535,17 @@ the ledger is how gertie checks them against itself.
 - **The main session is the leader.** No separate coordinator agent; the leader delegates via
   the `agent` tool and workers report only to the leader. Workers are isolated from each other;
   the leader relays.
+- **Memory in workers**: read, never write. A worker gets recall on touch (entries citing a
+  file arrive with its first touch, as in the leader's turn), and every reading type carries
+  `search_memory` (and `repo_map`). It gets no frozen index: up to 600 tokens per worker,
+  where touch and search are scoped to what the brief works on. `remember` and `memory` are
+  withheld from every worker whatever its allowlist says: parallel workers would save the
+  same lesson twice, and a worker sees its brief, not the session the lesson came from. A
+  worker names what is worth keeping in its report's CONCERNS; the leader decides.
+- **The check in workers**: a worker that can edit and run bash runs the project check (#40)
+  in its own turn before it reports. The leader's check counts only the leader's own edit
+  calls, so without this a delegated edit was never checked; the worker also holds the
+  context to fix a failure.
 - **Concurrency**: parent may launch multiple `agent` calls per turn; default cap 4 (configurable).
 - **Model routing**: inherit parent model by default; per-type override in `gertie.toml`
   (e.g. `explore` on a cheap fast model, synthesis on the strong model).

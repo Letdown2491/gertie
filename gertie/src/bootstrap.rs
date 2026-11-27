@@ -784,7 +784,9 @@ impl Bootstrap {
                     session_scope.clone(),
                     mode_scope.clone(),
                     sandbox_bash,
-                );
+                )
+                .with_memory(config.memory_enabled().then(|| Arc::clone(&memory)))
+                .with_verify(config.resolve_verify(&workspace_root));
                 match &target.endpoint {
                     Some(pinned) => label.push_str(&format!(
                         " · agent:{}@{}",
@@ -942,7 +944,9 @@ impl Bootstrap {
                     self.session_scope.clone(),
                     self.mode_scope.clone(),
                     sandbox_bash,
-                );
+                )
+                .with_memory(config.memory_enabled().then(|| Arc::clone(&memory)))
+                .with_verify(config.resolve_verify(&root));
                 additions.push((tool.name().to_string(), Arc::new(tool)));
             }
             let map = Arc::get_mut(&mut tools).expect("registry not yet shared");

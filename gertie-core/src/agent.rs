@@ -84,7 +84,20 @@ fn escape_envelope_delimiters(text: &str) -> String {
 /// `[[agents]]` entry with the same name replaces the built-in; extra
 /// entries are added on top.
 pub fn builtin_agent_types() -> Vec<AgentType> {
-    const READ: &[&str] = &["read_file", "glob", "grep", "search_history", "load_skill"];
+    // Every reading type can search memory (recorded decisions and
+    // gotchas are part of reading a codebase) and ask for the repo map
+    // (#41: fewer steps to find things). Writing memory is the
+    // leader's (see `worker_registry`). A tool the registry lacks
+    // (the map turned off) simply isn't there.
+    const READ: &[&str] = &[
+        "read_file",
+        "glob",
+        "grep",
+        "search_history",
+        "search_memory",
+        "repo_map",
+        "load_skill",
+    ];
     vec![
         AgentType {
             name: "explore".into(),
@@ -120,8 +133,8 @@ pub fn builtin_agent_types() -> Vec<AgentType> {
             description: "Use for delegated code changes within a defined scope: implement \
                           the brief exactly, run the relevant checks, report what changed."
                 .into(),
-            system_prompt: "You are an implementation agent. Do exactly what the brief asks \
-                           , no scope creep. Match surrounding code style. Verify with the \
+            system_prompt: "You are an implementation agent. Do exactly what the brief asks, \
+                            no scope creep. Match surrounding code style. Verify with the \
                             project's own checks where possible. Report what changed and \
                             how you verified it."
                 .into(),
@@ -132,16 +145,23 @@ pub fn builtin_agent_types() -> Vec<AgentType> {
             description: "Use to run test suites, reproduce failures, and verify behavior. \
                           Reports findings; does not fix code."
                 .into(),
-            system_prompt: "You are a testing agent. Reproduce, run, and observe, you do \
+            system_prompt: "You are a testing agent. Reproduce, run, and observe. You do \
                             not fix code. Report exact commands, exact output, and your \
                             verdict on whether the behavior matches the brief."
                 .into(),
             tools: Some(
-                ["bash", "read_file", "glob", "grep", "load_skill"]
-                    .iter()
-                    .copied()
-                    .map(String::from)
-                    .collect(),
+                [
+                    "bash",
+                    "read_file",
+                    "glob",
+                    "grep",
+                    "search_memory",
+                    "load_skill",
+                ]
+                .iter()
+                .copied()
+                .map(String::from)
+                .collect(),
             ),
         },
         AgentType {
@@ -151,7 +171,11 @@ pub fn builtin_agent_types() -> Vec<AgentType> {
                 .into(),
             system_prompt: "You are a review agent. Judge correctness first, then security, \
                             then clarity. Every finding cites a file and line. Verify claims \
-                            by reading, never by assuming. Say what is good, too, briefly."
+                            by reading, never by assuming. You can't run commands: review the \
+                            files and the change named in the brief, and say what you could \
+                            not see. \
+                            Check the change against recorded decisions (search_memory). Say \
+                            what is good, too, briefly."
                 .into(),
             tools: Some(READ.iter().copied().map(String::from).collect()),
         },
@@ -165,11 +189,19 @@ pub fn builtin_agent_types() -> Vec<AgentType> {
                             your deliverable is a diagnosis with evidence, not a patch."
                 .into(),
             tools: Some(
-                ["bash", "read_file", "glob", "grep", "search_history"]
-                    .iter()
-                    .copied()
-                    .map(String::from)
-                    .collect(),
+                [
+                    "bash",
+                    "read_file",
+                    "glob",
+                    "grep",
+                    "search_history",
+                    "search_memory",
+                    "load_skill",
+                ]
+                .iter()
+                .copied()
+                .map(String::from)
+                .collect(),
             ),
         },
         AgentType {
@@ -182,40 +214,66 @@ pub fn builtin_agent_types() -> Vec<AgentType> {
                             you could not verify."
                 .into(),
             tools: Some(
-                ["web_fetch", "web_search", "read_file", "glob", "grep"]
-                    .iter()
-                    .copied()
-                    .map(String::from)
-                    .collect(),
+                [
+                    "web_fetch",
+                    "web_search",
+                    "read_file",
+                    "glob",
+                    "grep",
+                    "search_memory",
+                ]
+                .iter()
+                .copied()
+                .map(String::from)
+                .collect(),
             ),
         },
         AgentType {
             name: "librarian".into(),
-            description: "Use to mine past gertie sessions, what we did before, what was \
-                          decided, what broke last time. Returns hits with session titles."
+            description: "Use to mine what this project remembers: memory entries and past \
+                          gertie sessions, what we did before, what was decided, what broke \
+                          last time. Returns hits with entry ids or session titles."
                 .into(),
-            system_prompt: "You are a memory agent. Search past sessions with search_history \
-                            and read the current workspace to connect the dots. Report what \
-                            was found, in which session, and what remains unknown."
+            system_prompt: "You are a memory agent. Search recorded memory entries with \
+                            search_memory and past sessions with search_history, and read the \
+                            current workspace to connect the dots. Report what was found, \
+                            where (entry id or session), whether the code still agrees, and \
+                            what remains unknown."
                 .into(),
             tools: Some(
-                ["search_history", "read_file", "glob", "grep"]
-                    .iter()
-                    .copied()
-                    .map(String::from)
-                    .collect(),
+                [
+                    "search_history",
+                    "search_memory",
+                    "read_file",
+                    "glob",
+                    "grep",
+                ]
+                .iter()
+                .copied()
+                .map(String::from)
+                .collect(),
             ),
         },
     ]
 }
 
-/// The worker's registry: allowlist applied, agent tools stripped,
-/// depth-1 enforced by what the map contains, not by prompt discipline.
+/// Tools no worker gets, whatever its allowlist says: writing memory
+/// is the leader's. Parallel workers saving the same lesson would
+/// duplicate it, and a worker sees only its brief, not the session the
+/// lesson came from; a worker flags what is worth keeping in its
+/// report's CONCERNS, and the leader decides. Reading stays open
+/// (`search_memory`, and recall on touch).
+pub const WORKER_WITHHELD: [&str; 2] = ["remember", "memory"];
+
+/// The worker's registry: allowlist applied, agent tools and memory
+/// writes stripped, depth-1 enforced by what the map contains, not by
+/// prompt discipline.
 pub fn worker_registry(all: &ToolRegistry, allowlist: Option<&[String]>) -> ToolRegistry {
     let filtered = all
         .iter()
         .filter(|(name, _)| {
             !name.starts_with("agent_")
+                && !WORKER_WITHHELD.contains(&name.as_str())
                 && allowlist.is_none_or(|allowed| allowed.iter().any(|a| a == *name))
         })
         .map(|(name, tool)| (name.clone(), tool.clone()))
@@ -254,6 +312,16 @@ pub struct AgentTool {
     /// Whether bash runs inside the Landlock sandbox, mirrored into
     /// the worker's turn, whose Auto mode keys off the same fact.
     sandbox_bash: bool,
+    /// The memory store, for the worker's recall on touch (#36): a
+    /// worker editing a file with a recorded gotcha sees it, the way
+    /// the leader would. None = memory off.
+    memory: Option<Arc<crate::MemoryStore>>,
+    /// The project check (#40), run by the worker's own turn before it
+    /// reports. Only a worker that can edit and run bash gets it: the
+    /// leader's check never sees a worker's edits (they are not its
+    /// own edit calls), and the worker holds the context to fix a
+    /// failure.
+    verify: Option<String>,
 }
 
 #[derive(serde::Deserialize)]
@@ -298,7 +366,26 @@ impl AgentTool {
             mode_scope,
             turn_scope: Arc::new(std::sync::Mutex::new(None)),
             sandbox_bash,
+            memory: None,
+            verify: None,
         }
+    }
+
+    /// Gives the worker recall on touch over `memory` (None = off).
+    pub fn with_memory(mut self, memory: Option<Arc<crate::MemoryStore>>) -> Self {
+        self.memory = memory;
+        self
+    }
+
+    /// Gives the worker the project check, when it can act on one: a
+    /// registry with an edit tool and bash. A read-only worker never
+    /// edits, so it never checks.
+    pub fn with_verify(mut self, command: Option<String>) -> Self {
+        let edits = ["edit_file", "write_file"]
+            .iter()
+            .any(|name| self.worker_tools.contains_key(*name));
+        self.verify = command.filter(|_| edits && self.worker_tools.contains_key("bash"));
+        self
     }
 
     /// The live turn's routing token, set at turn start. The loop
@@ -477,8 +564,9 @@ impl AgentTool {
                 // (its registry stripped them), so nothing ever writes
                 // this handle; it exists to satisfy the spec.
                 worker_progress: WorkerProgress::default(),
-                // Workers report to a leader whose own turn checks.
-                verify: None,
+                // A worker that edits runs the check itself: the
+                // leader's turn never counts a worker's edits.
+                verify: self.verify.clone(),
                 // A worker may run on another endpoint; it gets the
                 // full coaching until its own profile says otherwise.
                 tool_guidance: crate::tool::ToolGuidance::Standard,
@@ -490,17 +578,27 @@ impl AgentTool {
                      A brief file has been written for you:\n\n---\n{}\n---\n\n\
                      {}\n\n\
                      Execute the brief with your tools. Verify your work. \
+                     {}\
                      Finish with a report:\n\
                      STATUS: done | blocked\n\
                      EVIDENCE: what you did (commands, files, results)\n\
                      SUMMARY: one line\n\
-                     CONCERNS: anything the leader should know",
+                     CONCERNS: anything the leader should know, including anything \
+                     worth remembering for future sessions (you don't write memory; \
+                     the leader does)",
                     self.project_instructions()
                         .map_or_else(String::new, |text| format!(
                             "Project instructions (binding):\n\n{text}\n\n"
                         )),
                     escape_envelope_delimiters(&brief),
-                    escape_envelope_delimiters(&guidance)
+                    escape_envelope_delimiters(&guidance),
+                    if self.worker_tools.contains_key("search_memory") {
+                        "Recorded project memory arrives with the files you touch, and \
+                         search_memory finds more: treat entries as leads to check \
+                         against the code, not as facts. "
+                    } else {
+                        ""
+                    }
                 )),
                 snapshots: self.snapshots.clone(),
                 checkpoint_session: run,
@@ -521,13 +619,14 @@ impl AgentTool {
                 turn_token: *self.turn_scope.lock().expect("turn scope"),
                 // Instructions reach the worker through its brief
                 // envelope, not the spec: the brief is the whole world.
-                // Workers get no memory index either: they are
-                // brief-scoped (PR 3 plan; the librarian mines memory
-                // explicitly).
+                // No frozen memory index (up to 600 tokens per worker):
+                // memory reaches a worker by touch (recall) and by
+                // search (`search_memory`), the two that are scoped to
+                // what the brief actually works on.
                 instructions: None,
                 memory_index: None,
                 repo_map: None,
-                memory: None,
+                memory: self.memory.clone(),
                 system_prompt: Some(self.system_prompt.clone()),
             });
 
@@ -1074,6 +1173,259 @@ mod tests {
         assert!(!worker.contains_key("bash"));
     }
 
+    /// A provider that plays one script per request and keeps every
+    /// request it saw.
+    struct Scripted {
+        scripts: std::sync::Mutex<Vec<Vec<crate::Event>>>,
+        seen: std::sync::Mutex<Vec<crate::Request>>,
+    }
+
+    impl Scripted {
+        fn new(scripts: Vec<Vec<crate::Event>>) -> Arc<Self> {
+            Arc::new(Self {
+                scripts: std::sync::Mutex::new(scripts),
+                seen: std::sync::Mutex::new(Vec::new()),
+            })
+        }
+    }
+
+    impl crate::Provider for Scripted {
+        fn stream(&self, request: crate::Request) -> BoxStream<'static, crate::Event> {
+            self.seen.lock().unwrap().push(request);
+            let script = self.scripts.lock().unwrap().remove(0);
+            Box::pin(futures_util::stream::iter(script))
+        }
+    }
+
+    fn call(name: &str, arguments: &str) -> Vec<crate::Event> {
+        vec![
+            crate::Event::ToolCall {
+                id: "c1".into(),
+                name: name.into(),
+                arguments: arguments.into(),
+            },
+            crate::Event::Done,
+        ]
+    }
+
+    fn report() -> Vec<crate::Event> {
+        vec![
+            crate::Event::Token {
+                delta: "STATUS: done".into(),
+            },
+            crate::Event::Done,
+        ]
+    }
+
+    /// A tool that records each call's arguments and answers a fixed
+    /// result; `mutates` decides whether the loop treats it as an edit.
+    struct Recorder {
+        name: &'static str,
+        mutates: bool,
+        result: &'static str,
+        calls: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl Tool for Recorder {
+        fn name(&self) -> &'static str {
+            self.name
+        }
+        fn description(&self) -> String {
+            "recorder".into()
+        }
+        fn parameters(&self) -> serde_json::Value {
+            serde_json::json!({"type": "object"})
+        }
+        fn mutates(&self) -> bool {
+            self.mutates
+        }
+        fn run<'a>(
+            &'a self,
+            arguments: &'a str,
+        ) -> Pin<Box<dyn Future<Output = ToolResult> + Send + 'a>> {
+            self.calls.lock().unwrap().push(arguments.to_string());
+            Box::pin(async { Ok(self.result.to_string()) })
+        }
+    }
+
+    fn recorder(name: &'static str, mutates: bool, result: &'static str) -> Arc<Recorder> {
+        Arc::new(Recorder {
+            name,
+            mutates,
+            result,
+            calls: std::sync::Mutex::new(Vec::new()),
+        })
+    }
+
+    fn worker_tool(
+        provider: Arc<Scripted>,
+        tools: Vec<Arc<Recorder>>,
+        allowlist: Option<Vec<String>>,
+        root: &std::path::Path,
+        mode: crate::PermissionMode,
+    ) -> AgentTool {
+        let mut map = std::collections::BTreeMap::new();
+        for tool in tools {
+            map.insert(tool.name.to_string(), tool as Arc<dyn Tool>);
+        }
+        let modes = ModeScope::new();
+        modes.set(mode);
+        AgentTool::new(
+            AgentType {
+                name: "worker".into(),
+                description: "does the thing".into(),
+                system_prompt: "work hard".into(),
+                tools: allowlist,
+            },
+            provider,
+            &Arc::new(map),
+            None,
+            Arc::new(PermissionBroker::new()),
+            None,
+            root.to_path_buf(),
+            None,
+            crate::SessionScope::new(),
+            modes,
+            false,
+        )
+    }
+
+    #[test]
+    fn workers_never_get_memory_writes_even_when_allowlisted() {
+        let mut map = std::collections::BTreeMap::new();
+        for name in ["read_file", "remember", "memory", "search_memory"] {
+            map.insert(
+                name.to_string(),
+                Arc::new(NoopTool { name }) as Arc<dyn Tool>,
+            );
+        }
+        let all: ToolRegistry = Arc::new(map);
+        let full = worker_registry(&all, None);
+        assert!(!full.contains_key("remember") && !full.contains_key("memory"));
+        assert!(full.contains_key("search_memory"));
+        let listed = worker_registry(&all, Some(&["remember".into(), "search_memory".into()]));
+        assert!(
+            !listed.contains_key("remember"),
+            "the allowlist can't reopen it"
+        );
+        assert!(listed.contains_key("search_memory"));
+    }
+
+    #[test]
+    fn only_a_worker_that_edits_and_runs_bash_gets_the_check() {
+        let tmp = tempfile::tempdir().unwrap();
+        let editor = || {
+            vec![
+                recorder("write_file", true, "wrote"),
+                recorder("bash", true, "ok"),
+                recorder("read_file", false, "text"),
+            ]
+        };
+        let check = Some("cargo check".to_string());
+        let full = worker_tool(
+            Scripted::new(vec![]),
+            editor(),
+            None,
+            tmp.path(),
+            crate::PermissionMode::Supervised,
+        )
+        .with_verify(check.clone());
+        assert_eq!(full.verify.as_deref(), Some("cargo check"));
+        let reader = worker_tool(
+            Scripted::new(vec![]),
+            editor(),
+            Some(vec!["read_file".into(), "bash".into()]),
+            tmp.path(),
+            crate::PermissionMode::Supervised,
+        )
+        .with_verify(check.clone());
+        assert_eq!(reader.verify, None, "no edit tool, no check");
+        let no_bash = worker_tool(
+            Scripted::new(vec![]),
+            editor(),
+            Some(vec!["write_file".into()]),
+            tmp.path(),
+            crate::PermissionMode::Supervised,
+        )
+        .with_verify(check);
+        assert_eq!(no_bash.verify, None, "the check runs as bash");
+    }
+
+    #[test]
+    fn a_worker_touching_a_cited_file_recalls_its_memory() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        std::fs::create_dir_all(root.join(".gertie/memory")).unwrap();
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(root.join("src/pool.rs"), "fn pool() {}\n").unwrap();
+        let hash = crate::memory::blob_hash(b"fn pool() {}\n");
+        std::fs::write(
+            root.join(".gertie/memory/gotchas.md"),
+            format!(
+                "- [p1] helpful=0 harmful=0 the pool must stay at 8 slots \
+                 [evidence: src/pool.rs@{hash}] [source: added: 2026-11-01]\n"
+            ),
+        )
+        .unwrap();
+        std::fs::write(root.join("brief.md"), "Look at the pool.").unwrap();
+        let memory = Arc::new(crate::MemoryStore::open(
+            root.join(".gertie/memory"),
+            root.join("global"),
+            Arc::new(crate::SessionStore::open(std::path::Path::new(":memory:")).unwrap()),
+        ));
+        let provider = Scripted::new(vec![
+            call("read_file", r#"{"path": "src/pool.rs"}"#),
+            report(),
+        ]);
+        let tool = worker_tool(
+            provider.clone(),
+            vec![recorder("read_file", false, "fn pool() {}")],
+            None,
+            &root,
+            crate::PermissionMode::Supervised,
+        )
+        .with_memory(Some(memory));
+        crate::testing::block_on(tool.run(r#"{"brief_path": "brief.md"}"#)).expect("report");
+
+        let seen = provider.seen.lock().unwrap();
+        let result = seen[1]
+            .messages
+            .iter()
+            .find(|message| message.role == crate::Role::Tool)
+            .and_then(|message| message.content.as_deref())
+            .expect("the read's result");
+        assert!(
+            result.contains("[memory: entries citing src/pool.rs]")
+                && result.contains("the pool must stay at 8 slots"),
+            "recall rode the worker's read: {result}"
+        );
+    }
+
+    #[test]
+    fn a_worker_that_edits_runs_the_check_before_it_reports() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        std::fs::write(root.join("brief.md"), "Change the file.").unwrap();
+        let bash = recorder("bash", true, "all good");
+        let provider = Scripted::new(vec![
+            call("write_file", r#"{"path": "a.txt", "content": "x"}"#),
+            report(),
+            report(),
+        ]);
+        let tool = worker_tool(
+            provider,
+            vec![recorder("write_file", true, "wrote"), bash.clone()],
+            None,
+            &root,
+            crate::PermissionMode::FullAccess,
+        )
+        .with_verify(Some("make check".into()));
+        crate::testing::block_on(tool.run(r#"{"brief_path": "brief.md"}"#)).expect("report");
+        let commands = bash.calls.lock().unwrap();
+        assert_eq!(commands.len(), 1, "the check ran once: {commands:?}");
+        assert!(commands[0].contains("make check"), "{commands:?}");
+    }
+
     #[test]
     fn builtin_types_have_unique_names_and_safe_allowlists() {
         let builtins = builtin_agent_types();
@@ -1109,6 +1461,20 @@ mod tests {
                 "{}: empty prompt",
                 t.name
             );
+            // Every type reads memory; an allowlist that forgot it
+            // leaves a worker blind to recorded decisions.
+            if let Some(allow) = &t.tools {
+                assert!(
+                    allow.iter().any(|n| n == "search_memory"),
+                    "{} can't search memory",
+                    t.name
+                );
+            }
+            // A dash removed from a continued string literal leaves a
+            // stray " ," the model reads verbatim.
+            for text in [&t.description, &t.system_prompt] {
+                assert!(!text.contains(" ,"), "{}: stray comma in {text:?}", t.name);
+            }
         }
     }
 
