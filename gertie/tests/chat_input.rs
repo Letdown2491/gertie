@@ -6920,7 +6920,9 @@ fn the_settings_page_groups_four_sections_and_covers_the_middle_column() {
             "the page is gone after esc"
         );
     });
-    // The ✕ closes too: reopen, click it.
+    // The ✕ closes too: reopen, click it. And the rail's own open
+    // path focuses the dialog, so Esc closes from it as well (this
+    // was the bug: only the palette's open handed focus over).
     fixture.act(|window, cx| window.click("toggle-settings", cx));
     let reopened = fixture.cx.update(|cx| {
         fixture
@@ -6931,6 +6933,17 @@ fn the_settings_page_groups_four_sections_and_covers_the_middle_column() {
             .panel_for_test()
     });
     assert_eq!(reopened, "settings", "the sidebar's toggle reopens");
+    fixture.act(|window, cx| window.press("escape", cx));
+    let esc_from_rail = fixture.cx.update(|cx| {
+        fixture
+            .view
+            .upgrade()
+            .expect("view alive")
+            .read(cx)
+            .panel_for_test()
+    });
+    assert_eq!(esc_from_rail, "none", "rail-opened dialog answers esc");
+    fixture.act(|window, cx| window.click("toggle-settings", cx));
     fixture.act(|window, cx| window.click("settings-close", cx));
     let xed = fixture.cx.update(|cx| {
         fixture

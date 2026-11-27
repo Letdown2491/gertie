@@ -1026,7 +1026,7 @@ impl Render for SettingsPanelView {
         let section = self.section;
 
         // The nav: one row per section, the active one filled. The
-        // page's left pane; the content pane shows one section whole
+        // dialog's left pane; the content pane shows one section whole
         // instead of eight cards in a strip.
         let nav = v_flex()
             .id("settings-nav")
@@ -1039,33 +1039,13 @@ impl Render for SettingsPanelView {
             .px_2()
             .gap_0p5()
             .child(
-                h_flex()
+                div()
                     .px_2()
                     .pb_2()
-                    .items_center()
-                    .justify_between()
-                    .child(
-                        div()
-                            .text_size(px(11.))
-                            .font_weight(gpui_kit::FontWeight::SEMIBOLD)
-                            .text_color(theme.muted_foreground)
-                            .child("Settings"),
-                    )
-                    .child(
-                        div()
-                            .id("settings-close")
-                            .test_support()
-                            .cursor_pointer()
-                            .px_1()
-                            .text_size(px(12.))
-                            .text_color(theme.muted_foreground)
-                            .hover(|style| style.text_color(theme.foreground))
-                            .on_click(cx.listener(|_, _, _, cx| {
-                                cx.emit(SettingsEvent::Dismissed);
-                            }))
-                            .tooltip(|window, cx| Tooltip::new("Close (esc)").build(window, cx))
-                            .child(Button::new("settings-close-btn").label("✕").small().ghost()),
-                    ),
+                    .text_size(px(11.))
+                    .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                    .text_color(theme.muted_foreground)
+                    .child("Settings"),
             )
             .children(
                 [
@@ -1778,13 +1758,33 @@ impl Render for SettingsPanelView {
         // The dialog body: nav left, the right pane carries the save
         // status over one section's scrolling content. The shell's
         // modal card wraps this, so the body just fills it: a definite
-        // height here sizes the card.
+        // height here sizes the card. The ✕ sits top-right on the
+        // dialog itself, the modal convention, not tucked in the nav.
         h_flex()
             .id("settings-panel")
             .test_support()
             .w_full()
             .h(px(680.))
+            .relative()
             .child(nav)
+            .child(
+                div()
+                    .id("settings-close")
+                    .test_support()
+                    .absolute()
+                    .top_2()
+                    .right_2()
+                    .cursor_pointer()
+                    .px_1()
+                    .text_size(px(13.))
+                    .text_color(theme.muted_foreground)
+                    .hover(|style| style.text_color(theme.foreground))
+                    .on_click(cx.listener(|_, _, _, cx| {
+                        cx.emit(SettingsEvent::Dismissed);
+                    }))
+                    .tooltip(|window, cx| Tooltip::new("Close (esc)").build(window, cx))
+                    .child("✕"),
+            )
             .child(
                 v_flex()
                     .flex_1()

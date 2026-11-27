@@ -2830,30 +2830,34 @@ impl ChatView {
 
     /// The settings panel toggle: the right column's only panel now,
     /// the toggle opens and closes it.
-    fn toggle_settings(&mut self, cx: &mut Context<Self>) {
-        self.panel = if self.panel == Panel::Settings {
-            Panel::None
+    /// Rail / empty-state / backdrop toggle: open hands focus to the
+    /// dialog (its Escape rule binds), close gives it back to the
+    /// composer.
+    fn toggle_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.panel == Panel::Settings {
+            self.close_settings(window, cx);
         } else {
-            Panel::Settings
-        };
-        self.total_usage = self.store.total_usage();
-        cx.notify();
+            self.open_settings(window, cx);
+        }
     }
 
-    /// Opens the settings page, handing it focus so its Escape rule
-    /// (close-settings, settingsPanelFocus) binds.
+    /// Opens the settings dialog, handing it focus so its Escape rule
+    /// (close-settings, settingsPanelFocus) binds however it opened.
     fn open_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.panel != Panel::Settings {
-            self.toggle_settings(cx);
+            self.panel = Panel::Settings;
+            self.total_usage = self.store.total_usage();
+            cx.notify();
         }
         window.focus(&self.side_focus, cx);
     }
 
-    /// Closes the settings page, focus going back to the composer.
+    /// Closes the settings dialog, focus going back to the composer.
     fn close_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.panel == Panel::Settings {
-            self.toggle_settings(cx);
+            self.panel = Panel::None;
             window.focus(&self.input.read(cx).focus_handle(cx), cx);
+            cx.notify();
         }
     }
 
@@ -5672,7 +5676,9 @@ impl ChatView {
                     Button::new("empty-state-configure")
                         .label("Add an endpoint")
                         .small()
-                        .on_click(cx.listener(|this, _, _, cx| this.toggle_settings(cx))),
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.toggle_settings(window, cx)
+                        })),
                 )
             })
             .when(fresh && !no_endpoint, |state| {
@@ -6467,12 +6473,10 @@ impl Render for ChatView {
             .on_action(cx.listener(
                 |this, _: &CloseTurnDiff, _, cx| this.close_turn_diff(cx),
             ))
-            // Escape inside the settings page closes it (focus is
-            // handed to the page on open).
-            .on_action(cx.listener(|this, _: &CloseSettings, _, cx| {
-                if this.panel == Panel::Settings {
-                    this.toggle_settings(cx);
-                }
+            // Escape inside the settings dialog closes it (focus is
+            // handed to the dialog on every open path).
+            .on_action(cx.listener(|this, _: &CloseSettings, window, cx| {
+                this.close_settings(window, cx);
             }))
             // Ctrl+Z outside the composer: undo a sidebar delete still
             // inside its window.
@@ -7182,7 +7186,9 @@ impl Render for ChatView {
                         .bg(theme.overlay)
                         .on_mouse_down(
                             gpui_kit::MouseButton::Left,
-                            cx.listener(|this, _, _, cx| this.toggle_settings(cx)),
+                            cx.listener(|this, _, window, cx| {
+                                this.toggle_settings(window, cx)
+                            }),
                         )
                         .child(
                             div()

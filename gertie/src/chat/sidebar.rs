@@ -55,7 +55,7 @@ impl ChatView {
                     .when(self.panel == Panel::Settings, |icon| {
                         icon.bg(cx.theme().foreground.opacity(0.09))
                     })
-                    .on_click(cx.listener(|this, _, _, cx| this.toggle_settings(cx))),
+                    .on_click(cx.listener(|this, _, window, cx| this.toggle_settings(window, cx))),
             )
             .test_support()
             .into_any_element()
@@ -273,7 +273,9 @@ impl ChatView {
                         .tooltip(|window, cx| {
                             Tooltip::new("Configuration, theme, and token totals").build(window, cx)
                         })
-                        .on_click(cx.listener(|this, _, _, cx| this.toggle_settings(cx)))
+                        .on_click(
+                            cx.listener(|this, _, window, cx| this.toggle_settings(window, cx)),
+                        )
                         .test_support(),
                     ),
             )
