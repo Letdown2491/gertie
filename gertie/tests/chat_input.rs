@@ -8,8 +8,8 @@ use gpui_kit::component::Root;
 use gpui_kit::test::TestWindowExt as _;
 use gpui_kit::{
     AnyWindowHandle, AppContext, Bounds, HeadlessAppContext, NoopTextSystem, SharedString,
-    WeakEntity, WindowBounds, WindowHandle, WindowOptions, component::v_flex, div, prelude::*,
-    px, size,
+    WeakEntity, WindowBounds, WindowHandle, WindowOptions, component::v_flex, div, prelude::*, px,
+    size,
 };
 use std::path::Path;
 use std::sync::Arc;
@@ -6947,16 +6947,61 @@ fn the_settings_page_groups_four_sections_and_covers_the_middle_column() {
     assert_eq!(xed, "none", "the ✕ closes the page");
 }
 
-/// The settings column's real geometry at a window wider than the
-/// card column's max width: the column must center in the space right
-/// of the nav. The 900px default fixture is narrower than the max
-/// width, where centering never engages, and a resize does not
-/// relayout the headless window, so this test opens its own wide one.
+/// The settings page's centering, measured where it engages and with
+/// a status column present: the wide shell runs a scripted turn that
+/// sets a goal and touches a file, so the column is on screen; the
+/// settings page retires it (the 05:50 build let it paint back over
+/// the page's right edge, leaving the cards visibly off-center), and
+/// the card column centers in the full middle column.
 #[test]
-fn settings_column_centers_at_a_wide_window() {
+fn settings_retire_the_status_column_and_center_at_a_wide_window() {
+    let dir = tempfile::tempdir().expect("workspace");
     let store = Arc::new(SessionStore::open(Path::new(":memory:")).expect("session store"));
-    let mut fixture = fixture_with_store(store);
-    let wide = fixture.cx.update(|cx| {
+    let (provider, scenarios) = replay_provider(
+        "[[steps]]\ntext = ''\n\n\
+         [[steps.tool_calls]]\nname = \"status\"\n\
+         arguments = '{\"goal\": \"Fix the teardown race\", \"next\": \"re-run the suite\"}'\n\n\
+         [[steps]]\ntext = 'done'\n",
+    );
+    let mut fixture = fixture_built(
+        store,
+        None,
+        Some(dir.path().to_path_buf()),
+        None,
+        Some(provider),
+        None,
+        vec![Arc::new(gertie_tools::Status)],
+        None,
+        None,
+    );
+    // dir moves into fixture.hold; the wide view reads the workspace
+    // path through the fixture's resumed session, not the tempdir.
+    let workspace = dir.path().to_path_buf();
+    fixture.hold = vec![scenarios, dir];
+    // A turn that sets the column's goal, so it has content to show.
+    fixture.act(|window, cx| {
+        window.input("The widget_test keeps flaking", cx);
+        window.press("enter", cx);
+    });
+    pump_until(
+        &mut fixture,
+        200,
+        |fixture| {
+            fixture.cx.update(|cx| {
+                !fixture
+                    .view
+                    .upgrade()
+                    .expect("view alive")
+                    .read(cx)
+                    .is_streaming()
+            })
+        },
+        "the scripted turn",
+    );
+    // The wide shell: born 1600px, a resize does not relayout the
+    // headless window, so the window must open wide for max-width
+    // centering to engage.
+    let wide: AnyWindowHandle = fixture.cx.update(|cx| {
         cx.open_window(
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(Bounds {
@@ -6966,102 +7011,137 @@ fn settings_column_centers_at_a_wide_window() {
                 ..Default::default()
             },
             |window, cx| {
-            let view = cx.new(|cx| {
-                let panel = cx.new(|_| {
-                    gertie::settings_edit::SettingsPanelView::new(
-                        &gertie::config::Config::default(),
-                        gertie::settings::SettingsSummary::from_config(
+                let view = cx.new(|cx| {
+                    let panel = cx.new(|_| {
+                        gertie::settings_edit::SettingsPanelView::new(
                             &gertie::config::Config::default(),
-                        ),
+                            gertie::settings::SettingsSummary::from_config(
+                                &gertie::config::Config::default(),
+                            ),
+                        )
+                    });
+                    ChatView::new(
+                        gertie::chat::ChatViewConfig {
+                            store: fixture.store.clone(),
+                            provider: None,
+                            snapshots: None,
+                            tools: gertie_tools::builtin_tools(Path::new(".")),
+                            endpoint_label: "no endpoint configured".into(),
+                            system_prompt: None,
+                            instructions: None,
+                            memory_index: None,
+                            memory_enabled: false,
+                            memory_store: None,
+                            memory_extract_provider: None,
+                            max_tool_rounds: None,
+                            grace_rounds: None,
+                            templates: Vec::new(),
+                            // The fixture turn's workspace: resume picks
+                            // its newest unsettled session, and the
+                            // rebuild folds the status tool call back
+                            // into the column.
+                            workspace_root: workspace.clone(),
+                            settle_command: None,
+                            verify: None,
+                            tool_guidance: gertie_core::ToolGuidance::Standard,
+                            compact_at: None,
+                            repo_map_budget: None,
+                            broker: Arc::new(gertie_core::PermissionBroker::new()),
+                            session_scope: gertie_core::SessionScope::new(),
+                            mode_scope: gertie_core::ModeScope::new(),
+                            sandbox_bash: false,
+                            default_mode: gertie_core::PermissionMode::Supervised,
+                            settings_panel: panel,
+                            resume: true,
+                            branch_naming: None,
+                            live_elsewhere: Arc::new(|_, _, _| Ok(())),
+                            switch: Arc::new(|root: &Path| {
+                                Ok(gertie::bootstrap::Switched {
+                                    tools: gertie_tools::builtin_tools(root),
+                                    system_prompt: None,
+                                    instructions: None,
+                                    memory_index: None,
+                                    memory: None,
+                                    memory_extract_provider: None,
+                                    workspace_root: root.to_path_buf(),
+                                    templates: Vec::new(),
+                                    sandbox_bash: false,
+                                    verify: None,
+                                    warnings: Vec::new(),
+                                })
+                            }),
+                            session_router: None,
+                        },
+                        window,
+                        cx,
                     )
                 });
-                ChatView::new(
-                    gertie::chat::ChatViewConfig {
-                        store: fixture.store.clone(),
-                        provider: None,
-                        snapshots: None,
-                        tools: gertie_tools::builtin_tools(Path::new(".")),
-                        endpoint_label: "no endpoint configured".into(),
-                        system_prompt: None,
-                        instructions: None,
-                        memory_index: None,
-                        memory_enabled: false,
-                        memory_store: None,
-                        memory_extract_provider: None,
-                        max_tool_rounds: None,
-                        grace_rounds: None,
-                        templates: Vec::new(),
-                        workspace_root: Path::new(".").to_path_buf(),
-                        settle_command: None,
-                        verify: None,
-                        tool_guidance: gertie_core::ToolGuidance::Standard,
-                        compact_at: None,
-                        repo_map_budget: None,
-                        broker: Arc::new(gertie_core::PermissionBroker::new()),
-                        session_scope: gertie_core::SessionScope::new(),
-                        mode_scope: gertie_core::ModeScope::new(),
-                        sandbox_bash: false,
-                        default_mode: gertie_core::PermissionMode::Supervised,
-                        settings_panel: panel,
-                        resume: false,
-                        branch_naming: None,
-                        live_elsewhere: Arc::new(|_, _, _| Ok(())),
-                        switch: Arc::new(|root: &Path| {
-                            Ok(gertie::bootstrap::Switched {
-                                tools: gertie_tools::builtin_tools(root),
-                                system_prompt: None,
-                                instructions: None,
-                                memory_index: None,
-                                memory: None,
-                                memory_extract_provider: None,
-                                workspace_root: root.to_path_buf(),
-                                templates: Vec::new(),
-                                sandbox_bash: false,
-                                verify: None,
-                                warnings: Vec::new(),
-                            })
-                        }),
-                        session_router: None,
-                    },
-                    window,
-                    cx,
-                )
-            });
                 cx.new(|cx| Root::new(view, window, cx))
             },
         )
         .expect("wide window")
+        .into()
     });
-    let open = |fixture: &mut Fixture, wide: WindowHandle<Root>, f: &dyn Fn(&mut gpui_kit::Window, &mut gpui_kit::App)| {
+    let draw = |fixture: &mut Fixture,
+                wide: AnyWindowHandle,
+                f: &dyn Fn(&mut gpui_kit::Window, &mut gpui_kit::App)| {
         fixture
             .cx
-            .update_window(wide.into(), |_, window, cx| f(window, cx))
+            .update_window(wide, |_, window, cx| f(window, cx))
             .expect("wide window");
-        settle(&mut fixture.cx, wide.into());
+        settle(&mut fixture.cx, wide);
     };
-    open(&mut fixture, wide, &|window, cx| window.press("ctrl-k", cx));
-    open(&mut fixture, wide, &|window, cx| window.input(">settings", cx));
-    open(&mut fixture, wide, &|window, cx| window.press("enter", cx));
-    open(&mut fixture, wide, &|window, _| {
+    // The resume rebuilds the column from the session's status tool
+    // call. The rebuild folds the stored rows on the background
+    // executor: wait for the wide window's own tree to show it (the
+    // fixture's view handle is the first window's chat, not this one).
+    let column_up = std::cell::Cell::new(false);
+    for _ in 0..100 {
+        pump(&mut fixture, 2);
+        draw(&mut fixture, wide, &|window, _| {
+            column_up.set(window.try_find("status-column").is_some());
+        });
+        if column_up.get() {
+            break;
+        }
+    }
+    assert!(
+        column_up.get(),
+        "the resumed session shows the status column"
+    );
+    // Open settings via the palette.
+    draw(&mut fixture, wide, &|window, cx| window.press("ctrl-k", cx));
+    draw(&mut fixture, wide, &|window, cx| {
+        window.input(">settings", cx)
+    });
+    draw(&mut fixture, wide, &|window, cx| window.press("enter", cx));
+    draw(&mut fixture, wide, &|window, _| {
+        assert!(
+            window.try_find("status-column").is_none(),
+            "the settings page retires the status column"
+        );
         let panel = window
             .try_find("settings-panel")
             .expect("panel painted")
             .bounds();
-        assert!(panel.size.width > px(1000.), "the wide window: {panel:?}");
         let nav = window.try_find("nav-chat").expect("nav painted").bounds();
         let column = window
             .try_find("settings-column")
             .expect("card column painted")
             .bounds();
-        println!(
-            "PROBE panel={panel:?} nav={nav:?} column={column:?}"
-        );
         let left_gap = column.left() - nav.right();
         let right_gap = panel.right() - column.right();
-        println!("PROBE left_gap={left_gap:?} right_gap={right_gap:?}");
         assert!(
             (left_gap - right_gap).abs() < px(40.),
-            "the card column centers right of the nav: left gap {left_gap:?}, right gap {right_gap:?}"
+            "the card column centers: left gap {left_gap:?}, right gap {right_gap:?}"
+        );
+    });
+    // Esc closes, and the column comes back.
+    draw(&mut fixture, wide, &|window, cx| window.press("escape", cx));
+    draw(&mut fixture, wide, &|window, _| {
+        assert!(
+            window.try_find("status-column").is_some(),
+            "the column returns when the page closes"
         );
     });
     fixture
