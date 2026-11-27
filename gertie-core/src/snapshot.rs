@@ -92,6 +92,7 @@ impl SnapshotStore {
         let connection = Connection::open(dir.join("checkpoints.db"))?;
         connection.execute_batch(
             "PRAGMA journal_mode = WAL;
+             PRAGMA synchronous = NORMAL;
              -- Same story as SessionStore: a second process holding the
              -- write lock is a reason to wait, not to fail the open.
              PRAGMA busy_timeout = 5000;

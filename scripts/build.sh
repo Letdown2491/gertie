@@ -5,8 +5,8 @@
 # incremental. Never run two of these at once: they share target/.
 #
 #   ./scripts/build.sh check             # cargo check, all targets
-#   ./scripts/build.sh build             # debug build, installs the binary to ~/.local/bin
-#   ./scripts/build.sh build --release
+#   ./scripts/build.sh build             # release build, installs the binary to ~/.local/bin
+#   ./scripts/build.sh build --debug     # debug build (faster to compile), installed the same way
 #   ./scripts/build.sh test
 #   ./scripts/build.sh clippy
 #   ./scripts/build.sh fmt --all --check
@@ -15,6 +15,24 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 IMAGE=localhost/gertie-dev
+
+# The installed binary is the one used day to day: release unless asked
+# otherwise (a debug build is several times slower at rendering and
+# parsing). `--debug` is ours, not cargo's, so it is consumed here.
+if [ "${1:-}" = "build" ]; then
+  wants_debug=false
+  args=()
+  for argument in "$@"; do
+    case "$argument" in
+      --debug) wants_debug=true ;;
+      *) args+=("$argument") ;;
+    esac
+  done
+  if ! $wants_debug && [[ ! " ${args[*]} " =~ " --release " ]]; then
+    args+=(--release)
+  fi
+  set -- "${args[@]}"
+fi
 
 if ! podman image exists "$IMAGE"; then
   podman build -t "$IMAGE" -f containers/gertie-dev.containerfile containers/

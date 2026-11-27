@@ -235,6 +235,11 @@ impl SessionStore {
         let connection = Connection::open(path)?;
         connection.execute_batch(
             "PRAGMA journal_mode = WAL;
+             -- WAL's recommended durability: a commit no longer waits on
+             -- an fsync (the UI thread writes every streamed reply), and
+             -- the database stays consistent; a power cut can lose only
+             -- the last moments of writes.
+             PRAGMA synchronous = NORMAL;
              -- Wait out a concurrent writer (the desktop app and a
              -- headless `gertie run` share this store) instead of
              -- failing the open with SQLITE_BUSY.

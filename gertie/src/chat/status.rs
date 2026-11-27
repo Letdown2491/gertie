@@ -604,8 +604,15 @@ impl ChatView {
         let store = self.store.clone();
         let root = self.workspace_root.clone();
         cx.spawn(async move |this, cx| {
-            let rows = store.load_messages(session_id).unwrap_or_default();
-            let facts = StatusFacts::from_rows(&rows, &root);
+            // `cx.spawn` runs on the UI thread: the read and the fold
+            // go to the background executor.
+            let facts = cx
+                .background_executor()
+                .spawn(async move {
+                    let rows = store.load_messages(session_id).unwrap_or_default();
+                    StatusFacts::from_rows(&rows, &root)
+                })
+                .await;
             let _ = this.update(cx, |this, cx| {
                 // A switch away meanwhile: the facts are someone else's.
                 if this.session_id == Some(session_id) {

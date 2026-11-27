@@ -1724,6 +1724,9 @@ impl ChatView {
         self.markdown_cache.borrow_mut().clear();
         self.tool_face.borrow_mut().clear();
         self.tool_starts.clear();
+        // Pending writes' before-content (whole files) belongs to the
+        // transcript being replaced.
+        self.before_contents.clear();
         self.history = Arc::new(tokio::sync::Mutex::new(history));
         self.last_db_id = last_db_id;
         // The archive behind the page, every row, every image
@@ -1736,7 +1739,12 @@ impl ChatView {
             let history = self.history.clone();
             let seed_len = history.blocking_lock().len();
             cx.spawn(async move |this, cx| {
-                let full = store.load_wire_history(session_id).unwrap_or_default();
+                // `cx.spawn` runs on the UI thread: the read itself goes
+                // to the background executor.
+                let full = cx
+                    .background_executor()
+                    .spawn(async move { store.load_wire_history(session_id).unwrap_or_default() })
+                    .await;
                 let _ = this.update(cx, |_this, cx| {
                     let mut current = history.blocking_lock();
                     if current.len() == seed_len {
@@ -3183,44 +3191,56 @@ impl ChatView {
         if self.streaming {
             return;
         }
-        let messages = match self.store.load_messages(session_id) {
-            Ok(messages) => messages,
-            Err(_) => return,
-        };
-        let user_turns = messages
-            .iter()
-            .filter(|message| message.role == gertie_core::Role::User)
-            .count();
-        // A correction (#44) is worth extracting even from a short
-        // session: one denial with a reason is the whole lesson.
-        let corrected = !gertie_core::memory_extract::corrections_from(&messages).is_empty();
-        if user_turns < 4 && !corrected {
-            return;
-        }
-        let digest = gertie_core::memory_extract::digest_from(&messages, 12_000);
-        let touched = gertie_core::memory_extract::touched_files(&messages);
-        let digest_hash = format!("{:x}", sha2::Sha256::digest(digest.as_bytes()));
-        // The once-per-digest gate: the same record never proposes
-        // twice. A denied proposal is marked consumed too: a deny is
-        // a decision, not a nag.
-        match store.extracted(&digest_hash) {
-            Ok(true) => return,
-            Ok(false) => {}
-            Err(_) => return,
-        }
         let index = self.memory_index.clone().unwrap_or_default();
-        let flagged = messages
-            .iter()
-            .filter(|message| message.role == gertie_core::Role::User)
-            .count()
-            > 0
-            && messages.iter().any(|message| {
-                message.role == gertie_core::Role::Tool && message.content.contains("web_fetch")
-            });
+        // Marked before the read, so a second trigger meanwhile is
+        // debounced; cleared again if the session turns out ineligible.
         self.last_memory_extract
             .insert(session_id.0, Instant::now());
+        let session_store = self.store.clone();
         let store = store.clone();
         cx.spawn(async move |this, cx| {
+            // The whole session read, the digest and the gate check run
+            // off the UI thread: a long session is tens of milliseconds.
+            let gate_store = store.clone();
+            let prepared = cx
+                .background_executor()
+                .spawn(async move {
+                    let messages = session_store.load_messages(session_id).ok()?;
+                    let user_turns = messages
+                        .iter()
+                        .filter(|message| message.role == gertie_core::Role::User)
+                        .count();
+                    // A correction (#44) is worth extracting even from a
+                    // short session: one denial with a reason is the
+                    // whole lesson. A 2-turn hello holds no durable facts.
+                    let corrected =
+                        !gertie_core::memory_extract::corrections_from(&messages).is_empty();
+                    if user_turns < 4 && !corrected {
+                        return None;
+                    }
+                    let digest = gertie_core::memory_extract::digest_from(&messages, 12_000);
+                    let touched = gertie_core::memory_extract::touched_files(&messages);
+                    let digest_hash = format!("{:x}", sha2::Sha256::digest(digest.as_bytes()));
+                    // The once-per-digest gate: the same record never
+                    // proposes twice. A denied proposal is marked
+                    // consumed too: a deny is a decision, not a nag.
+                    if !matches!(gate_store.extracted(&digest_hash), Ok(false)) {
+                        return None;
+                    }
+                    let flagged = user_turns > 0
+                        && messages.iter().any(|message| {
+                            message.role == gertie_core::Role::Tool
+                                && message.content.contains("web_fetch")
+                        });
+                    Some((digest, touched, digest_hash, flagged))
+                })
+                .await;
+            let Some((digest, touched, digest_hash, flagged)) = prepared else {
+                let _ = this.update(cx, |this, _cx| {
+                    this.last_memory_extract.remove(&session_id.0);
+                });
+                return;
+            };
             let raw =
                 gertie_core::memory_extract::run_extraction(provider, &digest, &index, &touched)
                     .await;
