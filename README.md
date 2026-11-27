@@ -146,11 +146,12 @@ version of this whole list.
 
 ## Status
 
-**1.2.0**: projects to organize conversations, memory entries that cite their sources
-and flag what a correction touches, and per-directory `AGENTS.md`. Since then, on `main`:
-the repo map, recall on touch, the project check, output shaping and read pruning, the
-compaction ceiling, per-model settings with the eval that suggests them, corrections as
-memory candidates, and one-click leave for projects. Feature-complete against [DESIGN.md](DESIGN.md) (see "The original 'Deferred'
+**1.3.0**: the status column — the open session's working state beside the transcript
+(WORKING ON, NEXT UP, REMEMBERED, TOUCHED, DEPENDS ON, asks, corrections) with a riding
+grounding line on the latest turn — plus the memory trust arc: superseded entries ride
+search results pointing at their replacement, the tool path shapes the store exactly like
+the ops path, recall fires on touch, and the repo map gives navigation a ranked view of
+the workspace. Feature-complete against [DESIGN.md](DESIGN.md) (see "The original 'Deferred'
 row" for every decision and its rationale). New to the tool? [The tour](docs/TOUR.md)
 walks the whole surface in ten minutes.
 
