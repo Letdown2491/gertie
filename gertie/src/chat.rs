@@ -795,6 +795,10 @@ pub struct ChatView {
     /// Whether the column is folded to its rail, persisted per
     /// conversation as a store flag.
     status_collapsed: bool,
+    /// Whether the left sidebar is folded to its rail, persisted as
+    /// one app-wide store flag (the sidebar is chrome, not session
+    /// state).
+    sidebar_collapsed: bool,
     /// Pending asks in the other open chats of this chat's project,
     /// pushed by the shell every frame.
     project_asks: Vec<status::ProjectAsk>,
@@ -912,6 +916,7 @@ impl ChatView {
         // empty box made the attach button look lost beside it.
         // The palette is a component entity like the input: created
         // once, parked until Ctrl+K puts it on screen.
+        let sidebar_collapsed = store.store_flag(crate::chat::status::SIDEBAR_COLLAPSED_FLAG);
         let palette = cx.new(|cx| CommandState::new(window, cx));
         let turn_diff_list = ListState::new(0, ListAlignment::Top, px(256.));
         let find_input =
@@ -1197,6 +1202,7 @@ impl ChatView {
             grounded_heights: Default::default(),
             grounded_cap: std::cell::Cell::new(132.0),
             status_collapsed: false,
+            sidebar_collapsed,
             project_asks: Vec::new(),
             answered_from_column: Default::default(),
         };
@@ -6443,6 +6449,17 @@ impl Render for ChatView {
             // and the transcript list keeps its flex sizing.
             .items_stretch()
             .relative()
+            // Settings opens on the LEFT: it belongs with the
+            // sidebar's chrome, not over the session state the
+            // status column owns on the right.
+            .when(self.panel == Panel::Settings, |row| {
+                row.child(
+                    div()
+                        .key_context("SettingsPanel")
+                        .track_focus(&self.side_focus)
+                        .child(self.settings_panel.clone()),
+                )
+            })
             .child(self.render_sidebar(&mut *cx))
             .child(
                 h_flex()
@@ -7104,14 +7121,6 @@ impl Render for ChatView {
                     // when the session has state to show.
                     .when(self.status_column_shown(), |row| {
                         row.child(self.render_status_column(cx))
-                    })
-                    .when(self.panel == Panel::Settings, |row| {
-                        row.child(
-                            div()
-                                .key_context("SettingsPanel")
-                                .track_focus(&self.side_focus)
-                                .child(self.settings_panel.clone()),
-                        )
                     })
                     .when(self.panel == Panel::Memory, |row| {
                         row.child(self.render_memory_panel(cx))

@@ -1462,7 +1462,29 @@ impl ChatView {
     /// group per line, and the chevron that opens it again.
     fn render_status_rail(&self, cx: &Context<Self>) -> AnyElement {
         let theme = cx.theme();
+        // One state icon, the most salient thing first: an ask needs an
+        // answer (danger), a running turn is live (blue), a run clock
+        // with time on it is history (muted). Below it, counts without
+        // words: the touched-file count under a file glyph, the ask
+        // count under the bell. No words in the rail — words longer
+        // than 34px wrap mid-word, which the hand test caught ("TOUC /
+        // HED"), and the header chip already carries the legible text.
+        let asks = self.column_asks().len();
+        let running = self.run_started.is_some();
+        let (icon, color) = if asks > 0 {
+            (IconName::BellDot, theme.danger)
+        } else if running {
+            (IconName::Gauge, theme.blue)
+        } else {
+            (IconName::Clock, theme.muted_foreground)
+        };
+        let touched = self.status_facts.touched.len();
         let parts = self.status_summary();
+        let summary = if parts.is_empty() {
+            "Session status".to_string()
+        } else {
+            parts.join(" · ")
+        };
         v_flex()
             .id("status-rail")
             .w(px(RAIL_WIDTH))
@@ -1489,17 +1511,64 @@ impl ChatView {
                     .on_click(cx.listener(|this, _, _, cx| this.toggle_status_column(cx)))
                     .child("‹"),
             )
-            .child(v_flex().pt_2().gap_3().items_center().children(
-                rail_words(&parts).into_iter().map(|word| {
-                    div()
-                        .max_w_full()
-                        .overflow_hidden()
-                        .font_family(theme.mono_font_family.clone())
-                        .text_size(px(9.5))
-                        .text_color(theme.muted_foreground)
-                        .child(word)
-                }),
-            ))
+            .child(
+                v_flex()
+                    .pt_2()
+                    .gap_3()
+                    .items_center()
+                    .child(
+                        div()
+                            .id("status-rail-state")
+                            .cursor_pointer()
+                            .hover(|style| style.bg(theme.secondary_hover))
+                            .rounded(px(4.))
+                            .p(px(3.))
+                            .tooltip(move |window, cx| {
+                                Tooltip::new(summary.clone()).build(window, cx)
+                            })
+                            .on_click(cx.listener(|this, _, _, cx| this.toggle_status_column(cx)))
+                            .child(Icon::new(icon).with_size(px(14.)).text_color(color))
+                            .test_support(),
+                    )
+                    .when(touched > 0, |rail| {
+                        rail.child(
+                            v_flex()
+                                .items_center()
+                                .gap_0p5()
+                                .child(
+                                    div()
+                                        .text_size(px(9.5))
+                                        .font_family(theme.mono_font_family.clone())
+                                        .text_color(theme.muted_foreground)
+                                        .child(touched.to_string()),
+                                )
+                                .child(
+                                    Icon::new(IconName::FileText)
+                                        .with_size(px(11.))
+                                        .text_color(theme.muted_foreground),
+                                ),
+                        )
+                    })
+                    .when(asks > 0, |rail| {
+                        rail.child(
+                            v_flex()
+                                .items_center()
+                                .gap_0p5()
+                                .child(
+                                    div()
+                                        .text_size(px(9.5))
+                                        .font_family(theme.mono_font_family.clone())
+                                        .text_color(theme.danger)
+                                        .child(asks.to_string()),
+                                )
+                                .child(
+                                    Icon::new(IconName::Bell)
+                                        .with_size(px(11.))
+                                        .text_color(theme.danger),
+                                ),
+                        )
+                    }),
+            )
             .test_support()
             .into_any_element()
     }
@@ -1810,6 +1879,10 @@ fn status_link(
 fn status_flag(session: SessionId) -> String {
     format!("status_collapsed:{}", session.0)
 }
+
+/// The store flag holding the left sidebar's folded state. One bit
+/// for the whole app: the sidebar is chrome, not session state.
+pub(crate) const SIDEBAR_COLLAPSED_FLAG: &str = "sidebar_collapsed";
 
 #[cfg(test)]
 /// A tempdir root carrying the real files the tests' folds name:

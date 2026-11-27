@@ -5477,6 +5477,10 @@ fn the_status_column_shows_the_session_state_and_folds_to_a_rail() {
     fixture.act(|window, _| {
         assert!(window.try_find("status-column").is_none(), "folded");
         assert!(window.try_find("status-rail").is_some(), "the rail stays");
+        assert!(
+            window.try_find("status-rail-state").is_some(),
+            "the rail's state icon"
+        );
         assert!(window.try_find("status-chip").is_some(), "the header chip");
     });
     let session = fixture

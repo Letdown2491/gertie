@@ -6,10 +6,89 @@
 use super::*;
 
 impl ChatView {
+    /// Folds the sidebar to its rail (or back), persisted as one
+    /// app-wide store flag: the sidebar is chrome, not session state.
+    pub(crate) fn toggle_sidebar(&mut self, cx: &mut Context<Self>) {
+        self.sidebar_collapsed = !self.sidebar_collapsed;
+        let _ = self.store.set_store_flag(
+            crate::chat::status::SIDEBAR_COLLAPSED_FLAG,
+            self.sidebar_collapsed,
+        );
+        cx.notify();
+    }
+
+    /// The folded sidebar: a slim rail with the utilities, so the
+    /// affordances stay reachable while the workspace gets the width.
+    /// The same pattern as the status column's rail: no words, icons
+    /// with tooltips, and the chevron that opens it again.
+    fn render_sidebar_rail(&self, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme();
+        v_flex()
+            .id("sidebar-rail")
+            .w(px(44.))
+            .h_full()
+            .flex_shrink_0()
+            .items_center()
+            .border_r_1()
+            .border_color(theme.border)
+            .bg(theme.background)
+            .pt_2()
+            .pb_3()
+            .gap_1()
+            .child(
+                Button::new("sidebar-expand")
+                    .label("›")
+                    .small()
+                    .tooltip("Open the sidebar")
+                    .on_click(cx.listener(|this, _, _, cx| this.toggle_sidebar(cx))),
+            )
+            .child(
+                sidebar_row(
+                    "rail-new-chat",
+                    IconName::SquarePen,
+                    "New chat",
+                    None,
+                    false,
+                    cx,
+                )
+                .on_click(cx.listener(|this, _, window, cx| this.new_session(window, cx)))
+                .test_support(),
+            )
+            .child(
+                sidebar_row(
+                    "rail-search",
+                    IconName::Search,
+                    "Search",
+                    Some("Ctrl+K"),
+                    false,
+                    cx,
+                )
+                .on_click(cx.listener(|this, _, window, cx| this.open_palette(window, cx)))
+                .test_support(),
+            )
+            .child(
+                sidebar_row(
+                    "rail-settings",
+                    IconName::Settings,
+                    "Settings",
+                    None,
+                    self.panel == Panel::Settings,
+                    cx,
+                )
+                .on_click(cx.listener(|this, _, _, cx| this.toggle_settings(cx)))
+                .test_support(),
+            )
+            .test_support()
+            .into_any_element()
+    }
+
     /// The sidebar column, whole: sessions scroll, the utility
     /// buttons stay put at the foot. A focus area (F6): the
     /// container tracks focus so the cycle can find it.
     pub(super) fn render_sidebar(&self, cx: &mut Context<Self>) -> AnyElement {
+        if self.sidebar_collapsed {
+            return self.render_sidebar_rail(cx);
+        }
         let visible = self.visible_sessions();
 
         // Session sidebar: sessions scroll, the utility
