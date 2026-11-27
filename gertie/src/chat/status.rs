@@ -948,22 +948,17 @@ impl ChatView {
                 })
                 .collect()
             };
-            let mut body = chips(&mut facts.touched.iter().take(TOUCHED_SHOWN));
-            if count > TOUCHED_SHOWN {
-                // The rest scrolls, it never truncates: a "+N more"
-                // label reads as a control that isn't (the hand test
-                // caught it), and a 53-file session is where TOUCHED
-                // is most worth having.
-                body.push(
-                    v_flex()
-                        .id("touched-more")
-                        .max_h(px(240.))
-                        .overflow_y_scroll()
-                        .gap(px(3.))
-                        .children(chips(&mut facts.touched.iter().skip(TOUCHED_SHOWN)))
-                        .into_any_element(),
-                );
-            }
+            // Ten files, the whole list in one scrollable window: no
+            // "+N more" continuation (the hand test read it as a
+            // control that wasn't), and the column's height stays
+            // stable whether the session touched 3 files or 300.
+            let body = v_flex()
+                .id("touched-scroll")
+                .max_h(px(240.))
+                .overflow_y_scroll()
+                .gap(px(3.))
+                .children(chips(&mut facts.touched.iter().take(TOUCHED_SHOWN)))
+                .into_any_element();
             sections.push(
                 v_flex()
                     .gap_1p5()
@@ -974,7 +969,7 @@ impl ChatView {
                             if count == 1 { "" } else { "s" }
                         ),
                     ))
-                    .child(v_flex().gap(px(3.)).children(body))
+                    .child(body)
                     .into_any_element(),
             );
         }
