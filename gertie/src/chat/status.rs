@@ -883,7 +883,7 @@ impl ChatView {
                 vec![
                     div()
                         .text_size(px(12.5))
-                        .text_color(theme.muted_foreground)
+                        .text_color(theme.foreground)
                         .child(SharedString::from(next.clone()))
                         .into_any_element(),
                 ],
