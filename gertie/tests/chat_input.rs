@@ -5481,6 +5481,130 @@ fn the_status_column_shows_the_session_state_and_folds_to_a_rail() {
     assert!(!store.store_flag(&format!("status_collapsed:{}", session.0)));
 }
 
+/// The GROUNDED IN viewport shows three whole rows at their real
+/// heights: rows free-wrap, so the viewport's max is measured from the
+/// rows themselves (three measured heights plus their gaps), not a
+/// constant. Everything past the third row scrolls.
+#[test]
+fn the_grounded_in_viewport_shows_three_whole_rows() {
+    let dir = tempfile::tempdir().expect("workspace");
+    std::fs::create_dir_all(dir.path().join("project")).expect("tier root");
+    // Six entries sharing the query word, each long enough to wrap
+    // well past one line in the 300px column: with every row tall, the
+    // assertions cannot depend on which entry ranks first in the FTS
+    // result. No [evidence:] clauses: the cluster is then just the
+    // entry, so three of them (3 x 149 + gaps = 453px) fit the space
+    // this window's column has, and the size assertions exercise the
+    // three-row rule rather than the crowded-column bound.
+    let mut entries = String::new();
+    for n in 12..=17 {
+        entries.push_str(&format!(
+            "- [p{n}] helpful=0 harmful=0 the flake test keeps failing when the \
+             teardown timer races the widget between retries and the retry \
+             budget is spent before the fixture settles\n"
+        ));
+    }
+    std::fs::write(dir.path().join("project").join("gotchas.md"), entries).expect("topic file");
+    let store = Arc::new(SessionStore::open(Path::new(":memory:")).expect("session store"));
+    let memory = Arc::new(gertie_core::MemoryStore::open(
+        dir.path().join("project"),
+        dir.path().join("global"),
+        store.clone(),
+    ));
+    memory.sync().expect("sidecar sync");
+    let (provider, scenarios) = replay_provider(
+        "[[steps]]\ntext = ''\n\n\
+         [[steps.tool_calls]]\nname = \"search_memory\"\n\
+         arguments = '{\"query\": \"flake\"}'\n\n\
+         [[steps]]\ntext = 'done'\n",
+    );
+    let mut fixture = fixture_built(
+        store.clone(),
+        None,
+        Some(dir.path().to_path_buf()),
+        None,
+        Some(provider),
+        None,
+        vec![Arc::new(gertie_tools::memory::SearchMemory::new(
+            memory.clone(),
+        ))],
+        Some(memory),
+        None,
+    );
+    fixture.hold = vec![scenarios, dir];
+    fixture.act(|window, cx| {
+        window.input("The widget_test keeps flaking", cx);
+        window.press("enter", cx);
+    });
+    pump_until(
+        &mut fixture,
+        200,
+        |fixture| {
+            fixture.cx.update(|cx| {
+                !fixture
+                    .view
+                    .upgrade()
+                    .expect("view alive")
+                    .read(cx)
+                    .is_streaming()
+            })
+        },
+        "the scripted turn",
+    );
+    // The rows in render order, so the third and fourth can be named
+    // without depending on the search's rank order.
+    let ground = fixture.cx.update(|cx| {
+        fixture
+            .view
+            .upgrade()
+            .expect("view alive")
+            .read(cx)
+            .status_for_test()
+            .3
+    });
+    assert!(
+        ground.len() >= 4,
+        "the scenario seeds at least four rows to size against: {ground:?}"
+    );
+    // The settle after the turn already drew the corrective frame the
+    // measurement defers: read the settled bounds.
+    fixture.act(|window, _| {
+        let viewport = window
+            .try_find("grounded-scroll")
+            .map(|found| found.bounds())
+            .expect("the grounded viewport is laid out");
+        let column = window
+            .try_find("status-column")
+            .map(|found| found.bounds())
+            .expect("the column is laid out");
+        eprintln!("viewport: {viewport:?} column: {column:?}");
+        // The outer bound holds: the viewport stays inside the
+        // column's visible bottom (the window edge), whatever the
+        // three-row math wanted.
+        assert!(
+            viewport.bottom() <= column.bottom() + px(1.),
+            "the viewport never exceeds the column: {viewport:?} vs {column:?}"
+        );
+        let row = |id: &str| {
+            window
+                .try_find(format!("status-ground-{id}"))
+                .map(|found| found.bounds())
+                .unwrap_or_else(|| panic!("{id} is laid out"))
+        };
+        let third = row(&ground[2]);
+        let fourth = row(&ground[3]);
+        eprintln!("viewport: {viewport:?} third: {third:?} fourth: {fourth:?}");
+        assert!(
+            third.bottom() <= viewport.bottom() + px(1.),
+            "the third row shows whole: {third:?} vs {viewport:?}"
+        );
+        assert!(
+            fourth.top() >= viewport.bottom() - px(1.),
+            "the fourth row starts below the fold: {fourth:?} vs {viewport:?}"
+        );
+    });
+}
+
 /// An ask answered from another chat's status column lands on the
 /// owning card through the card's own path: the tool result is the
 /// option, the turn completes, and the card says where the answer came
