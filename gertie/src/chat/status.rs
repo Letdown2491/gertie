@@ -532,9 +532,7 @@ pub fn project_asks_for(
 }
 
 /// The collapsed summary, `run 12:30 · 3 touched · 1 ask`: the header
-/// chip reads these parts verbatim. The rail renders a rail-specific
-/// form (see [`rail_words`]): words longer than the 34px rail wrap
-/// mid-word at this size, so long labels shorten for the rail only.
+/// chip reads these parts verbatim.
 pub fn summary_parts(run: Option<String>, touched: usize, asks: usize) -> Vec<String> {
     let mut parts = Vec::new();
     if let Some(run) = run {
@@ -547,34 +545,6 @@ pub fn summary_parts(run: Option<String>, touched: usize, asks: usize) -> Vec<St
         parts.push(format!("{asks} ask{}", if asks == 1 { "" } else { "s" }));
     }
     parts
-}
-
-/// The rail's stacked words, from the same summary: every word is
-/// chosen to fit 34px at the rail's 9.5px semibold (measured: ~4.2px
-/// per char, so eight characters is the honest ceiling; "TOUCHED" at
-/// seven was already too wide and wrapped into TOUC/HED). Numbers
-/// shrink to digits-plus-unit ("12:30" → "12:30" fits, but "48s"
-/// already does; the label word "RUN" fits).
-pub fn rail_words(parts: &[String]) -> Vec<String> {
-    parts
-        .iter()
-        .flat_map(|part| match part.as_str() {
-            // The touched line: "3 touched" is two words, one too
-            // wide; the rail reads "3" over "EDIT".
-            s if s.ends_with(" touched") => vec![
-                s.trim_end_matches(" touched").to_string(),
-                "EDIT".to_string(),
-            ],
-            // The ask line: "ASKS"/"ASK" both fit (4 chars).
-            s if s.ends_with(" ask") || s.ends_with(" asks") => {
-                let count = s.split(' ').next().unwrap_or(s).to_string();
-                let unit = if s.starts_with('1') { "ASK" } else { "ASKS" };
-                vec![count, unit.to_string()]
-            }
-            // Run and anything else: split as before.
-            s => s.split(' ').map(|w| w.to_string()).collect(),
-        })
-        .collect()
 }
 
 impl ChatView {
@@ -1458,17 +1428,19 @@ impl ChatView {
             .into_any_element()
     }
 
-    /// The folded column: a rail with the summary stacked, one word
-    /// group per line, and the chevron that opens it again.
+    /// The folded column: one state icon with the summary in its
+    /// tooltip, count groups beneath (each tooltip'd), and the
+    /// chevron that opens it again.
     fn render_status_rail(&self, cx: &Context<Self>) -> AnyElement {
         let theme = cx.theme();
         // One state icon, the most salient thing first: an ask needs an
         // answer (danger), a running turn is live (blue), a run clock
-        // with time on it is history (muted). Below it, counts without
-        // words: the touched-file count under a file glyph, the ask
-        // count under the bell. No words in the rail — words longer
+        // with time on it is history (muted). Below it, counts with
+        // tooltips: the touched-file count over a file glyph, the ask
+        // count over the bell. No words in the rail — words longer
         // than 34px wrap mid-word, which the hand test caught ("TOUC /
-        // HED"), and the header chip already carries the legible text.
+        // HED") — and everything the icons mean lives in their
+        // tooltips, at full foreground strength so they read.
         let asks = self.column_asks().len();
         let running = self.run_started.is_some();
         let (icon, color) = if asks > 0 {
@@ -1527,43 +1499,59 @@ impl ChatView {
                                 Tooltip::new(summary.clone()).build(window, cx)
                             })
                             .on_click(cx.listener(|this, _, _, cx| this.toggle_status_column(cx)))
-                            .child(Icon::new(icon).with_size(px(14.)).text_color(color))
+                            .child(Icon::new(icon).with_size(px(16.)).text_color(color))
                             .test_support(),
                     )
                     .when(touched > 0, |rail| {
                         rail.child(
+                            // One group, tooltip on the whole thing: the
+                            // count and the glyph together mean "touched
+                            // files", which neither said alone.
                             v_flex()
+                                .id("status-rail-files")
+                                .tooltip(move |window, cx| {
+                                    Tooltip::new(format!("{touched} touched files"))
+                                        .build(window, cx)
+                                })
                                 .items_center()
                                 .gap_0p5()
                                 .child(
                                     div()
-                                        .text_size(px(9.5))
+                                        .text_size(px(10.5))
                                         .font_family(theme.mono_font_family.clone())
-                                        .text_color(theme.muted_foreground)
+                                        .text_color(theme.foreground)
                                         .child(touched.to_string()),
                                 )
                                 .child(
                                     Icon::new(IconName::FileText)
-                                        .with_size(px(11.))
-                                        .text_color(theme.muted_foreground),
+                                        .with_size(px(13.))
+                                        .text_color(theme.foreground),
                                 ),
                         )
                     })
                     .when(asks > 0, |rail| {
                         rail.child(
                             v_flex()
+                                .id("status-rail-asks")
+                                .tooltip(move |window, cx| {
+                                    Tooltip::new(format!(
+                                        "{asks} ask{} waiting in other chats",
+                                        if asks == 1 { "" } else { "s" }
+                                    ))
+                                    .build(window, cx)
+                                })
                                 .items_center()
                                 .gap_0p5()
                                 .child(
                                     div()
-                                        .text_size(px(9.5))
+                                        .text_size(px(10.5))
                                         .font_family(theme.mono_font_family.clone())
                                         .text_color(theme.danger)
                                         .child(asks.to_string()),
                                 )
                                 .child(
                                     Icon::new(IconName::Bell)
-                                        .with_size(px(11.))
+                                        .with_size(px(13.))
                                         .text_color(theme.danger),
                                 ),
                         )
@@ -1900,20 +1888,6 @@ fn root_fixture() -> (tempfile::TempDir, std::path::PathBuf) {
 
 #[cfg(test)]
 mod tests {
-    #[test]
-    fn the_rail_words_fit_the_rail() {
-        // The words the screenshot wrapped: "TOUCHED" at 7 chars was
-        // wider than the 34px rail and broke into TOUC/HED.
-        let words = rail_words(&summary_parts(Some("48s".into()), 53, 1));
-        assert_eq!(words, vec!["run", "48s", "53", "EDIT", "1", "ASK"]);
-        assert!(
-            words.iter().all(|w| w.chars().count() <= 5),
-            "every rail word must fit 34px at 9.5px: {words:?}"
-        );
-        // Zero states produce no words (empty sections stay silent).
-        assert!(rail_words(&summary_parts(None, 0, 0)).is_empty());
-    }
-
     use super::*;
 
     #[test]

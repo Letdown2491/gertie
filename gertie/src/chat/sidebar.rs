@@ -43,40 +43,19 @@ impl ChatView {
                     .on_click(cx.listener(|this, _, _, cx| this.toggle_sidebar(cx))),
             )
             .child(
-                sidebar_row(
-                    "rail-new-chat",
-                    IconName::SquarePen,
-                    "New chat",
-                    None,
-                    false,
-                    cx,
-                )
-                .on_click(cx.listener(|this, _, window, cx| this.new_session(window, cx)))
-                .test_support(),
+                rail_icon("rail-new-chat", IconName::SquarePen, "New chat", cx)
+                    .on_click(cx.listener(|this, _, window, cx| this.new_session(window, cx))),
             )
             .child(
-                sidebar_row(
-                    "rail-search",
-                    IconName::Search,
-                    "Search",
-                    Some("Ctrl+K"),
-                    false,
-                    cx,
-                )
-                .on_click(cx.listener(|this, _, window, cx| this.open_palette(window, cx)))
-                .test_support(),
+                rail_icon("rail-search", IconName::Search, "Search (Ctrl+K)", cx)
+                    .on_click(cx.listener(|this, _, window, cx| this.open_palette(window, cx))),
             )
             .child(
-                sidebar_row(
-                    "rail-settings",
-                    IconName::Settings,
-                    "Settings",
-                    None,
-                    self.panel == Panel::Settings,
-                    cx,
-                )
-                .on_click(cx.listener(|this, _, _, cx| this.toggle_settings(cx)))
-                .test_support(),
+                rail_icon("rail-settings", IconName::Settings, "Settings", cx)
+                    .when(self.panel == Panel::Settings, |icon| {
+                        icon.bg(cx.theme().foreground.opacity(0.09))
+                    })
+                    .on_click(cx.listener(|this, _, _, cx| this.toggle_settings(cx))),
             )
             .test_support()
             .into_any_element()
@@ -115,12 +94,31 @@ impl ChatView {
                     // Who this is: the mark and the name, as in
                     // the launcher.
                     .child(
-                        h_flex().gap_2().px_2().pb_2().child(logo(22.)).child(
-                            div()
-                                .text_size(px(15.))
-                                .font_weight(gpui_kit::FontWeight::SEMIBOLD)
-                                .child("Gertie"),
-                        ),
+                        h_flex()
+                            .gap_2()
+                            .px_2()
+                            .pb_2()
+                            .child(logo(22.))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .text_size(px(15.))
+                                    .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                                    .child("Gertie"),
+                            )
+                            .child(
+                                // The fold affordance, mirroring the
+                                // status column's: same button, mirrored
+                                // chevron, in the header where folds live.
+                                Button::new("sidebar-collapse")
+                                    .label("‹")
+                                    .small()
+                                    .ghost()
+                                    .tooltip("Fold the sidebar")
+                                    .on_click(
+                                        cx.listener(|this, _, _, cx| this.toggle_sidebar(cx)),
+                                    ),
+                            ),
                     )
                     .child(
                         sidebar_row("new-chat", IconName::SquarePen, "New chat", None, false, cx)
@@ -534,4 +532,31 @@ impl ChatView {
             })
             .into_any_element()
     }
+}
+
+/// The folded sidebar's one icon row: a 32px square, the glyph at
+/// full foreground strength, the name in the tooltip. Icon-only —
+/// a 44px rail cannot show words, and `sidebar_row`'s label would
+/// clip.
+fn rail_icon(
+    id: &'static str,
+    icon: IconName,
+    tip: &'static str,
+    cx: &App,
+) -> gpui_kit::Stateful<gpui_kit::Div> {
+    let theme = cx.theme();
+    let (fg, hover_bg) = (theme.foreground, theme.foreground.opacity(0.06));
+    div()
+        .id(id)
+        .h(px(32.))
+        .w(px(32.))
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(px(6.))
+        .cursor_pointer()
+        .text_color(fg)
+        .hover(move |row| row.bg(hover_bg).text_color(fg))
+        .tooltip(move |window, cx| Tooltip::new(tip).build(window, cx))
+        .child(Icon::new(icon).with_size(px(16.)))
 }
