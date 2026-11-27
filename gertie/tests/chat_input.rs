@@ -6745,7 +6745,7 @@ fn a_bash_reread_of_a_cited_file_also_reverifies() {
     // The entry cites src/cited.rs and this chat consulted it.
     fixture.cx.update(|cx| {
         let view = fixture.view.upgrade().expect("view alive");
-        view.update(cx, |chat, cx| {
+        view.update(cx, |chat, _cx| {
             let memory = chat.memory_store_for_test().expect("memory store");
             let report = memory
                 .apply(
@@ -6799,4 +6799,80 @@ fn a_bash_reread_of_a_cited_file_also_reverifies() {
         !stale.contains(&"src/cited.rs".to_string()),
         "the bash reread re-recorded the hash, got {stale:?}"
     );
+}
+
+/// The settings page: four sections with substance (not eight
+/// one-switch tabs), the nav switching which shows, and the page
+/// covering the middle column's composer and footer while it's open.
+#[test]
+fn the_settings_page_groups_four_sections_and_covers_the_middle_column() {
+    let store = Arc::new(SessionStore::open(Path::new(":memory:")).expect("session store"));
+    let mut fixture = fixture_with_store(store);
+    // Open settings via the palette: ctrl-k, a pump (the palette's
+    // input mounts on the draw), then type the query and confirm.
+    fixture.act(|window, _cx| window.press("ctrl-k", _cx));
+    pump(&mut fixture, 2);
+    fixture.act(|window, cx| window.input(">settings", cx));
+    fixture.act(|window, cx| window.press("enter", cx));
+    let state = fixture.cx.update(|cx| {
+        let view = fixture.view.upgrade().expect("view alive").read(cx);
+        (view.palette_open_for_test(), view.panel_for_test())
+    });
+    assert_eq!(state.1, "settings", "the settings panel opened");
+    fixture.act(|window, _| {
+        let window = window;
+        assert!(
+            window.try_find("settings-panel").is_some()
+                || window.try_find("settings-content").is_some(),
+            "the settings page painted (settings-panel / settings-content missing)"
+        );
+        assert!(
+            window.try_find("nav-chat").is_some() && window.try_find("nav-tools").is_some(),
+            "the nav has the four grouped sections"
+        );
+        assert!(
+            window.try_find("nav-appearance").is_none() && window.try_find("nav-config").is_none(),
+            "the eight-tab nav is gone"
+        );
+        // The page covers the composer: it overlays the whole middle
+        // column, so the composer's input is not hit-testable here.
+        let panel = window
+            .try_find("settings-panel")
+            .expect("panel painted")
+            .bounds();
+        assert!(
+            panel.size.height > px(400.),
+            "the page fills the column: {panel:?}"
+        );
+    });
+    // Switching sections swaps the content: Tools & agents owns the
+    // sandbox switch; Chat owns the mode buttons.
+    fixture.act(|window, cx| window.click("nav-tools", cx));
+    fixture.act(|window, _| {
+        assert!(
+            window.try_find("sandbox-switch").is_some(),
+            "Tools & agents shows the sandbox switch"
+        );
+        assert!(
+            window.try_find("mode-supervised").is_none(),
+            "the mode choices live in Chat, not Tools"
+        );
+    });
+    fixture.act(|window, cx| window.click("nav-chat", cx));
+    fixture.act(|window, _| {
+        assert!(
+            window.try_find("mode-supervised").is_some(),
+            "Chat shows the permission-mode choices"
+        );
+        assert!(
+            window.try_find("settle-7 days").is_some(),
+            "Chat shows the auto-settle choices"
+        );
+    });
+    // Close: Esc over the page hands the middle column back.
+    fixture.act(|window, cx| window.press("escape", cx));
+    fixture.act(|window, cx| {
+        window.input("back to the chat", cx);
+        window.press("escape", cx);
+    });
 }

@@ -545,6 +545,23 @@ pub struct ConfigEdits {
     /// the defaults read through).
     pub max_tool_rounds: Option<usize>,
     pub grace_rounds: Option<usize>,
+    /// New sessions' permission mode (None = leave the file's key
+    /// alone; the panel always shows a choice, so its None means the
+    /// user cleared a file-set value back to the default).
+    pub default_mode: Option<Option<gertie_core::PermissionMode>>,
+    /// Auto-settle's idle threshold in days (None = leave the file's
+    /// key alone; Some(None) = the user turned it off).
+    pub auto_settle_days: Option<Option<u64>>,
+    /// The workspace check: None = leave the file's [verify] table
+    /// alone; Some(None) = remove the command override; Some(Some(cmd))
+    /// = write it.
+    pub verify_command: Option<Option<String>>,
+    pub verify_enabled: Option<bool>,
+    /// The repo map: None = leave the file's [repo_map] alone.
+    pub repo_map_enabled: Option<bool>,
+    pub repo_map_budget: Option<Option<usize>>,
+    /// Memory's frozen-index budget: None = leave the file's key alone.
+    pub memory_index_budget: Option<Option<usize>>,
 }
 
 impl ConfigEdits {
@@ -639,6 +656,113 @@ impl ConfigEdits {
         }
         if let Some(rounds) = self.grace_rounds {
             turn.insert("grace_rounds", toml_edit::value(rounds as i64));
+        }
+
+        // New sessions' permission mode: a written key names the mode,
+        // a cleared choice removes the key (the built-in default,
+        // supervised, reads through). The [permissions] table is
+        // mutated in place; hand-written keys survive.
+        if let Some(mode) = &self.default_mode {
+            if !matches!(root.get("permissions"), Some(toml_edit::Item::Table(_))) {
+                root.insert(
+                    "permissions",
+                    toml_edit::Item::Table(toml_edit::Table::new()),
+                );
+            }
+            let Some(toml_edit::Item::Table(permissions)) = root.get_mut("permissions") else {
+                unreachable!("just inserted as a table")
+            };
+            match mode {
+                Some(mode) => permissions.insert("default_mode", toml_edit::value(mode.as_str())),
+                None => permissions.remove("default_mode"),
+            };
+        }
+
+        // Auto-settle: Some(days) writes the threshold, Some(None)
+        // removes the key (off), None leaves the file alone.
+        if let Some(days) = &self.auto_settle_days {
+            match days {
+                Some(days) => {
+                    root.insert("auto_settle_days", toml_edit::value(*days as i64));
+                }
+                None => {
+                    root.remove("auto_settle_days");
+                }
+            }
+        }
+
+        // The workspace check: the [verify] table is mutated in place
+        // (per-workspace keys survive); an off switch writes enabled =
+        // false, an on one removes it (the default reads through).
+        if self.verify_enabled.is_some() || self.verify_command.is_some() {
+            if !matches!(root.get("verify"), Some(toml_edit::Item::Table(_))) {
+                root.insert("verify", toml_edit::Item::Table(toml_edit::Table::new()));
+            }
+            let Some(toml_edit::Item::Table(verify)) = root.get_mut("verify") else {
+                unreachable!("just inserted as a table")
+            };
+            match self.verify_enabled {
+                Some(true) => {
+                    verify.remove("enabled");
+                }
+                Some(false) => {
+                    verify.insert("enabled", toml_edit::value(false));
+                }
+                None => {}
+            }
+            match &self.verify_command {
+                Some(Some(command)) => {
+                    verify.insert("command", toml_edit::value(command.clone()));
+                }
+                Some(None) => {
+                    verify.remove("command");
+                }
+                None => {}
+            }
+        }
+
+        // The repo map: same mutate-in-place contract; the budget's
+        // cleared state removes the key so the default reads through.
+        if self.repo_map_enabled.is_some() || self.repo_map_budget.is_some() {
+            if !matches!(root.get("repo_map"), Some(toml_edit::Item::Table(_))) {
+                root.insert("repo_map", toml_edit::Item::Table(toml_edit::Table::new()));
+            }
+            let Some(toml_edit::Item::Table(repo_map)) = root.get_mut("repo_map") else {
+                unreachable!("just inserted as a table")
+            };
+            match self.repo_map_enabled {
+                Some(true) => {
+                    repo_map.remove("enabled");
+                }
+                Some(false) => {
+                    repo_map.insert("enabled", toml_edit::value(false));
+                }
+                None => {}
+            }
+            match &self.repo_map_budget {
+                Some(Some(budget)) => {
+                    repo_map.insert("budget_tokens", toml_edit::value(*budget as i64));
+                }
+                Some(None) => {
+                    repo_map.remove("budget_tokens");
+                }
+                None => {}
+            }
+        }
+
+        // Memory's index budget rides the [memory] table, which the
+        // panel already ensured exists above.
+        if let Some(budget) = &self.memory_index_budget {
+            if !matches!(root.get("memory"), Some(toml_edit::Item::Table(_))) {
+                root.insert("memory", toml_edit::Item::Table(toml_edit::Table::new()));
+            }
+            let Some(toml_edit::Item::Table(memory)) = root.get_mut("memory") else {
+                unreachable!("just inserted as a table")
+            };
+            match budget {
+                Some(budget) => memory.insert("index_budget", toml_edit::value(*budget as i64)),
+                None => memory.remove("index_budget"),
+            };
         }
 
         // Security posture: the flag lives under [security]; a

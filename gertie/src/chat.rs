@@ -6466,6 +6466,22 @@ impl Render for ChatView {
             .items_stretch()
             .relative()
             .child(self.render_sidebar(&mut *cx))
+            .when(self.panel == Panel::Settings, |row| {
+                // Settings is a full page over the middle column:
+                // transcript, composer, and footer all yield, the
+                // sidebars stay. Opaque, so nothing bleeds through.
+                row.child(
+                    div()
+                        .absolute()
+                        .inset_0()
+                        .flex()
+                        .justify_center()
+                        .key_context("SettingsPanel")
+                        .track_focus(&self.side_focus)
+                        .bg(theme.background)
+                        .child(self.settings_panel.clone()),
+                )
+            })
             .child(
                 h_flex()
                     .flex_1()
@@ -6521,24 +6537,6 @@ impl Render for ChatView {
                                         .pb_4(),
                                     ),
                             )
-                            .when(self.panel == Panel::Settings, |area| {
-                                // Settings is a full page over the
-                                // conversation, not a strip on an edge:
-                                // the sidebars stay, the transcript
-                                // yields. Opaque background so the list
-                                // doesn't bleed through.
-                                area.child(
-                                    div()
-                                        .absolute()
-                                        .inset_0()
-                                        .flex()
-                                        .justify_center()
-                                        .key_context("SettingsPanel")
-                                        .track_focus(&self.side_focus)
-                                        .bg(theme.background)
-                                        .child(self.settings_panel.clone()),
-                                )
-                            })
                             // Empty state: the transcript is quiet until
                             // it isn't, say so, quietly. The state says
                             // more when a first-run needs to know it

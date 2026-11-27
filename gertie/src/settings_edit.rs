@@ -14,6 +14,7 @@ use crate::config::{
     AgentConfig, Config, ConfigEdits, EndpointConfig, Invocation, McpServerConfig,
 };
 use crate::settings::SettingsSummary;
+use gpui_kit::TestSupportExt as _;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::ActiveTheme as _;
 use gpui_kit::component::Sizable as _;
@@ -174,6 +175,30 @@ pub struct SettingsPanelView {
     sandbox: bool,
     memory_enabled: bool,
     memory_dream_days: u64,
+    /// Memory's frozen-index budget draft: empty = the panel doesn't
+    /// own the key.
+    memory_index_budget_draft: String,
+    memory_index_budget_input: Option<Entity<InputState>>,
+    /// New sessions' starting permission mode.
+    default_mode: gertie_core::PermissionMode,
+    /// Auto-settle's idle threshold: None = off.
+    auto_settle_days: Option<u64>,
+    /// The workspace check: the on/off switch and the command draft
+    /// (empty = no override, the workspace's inference reads through).
+    verify_enabled: bool,
+    verify_command_draft: String,
+    verify_command_input: Option<Entity<InputState>>,
+    /// The repo map: on/off and its framing budget draft.
+    repo_map_enabled: bool,
+    repo_map_budget_draft: String,
+    repo_map_budget_input: Option<Entity<InputState>>,
+    /// The search backend: "brave", "searxng", or "none" (off), plus
+    /// its two config fields.
+    search_backend: String,
+    search_base_url_draft: String,
+    search_base_url_input: Option<Entity<InputState>>,
+    search_key_env_draft: String,
+    search_key_env_input: Option<Entity<InputState>>,
     /// The round-budget drafts: raw text, empty = the panel doesn't
     /// own the key (the file's value and the default read through).
     max_tool_rounds_draft: String,
@@ -197,31 +222,34 @@ pub struct SettingsPanelView {
 }
 
 /// The settings page's sections, in nav order. One shows at a time:
-/// the old single scroll crammed eight cards into a strip.
+/// the first pass split the config file's real groups across eight
+/// near-empty tabs; four sections with substance each is the shape.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum SettingsSection {
-    Appearance,
+    Chat,
     Endpoints,
-    Sandbox,
     Memory,
-    TurnBudgets,
-    Mcp,
-    Agents,
-    Config,
+    Tools,
 }
 
 impl SettingsSection {
     /// The element id / test handle suffix.
     fn name(self) -> &'static str {
         match self {
-            SettingsSection::Appearance => "appearance",
+            SettingsSection::Chat => "chat",
             SettingsSection::Endpoints => "endpoints",
-            SettingsSection::Sandbox => "sandbox",
             SettingsSection::Memory => "memory",
-            SettingsSection::TurnBudgets => "turn-budgets",
-            SettingsSection::Mcp => "mcp",
-            SettingsSection::Agents => "agents",
-            SettingsSection::Config => "config",
+            SettingsSection::Tools => "tools",
+        }
+    }
+
+    /// The nav's label.
+    fn label(self) -> &'static str {
+        match self {
+            SettingsSection::Chat => "Chat",
+            SettingsSection::Endpoints => "Endpoints",
+            SettingsSection::Memory => "Memory & search",
+            SettingsSection::Tools => "Tools & agents",
         }
     }
 }
@@ -235,6 +263,21 @@ impl SettingsPanelView {
             sandbox: false,
             memory_enabled: true,
             memory_dream_days: 7,
+            memory_index_budget_draft: String::new(),
+            memory_index_budget_input: None,
+            default_mode: gertie_core::PermissionMode::Supervised,
+            auto_settle_days: None,
+            verify_enabled: true,
+            verify_command_draft: String::new(),
+            verify_command_input: None,
+            repo_map_enabled: true,
+            repo_map_budget_draft: String::new(),
+            repo_map_budget_input: None,
+            search_backend: "none".into(),
+            search_base_url_draft: String::new(),
+            search_base_url_input: None,
+            search_key_env_draft: String::new(),
+            search_key_env_input: None,
             max_tool_rounds_draft: String::new(),
             grace_rounds_draft: String::new(),
             mcp_servers: Vec::new(),
@@ -272,43 +315,50 @@ impl SettingsPanelView {
         }
     }
 
-    fn budget_field(
+    /// One labelled text field backed by a lazily-created input that
+    /// seeds from its draft. The slot and draft resolve by id, so a
+    /// call site borrows self once. The draft follows the input;
+    /// Save reads the drafts (and the budget inputs directly).
+    fn text_field(
         &mut self,
         id: &'static str,
-        placeholder: String,
+        placeholder: &str,
         label: &'static str,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let seed = match id {
-            "turn-max-rounds" => self.max_tool_rounds_draft.clone(),
-            _ => self.grace_rounds_draft.clone(),
+        let (slot, draft): (&mut Option<Entity<InputState>>, &String) = match id {
+            "verify-command" => (&mut self.verify_command_input, &self.verify_command_draft),
+            "memory-index-budget" => (
+                &mut self.memory_index_budget_input,
+                &self.memory_index_budget_draft,
+            ),
+            "repo-map-budget" => (&mut self.repo_map_budget_input, &self.repo_map_budget_draft),
+            "search-base-url" => (&mut self.search_base_url_input, &self.search_base_url_draft),
+            "search-key-env" => (&mut self.search_key_env_input, &self.search_key_env_draft),
+            "turn-max-rounds" => (&mut self.max_tool_rounds_input, &self.max_tool_rounds_draft),
+            "turn-grace-rounds" => (&mut self.grace_rounds_input, &self.grace_rounds_draft),
+            _ => unreachable!("unregistered text field {id}"),
         };
-        let input = match id {
-            "turn-max-rounds" => self.max_tool_rounds_input.get_or_insert_with(|| {
+        let input = slot
+            .get_or_insert_with(|| {
                 let state = cx.new(|cx| InputState::new(window, cx).placeholder(placeholder));
                 cx.subscribe(&state, Self::budget_event).detach();
-                if !seed.is_empty() {
-                    state.update(cx, |state, cx| state.set_value(&seed, window, cx));
+                if !draft.is_empty() {
+                    state.update(cx, |state, cx| state.set_value(draft, window, cx));
                 }
                 state
-            }),
-            _ => self.grace_rounds_input.get_or_insert_with(|| {
-                let state = cx.new(|cx| InputState::new(window, cx).placeholder(placeholder));
-                cx.subscribe(&state, Self::budget_event).detach();
-                if !seed.is_empty() {
-                    state.update(cx, |state, cx| state.set_value(&seed, window, cx));
-                }
-                state
-            }),
-        };
-        // The draft follows the input, one direction only: Save reads
-        // the drafts, and a click can land before this frame's redraw,
-        // so save_budgets also reads the inputs directly.
+            })
+            .clone();
+        // The draft follows the input, one direction only.
         let current = input.read(cx).value().to_string();
         match id {
-            "turn-max-rounds" => self.max_tool_rounds_draft = current,
-            _ => self.grace_rounds_draft = current,
+            "verify-command" => self.verify_command_draft = current,
+            "memory-index-budget" => self.memory_index_budget_draft = current,
+            "repo-map-budget" => self.repo_map_budget_draft = current,
+            "search-base-url" => self.search_base_url_draft = current,
+            "search-key-env" => self.search_key_env_draft = current,
+            _ => {}
         }
         v_flex()
             .id(id)
@@ -319,7 +369,7 @@ impl SettingsPanelView {
                     .text_color(cx.theme().muted_foreground)
                     .child(label),
             )
-            .child(Input::new(input).small().w_full())
+            .child(Input::new(&input).small().w_full())
     }
 
     /// Pending state := the current config. Called on construction and
@@ -354,6 +404,43 @@ impl SettingsPanelView {
         self.sandbox = self.summary.sandbox;
         self.memory_enabled = self.summary.memory_enabled;
         self.memory_dream_days = self.summary.memory_dream_days;
+        self.default_mode = self.summary.default_mode;
+        self.auto_settle_days = self.summary.auto_settle_days;
+        self.verify_enabled = self
+            .summary
+            .verify
+            .as_ref()
+            .map(|v| v.is_some())
+            .unwrap_or(true);
+        self.verify_command_draft = self.summary.verify.clone().flatten().unwrap_or_default();
+        self.verify_command_input = None;
+        self.repo_map_enabled = self.summary.repo_map_enabled;
+        self.repo_map_budget_draft =
+            if self.summary.repo_map_budget == crate::config::DEFAULT_REPO_MAP_TOKENS {
+                String::new()
+            } else {
+                self.summary.repo_map_budget.to_string()
+            };
+        self.repo_map_budget_input = None;
+        self.memory_index_budget_draft = self
+            .summary
+            .memory_index_budget
+            .map(|budget| budget.to_string())
+            .unwrap_or_default();
+        self.memory_index_budget_input = None;
+        self.search_backend = self.summary.search.clone();
+        self.search_base_url_draft = config
+            .search
+            .as_ref()
+            .and_then(|search| search.base_url.clone())
+            .unwrap_or_default();
+        self.search_base_url_input = None;
+        self.search_key_env_draft = config
+            .search
+            .as_ref()
+            .and_then(|search| search.api_key_env.clone())
+            .unwrap_or_default();
+        self.search_key_env_input = None;
         // The budget drafts pre-fill from the file's keys (absent =
         // empty, the panel doesn't own them). The placeholder shows
         // the built-in default, never a written value: writing the
@@ -719,6 +806,22 @@ impl SettingsPanelView {
             agents: self.agents.iter().map(|d| d.to_config()).collect(),
             max_tool_rounds: max_parsed.unwrap_or(None),
             grace_rounds: grace_parsed.unwrap_or(None),
+            // The chat section's choices: always owned by the panel, so
+            // they write through every save (the mode as Some(choice),
+            // settle as Some(days-or-off), check and map per their
+            // switches). Unparseable budget fields above already
+            // aborted the save.
+            default_mode: Some(Some(self.default_mode)),
+            auto_settle_days: Some(self.auto_settle_days),
+            verify_enabled: Some(self.verify_enabled),
+            verify_command: Some(if self.verify_command_draft.trim().is_empty() {
+                None
+            } else {
+                Some(self.verify_command_draft.trim().to_string())
+            }),
+            repo_map_enabled: Some(self.repo_map_enabled),
+            repo_map_budget: Some(self.repo_map_budget_draft.trim().parse::<usize>().ok()),
+            memory_index_budget: Some(self.memory_index_budget_draft.trim().parse::<usize>().ok()),
         };
         match edits.save(&path) {
             Ok(()) => {
@@ -820,6 +923,37 @@ fn endpoint_row(
 
 /// One agent row: edit on click, ✕ to remove. The pin is the point,
 /// a seat without its endpoint visible is just a name.
+/// One MCP server row: name with its url or command, ✕ to remove.
+fn mcp_row(index: usize, draft: &McpDraft, cx: &Context<SettingsPanelView>) -> impl IntoElement {
+    let detail = match (&draft.url, &draft.command) {
+        (Some(url), _) => url.clone(),
+        (None, Some(command)) => command.clone(),
+        (None, None) => String::new(),
+    };
+    h_flex()
+        .w_full()
+        .gap_0p5()
+        .child(
+            Button::new(SharedString::from(format!("mcp-{index}")))
+                .label(draft.name.clone())
+                .small()
+                .flex_1()
+                .min_w_0()
+                .tooltip(format!("{detail}, restart to apply")),
+        )
+        .child(
+            Button::new(SharedString::from(format!("remove-mcp-{index}")))
+                .icon(IconName::Trash)
+                .xsmall()
+                .ghost()
+                .tooltip("Remove")
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.mcp_servers.remove(index);
+                    this.autosave(cx);
+                })),
+        )
+}
+
 fn agent_row(
     index: usize,
     draft: &AgentDraft,
@@ -909,19 +1043,16 @@ impl Render for SettingsPanelView {
             )
             .children(
                 [
-                    (SettingsSection::Appearance, "Appearance"),
-                    (SettingsSection::Endpoints, "Endpoints"),
-                    (SettingsSection::Sandbox, "Sandbox"),
-                    (SettingsSection::Memory, "Memory"),
-                    (SettingsSection::TurnBudgets, "Turn budgets"),
-                    (SettingsSection::Mcp, "MCP servers"),
-                    (SettingsSection::Agents, "Agents"),
-                    (SettingsSection::Config, "Config file"),
+                    SettingsSection::Chat,
+                    SettingsSection::Endpoints,
+                    SettingsSection::Memory,
+                    SettingsSection::Tools,
                 ]
-                .map(|(id, label)| {
+                .map(|id| {
                     let active = section == id;
                     div()
                         .id(SharedString::from(format!("nav-{}", id.name())))
+                        .test_support()
                         .px_2()
                         .py_1()
                         .rounded(px(6.))
@@ -938,7 +1069,7 @@ impl Render for SettingsPanelView {
                             this.section = id;
                             cx.notify();
                         }))
-                        .child(label)
+                        .child(id.label())
                 }),
             );
 
@@ -1106,8 +1237,6 @@ impl Render for SettingsPanelView {
                 )
         });
 
-        let mcp_form_open = mcp_form.is_some();
-
         // The save-result messages live at the page's top, above nav
         // and content, so a save reports no matter which section shows.
         let status_line = v_flex().children(self.status.iter().map(|(message, is_error)| {
@@ -1126,17 +1255,25 @@ impl Render for SettingsPanelView {
         // pick which. The content pane holds the active section only.
         let mut content: Vec<AnyElement> = Vec::new();
 
-        if self.section == SettingsSection::Appearance {
+        let section_note = |text: &str| {
+            div()
+                .text_size(px(10.5))
+                .text_color(theme.muted_foreground)
+                .child(text.to_string())
+        };
+
+        if self.section == SettingsSection::Chat {
+            // Theme: UI state (ui.json), not config.toml.
+            let current = gpui_kit::component::Theme::global(cx).mode;
             content.push(
                 settings_card("Appearance", cx)
-                    .child({
-                        let current = gpui_kit::component::Theme::global(cx).mode;
+                    .child(
                         h_flex()
                             .gap_1()
                             .children([ThemeMode::Dark, ThemeMode::Light].map(|mode| {
                                 let button = Button::new(SharedString::from(format!(
-                                    "theme-{}",
-                                    mode.name()
+                                    "theme-{mode}",
+                                    mode = mode.name()
                                 )))
                                 .label(mode.name())
                                 .small();
@@ -1148,8 +1285,107 @@ impl Render for SettingsPanelView {
                                 button.on_click(
                                     cx.listener(move |this, _, _, cx| this.set_theme(mode, cx)),
                                 )
+                            })),
+                    )
+                    .into_any_element(),
+            );
+            // New sessions' permission mode: the composer's chip
+            // overrides per session; this seeds it.
+            let modes = [
+                (gertie_core::PermissionMode::Supervised, "Supervised"),
+                (gertie_core::PermissionMode::AcceptEdits, "Accept edits"),
+                (gertie_core::PermissionMode::Auto, "Auto (sandboxed)"),
+                (gertie_core::PermissionMode::FullAccess, "Full access"),
+            ];
+            content.push(
+                settings_card("New sessions start in", cx)
+                    .child(section_note(
+                        "The composer's mode chip overrides per conversation. Auto needs the                          sandbox on to run bash unasked; with it off, Auto asks like Accept edits.",
+                    ))
+                    .child(
+                        h_flex().gap_1().flex_wrap().children(modes.map(|(mode, label)| {
+                            let button = Button::new(SharedString::from(format!(
+                                "mode-{mode}",
+                                mode = mode.as_str()
+                            )))
+                            .label(label)
+                            .small();
+                            let button = if self.default_mode == mode {
+                                button.primary()
+                            } else {
+                                button.ghost()
+                            };
+                            button.on_click(cx.listener(move |this, _, _, cx| {
+                                this.default_mode = mode;
+                                this.autosave(cx);
                             }))
+                        })),
+                    )
+                    .into_any_element(),
+            );
+            // Auto-settle: the idle threshold, off by default.
+            content.push(
+                settings_card("Auto-settle", cx)
+                    .child(section_note(
+                        "Settle chats idle this many days on startup: the transcript folds, the worktree (if any) is reclaimed. Settling is always manual otherwise.",
+                    ))
+                    .child(
+                        h_flex().gap_1().children(
+                            [
+                                (None, "Off"),
+                                (Some(7u64), "7 days"),
+                                (Some(14), "14 days"),
+                                (Some(30), "30 days"),
+                            ]
+                            .map(|(days, label)| {
+                                let button = Button::new(SharedString::from(format!(
+                                    "settle-{label}"
+                                )))
+                                .label(label)
+                                .small();
+                                let button = if self.auto_settle_days == days {
+                                    button.primary()
+                                } else {
+                                    button.ghost()
+                                };
+                                button.on_click(cx.listener(move |this, _, _, cx| {
+                                    this.auto_settle_days = days;
+                                    this.autosave(cx);
+                                }))
+                            }),
+                        ),
+                    )
+                    .into_any_element(),
+            );
+            // The workspace check (#40) with its command override.
+            content.push(
+                settings_card("Check before a turn ends", cx)
+                    .child(section_note(
+                        "The check gertie runs before an editing turn ends. Each workspace's                          inference (a Makefile, scripts/build.sh) wins when there is one; a                          command here overrides it everywhere.",
+                    ))
+                    .child({
+                        let panel = cx.entity().downgrade();
+                        Switch::new("verify-switch")
+                            .label("Run the check")
+                            .small()
+                            .checked(self.verify_enabled)
+                            .tooltip("Off = no check, the turn ends when the model wraps up.")
+                            .on_click(move |checked, _, cx| {
+                                if let Some(panel) = panel.upgrade() {
+                                    panel.update(cx, |panel, cx| {
+                                        panel.verify_enabled = *checked;
+                                        panel.autosave(cx);
+                                    });
+                                }
+                            })
                     })
+                    .child(self.text_field(
+                            "verify-command",
+                            "e.g. ./scripts/build.sh check (empty = the workspace's inference)",
+                        "command override",
+                        _window,
+                        cx,
+                    ))
                     .into_any_element(),
             );
         }
@@ -1162,59 +1398,31 @@ impl Render for SettingsPanelView {
                             div()
                                 .text_size(px(12.))
                                 .text_color(theme.muted_foreground)
-                                .child("none configured, add one below"),
+                                .child("no endpoints configured"),
                         )
                     })
                     .children(self.endpoints.iter().enumerate().map(|(index, draft)| {
+                        let is_default =
+                            self.default_endpoint.as_deref() == Some(draft.name.as_str());
                         let key_resolved = self
                             .summary
                             .endpoints
                             .iter()
                             .find(|info| info.name == draft.name)
                             .map(|info| info.key_resolved);
-                        let is_default =
-                            self.default_endpoint.as_deref() == Some(draft.name.as_str());
                         endpoint_row(index, draft, key_resolved, is_default, cx).into_any_element()
                     }))
-                    .child(
-                        Button::new("add-endpoint")
-                            .label("Add endpoint")
-                            .small()
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.open_form(None, window, cx);
-                            })),
-                    )
                     .children(form)
-                    .into_any_element(),
-            );
-        }
-
-        if self.section == SettingsSection::Sandbox {
-            content.push(
-                settings_card("Sandbox", cx)
-                    .child(
-                        Switch::new("sandbox-switch")
-                            .label("Landlock-isolate bash children")
-                            .small()
-                            .checked(self.sandbox)
-                            .tooltip(concat!(
-                                "Restart to apply. Your config sets this; while it",
-                                " doesn't, the repo's .gertie/config.toml wins, and",
-                                " that file may also write \"inherit\" to stand down."
-                            ))
-                            .on_click({
-                                let panel = cx.entity().downgrade();
-                                move |checked, _, cx| {
-                                    if let Some(panel) = panel.upgrade() {
-                                        panel.update(cx, |panel, cx| {
-                                            panel.sandbox = *checked;
-                                            panel.autosave(cx);
-                                        });
-                                    }
-                                }
-                            }),
-                    )
-                    .child(origin_note(self.summary.sandbox_origin, cx))
+                    .when(self.form.is_none(), |col| {
+                        col.child(
+                            Button::new("add-endpoint")
+                                .label("Add endpoint")
+                                .small()
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.open_form(None, window, cx);
+                                })),
+                        )
+                    })
                     .into_any_element(),
             );
         }
@@ -1222,31 +1430,29 @@ impl Render for SettingsPanelView {
         if self.section == SettingsSection::Memory {
             content.push(
                 settings_card("Memory", cx)
-                    .child(
+                    .child({
+                        let panel = cx.entity().downgrade();
                         Switch::new("memory-switch")
                             .label("Remember across sessions")
                             .small()
                             .checked(self.memory_enabled)
                             .tooltip(concat!(
-                                "Session-end extraction proposes memory entries",
-                                " as review cards on settle; dreaming consolidates",
-                                " the store on startup. Applies on restart; the",
-                                " files live in .gertie/memory/ and the data dir."
+                                "Restart to apply. Off disables the session-end extraction AND",
+                                " dreaming; the memory and search_memory tools stay available",
+                                " either way."
                             ))
-                            .on_click({
-                                let panel = cx.entity().downgrade();
-                                move |checked, _, cx| {
-                                    if let Some(panel) = panel.upgrade() {
-                                        panel.update(cx, |panel, cx| {
-                                            panel.memory_enabled = *checked;
-                                            panel.autosave(cx);
-                                        });
-                                    }
+                            .on_click(move |checked, _, cx| {
+                                if let Some(panel) = panel.upgrade() {
+                                    panel.update(cx, |panel, cx| {
+                                        panel.memory_enabled = *checked;
+                                        panel.autosave(cx);
+                                    });
                                 }
-                            }),
-                    )
+                            })
+                    })
                     .child(origin_note(self.summary.memory_origin, cx))
-                    .child(
+                    .child({
+                        let panel = cx.entity().downgrade();
                         Switch::new("dream-switch")
                             .label(format!(
                                 "Consolidate memory every {} days",
@@ -1255,64 +1461,145 @@ impl Render for SettingsPanelView {
                             .small()
                             .checked(self.memory_enabled && self.memory_dream_days > 0)
                             .tooltip(concat!(
-                                "Startup pass that merges duplicate entries and",
-                                " archives counter-dead ones. A changelog lands in",
+                                "Startup pass that merges duplicate entries and archives",
+                                " counter-dead ones. A changelog lands in",
                                 " .gertie/memory/dreams/. Applies on restart."
                             ))
-                            .on_click({
-                                let panel = cx.entity().downgrade();
-                                move |checked, _, cx| {
-                                    if let Some(panel) = panel.upgrade() {
-                                        panel.update(cx, |panel, cx| {
-                                            panel.memory_dream_days = if *checked { 7 } else { 0 };
-                                            panel.autosave(cx);
-                                        });
-                                    }
+                            .on_click(move |checked, _, cx| {
+                                if let Some(panel) = panel.upgrade() {
+                                    panel.update(cx, |panel, cx| {
+                                        panel.memory_dream_days = if *checked { 7 } else { 0 };
+                                        panel.autosave(cx);
+                                    });
                                 }
+                            })
+                    })
+                    .child(self.text_field(
+                        "memory-index-budget",
+                        "tokens for the frozen index (empty = the default)",
+                        "index budget",
+                        _window,
+                        cx,
+                    ))
+                    .into_any_element(),
+            );
+            // The search backend: config-only until now.
+            content.push(
+                settings_card("Web search", cx)
+                    .child(section_note(
+                        "web_search's backend. None leaves the tool explaining how to configure                          it instead of failing mysteriously. Applies on restart.",
+                    ))
+                    .child(
+                        h_flex().gap_1().children(
+                            [
+                                ("none", "None"),
+                                ("brave", "Brave"),
+                                ("searxng", "SearXNG"),
+                            ]
+                            .map(|(backend, label)| {
+                                let button = Button::new(SharedString::from(format!(
+                                    "search-{backend}"
+                                )))
+                                .label(label)
+                                .small();
+                                let button = if self.search_backend == backend {
+                                    button.primary()
+                                } else {
+                                    button.ghost()
+                                };
+                                button.on_click(cx.listener(move |this, _, _, cx| {
+                                    this.search_backend = backend.to_string();
+                                    this.autosave(cx);
+                                }))
                             }),
+                        ),
+                    )
+                    .when(
+                        self.search_backend == "searxng",
+                        |col| {
+                            col.child(self.text_field(
+                                "search-base-url",
+                                "https://searx.example (must allow format=json)",
+                                "instance base URL",
+                                _window,
+                                cx,
+                            ))
+                        },
+                    )
+                    .when(
+                        self.search_backend == "brave",
+                        |col| {
+                            col.child(self.text_field(
+                                "search-key-env",
+                                "env var holding the Brave API key (e.g. BRAVE_API_KEY)",
+                                "API key env var",
+                                _window,
+                                cx,
+                            ))
+                        },
                     )
                     .into_any_element(),
             );
         }
 
-        if self.section == SettingsSection::TurnBudgets {
+        if self.section == SettingsSection::Tools {
+            // Sandbox, MCP servers, turn budgets, agents: what the
+            // model can reach and how much rope it gets.
             content.push(
-                settings_card("Turn budgets", cx).child(
-                    v_flex()
-                        .gap_1p5()
-                        .px_1()
-                        .child(
-                            div()
-                                .text_size(px(10.5))
-                                .text_color(theme.muted_foreground)
-                                .child(format!(
-                                    "Tool rounds before a wrap-up nudge, then grace rounds before \
+                settings_card("Sandbox", cx)
+                    .child({
+                        let panel = cx.entity().downgrade();
+                        Switch::new("sandbox-switch")
+                            .label("Landlock-isolate bash children")
+                            .small()
+                            .checked(self.sandbox)
+                            .tooltip(concat!(
+                                "Restart to apply. Your config sets this; while it doesn't, the",
+                                " repo's .gertie/config.toml wins, and that file may also write",
+                                " \"inherit\" to stand down."
+                            ))
+                            .on_click(move |checked, _, cx| {
+                                if let Some(panel) = panel.upgrade() {
+                                    panel.update(cx, |panel, cx| {
+                                        panel.sandbox = *checked;
+                                        panel.autosave(cx);
+                                    });
+                                }
+                            })
+                    })
+                    .child(origin_note(self.summary.sandbox_origin, cx))
+                    .into_any_element(),
+            );
+            content.push(
+                settings_card("Turn budgets", cx)
+                    .child(
+                        v_flex()
+                            .gap_1p5()
+                            .px_1()
+                            .child(section_note(&format!(
+                                "Tool rounds before a wrap-up nudge, then grace rounds before \
                                  the turn pauses (resumable). Defaults {} + {}; empty = the \
                                  default. Long work (a wide sweep, a migration) wants more.",
-                                    gertie_core::DEFAULT_MAX_TOOL_ROUNDS,
-                                    gertie_core::DEFAULT_GRACE_ROUNDS
-                                )),
-                        )
-                        .child(self.budget_field(
-                            "turn-max-rounds",
-                            format!("{} (default)", gertie_core::DEFAULT_MAX_TOOL_ROUNDS),
-                            "max tool rounds",
-                            _window,
-                            cx,
-                        ))
-                        .child(self.budget_field(
-                            "turn-grace-rounds",
-                            format!("{} (default)", gertie_core::DEFAULT_GRACE_ROUNDS),
-                            "grace rounds",
-                            _window,
-                            cx,
-                        )),
-                )
-                .into_any_element(),
+                                gertie_core::DEFAULT_MAX_TOOL_ROUNDS,
+                                gertie_core::DEFAULT_GRACE_ROUNDS
+                            )))
+                            .child(self.text_field(
+                                "turn-max-rounds",
+                                &format!("{} (default)", gertie_core::DEFAULT_MAX_TOOL_ROUNDS),
+                                "max tool rounds",
+                                _window,
+                                cx,
+                            ))
+                            .child(self.text_field(
+                                "turn-grace-rounds",
+                                &format!("{} (default)", gertie_core::DEFAULT_GRACE_ROUNDS),
+                                "grace rounds",
+                                _window,
+                                cx,
+                            )),
+                    )
+                    .into_any_element(),
             );
-        }
-
-        if self.section == SettingsSection::Mcp {
             content.push(
                 settings_card("MCP servers", cx)
                     .when(self.mcp_servers.is_empty(), |col| {
@@ -1323,38 +1610,14 @@ impl Render for SettingsPanelView {
                                 .child("none configured"),
                         )
                     })
-                    .children(self.mcp_servers.iter().enumerate().map(|(index, server)| {
-                        let target = server
-                            .url
-                            .clone()
-                            .or_else(|| server.command.clone())
-                            .unwrap_or_default();
-                        h_flex()
-                            .w_full()
-                            .gap_0p5()
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .truncate()
-                                    .text_size(px(12.))
-                                    .child(format!("{} · {}", server.name, target)),
-                            )
-                            .child(
-                                Button::new(SharedString::from(format!("remove-mcp-{index}")))
-                                    .icon(IconName::Trash)
-                                    .xsmall()
-                                    .ghost()
-                                    .tooltip("Remove")
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        this.mcp_servers.remove(index);
-                                        this.autosave(cx);
-                                    })),
-                            )
-                            .into_any_element()
-                    }))
+                    .children(
+                        self.mcp_servers
+                            .iter()
+                            .enumerate()
+                            .map(|(index, draft)| mcp_row(index, draft, cx).into_any_element()),
+                    )
                     .children(mcp_form)
-                    .when(!mcp_form_open, |col| {
+                    .when(self.mcp_name.is_none(), |col| {
                         col.child(Button::new("add-mcp").label("Add server").small().on_click(
                             cx.listener(|this, _, window, cx| {
                                 this.mcp_name = Some(
@@ -1372,9 +1635,6 @@ impl Render for SettingsPanelView {
                     })
                     .into_any_element(),
             );
-        }
-
-        if self.section == SettingsSection::Agents {
             content.push(
                 settings_card("Agents", cx)
                     .when(self.agents.is_empty(), |col| {
@@ -1404,27 +1664,57 @@ impl Render for SettingsPanelView {
                     })
                     .into_any_element(),
             );
-        }
-
-        if self.section == SettingsSection::Config {
+            // The repo map: what the model sees of the workspace.
             content.push(
-                settings_card("Config file", cx)
-                    .child(
-                        div()
-                            .text_size(px(11.))
-                            .text_color(theme.muted_foreground)
-                            .child(match &self.summary.config_path {
-                                Some(path) => format!(
-                                    "Changes save to {} as you make them; its comments and \
-                                 unknown keys are kept.",
-                                    path.display()
-                                ),
-                                None => "no config file location".into(),
-                            }),
-                    )
+                settings_card("Repo map", cx)
+                    .child(section_note(&format!(
+                        "The ranked map of the workspace's code, sent at session start, and the                          repo_map tool. Budget {}/tokens frames it; empty = the default.",
+                        self.summary.repo_map_budget
+                    )))
+                    .child({
+                        let panel = cx.entity().downgrade();
+                        Switch::new("repo-map-switch")
+                            .label("Send the repo map")
+                            .small()
+                            .checked(self.repo_map_enabled)
+                            .tooltip("Off turns both the framing and the tool off.")
+                            .on_click(move |checked, _, cx| {
+                                if let Some(panel) = panel.upgrade() {
+                                    panel.update(cx, |panel, cx| {
+                                        panel.repo_map_enabled = *checked;
+                                        panel.autosave(cx);
+                                    });
+                                }
+                            })
+                    })
+                    .child(self.text_field(
+                            "repo-map-budget",
+                            &format!("{} (default)", self.summary.repo_map_budget),
+                        "framing budget",
+                        _window,
+                        cx,
+                    ))
                     .into_any_element(),
             );
         }
+
+        // The config file note: a footer fact, not a section.
+        content.push(
+            settings_card("Config file", cx)
+                .child(
+                    div()
+                        .text_size(px(11.))
+                        .text_color(theme.muted_foreground)
+                        .child(match &self.summary.config_path {
+                            Some(path) => format!(
+                                "Changes save to {} as you make them; its comments and unknown                                  keys are kept.",
+                                path.display()
+                            ),
+                            None => "no config file location".into(),
+                        }),
+                )
+                .into_any_element(),
+        );
 
         // The two-pane page: nav left, one section's content right.
         // The wrapper is the page the chat overlays over the
@@ -1432,6 +1722,7 @@ impl Render for SettingsPanelView {
         // the old 300px strip could never have.
         v_flex()
             .id("settings-panel")
+            .test_support()
             .w_full()
             .h_full()
             .flex_1()

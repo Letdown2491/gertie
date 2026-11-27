@@ -44,6 +44,17 @@ pub struct SettingsSummary {
     pub skills: usize,
     /// Model-invocable agent type names.
     pub agents: Vec<String>,
+    /// New sessions' starting permission mode, as resolved.
+    pub default_mode: gertie_core::PermissionMode,
+    /// Auto-settle's idle threshold in days (None = off).
+    pub auto_settle_days: Option<u64>,
+    /// The workspace check in force: Some("") = off, None = inferred.
+    pub verify: Option<Option<String>>,
+    /// The repo map: on/off and its framing budget (default 500).
+    pub repo_map_enabled: bool,
+    pub repo_map_budget: usize,
+    /// Memory's frozen-index token budget (None = the built-in default).
+    pub memory_index_budget: Option<usize>,
     /// Where the config lives, for the "go change it" footer.
     pub config_path: Option<PathBuf>,
 }
@@ -100,6 +111,26 @@ impl SettingsSummary {
                     None => agent.name.clone(),
                 })
                 .collect(),
+            default_mode: config
+                .permissions
+                .default_mode
+                .unwrap_or(gertie_core::PermissionMode::Supervised),
+            auto_settle_days: config.auto_settle_days,
+            verify: config.verify.as_ref().map(|verify| verify.command.clone()),
+            repo_map_enabled: config
+                .repo_map
+                .as_ref()
+                .and_then(|map| map.enabled)
+                .unwrap_or(true),
+            repo_map_budget: config
+                .repo_map
+                .as_ref()
+                .and_then(|map| map.budget_tokens)
+                .unwrap_or(crate::config::DEFAULT_REPO_MAP_TOKENS),
+            memory_index_budget: config
+                .memory
+                .as_ref()
+                .and_then(|memory| memory.index_budget),
             config_path: crate::config::Config::path(),
         }
     }
