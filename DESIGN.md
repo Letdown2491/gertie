@@ -359,7 +359,11 @@ back as "the turn is not done: fix it or say why it is expected", up to three ru
 the last asking for a report instead. The command comes from the user's `[verify]` config
 (global, or per workspace path) or is inferred (`cargo check --message-format=short`, `go
 build ./...`) only when the program is on PATH. The repo's overlay may not name it: the
-settle_command rule, a cloned repo does not get to choose a command gertie runs.
+settle_command rule, a cloned repo does not get to choose a command gertie runs. The check
+is a per-root answer, resolved for the folder a chat runs in: a footer workspace switch, a
+worktree tab, and a conversation opened in another folder each get their own folder's
+check (and recall on touch reads that folder's memory), never the startup folder's. A
+worker that edits and runs bash runs the same check before it reports.
 
 **The repo map (#41).** Models spend rounds finding code: list a directory, read the wrong
 file, grep, read again; weak models wander longest. On a session's first turn the harness
@@ -686,6 +690,16 @@ out of git by the local exclude) and the message cites the path for the agent's
 commenting on carries a **quote** action: the response lands in the composer as a
 blockquote (bounded, enough to pin the referent, never the whole answer back into
 the prompt) and the comment types under it; sending shows the model the exact words.
+**The composer belongs to the conversation.** Unsent words and attachment chips are a
+draft kept per conversation: New chat, a sidebar switch or a delete parks the draft
+with the chat it was typed in and loads the other's (empty when it has none), so
+nothing typed for one conversation can leak into the next. An attached image is
+written to the attachments dir and the stored message keeps a `{{image:PATH}}`
+marker on its own line; a reload reads the file back into the wire (a missing file
+becomes a text note), and a queued message keeps its markers, so an image sent while
+a turn runs reaches the model with its words instead of being dropped. Tool rows
+never have their text read for markers (a tool's images have their own column, see
+Tools).
 Steer and queue are verbs with a visible stack: while a turn runs, Enter queues a
 follow-up (the safe default, it doesn't redirect work in flight) and the secondary
 Enter steers (the model reads the words at the next round boundary). The composer's

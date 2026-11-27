@@ -29,7 +29,9 @@ fronts, nothing shared over the network.
 - **Subagents, not a monolith**: eight built-in agent types (explore, plan, implement,
   test, debug, review, research, librarian) dispatched by the leader; define your own in
   TOML, pinned to any configured endpoint: a council of three models can review one diff
-  (the bundled `council` skill runs the loop). Workers never spawn workers.
+  (the bundled `council` skill runs the loop). Workers never spawn workers. They read
+  memory but never write it, and a worker that edits runs the project's check before
+  it reports.
 - **Projects**: named groups for organizing conversations (not folders). File a chat
   under one from its row's move button, or start it from the project's +; a chat is in
   one project at most, and ones you haven't filed sit in Other. Leaving is one click on

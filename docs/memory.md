@@ -81,6 +81,15 @@ tool's result, so you see in the transcript what the agent was given and where. 
 what it is about to do contradicts one, it names the entry and asks you first. Each
 file's entries arrive once per session (again after a compaction drops them).
 
+## Subagents and memory
+
+Workers (`explore`, `implement`, `debug` and the rest) read memory the same way: every
+built-in type can `search_memory`, and recall on touch works for the files a worker
+reads or edits. Writing stays with the main agent: workers never get `remember` or
+the `memory` tool, even when a custom agent's allowlist names them. A worker puts
+what it thinks is worth keeping in its report, and the main agent decides whether to
+save it, so every write still happens where you can see it.
+
 ## When the agent saves a fact
 
 The agent saves facts with a `remember` tool: one fact per call, and a changed fact

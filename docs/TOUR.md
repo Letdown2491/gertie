@@ -16,7 +16,10 @@ The agent asks *you* questions too: when a decision is genuinely ambiguous it se
 Answer by clicking; the answer rides back into the work.
 
 The composer is one box: the paperclip attaches images, PDFs, and text files (or paste
-them), and the arrow sends. Enter while a turn runs queues a follow-up for after it
+them), and the arrow sends. What you've typed but not sent stays with its chat: switch
+conversations or start a new one and the draft waits where you left it. Attached
+images are kept with the message, so a reopened chat still shows the model what you
+sent. Enter while a turn runs queues a follow-up for after it
 (queued messages go out together, as one message); Ctrl+Enter steers the running turn
 instead. A stop holds the queue until you send it, clear it, or send a new message. With
 the composer empty, the arrow becomes Stop.
@@ -45,7 +48,8 @@ Whichever model you pick, the harness does the parts weaker models skip:
   the entry arrives with the result.
 - **The check before "done".** If a turn edited files, gertie runs the project's check
   (`cargo check`, `go build`, or your `[verify]` command) before the turn can end; a
-  failure goes back to the agent.
+  failure goes back to the agent. The check is the folder's own: switch the chat to
+  another project, or open a worktree chat, and that folder's check runs.
 - **Fewer wasted tokens.** Long command output keeps its head, its failures and its
   tail; a file read twice keeps only the newer copy; and long sessions compact at 160k
   tokens even when the model claims a far bigger window, so replies stay quick.
@@ -95,6 +99,12 @@ broadly and reports, `plan` turns fuzzy goals into steps, `implement` edits with
 brief, `test` runs suites and reproduces failures, `debug` diagnoses without patching,
 `review` critiques before you merge, `research` reads the web, `librarian` mines past
 sessions. Each run is a card in the transcript; briefs are files you can read.
+
+Workers see what the project knows: they search memory, and memory about a file they
+touch arrives with the read, as it does for the main agent. They don't write memory
+themselves; anything worth keeping goes in their report, and the main agent decides.
+A worker that edits code runs the project's check before it reports back. Workers
+talk only to the main agent, which passes along what one learned to the next.
 
 Define your own in `config.toml` (`[[agents]]`), pinned to any endpoint: put a
 cheap model on `explore` and a strong one on `review`, or run a council of three
