@@ -762,6 +762,14 @@ pub struct ChatView {
     status_version: u64,
     /// GROUNDED IN, cached (the evidence check hashes files).
     status_ground: std::cell::RefCell<Option<status::GroundCache>>,
+    /// Each GROUNDED IN row's measured height, in render order: rows
+    /// free-wrap, so no constant says how tall they are. Filled by the
+    /// rows' paint probes, read when sizing the viewport.
+    grounded_heights: std::cell::RefCell<Vec<f32>>,
+    /// The GROUNDED IN viewport's max height: three measured rows plus
+    /// their gaps, so whole rows show whatever the text wrapped to.
+    /// Starts at the old constant until the first measurement lands.
+    grounded_cap: std::cell::Cell<f32>,
     /// Whether the column is folded to its rail, persisted per
     /// conversation as a store flag.
     status_collapsed: bool,
@@ -1161,6 +1169,8 @@ impl ChatView {
             status_facts: Default::default(),
             status_version: 0,
             status_ground: Default::default(),
+            grounded_heights: Default::default(),
+            grounded_cap: std::cell::Cell::new(132.0),
             status_collapsed: false,
             project_asks: Vec::new(),
             answered_from_column: Default::default(),
