@@ -17,11 +17,11 @@ use crate::settings::SettingsSummary;
 use gpui_kit::TestSupportExt as _;
 use gpui_kit::assets::IconName;
 use gpui_kit::component::ActiveTheme as _;
+use gpui_kit::component::Icon;
 use gpui_kit::component::Sizable as _;
 use gpui_kit::component::ThemeMode;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
-use gpui_kit::component::Icon;
 use gpui_kit::component::switch::Switch;
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{h_flex, v_flex};
@@ -1768,53 +1768,50 @@ impl Render for SettingsPanelView {
         // The dialog body: nav left, the right pane carries the save
         // status over one section's scrolling content. The shell's
         // modal card wraps this, so the body just fills it: a definite
-        // height here sizes the card. The ✕ sits top-right on the
-        // dialog itself, the modal convention, not tucked in the nav.
+        // height here sizes the card. The ✕ rides in a header strip over
+        // the content pane, in flow: an absolute corner button painted
+        // under the pane's opaque background (the dot-in-the-corner
+        // screenshots), hover worked only because hit-testing ignores
+        // paint order.
+        let close = div()
+            .id("settings-close")
+            .test_support()
+            .flex()
+            .items_center()
+            .justify_center()
+            .size(px(24.))
+            .rounded(px(6.))
+            .text_color(theme.muted_foreground)
+            .cursor_pointer()
+            .hover(|style| style.bg(theme.secondary).text_color(theme.foreground))
+            .on_click(cx.listener(|_, _, _, cx| {
+                cx.emit(SettingsEvent::Dismissed);
+            }))
+            .tooltip(|window, cx| Tooltip::new("Close (esc)").build(window, cx))
+            .child(Icon::new(IconName::Close).with_size(px(14.)));
         h_flex()
             .id("settings-panel")
             .test_support()
             .w_full()
             .h(px(680.))
-            .relative()
             .child(nav)
-            // The ✕: a bordered circle top-right, visible at rest (the
-            // bare muted glyph hid against the background until hover).
-            .child(
-                div()
-                    .id("settings-close")
-                    .test_support()
-                    .absolute()
-                    .top_2()
-                    .right_2()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .size(px(24.))
-                    .rounded_full()
-                    .border_1()
-                    .border_color(theme.border)
-                    .text_size(px(11.))
-                    .text_color(theme.foreground)
-                    .cursor_pointer()
-                    .hover(|style| style.bg(theme.secondary).text_color(theme.foreground))
-                    .on_click(cx.listener(|_, _, _, cx| {
-                        cx.emit(SettingsEvent::Dismissed);
-                    }))
-                    .tooltip(|window, cx| Tooltip::new("Close (esc)").build(window, cx))
-                    // The real X glyph from the icon catalog: a text
-                    // ✕ at 11px renders as a dot.
-                    .child(
-                        Icon::new(IconName::Close)
-                            .with_size(px(14.))
-                            .text_color(theme.foreground),
-                    ),
-            )
             .child(
                 v_flex()
                     .flex_1()
                     .min_w_0()
                     .h_full()
                     .bg(theme.background)
+                    // The header: the ✕ at the top-right, in flow,
+                    // above everything that could paint over it.
+                    .child(
+                        h_flex()
+                            .h(px(36.))
+                            .flex_shrink_0()
+                            .items_center()
+                            .justify_end()
+                            .px_3()
+                            .child(close),
+                    )
                     .child(status_line)
                     .child(content_column),
             )
