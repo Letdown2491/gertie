@@ -17,7 +17,7 @@
 
 use super::*;
 use gertie_core::{CorrectionStep, MemoryEntry};
-use gpui_kit::{Div, Hsla, relative};
+use gpui_kit::{Div, Hsla, canvas, relative};
 
 /// The column's width, the mockup's: wide enough for a path and its
 /// status on one line, narrow enough that the reading column keeps
@@ -851,6 +851,16 @@ impl ChatView {
                 .children(body)
                 .into_any_element()
         };
+        // The sections container's visible bottom edge, probed at
+        // paint (it is flex_1 in a full-height column, so its bottom
+        // is the window edge the user actually sees). The GROUNDED IN
+        // settle reads it as the viewport's outer bound.
+        let visible = std::rc::Rc::new(std::cell::Cell::new(0.0f32));
+        let visible_probe = visible.clone();
+        // Where the GROUNDED IN section starts, same coordinate
+        // space: the space the section may use is the distance
+        // between the two probes.
+        let section_top = std::rc::Rc::new(std::cell::Cell::new(0.0f32));
         let mut sections: Vec<AnyElement> = Vec::new();
 
         if let Some(goal) = facts.goal_text() {
@@ -891,24 +901,27 @@ impl ChatView {
             // Each action is a chip row in the TOUCHED idiom: the
             // entry's file left, the verb right where TOUCHED puts its
             // badge.
-            let rows = facts
-                .memory_actions
+            // Five rows in the viewport, the whole list scrollable:
+            // memory actions are rarer and the section yields the
+            // column's height to TOUCHED. Repeat runs collapse (see
+            // collapse_memory_actions).
+            let collapsed = collapse_memory_actions(&facts.memory_actions);
+            let rows = collapsed
                 .iter()
-                .map(|action| {
-                    let (verb, file) = match action.split_once(' ') {
-                        Some((verb, rest)) => (verb, rest),
-                        // A clip-truncated action has no space; render
-                        // it whole rather than losing it.
-                        None => (action.as_str(), ""),
-                    };
-                    let color = match verb {
+                .map(|(verb, file, n)| {
+                    let color = match verb.as_str() {
                         "created" | "edited" | "renamed" => theme.warning,
                         _ => theme.muted_foreground,
                     };
+                    let word = if *n > 1 {
+                        format!("{verb} ×{n}")
+                    } else {
+                        verb.clone()
+                    };
                     status_file_chip(
-                        SharedString::from(format!("status-memory-{action}")),
-                        file.to_string(),
-                        verb.to_string(),
+                        SharedString::from(format!("status-memory-{verb}-{file}")),
+                        file.clone(),
+                        word,
                         color,
                         cx,
                     )
@@ -961,7 +974,9 @@ impl ChatView {
             // The whole list in one scrollable window, the viewport
             // sized to roughly five rows: no data cap, no "+N more"
             // continuation, and the column's height stays stable
-            // whether the session touched 3 files or 300.
+            // whether the session touched 3 files or 300. The
+            // artifact gate in the fold keeps build debris out, so
+            // the five rows are the files that matter.
             let body = v_flex()
                 .id("touched-scroll")
                 .max_h(px(150.))
@@ -988,6 +1003,11 @@ impl ChatView {
         }
 
         if !ground.is_empty() {
+            // One cluster per entry: the entry link plus its
+            // superseded and evidence subrows, stacked at the same 3px
+            // gap the scroll container used to put between them. The
+            // cluster is the unit the viewport sizes against, so a
+            // subrow can never split a "three rows" viewport.
             let mut links: Vec<AnyElement> = Vec::new();
             for row in &ground {
                 // The entry itself: ACTING ON carries the accent edge
@@ -998,7 +1018,7 @@ impl ChatView {
                 } else {
                     ("SHARES FILES", theme.muted_foreground)
                 };
-                links.push(
+                let mut items: Vec<AnyElement> = vec![
                     status_link(
                         Some((head.to_string(), color)),
                         Some(format!("[{}]", row.id)),
@@ -1009,7 +1029,7 @@ impl ChatView {
                     .id(SharedString::from(format!("status-ground-{}", row.id)))
                     .test_support()
                     .into_any_element(),
-                );
+                ];
                 if let Some(by) = &row.superseded {
                     let (head, body) = if by.is_empty() {
                         (
@@ -1022,40 +1042,171 @@ impl ChatView {
                             format!("[{}] was replaced; follow [{by}] instead", row.id),
                         )
                     };
-                    links.push(
+                    items.push(
                         status_link(Some((head, theme.danger)), None, body, false, cx)
                             .into_any_element(),
                     );
                 }
                 if let Some((files, rest)) = row.evidence_parts() {
-                    links.push(
+                    items.push(
                         status_link(
                             Some(("EVIDENCE CHANGED".to_string(), theme.danger)),
-                            Some(files),
+                            None,
                             rest,
                             false,
                             cx,
                         )
                         .into_any_element(),
                     );
+                    // A path is one unbreakable token, so it cannot
+                    // share a flex row with the verdict: in the id
+                    // slot it overflowed the row and starved the
+                    // verdict to a zero-width column (the tall
+                    // half-empty box). Each path gets its own
+                    // truncated mono line, the TOUCHED chip's
+                    // contract, indented under the verdict.
+                    for path in files.split(", ") {
+                        items.push(
+                            div()
+                                .flex()
+                                .items_center()
+                                .justify_between()
+                                .gap_2()
+                                .px_2()
+                                .pl_3()
+                                .py_1()
+                                .rounded(px(4.))
+                                .bg(theme.secondary)
+                                .font_family(theme.mono_font_family.clone())
+                                .text_size(px(11.5))
+                                .child(
+                                    div()
+                                        .flex_1()
+                                        .min_w_0()
+                                        .truncate()
+                                        .text_color(theme.foreground)
+                                        .child(SharedString::from(path)),
+                                )
+                                .into_any_element(),
+                        );
+                    }
                 }
+                links.push(v_flex().gap(px(3.)).children(items).into_any_element());
             }
             sections.push(
                 v_flex()
+                    // Positioned: the top probe's absolute child must
+                    // anchor HERE, not climb to the sections container
+                    // (the unpositioned-parent climb read the column
+                    // top and sized the viewport to the whole column).
+                    .relative()
                     .gap_1p5()
+                    // This section's top edge: the outer bound's
+                    // other anchor (positioned root, so the probe's
+                    // absolute child anchors HERE and the space math
+                    // is the section, not the whole column).
+                    .child({
+                        let top = section_top.clone();
+                        canvas(
+                            move |bounds, _, _| top.set(bounds.origin.y.as_f32()),
+                            move |_, _, _, _| {},
+                        )
+                        .absolute()
+                        .inset_0()
+                    })
                     .child(label(None, "GROUNDED IN".into()))
-                    .child(
-                        // Three rows in the viewport, the whole list
-                        // scrollable, wheel events staying in the
-                        // section rather than scrolling the column.
+                    .child({
+                        // Rows free-wrap, so nothing knows a row's
+                        // height until gpui lays it out. Every row
+                        // carries an absolute paint probe recording
+                        // its laid-out height, and the trailing
+                        // probe (last child, so its prepaint runs
+                        // after every row's) turns three of those
+                        // heights into the viewport's max and
+                        // settles it with one deferred re-render.
+                        // The max only clips: rows lay out at their
+                        // natural height inside the scroll, so the
+                        // measured values are stable frame to frame.
+                        let heights = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+                        let entity = cx.entity();
+                        let tally = heights.clone();
+                        let rows = links
+                            .into_iter()
+                            .map(|row| {
+                                let probe = heights.clone();
+                                div()
+                                    .relative()
+                                    .child(row)
+                                    .child(
+                                        canvas(
+                                            move |bounds, _, _| {
+                                                probe.borrow_mut().push(bounds.size.height.as_f32())
+                                            },
+                                            |_, _, _, _| {},
+                                        )
+                                        .absolute()
+                                        .inset_0(),
+                                    )
+                                    .into_any_element()
+                            })
+                            .collect::<Vec<_>>();
                         v_flex()
                             .id("grounded-scroll")
-                            .max_h(px(132.))
+                            .test_support()
+                            .max_h(px(self.grounded_cap.get()))
                             .overflow_y_scroll()
                             .occlude()
                             .gap(px(3.))
-                            .children(links),
-                    )
+                            .children(rows)
+                            .child({
+                                let visible = visible.clone();
+                                let current_cap = self.grounded_cap.get();
+                                canvas(
+                                    move |_, window, cx| {
+                                        let collected = tally.borrow().clone();
+                                        // The container's gap(px(3.)),
+                                        // twice between three rows.
+                                        let three = if collected.len() >= 3 {
+                                            collected[0] + collected[1] + collected[2] + 6.0
+                                        } else {
+                                            0.0
+                                        };
+                                        // The outer bound: the distance
+                                        // from this section's top edge
+                                        // to the column's visible
+                                        // bottom, minus the overhead
+                                        // after the probe (label, gaps,
+                                        // padding, ~40px at the
+                                        // mockup's sizes) and never
+                                        // below a peek (90px), so a
+                                        // crowded column still shows
+                                        // the section rather than
+                                        // nothing.
+                                        let space =
+                                            (visible.get() - section_top.get() - 40.0).max(90.0);
+                                        let cap =
+                                            if three > 0.0 { three.min(space) } else { space };
+                                        // React to cap changes, not
+                                        // just row-height changes: a
+                                        // crowded column trims the
+                                        // viewport even when the rows
+                                        // did not change, and the
+                                        // probes only settle a frame
+                                        // after the sections render.
+                                        if cap != current_cap {
+                                            window.defer(cx, move |_, cx| {
+                                                entity.update(cx, |view, cx| {
+                                                    *view.grounded_heights.borrow_mut() = collected;
+                                                    view.grounded_cap.set(cap);
+                                                    cx.notify();
+                                                });
+                                            });
+                                        }
+                                    },
+                                    |_, _, _, _| {},
+                                )
+                            })
+                    })
                     .into_any_element(),
             );
         }
@@ -1174,7 +1325,7 @@ impl ChatView {
                             .on_click(cx.listener(|this, _, _, cx| this.toggle_status_column(cx))),
                     ),
             )
-            .child(
+            .child({
                 v_flex()
                     .id("status-sections")
                     .flex_1()
@@ -1183,8 +1334,22 @@ impl ChatView {
                     .px(px(14.))
                     .py_3()
                     .gap(px(14.))
-                    .children(sections),
-            )
+                    // The container's bottom edge, the outer
+                    // bound's anchor (absolute, so it never
+                    // affects the layout it measures). First
+                    // child, so its prepaint runs before any
+                    // section's settle reads the cell.
+                    .child({
+                        let bottom = visible_probe;
+                        canvas(
+                            move |bounds, _, _| bottom.set(bounds.bottom().as_f32()),
+                            move |_, _, _, _| {},
+                        )
+                        .absolute()
+                        .inset_0()
+                    })
+                    .children(sections)
+            })
             .test_support()
             .into_any_element()
     }
@@ -1966,7 +2131,13 @@ fn bash_file_targets(command: &str, root: &std::path::Path) -> Vec<(String, Touc
                     // expressions) die here instead of rendering as
                     // rows. Only real, in-workspace files pass.
                     let exists_ok = pending_creates || is_real_workspace_file(root, cleaned);
-                    if !exists_ok {
+                    // Build output and logs are not file state the
+                    // user cares about when EDITED: a build run
+                    // should not push out the files that matter.
+                    // Reads stay: reading a log is sometimes the
+                    // work itself (a crash diagnosis).
+                    let not_artifact = touch != Touch::Edited || !is_artifact_path(cleaned);
+                    if !exists_ok || !not_artifact {
                         continue;
                     }
                     if let Some(normalized) = normalize_path(root, cleaned) {
@@ -2023,6 +2194,47 @@ fn is_scratch(token: &str) -> bool {
     token.starts_with("/dev/") || token.starts_with("/tmp/") || token.starts_with("/var/tmp/")
 }
 
+/// Memory actions collapsed for display: consecutive repeats of the
+/// same verb+file (three `created project.md` rows from one save
+/// burst) become one row counted ×N. The row says what happened, not
+/// how many times the same write fired.
+pub(crate) fn collapse_memory_actions(actions: &[String]) -> Vec<(String, String, usize)> {
+    let mut collapsed: Vec<(String, String, usize)> = Vec::new();
+    for action in actions {
+        let (verb, file) = match action.split_once(' ') {
+            Some((verb, rest)) => (verb.to_string(), rest.to_string()),
+            // A clip-truncated action has no space; render it whole
+            // rather than losing it.
+            None => (action.clone(), String::new()),
+        };
+        match collapsed.last_mut() {
+            Some((seen_verb, seen_file, n)) if seen_file == &file && seen_verb == &verb => {
+                *n += 1;
+            }
+            _ => collapsed.push((verb, file, 1)),
+        }
+    }
+    collapsed
+}
+
+/// Build output and throwaway state, wherever it lands: target/,
+/// node_modules/, log files, lock files' temp siblings. The TOUCHED
+/// gate drops EDITED hits here (a build is not the work; a READ of a
+/// log can be), and strips the shell's `;`-glued tokens the heuristics
+/// would otherwise keep (`build.log;` from a trailing semicolon).
+fn is_artifact_path(token: &str) -> bool {
+    let token = token.trim_end_matches(';');
+    let file = token.rsplit('/').next().unwrap_or(token);
+    let logged = {
+        let lower = file.to_ascii_lowercase();
+        lower.ends_with(".log") || lower.ends_with(".log.tmp") || lower.ends_with(".lock")
+    };
+    token
+        .split('/')
+        .any(|segment| matches!(segment, "target" | "node_modules" | ".git"))
+        || logged
+}
+
 #[test]
 fn newest_wins_ordering_moves_retouched_files_front() {
     let (_tmp, root) = root_fixture();
@@ -2074,11 +2286,69 @@ mod memory_action_tests {
         assert_eq!(facts.memory_actions[7], "created t0.md", "oldest last");
         assert!(facts.consulted.contains(&"p12".to_string()));
     }
+
+    #[test]
+    fn repeated_memory_actions_collapse_to_one_counted_row() {
+        // The screenshot's case: three `created project.md` rows from
+        // one write burst read as noise; the row says what happened,
+        // not how many saves fired.
+        let collapsed = collapse_memory_actions(&[
+            "created project.md".into(),
+            "created project.md".into(),
+            "created project.md".into(),
+            "superseded p12".into(),
+        ]);
+        assert_eq!(
+            collapsed,
+            vec![
+                ("created".into(), "project.md".into(), 3),
+                ("superseded".into(), "p12".into(), 1),
+            ]
+        );
+        // Non-adjacent repeats stay separate: the run-length fold
+        // shows the sequence, not a lifetime total.
+        let collapsed = collapse_memory_actions(&[
+            "created a.md".into(),
+            "created b.md".into(),
+            "created a.md".into(),
+        ]);
+        assert_eq!(collapsed.len(), 3);
+    }
 }
 
 #[cfg(test)]
 mod bash_tests {
     use super::*;
+
+    #[test]
+    fn build_artifacts_do_not_count_as_touched_edits() {
+        // The screenshot's case: a build run flooded TOUCHED with
+        // target/ paths and log files, crowding out the files that
+        // matter. Writes into build output are not the work.
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::create_dir_all(root.join("target/debug")).unwrap();
+        std::fs::write(root.join("src/main.rs"), "fn main() {}").unwrap();
+        std::fs::write(root.join("target/debug/out.log"), "").unwrap();
+        let targets = bash_file_targets(
+            "cargo build 2> target/debug/out.log && cp src/main.rs src/main.rs.bak",
+            root,
+        );
+        assert!(
+            !targets
+                .iter()
+                .any(|(path, _)| path.contains("target/") || path.ends_with(".log")),
+            "build debris stays out: {targets:?}"
+        );
+        // Reading a log is sometimes the work itself (a crash
+        // diagnosis), so reads keep their recall.
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        std::fs::write(root.join("crash.log"), "x").unwrap();
+        let targets = bash_file_targets("tail crash.log", root);
+        assert_eq!(targets.len(), 1, "a read of a log is signal: {targets:?}");
+    }
 
     #[test]
     fn redirects_and_edits_classify_as_edited() {
