@@ -210,6 +210,9 @@ fn capture(root: &Path, arguments: &str) -> Shot {
 
 /// Where captures are kept: `$XDG_CACHE_HOME/gertie/screenshots`, out
 /// of every workspace, since a capture is evidence, not project work.
+/// Created on every capture, so the age sweep rides it: files older
+/// than 30 days go, keeping a chatty screenshot habit from growing
+/// the cache without bound.
 fn shots_dir() -> Result<PathBuf, String> {
     let cache = std::env::var_os("XDG_CACHE_HOME")
         .filter(|value| !value.is_empty())
@@ -219,7 +222,35 @@ fn shots_dir() -> Result<PathBuf, String> {
     let dir = cache.join("gertie").join("screenshots");
     std::fs::create_dir_all(&dir)
         .map_err(|error| format!("screenshot: can't create {} ({error})", dir.display()))?;
+    sweep_stale(&dir);
     Ok(dir)
+}
+
+/// Deletes capture files older than 30 days, best effort: a sweep
+/// failure never blocks a capture. Runs once per capture; the dir is
+/// small, so the scan is cheap next to a browser launch.
+fn sweep_stale(dir: &Path) {
+    let cutoff = match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
+        Ok(now) => now.as_secs() - 30 * 24 * 60 * 60,
+        Err(_) => return,
+    };
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        if !entry.path().is_file() {
+            continue;
+        }
+        let stale = entry
+            .metadata()
+            .ok()
+            .and_then(|meta| meta.modified().ok())
+            .and_then(|modified| modified.duration_since(std::time::UNIX_EPOCH).ok())
+            .is_some_and(|secs| secs.as_secs() < cutoff);
+        if stale {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
 }
 
 /// A URL the browser can open, and the folder a file page lives in.
@@ -246,9 +277,28 @@ fn page_url(root: &Path, url: &str) -> Result<(String, Option<PathBuf>), String>
     };
     let resolved = crate::resolve(root, path)?;
     Ok((
-        format!("file://{}", resolved.display()),
+        format!("file://{}", file_url_path(&resolved)),
         Some(root.to_path_buf()),
     ))
+}
+
+/// The path as a file URL's path component: percent-encoded per RFC
+/// 3986. Unreserved bytes and `/` pass (the separator keeps the path's
+/// structure); anything else, space and `#` and `?` and quotes and
+/// non-ASCII included, goes hex, so `my page.html` survives the trip
+/// through the browser's argv and URL parser.
+fn file_url_path(path: &Path) -> String {
+    let raw = path.as_os_str().to_string_lossy();
+    let mut encoded = String::with_capacity(raw.len());
+    for byte in raw.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' | b'/' => {
+                encoded.push(byte as char)
+            }
+            other => encoded.push_str(&format!("%{other:02X}")),
+        }
+    }
+    encoded
 }
 
 /// Whether an http(s) URL's host is this machine: localhost, a
@@ -1000,7 +1050,7 @@ mod tests {
         let workspace = tempfile::tempdir().unwrap();
         std::fs::write(workspace.path().join("index.html"), "<p>hi</p>").unwrap();
         let root = workspace.path().canonicalize().unwrap();
-        let inside = format!("file://{}", root.join("index.html").display());
+        let inside = format!("file://{}", file_url_path(&root.join("index.html")));
         assert_eq!(
             page_url(&root, "index.html").unwrap(),
             (inside.clone(), Some(root.clone()))
@@ -1014,6 +1064,20 @@ mod tests {
         assert!(page_url(&root, "file:///etc/passwd").is_err());
         assert!(page_url(&root, "javascript:alert(1)").is_err());
         assert!(page_url(&root, "chrome://settings").is_err());
+    }
+
+    #[test]
+    fn file_urls_percent_encode_path_specials() {
+        let workspace = tempfile::tempdir().unwrap();
+        let root = workspace.path().canonicalize().unwrap();
+        std::fs::write(root.join("my page.html"), "<p>hi</p>").unwrap();
+        let (url, _) = page_url(&root, "my page.html").unwrap();
+        assert_eq!(
+            url,
+            format!("file://{}", file_url_path(&root.join("my page.html")))
+        );
+        assert!(url.contains("my%20page.html"), "{url}");
+        assert!(!url.contains(' '));
     }
 
     #[test]

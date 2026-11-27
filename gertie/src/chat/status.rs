@@ -597,8 +597,10 @@ impl ChatView {
     /// (the content is in the model's context), so the store re-records
     /// the hash and the flag clears without a click or a tool call. An
     /// edit counts too: folding happens after the result, so the hash
-    /// lands on the file's post-edit state. A stale fact should still
-    /// supersede; this is for facts that survived the refactor.
+    /// lands on the file's post-edit state. A failed reread does not:
+    /// the content never reached the model's context, so the cite
+    /// keeps its stale flag. A stale fact should still supersede; this
+    /// is for facts that survived the refactor.
     fn reverify_on_reread(
         &mut self,
         name: &str,
@@ -607,6 +609,11 @@ impl ChatView {
         root: &std::path::Path,
     ) {
         if !matches!(name, "read_file" | "edit_file" | "write_file" | "bash") {
+            return;
+        }
+        // A failed tool call is not a reread: nothing arrived in the
+        // model's context to re-verify against.
+        if result.starts_with("error:") {
             return;
         }
         let Some(store) = self.memory_store.clone() else {
@@ -649,7 +656,10 @@ impl ChatView {
                 showns.contains(&cited.path) && store.changed_evidence(entry).contains(&cited.path)
             });
             if hits {
-                let _ = store.reverify_evidence(&id);
+                // Re-verify only the cites the session actually re-read:
+                // a second stale cite of this entry, one the model never
+                // re-saw here, keeps its flag.
+                store.reverify_evidence_paths(&id, &showns);
             }
         }
     }

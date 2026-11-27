@@ -6924,7 +6924,7 @@ fn the_settings_page_groups_four_sections_and_covers_the_middle_column() {
             .panel_for_test()
     });
     assert_eq!(closed, "none", "escape closes the page");
-    fixture.act(|window, cx| {
+    fixture.act(|window, _cx| {
         assert!(
             window.try_find("settings-panel").is_none(),
             "the page is gone after esc"
@@ -7157,7 +7157,7 @@ fn settings_modal_covers_and_centers_at_a_wide_window() {
             (left_gap - right_gap).abs() < px(40.),
             "the dialog centers: left gap {left_gap:?}, right gap {right_gap:?}"
         );
-        // The dialog is its body's height (560px), not the window's.
+        // The dialog is its body's height (680px), not the window's.
         assert!(
             (panel.size.height - px(680.)).abs() < px(2.),
             "the dialog is its body's height: {panel:?}"

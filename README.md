@@ -58,10 +58,10 @@ fronts, nothing shared over the network.
 - **Any endpoint**: speaks the OpenAI-compatible wire (ppq.ai, OpenRouter, Ollama,
   vLLM, Gemini's compat endpoint) plus a native Anthropic adapter. Fallback chains: when
   an endpoint dies before producing content, the next one takes over invisibly.
-- **Editable settings**: endpoints, API keys, the sandbox, and MCP servers are
-  configurable in the panel, and each change saves as you make it, through `toml_edit`,
-  so your config comments and hand-written keys survive. Endpoint changes apply to open
-  chats immediately.
+- **Editable settings**: a modal over the window with four sections (chat behavior,
+  endpoints, memory, tools & agents); each change saves as you make it, through
+  `toml_edit`, so your config comments and hand-written keys survive (MCP `args` and
+  `env` included). Endpoint changes apply to open chats immediately.
 - **MCP**: external tools over stdio *or* Streamable HTTP. Server tool descriptions are
   treated as untrusted input (sanitized, capped); every MCP call prompts.
 - **Token ledger**: per-session and all-time token totals, persisted locally. No
@@ -104,7 +104,7 @@ gertie eval nav        # measures what the repo map saves each model in finding 
 
 First launch writes a starter `~/.config/gertie/config.toml` with comments and pointers
 only: no endpoint is built in, so none is invented for you. Add yours in the app
-(`/settings` in the composer) or by hand:
+(settings, Endpoints) or by hand:
 
 ```toml
 [[endpoints]]

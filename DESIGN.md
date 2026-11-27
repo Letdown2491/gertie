@@ -90,6 +90,18 @@ Shipped (M0–M5), in order:
   turns, the footer's compaction line, the `[turn]` budget dial (defaults 60 + 10,
   panel-editable), and the polish items (popup arrow-key navigation, vote feedback in the
   panel rows, find's row highlight). Full record in the Deferred row below.
+- **M8, the settings dialog and the release review** (shipped 2026-11-27): settings
+  rebuilt as a modal over the whole window (four sections in a left nav, Chat first,
+  saves as you touch a control through `toml_edit`, Escape or the corner ✕ closes), the
+  release review it caught (MCP saves no longer strip `args`/`env`; the Search section
+  actually writes `[search]` now), the memory defaults made true (extraction and dreaming
+  on when `[memory]` is absent, the DESIGN.md amendment the getters had missed), a
+  reread of a cited file re-verifies the consulted entry (failed reads don't), the
+  workspace-following check/memory/root (follows the chat's workspace), Enter queues
+  follow-ups and steers can't vanish, images survive reloads and mid-turn sends, a
+  screenshot tool whose captures stay in the cache (30-day sweep) and out of the
+  workspace, the folded sidebar and icon rail, boot-stage tracing (`GERTIE_BOOT_TRACE`),
+  and home-rooted launches resume the newest unsettled conversation wherever it lives.
 
 
 The original "Deferred" row, every item shipped or decided:

@@ -262,7 +262,8 @@ fn render_file(rules: &[Rule]) -> String {
 
 const HEADER: &str = r#"# gertie keymap. Rules are {key, command, when}; the last matching
 # rule wins. `when` is one of: composerFocus, editableFocus,
-# turnRunning, turnDiffFocus, omit it to match everywhere.
+# turnRunning, turnDiffFocus, settingsPanelFocus, findBarFocus;
+# omit it to match everywhere.
 # gertie adds new defaults here on upgrade; rules you write are
 # never replaced. Set command = "none" to claim a key and bind
 # nothing to it.

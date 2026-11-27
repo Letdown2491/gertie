@@ -562,6 +562,15 @@ pub struct ConfigEdits {
     pub repo_map_budget: Option<Option<usize>>,
     /// Memory's frozen-index budget: None = leave the file's key alone.
     pub memory_index_budget: Option<Option<usize>>,
+    /// Web search: the panel always owns the choice ("none" = off =
+    /// the [search] table is removed). The inactive transport's key is
+    /// left as the file has it, so switching backends doesn't lose it.
+    pub search_backend: String,
+    /// SearXNG's instance URL, touched only when the backend is
+    /// searxng (None = remove the key, the default reads through).
+    pub search_base_url: Option<String>,
+    /// Brave's key env var, touched only when the backend is brave.
+    pub search_api_key_env: Option<String>,
 }
 
 impl ConfigEdits {
@@ -636,8 +645,10 @@ impl ConfigEdits {
                 toml_edit::value(self.memory_dream_days as i64),
             );
         } else {
-            // Zero means never: remove the key so the default (7)
-            // reads through, the panel switch off is the intent.
+            // Zero means never: remove the key so the cadence is off
+            // regardless of the getter's absent-key default (also 7,
+            // DESIGN.md "Defaults"). The removal is the panel's
+            // faithful record of a user-written 0.
             memory.remove("dream_days");
         }
 
@@ -775,6 +786,37 @@ impl ConfigEdits {
         };
         security.insert("sandbox_bash", toml_edit::value(self.sandbox_bash));
 
+        // Web search: the panel owns the whole [search] table ("none"
+        // removes it, the backend reads as off). The inactive
+        // transport's key is untouched, so flipping back and forth
+        // doesn't lose the other side's configuration.
+        match self.search_backend.as_str() {
+            "none" => {
+                root.remove("search");
+            }
+            backend => {
+                if !matches!(root.get("search"), Some(toml_edit::Item::Table(_))) {
+                    root.insert("search", toml_edit::Item::Table(toml_edit::Table::new()));
+                }
+                let Some(toml_edit::Item::Table(search)) = root.get_mut("search") else {
+                    unreachable!("just normalized search to a table");
+                };
+                search.insert("backend", toml_edit::value(backend.to_string()));
+                if backend == "searxng" {
+                    match &self.search_base_url {
+                        Some(url) => search.insert("base_url", toml_edit::value(url.clone())),
+                        None => search.remove("base_url"),
+                    };
+                }
+                if backend == "brave" {
+                    match &self.search_api_key_env {
+                        Some(name) => search.insert("api_key_env", toml_edit::value(name.clone())),
+                        None => search.remove("api_key_env"),
+                    };
+                }
+            }
+        }
+
         // MCP servers: same whole-array replacement as endpoints.
         let mut servers = toml_edit::ArrayOfTables::new();
         for server in &self.mcp_servers {
@@ -791,6 +833,13 @@ impl ConfigEdits {
                     "args",
                     toml_edit::value(server.args.iter().cloned().collect::<toml_edit::Array>()),
                 );
+            }
+            if !server.env.is_empty() {
+                let mut env = toml_edit::Table::new();
+                for (key, value) in &server.env {
+                    env.insert(key, toml_edit::value(value.clone()));
+                }
+                table.insert("env", toml_edit::Item::Table(env));
             }
             servers.push(table);
         }
@@ -1077,12 +1126,11 @@ impl Config {
             })
     }
 
-    /// The auto-settle threshold in force.
+    /// Long-term memory's switch: your config's say, else on (the
+    /// amended default, DESIGN.md "Defaults": extraction on, dreaming
+    /// on, the review inbox the only gate).
     pub fn memory_enabled(&self) -> bool {
-        self.memory
-            .as_ref()
-            .and_then(|m| m.enabled)
-            .unwrap_or(false)
+        self.memory.as_ref().and_then(|m| m.enabled).unwrap_or(true)
     }
 
     pub fn memory_index_budget(&self) -> usize {
@@ -1092,8 +1140,11 @@ impl Config {
             .unwrap_or(600)
     }
 
+    /// Dreaming's cadence in days: your config's say, else 7 (the
+    /// amended default, DESIGN.md "Defaults"; zero in the file still
+    /// means never).
     pub fn memory_dream_days(&self) -> u64 {
-        self.memory.as_ref().and_then(|m| m.dream_days).unwrap_or(0)
+        self.memory.as_ref().and_then(|m| m.dream_days).unwrap_or(7)
     }
 
     /// The turn's tool-round budget: the user's value, else the loop's
@@ -2001,6 +2052,135 @@ default_mode = "full_access"
         ConfigEdits::default().save(&path).unwrap();
         let config = Config::load_from(&path).unwrap();
         assert!(config.agents.is_empty(), "agents removed wholesale");
+    }
+
+    /// The blocker the release review caught: a settings save rebuilds
+    /// the [[mcp_servers]] array wholesale, and the form doesn't model
+    /// args/env, so they must ride the draft untouched or every
+    /// autosave (a sandbox flip, an endpoint edit) silently strips
+    /// them and the server stops spawning.
+    #[test]
+    fn edits_preserve_hand_written_mcp_args_and_env() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            "[[endpoints]]\nname = \"ppq\"\nmodel = \"m1\"\n\n\
+             [[mcp_servers]]\nname = \"docs\"\nurl = \"https://mcp.example.com/mcp\"\n\n\
+             [[mcp_servers]]\nname = \"fs\"\ncommand = \"mcp-fs\"\n\
+             args = [\"--root\", \"/srv\"]\n\n\
+             [mcp_servers.env]\nFS_ROOT = \"/srv\"\n",
+        )
+        .unwrap();
+
+        // A save that owns the MCP list (as every panel save does).
+        ConfigEdits {
+            endpoints: vec![endpoint("ppq", "m1")],
+            default_endpoint: Some("ppq".into()),
+            sandbox_bash: false,
+            memory_enabled: false,
+            memory_dream_days: 7,
+            mcp_servers: vec![
+                McpServerConfig {
+                    name: "docs".into(),
+                    url: Some("https://mcp.example.com/mcp".into()),
+                    command: None,
+                    args: Vec::new(),
+                    env: Default::default(),
+                },
+                McpServerConfig {
+                    name: "fs".into(),
+                    url: None,
+                    command: Some("mcp-fs".into()),
+                    // Exactly what the panel's draft carries: the
+                    // file's own values, not the form's blanks.
+                    args: vec!["--root".into(), "/srv".into()],
+                    env: [("FS_ROOT".to_string(), "/srv".to_string())]
+                        .into_iter()
+                        .collect(),
+                },
+            ],
+            ..Default::default()
+        }
+        .save(&path)
+        .unwrap();
+
+        let config = Config::load_from(&path).unwrap();
+        assert_eq!(config.mcp_servers.len(), 2);
+        let fs = &config.mcp_servers[1];
+        assert_eq!(fs.args, vec!["--root", "/srv"], "args survive: {fs:?}");
+        assert_eq!(fs.env.get("FS_ROOT").map(String::as_str), Some("/srv"));
+    }
+
+    /// The search section's controls write what they report: the
+    /// backend choice lands as [search], "none" removes the table,
+    /// and the inactive transport's key survives a switch.
+    #[test]
+    fn edits_write_the_search_section_and_none_removes_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "[endpoints]\nname = \"ppq\"\nmodel = \"m1\"\n").unwrap();
+
+        ConfigEdits {
+            endpoints: vec![endpoint("ppq", "m1")],
+            default_endpoint: Some("ppq".into()),
+            sandbox_bash: false,
+            memory_enabled: false,
+            memory_dream_days: 7,
+            search_backend: "brave".into(),
+            search_api_key_env: Some("BRAVE_KEY".into()),
+            search_base_url: Some("https://searx.example.com".into()),
+            ..Default::default()
+        }
+        .save(&path)
+        .unwrap();
+
+        let raw = std::fs::read_to_string(&path).unwrap();
+        assert!(raw.contains("backend = \"brave\""), "{raw}");
+        assert!(raw.contains("api_key_env = \"BRAVE_KEY\""), "{raw}");
+        let config = Config::load_from(&path).unwrap();
+        let search = config.search.as_ref().expect("the [search] table");
+        assert_eq!(search.backend, "brave");
+        assert_eq!(search.api_key_env.as_deref(), Some("BRAVE_KEY"));
+        assert!(
+            search.base_url.is_none(),
+            "the inactive transport's key is not written"
+        );
+
+        // Switch to searxng: brave's env name survives, the URL lands.
+        ConfigEdits {
+            endpoints: vec![endpoint("ppq", "m1")],
+            default_endpoint: Some("ppq".into()),
+            sandbox_bash: false,
+            memory_enabled: false,
+            memory_dream_days: 7,
+            search_backend: "searxng".into(),
+            search_base_url: Some("https://searx.example.com".into()),
+            ..Default::default()
+        }
+        .save(&path)
+        .unwrap();
+        let raw = std::fs::read_to_string(&path).unwrap();
+        assert!(raw.contains("backend = \"searxng\""), "{raw}");
+        assert!(
+            raw.contains("api_key_env = \"BRAVE_KEY\""),
+            "the inactive key survives: {raw}"
+        );
+
+        // "none" removes the table: search is off, no stub remains.
+        ConfigEdits {
+            endpoints: vec![endpoint("ppq", "m1")],
+            default_endpoint: Some("ppq".into()),
+            sandbox_bash: false,
+            memory_enabled: false,
+            memory_dream_days: 7,
+            search_backend: "none".into(),
+            ..Default::default()
+        }
+        .save(&path)
+        .unwrap();
+        let raw = std::fs::read_to_string(&path).unwrap();
+        assert!(!raw.contains("[search]"), "off removes the table: {raw}");
     }
 
     #[test]

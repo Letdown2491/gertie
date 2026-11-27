@@ -89,12 +89,16 @@ impl EndpointDraft {
     }
 }
 
-/// One MCP server as the editor holds it.
+/// One MCP server as the editor holds it. `args` and `env` ride
+/// along unedited (the form doesn't model them), so a save rebuilds
+/// the server with them instead of stripping them.
 #[derive(Clone)]
 struct McpDraft {
     name: String,
     url: Option<String>,
     command: Option<String>,
+    args: Vec<String>,
+    env: std::collections::BTreeMap<String, String>,
 }
 
 impl McpDraft {
@@ -103,6 +107,8 @@ impl McpDraft {
             name: server.name.clone(),
             url: server.url.clone(),
             command: server.command.clone(),
+            args: server.args.clone(),
+            env: server.env.clone(),
         }
     }
 }
@@ -804,8 +810,8 @@ impl SettingsPanelView {
                     name: draft.name.clone(),
                     url: draft.url.clone(),
                     command: draft.command.clone(),
-                    args: Vec::new(),
-                    env: Default::default(),
+                    args: draft.args.clone(),
+                    env: draft.env.clone(),
                 })
                 .collect(),
             agents: self.agents.iter().map(|d| d.to_config()).collect(),
@@ -827,6 +833,14 @@ impl SettingsPanelView {
             repo_map_enabled: Some(self.repo_map_enabled),
             repo_map_budget: Some(self.repo_map_budget_draft.trim().parse::<usize>().ok()),
             memory_index_budget: Some(self.memory_index_budget_draft.trim().parse::<usize>().ok()),
+            // The search section's choice: the backend always writes
+            // ("none" removes the table), the transport fields only
+            // when their backend is active.
+            search_backend: self.search_backend.clone(),
+            search_base_url: (!self.search_base_url_draft.trim().is_empty())
+                .then(|| self.search_base_url_draft.trim().to_string()),
+            search_api_key_env: (!self.search_key_env_draft.trim().is_empty())
+                .then(|| self.search_key_env_draft.trim().to_string()),
         };
         match edits.save(&path) {
             Ok(()) => {
@@ -1183,6 +1197,11 @@ impl Render for SettingsPanelView {
                                             name,
                                             url: (!url.is_empty()).then_some(url),
                                             command: (!command.is_empty()).then_some(command),
+                                            // A form-added server starts with
+                                            // no args or env; the user wires
+                                            // those in config.toml by hand.
+                                            args: Vec::new(),
+                                            env: Default::default(),
                                         });
                                         this.mcp_name = None;
                                         this.mcp_url = None;

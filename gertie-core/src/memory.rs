@@ -365,6 +365,56 @@ impl MemoryStore {
         Ok(refreshed)
     }
 
+    /// Re-verifies only the cited paths the session actually re-read:
+    /// the given paths' hashes re-record, the rest of the entry's
+    /// evidence keeps its stale flag. The per-path form of
+    /// [`Self::reverify_evidence`], which the automation calls so a
+    /// reread of one file doesn't clear the flag on the others.
+    pub fn reverify_evidence_paths(&self, id: &str, paths: &[String]) -> Vec<String> {
+        let entry = match self.scan().into_iter().find(|entry| entry.id == id) {
+            Some(entry) => entry,
+            None => return Vec::new(),
+        };
+        if entry.evidence.is_empty() || entry.valid_until.is_some() {
+            return Vec::new();
+        }
+        let Some(root) = self.workspace_root() else {
+            return Vec::new();
+        };
+        let mut refreshed = Vec::new();
+        let mut evidence = entry.evidence.clone();
+        for cited in &mut evidence {
+            // Not re-read here: the flag stands either way.
+            if !paths.contains(&cited.path) {
+                continue;
+            }
+            let bytes = match std::fs::read(root.join(&cited.path)) {
+                Ok(bytes) => bytes,
+                Err(_) => continue, // gone is still stale; keep the flag
+            };
+            let hash = blob_hash(&bytes);
+            if hash != cited.hash {
+                cited.hash = hash;
+                refreshed.push(cited.path.clone());
+            }
+        }
+        if refreshed.is_empty() {
+            return Vec::new();
+        }
+        let line = render_line(&MemoryEntry {
+            evidence,
+            ..entry.clone()
+        });
+        if rewrite_line(self.root(tier_of(&entry.id)).join(&entry.file), id, |_| {
+            Ok(line)
+        })
+        .is_err()
+        {
+            return Vec::new();
+        }
+        refreshed
+    }
+
     /// Wraps raw model text in the entry grammar, one entry per line:
     /// fresh ids, zeroed counters, provenance, date. One scan for the
     /// whole batch, ids minted sequentially against it (a per-line scan

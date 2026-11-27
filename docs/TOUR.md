@@ -143,10 +143,12 @@ read from the record, never asked for.
 
 ## Settings
 
-Settings opens from the foot of the sidebar (or `/settings`): endpoints and keys, the
-sandbox, memory, turn budgets, MCP servers, and agents, one card each. Every change
-saves the moment you make it, into your `config.toml` with its comments kept.
-Endpoint changes apply right away; the rest says when it needs a restart.
+Settings opens as a modal over the whole window, from the foot of the sidebar, `/settings`
+in the composer, or the palette (`ctrl-k`, `>settings`): four sections in a left nav
+(Chat, Endpoints, Memory, Tools & agents), and every open lands on Chat. Every change
+saves the moment you make it, into your `config.toml` with its comments kept; MCP servers'
+`args` and `env` pass through untouched. Endpoint changes apply right away, the rest says
+when it needs a restart. Escape closes it, so does the ✕ in its corner.
 
 ## MCP: your tools, its hands
 
