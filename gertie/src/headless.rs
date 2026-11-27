@@ -296,6 +296,11 @@ pub(crate) fn pump(
                     recorder.pending.push_str(&delta);
                     recorder.text.push_str(&delta);
                 }
+                LoopEvent::ToolsCalled { .. } => {
+                    // The round's assistant row, text or not: its
+                    // results answer it on reload.
+                    recorder.flush_round();
+                }
                 LoopEvent::ToolCallRequested { id, call } => {
                     recorder.flush();
                     calls.insert(call.id.clone(), (call.name.clone(), call.arguments.clone()));
@@ -312,19 +317,33 @@ pub(crate) fn pump(
                     name,
                     arguments: _,
                     result,
+                    images,
                 } => {
                     let arguments = calls
                         .remove(&call_id)
                         .map(|(_, arguments)| arguments)
                         .unwrap_or_else(|| "{}".into());
                     eprintln!("· {} → {}", name, brief(&result));
-                    if let Ok(db_id) = store.append_tool_result(
+                    // The same attachments dir the app files a tool's
+                    // images in (#50): a headless session reloads in
+                    // the app with them.
+                    let saved: Vec<std::path::PathBuf> = crate::config::Config::data_dir()
+                        .map(|dir| dir.join("attachments"))
+                        .map(|dir| {
+                            images
+                                .iter()
+                                .filter_map(|image| gertie_core::save_data_url(&dir, image))
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    if let Ok(db_id) = store.append_tool_result_with_images(
                         session,
                         recorder.last_db_id,
                         &call_id,
                         &name,
                         &arguments,
                         &result,
+                        &saved,
                     ) {
                         recorder.last_db_id = Some(db_id);
                     }
@@ -443,6 +462,21 @@ struct Recorder {
 }
 
 impl Recorder {
+    /// Ends a round that calls tools: its text becomes the assistant
+    /// row, or an empty row when it said nothing.
+    fn flush_round(&mut self) {
+        if !self.pending.is_empty() {
+            self.flush();
+            return;
+        }
+        if let Ok(db_id) =
+            self.store
+                .append_message(self.session, self.last_db_id, Role::Assistant, "")
+        {
+            self.last_db_id = Some(db_id);
+        }
+    }
+
     fn flush(&mut self) {
         if self.pending.is_empty() {
             return;

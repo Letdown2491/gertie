@@ -88,6 +88,21 @@ pub fn action_label(name: &str, arguments: &str, running: bool) -> String {
                 let url = short(&field("url"), 96);
                 tense(format!("Fetching {url}"), format!("Fetched {url}"))
             }
+            "screenshot" => {
+                // The source the capture names: the page, the window,
+                // or the screen.
+                let what = if !field("url").is_empty() {
+                    short(&field("url"), 96)
+                } else if !field("window").is_empty() {
+                    format!("the {} window", short(&field("window"), 72))
+                } else {
+                    "the screen".to_string()
+                };
+                tense(
+                    format!("Taking a screenshot of {what}"),
+                    format!("Took a screenshot of {what}"),
+                )
+            }
             "search_history" => {
                 let query = short(&field("query"), 96);
                 tense(
@@ -310,6 +325,18 @@ mod tests {
         assert_eq!(action_label("read_file", "", true), "Running read file…");
         assert_eq!(action_label("bash", "not json", false), "Ran bash");
         assert_eq!(action_label("web_fetch", "{}", false), "Ran web fetch");
+        assert_eq!(
+            action_label("screenshot", r#"{"url":"http://localhost:5173"}"#, true),
+            "Taking a screenshot of http://localhost:5173…"
+        );
+        assert_eq!(
+            action_label("screenshot", r#"{"window":"gertie"}"#, false),
+            "Took a screenshot of the gertie window"
+        );
+        assert_eq!(
+            action_label("screenshot", r#"{"screen":true}"#, false),
+            "Took a screenshot of the screen"
+        );
         assert_eq!(
             action_label("web_search", r#"{"query": ""}"#, true),
             "Running web search…"

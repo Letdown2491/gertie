@@ -161,14 +161,18 @@ impl ChatView {
                     LoopEvent::ToolCallStarted { call } => {
                         let _ = this.update(cx, |this, cx| this.on_tool_started(call, cx));
                     }
+                    LoopEvent::ToolsCalled { .. } => {
+                        let _ = this.update(cx, |this, cx| this.on_tools_called(cx));
+                    }
                     LoopEvent::ToolResult {
                         call_id,
                         name,
                         arguments,
                         result,
+                        images,
                     } => {
                         let _ = this.update(cx, |this, cx| {
-                            this.on_tool_result(&call_id, &name, &arguments, &result, cx)
+                            this.on_tool_result(&call_id, &name, &arguments, &result, &images, cx)
                         });
                     }
                     LoopEvent::Usage {
@@ -377,6 +381,24 @@ impl ChatView {
 
     /// A read-only tool started executing: give it a running card so the
     /// quiet parts of a turn still look alive.
+    /// The round ended in tool calls. A round that wrote text already
+    /// has its assistant row; one that wrote none gets an empty row
+    /// in the store (no transcript bubble), so its results answer an
+    /// assistant on reload instead of dropping out of the history.
+    pub(crate) fn on_tools_called(&mut self, cx: &mut Context<Self>) {
+        self.flush_stream(cx);
+        if self.streaming_assistant.is_some() {
+            return;
+        }
+        if let Some(session_id) = self.session_id
+            && let Ok(db_id) =
+                self.store
+                    .append_message(session_id, self.last_db_id, Role::Assistant, "")
+        {
+            self.last_db_id = Some(db_id);
+        }
+    }
+
     pub(crate) fn on_tool_started(&mut self, call: ToolCall, cx: &mut Context<Self>) {
         self.set_activity(crate::tools_ui::action_label(
             &call.name,
@@ -483,6 +505,7 @@ impl ChatView {
         name: &str,
         arguments: &str,
         result: &str,
+        images: &[String],
         cx: &mut Context<Self>,
     ) {
         // The tool is done: the status says what was done, in the
@@ -525,13 +548,26 @@ impl ChatView {
         cx.notify();
 
         if let Some(session_id) = self.session_id
-            && let Ok(db_id) = self.store.append_tool_result(
+            && let Ok(db_id) = self.store.append_tool_result_with_images(
                 session_id,
                 self.last_db_id,
                 call_id,
                 name,
                 arguments,
                 result,
+                // A tool's images (#50) land beside the user's
+                // attachments; the row keeps their paths. One that
+                // can't be written lives for this turn only.
+                &self
+                    .attachments_dir
+                    .as_deref()
+                    .map(|dir| {
+                        images
+                            .iter()
+                            .filter_map(|image| gertie_core::save_data_url(dir, image))
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default(),
             )
         {
             self.last_db_id = Some(db_id);
@@ -661,7 +697,7 @@ impl ChatView {
             })
             .collect();
         for (id, name, arguments) in open {
-            self.on_tool_result(&id, &name, &arguments, STOPPED, cx);
+            self.on_tool_result(&id, &name, &arguments, STOPPED, &[], cx);
         }
         gertie_core::close_unanswered_calls(&mut self.history.blocking_lock(), STOPPED);
         self.approval_replies.clear();

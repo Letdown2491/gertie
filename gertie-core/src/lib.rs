@@ -38,7 +38,7 @@ pub use projects::{Project, project_of};
 pub use provider::Provider;
 pub use request::{
     IMAGE_MARKER_PREFIX, Request, ToolCall, ToolSpec, WireMessage, data_url_parts,
-    extract_image_markers, file_to_data_url, media_type_for_extension,
+    extract_image_markers, file_to_data_url, media_type_for_extension, save_data_url,
 };
 use rusqlite::Connection;
 pub use snapshot::{
@@ -166,6 +166,12 @@ pub struct Message {
     pub tool_name: Option<String>,
     /// Tool rows only: the arguments the model sent.
     pub tool_arguments: Option<String>,
+    /// Tool rows only: files holding the images the tool produced
+    /// (#50), oldest first. A column of its own, never markers in the
+    /// content: a tool's text is whatever a file or a web page said,
+    /// and a marker there must not make a reload read a path of its
+    /// choosing.
+    pub images: Vec<String>,
 }
 
 /// A follow-up parked while a session's turn runs. Persisted rows, so
@@ -317,6 +323,7 @@ impl SessionStore {
             ("tool_call_id", "TEXT"),
             ("tool_name", "TEXT"),
             ("tool_arguments", "TEXT"),
+            ("images", "TEXT"),
         ] {
             if !columns.contains(&column.to_string()) {
                 connection.execute(
@@ -842,14 +849,46 @@ impl SessionStore {
         arguments: &str,
         content: &str,
     ) -> Result<MessageId, rusqlite::Error> {
+        self.append_tool_result_with_images(
+            session_id,
+            parent_id,
+            call_id,
+            tool_name,
+            arguments,
+            content,
+            &[],
+        )
+    }
+
+    /// [`append_tool_result`](Self::append_tool_result) with the files
+    /// holding the images the tool produced (#50); a reload sends them
+    /// again.
+    #[allow(clippy::too_many_arguments)]
+    pub fn append_tool_result_with_images(
+        &self,
+        session_id: SessionId,
+        parent_id: Option<MessageId>,
+        call_id: &str,
+        tool_name: &str,
+        arguments: &str,
+        content: &str,
+        images: &[std::path::PathBuf],
+    ) -> Result<MessageId, rusqlite::Error> {
+        let images = (!images.is_empty()).then(|| {
+            images
+                .iter()
+                .map(|path| path.to_string_lossy().into_owned())
+                .collect::<Vec<_>>()
+                .join("\n")
+        });
         let mut connection = self.connection.lock().unwrap();
         // Same transaction discipline as append_message: the row, its
         // activity stamp, and the tip move together.
         let transaction = connection.transaction()?;
         transaction
             .prepare(
-                "INSERT INTO messages (session_id, parent_id, role, content, tool_call_id, tool_name, tool_arguments)
-                 VALUES (?1, ?2, 'tool', ?3, ?4, ?5, ?6)",
+                "INSERT INTO messages (session_id, parent_id, role, content, tool_call_id, tool_name, tool_arguments, images)
+                 VALUES (?1, ?2, 'tool', ?3, ?4, ?5, ?6, ?7)",
             )?
             .execute(rusqlite::params![
                 session_id.0 as i64,
@@ -858,6 +897,7 @@ impl SessionStore {
                 call_id,
                 tool_name,
                 arguments,
+                images,
             ])?;
         // Tool results are activity too: the turn's work, not just
         // its words.
@@ -1028,7 +1068,7 @@ impl SessionStore {
     fn load_rows_flat(&self, session_id: SessionId) -> Result<Vec<Message>, rusqlite::Error> {
         let connection = self.connection.lock().unwrap();
         let mut statement = connection.prepare(
-            "SELECT id, parent_id, role, content, tool_call_id, tool_name, tool_arguments
+            "SELECT id, parent_id, role, content, tool_call_id, tool_name, tool_arguments, images
              FROM messages WHERE session_id = ?1",
         )?;
         let rows = statement.query_map([session_id.0 as i64], Self::message_from_row)?;
@@ -1199,6 +1239,7 @@ impl SessionStore {
                 tool_call_id: None,
                 tool_name: None,
                 tool_arguments: None,
+                images: Vec::new(),
             })
         })?;
         rows.collect()
@@ -1216,7 +1257,7 @@ impl SessionStore {
         }
         let list = ids.iter().map(|_| "?").collect::<Vec<_>>().join(", ");
         let mut statement = connection.prepare(&format!(
-            "SELECT id, parent_id, role, content, tool_call_id, tool_name, tool_arguments
+            "SELECT id, parent_id, role, content, tool_call_id, tool_name, tool_arguments, images
              FROM messages WHERE session_id = ? AND id IN ({list})"
         ))?;
         let rows = statement.query_map(
@@ -1242,6 +1283,17 @@ impl SessionStore {
             tool_call_id: row.get(4)?,
             tool_name: row.get(5)?,
             tool_arguments: row.get(6)?,
+            // Newline-separated paths: a path never holds one.
+            images: row
+                .get::<_, Option<String>>(7)?
+                .map(|paths| {
+                    paths
+                        .lines()
+                        .filter(|path| !path.is_empty())
+                        .map(str::to_string)
+                        .collect()
+                })
+                .unwrap_or_default(),
         })
     }
 
@@ -1282,13 +1334,31 @@ impl SessionStore {
                 (text, images)
             };
             match message.role {
-                Role::Assistant => {
-                    // Tool rows answering this assistant turn follow it.
+                Role::Assistant | Role::Tool => {
+                    // A round: the assistant row, then the tool rows
+                    // answering its calls. They hang off the assistant,
+                    // or (how the chat writes them) each off the one
+                    // before. A run of tool rows with no assistant is a
+                    // round the model narrated nothing in, stored
+                    // before gertie wrote an empty row for one: it gets
+                    // an empty assistant back, rather than its results
+                    // dropping out of the history.
+                    let (text, assistant, first) = if message.role == Role::Assistant {
+                        (content, Some(message.id), index + 1)
+                    } else {
+                        (String::new(), None, index)
+                    };
                     let mut calls = Vec::new();
-                    let mut next = index + 1;
+                    let mut next = first;
+                    let mut previous = if assistant.is_some() {
+                        assistant
+                    } else {
+                        message.parent_id
+                    };
                     while next < messages.len()
                         && messages[next].role == Role::Tool
-                        && messages[next].parent_id == Some(message.id)
+                        && (messages[next].parent_id == previous
+                            || (assistant.is_some() && messages[next].parent_id == assistant))
                     {
                         let row = &messages[next];
                         calls.push(ToolCall {
@@ -1296,20 +1366,43 @@ impl SessionStore {
                             name: row.tool_name.clone().unwrap_or_default(),
                             arguments: row.tool_arguments.clone().unwrap_or_default(),
                         });
+                        previous = Some(row.id);
                         next += 1;
                     }
+                    if calls.is_empty() && text.is_empty() {
+                        // Nothing said and nothing called (a round
+                        // stopped before its calls ran, or a tool row
+                        // off the chain): an empty assistant message
+                        // is one the endpoints refuse.
+                        index += 1;
+                        continue;
+                    }
                     wire.push(WireMessage::assistant_with_tool_calls(
-                        (!content.is_empty()).then_some(content),
+                        (!text.is_empty()).then_some(text),
                         calls,
                     ));
-                    for row in &messages[index + 1..next] {
-                        wire.push(WireMessage::tool_result(
+                    for row in &messages[first..next] {
+                        // A tool's images come back from their files;
+                        // one that's gone says so instead of vanishing
+                        // (the model may otherwise think it saw it).
+                        let mut content = row.content.clone();
+                        let mut images = Vec::new();
+                        for path in &row.images {
+                            match crate::request::file_to_data_url(std::path::Path::new(path)) {
+                                Some(image) => images.push(image),
+                                None => content.push_str(&format!(
+                                    "\n[an image this tool returned is gone: {path}]"
+                                )),
+                            }
+                        }
+                        wire.push(WireMessage::tool_result_with_images(
                             &ToolCall {
                                 id: row.tool_call_id.clone().unwrap_or_default(),
                                 name: row.tool_name.clone().unwrap_or_default(),
                                 arguments: row.tool_arguments.clone().unwrap_or_default(),
                             },
-                            &row.content,
+                            &content,
+                            images,
                         ));
                     }
                     index = next;
@@ -1326,7 +1419,6 @@ impl SessionStore {
                     });
                     index += 1;
                 }
-                Role::Tool => index += 1, // orphan row: skip, don't guess
             }
         }
         wire
@@ -1389,8 +1481,8 @@ impl SessionStore {
             transaction
                 .prepare(
                     "INSERT INTO messages
-                         (session_id, parent_id, role, content, tool_call_id, tool_name, tool_arguments)
-                     SELECT ?1, ?2, role, content, tool_call_id, tool_name, tool_arguments
+                         (session_id, parent_id, role, content, tool_call_id, tool_name, tool_arguments, images)
+                     SELECT ?1, ?2, role, content, tool_call_id, tool_name, tool_arguments, images
                      FROM messages WHERE id = ?3",
                 )
                 .and_then(|mut statement| {
@@ -2092,6 +2184,146 @@ mod tests {
         assert_eq!(flat.len(), 3);
         assert_ne!(a, b);
         assert_eq!(flat[1].parent_id, flat[2].parent_id);
+    }
+
+    #[test]
+    fn a_tools_images_come_back_on_reload_and_never_from_its_text() {
+        let store = memory_store();
+        let files = tempfile::tempdir().unwrap();
+        let shot = files.path().join("shot.png");
+        std::fs::write(&shot, b"PNGBYTES").unwrap();
+        let gone = files.path().join("gone.png");
+        let session = store.create_session("pictures").unwrap();
+        let q = store
+            .append_message(session, None, Role::User, "look")
+            .unwrap();
+        let a = store
+            .append_message(session, Some(q), Role::Assistant, "")
+            .unwrap();
+        // The text quotes a marker, as a file read_file opened might:
+        // it must stay text, never become an image read off disk.
+        let planted = format!("{IMAGE_MARKER_PREFIX}{}}}}}", shot.display());
+        let tool = store
+            .append_tool_result_with_images(
+                session,
+                Some(a),
+                "call-1",
+                "screenshot",
+                "{}",
+                &format!("saved. {planted}"),
+                &[shot.clone(), gone.clone()],
+            )
+            .unwrap();
+
+        let rows = store.load_messages(session).unwrap();
+        assert_eq!(
+            rows[2].images,
+            vec![shot.display().to_string(), gone.display().to_string()]
+        );
+        let wire = SessionStore::wire_history_from_rows(&rows);
+        let result = &wire[2];
+        assert_eq!(result.role, Role::Tool);
+        assert_eq!(
+            result.attachments,
+            vec!["data:image/png;base64,UE5HQllURVM=".to_string()],
+            "the stored file comes back as the image"
+        );
+        let content = result.content.as_deref().unwrap();
+        assert!(
+            content.starts_with(&format!("saved. {planted}")),
+            "{content}"
+        );
+        assert!(
+            content.contains(&format!(
+                "[an image this tool returned is gone: {}]",
+                gone.display()
+            )),
+            "{content}"
+        );
+
+        // A fork copies the column with the row.
+        let (fork, _) = store.fork_session(session, tool, "fork").unwrap();
+        assert_eq!(store.load_messages(fork).unwrap()[2].images.len(), 2);
+    }
+
+    /// Sessions stored before rounds always had an assistant row: a
+    /// round that said nothing left its tool rows hanging off the user
+    /// message, and every round chained its results one off the next.
+    /// The reload keeps them all, instead of dropping each as an
+    /// orphan.
+    #[test]
+    fn old_rounds_reload_whole() {
+        let store = memory_store();
+        let session = store.create_session("old").unwrap();
+        let user = store
+            .append_message(session, None, Role::User, "look around")
+            .unwrap();
+        // Round one said nothing: no assistant row.
+        let silent = store
+            .append_tool_result(session, Some(user), "c1", "glob", "{}", "a.rs")
+            .unwrap();
+        // Round two narrated, and made two calls, chained.
+        let narrated = store
+            .append_message(session, Some(silent), Role::Assistant, "reading both")
+            .unwrap();
+        let first = store
+            .append_tool_result(session, Some(narrated), "c2", "read_file", "{}", "one")
+            .unwrap();
+        let second = store
+            .append_tool_result(session, Some(first), "c3", "read_file", "{}", "two")
+            .unwrap();
+        store
+            .append_message(session, Some(second), Role::Assistant, "done")
+            .unwrap();
+
+        let wire = store.load_wire_history(session).unwrap();
+        let shape: Vec<(Role, Option<&str>, Vec<&str>)> = wire
+            .iter()
+            .map(|message| {
+                (
+                    message.role,
+                    message.content.as_deref(),
+                    message
+                        .tool_calls
+                        .iter()
+                        .map(|call| call.id.as_str())
+                        .collect(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            shape,
+            vec![
+                (Role::User, Some("look around"), vec![]),
+                (Role::Assistant, None, vec!["c1"]),
+                (Role::Tool, Some("a.rs"), vec![]),
+                (Role::Assistant, Some("reading both"), vec!["c2", "c3"]),
+                (Role::Tool, Some("one"), vec![]),
+                (Role::Tool, Some("two"), vec![]),
+                (Role::Assistant, Some("done"), vec![]),
+            ]
+        );
+    }
+
+    /// An empty assistant row with no calls after it (a round stopped
+    /// before its tools ran) sends nothing: an empty assistant message
+    /// is one the endpoints refuse.
+    #[test]
+    fn an_empty_round_with_no_calls_sends_nothing() {
+        let store = memory_store();
+        let session = store.create_session("stopped").unwrap();
+        let user = store
+            .append_message(session, None, Role::User, "go")
+            .unwrap();
+        let empty = store
+            .append_message(session, Some(user), Role::Assistant, "")
+            .unwrap();
+        store
+            .append_message(session, Some(empty), Role::User, "again")
+            .unwrap();
+        let wire = store.load_wire_history(session).unwrap();
+        assert_eq!(wire.len(), 2);
+        assert!(wire.iter().all(|message| message.role == Role::User));
     }
 
     #[test]

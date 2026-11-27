@@ -45,6 +45,17 @@ pub enum LoopEvent {
         name: String,
         arguments: String,
         result: String,
+        /// Images the tool produced (#50), as data URLs: what the
+        /// model saw beside the text, and what a store keeps.
+        images: Vec<String>,
+    },
+    /// The model's round ended in tool calls, which run next. Comes
+    /// before any of them starts. A store records the round's
+    /// assistant row here even when the model wrote no text: without
+    /// that row the calls' results have nothing to answer on reload,
+    /// and one round's results run into the next's.
+    ToolsCalled {
+        calls: Vec<ToolCall>,
     },
     /// A call started executing without ever prompting (read-only
     /// tools always; mutating calls the mode pre-approved, which is
@@ -603,8 +614,12 @@ pub fn run_turn(spec: TurnSpec) -> BoxStream<'static, LoopEvent> {
                     if assistant_text.is_empty() { None } else { Some(assistant_text) },
                     calls.clone(),
                 ));
+            yield LoopEvent::ToolsCalled { calls: calls.clone() };
 
             for call in calls {
+                // Images a tool produced (#50): only a tool that ran
+                // fills this, a refusal or a denial carries none.
+                let mut images: Vec<String> = Vec::new();
                 let result = match tools.get(&call.name) {
                     None => Err(format!("unknown tool: {}", call.name)),
                     Some(_) if call.name == "ask_user" => {
@@ -687,8 +702,11 @@ pub fn run_turn(spec: TurnSpec) -> BoxStream<'static, LoopEvent> {
                             // contains bash, and nothing else. A
                             // turn-wide flag here would wave a
                             // gated fetch or an MCP tool through
-                            // every sandboxed auto turn.
-                            let contained = sandbox_bash && call.name == "bash";
+                            // every sandboxed auto turn. A tool
+                            // may vouch for one call of its own
+                            // (a screenshot of a workspace page).
+                            let contained = (sandbox_bash && call.name == "bash")
+                                || (!tool.third_party() && tool.contained(&call.arguments));
                             let pre_approved = permission_mode.auto_allows(
                                 checkpoint_target.is_some(),
                                 contained,
@@ -756,7 +774,11 @@ pub fn run_turn(spec: TurnSpec) -> BoxStream<'static, LoopEvent> {
                                         };
                                         return;
                                     }
-                                    tool.run_with_call(&call, &worker_progress, turn_token).await
+                                    let (ran, produced) = tool
+                                        .run_with_images(&call, &worker_progress, turn_token)
+                                        .await;
+                                    images = produced;
+                                    ran
                                 }
                                 // The human said no, and possibly
                                 // why. Their reply rides in the tool
@@ -774,7 +796,11 @@ pub fn run_turn(spec: TurnSpec) -> BoxStream<'static, LoopEvent> {
                             }
                         } else {
                             yield LoopEvent::ToolCallStarted { call: call.clone() };
-                            tool.run_with_call(&call, &worker_progress, turn_token).await
+                            let (ran, produced) = tool
+                                .run_with_images(&call, &worker_progress, turn_token)
+                                .await;
+                            images = produced;
+                            ran
                         }
                     }
                 };
@@ -831,12 +857,13 @@ pub fn run_turn(spec: TurnSpec) -> BoxStream<'static, LoopEvent> {
                 history
                     .lock()
                     .await
-                    .push(WireMessage::tool_result(&call, &result));
+                    .push(WireMessage::tool_result_with_images(&call, &result, images.clone()));
                 yield LoopEvent::ToolResult {
                     call_id: call.id,
                     name: call.name,
                     arguments: call.arguments,
                     result,
+                    images,
                 };
             }
 
@@ -1732,6 +1759,67 @@ mod tests {
         assert_eq!(tool_result(&events, "watch"), "spied");
     }
 
+    /// A gated tool that vouches for one call (`Tool::contained`, a
+    /// screenshot of a workspace page) runs unasked in auto, and still
+    /// asks in supervised: the pass is the auto mode's, not the tool's.
+    #[test]
+    fn a_tools_contained_call_runs_unasked_only_in_auto() {
+        struct Local;
+        impl Tool for Local {
+            fn name(&self) -> &'static str {
+                "shoot"
+            }
+            fn description(&self) -> String {
+                "shoot".into()
+            }
+            fn parameters(&self) -> serde_json::Value {
+                serde_json::json!({"type": "object", "properties": {}})
+            }
+            fn asks(&self) -> bool {
+                true
+            }
+            fn contained(&self, _arguments: &str) -> bool {
+                true
+            }
+            fn run<'a>(
+                &'a self,
+                _arguments: &'a str,
+            ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ToolResult> + Send + 'a>>
+            {
+                Box::pin(async { Ok("shot".to_string()) })
+            }
+        }
+        for (mode, should_ask) in [
+            (PermissionMode::Auto, false),
+            (PermissionMode::Supervised, true),
+        ] {
+            let asked = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let provider = Arc::new(ScriptedProvider {
+                seen: std::sync::Mutex::new(Vec::new()),
+                scripts: std::sync::Mutex::new(one_call_then_text("shoot")),
+            });
+            let history: SharedHistory = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+            let (mut spec, broker) = turn(
+                provider,
+                registry(&[Arc::new(Local)]),
+                history.clone(),
+                "go",
+            );
+            spec.permission_mode = mode;
+            let flag = asked.clone();
+            let events = drain(run_turn(spec), &broker, move |_| {
+                flag.store(true, std::sync::atomic::Ordering::Relaxed);
+                PermissionDecision::Approve
+            });
+            assert_eq!(
+                asked.load(std::sync::atomic::Ordering::Relaxed),
+                should_ask,
+                "{mode:?}"
+            );
+            assert_eq!(tool_result(&events, "shoot"), "shot");
+        }
+    }
+
     /// And the contained bash itself stays pre-approved in auto: the
     /// mode's whole point survives the tightening.
     #[test]
@@ -2331,6 +2419,96 @@ mod tests {
         let history = history.blocking_lock();
         assert_eq!(history.len(), 4); // user, assistant+call, tool result, assistant
         assert_eq!(history[3], WireMessage::assistant("done"));
+    }
+
+    /// A tool that returns a picture beside its text (#50).
+    struct PictureTool;
+
+    impl Tool for PictureTool {
+        fn name(&self) -> &'static str {
+            "picture"
+        }
+
+        fn description(&self) -> String {
+            "picture".into()
+        }
+
+        fn parameters(&self) -> serde_json::Value {
+            serde_json::json!({"type": "object", "properties": {}})
+        }
+
+        fn run<'a>(
+            &'a self,
+            _arguments: &'a str,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ToolResult> + Send + 'a>> {
+            Box::pin(async { Ok("saved to /c/shot.png".to_string()) })
+        }
+
+        fn run_with_images<'a>(
+            &'a self,
+            call: &'a ToolCall,
+            progress: &'a crate::WorkerProgress,
+            turn_token: Option<crate::TurnToken>,
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = (ToolResult, Vec<String>)> + Send + 'a>,
+        > {
+            Box::pin(async move {
+                (
+                    self.run_with_call(call, progress, turn_token).await,
+                    vec!["data:image/png;base64,QUJD".to_string()],
+                )
+            })
+        }
+    }
+
+    #[test]
+    fn a_tools_images_reach_the_next_request_and_the_event() {
+        let provider = Arc::new(ScriptedProvider {
+            seen: std::sync::Mutex::new(Vec::new()),
+            scripts: std::sync::Mutex::new(vec![
+                vec![
+                    Event::ToolCall {
+                        id: "c1".into(),
+                        name: "picture".into(),
+                        arguments: "{}".into(),
+                    },
+                    Event::Done,
+                ],
+                vec![
+                    Event::Token {
+                        delta: "I see it".into(),
+                    },
+                    Event::Done,
+                ],
+            ]),
+        });
+        let picture: Arc<dyn Tool> = Arc::new(PictureTool);
+        let history: SharedHistory = Arc::new(tokio::sync::Mutex::new(Vec::new()));
+        let (spec, broker) = turn(
+            provider.clone(),
+            registry(&[picture]),
+            history.clone(),
+            "look",
+        );
+        let events = drain(run_turn(spec), &broker, |_| PermissionDecision::Approve);
+
+        let images = events
+            .iter()
+            .find_map(|event| match event {
+                LoopEvent::ToolResult { images, .. } => Some(images.clone()),
+                _ => None,
+            })
+            .expect("tool result");
+        assert_eq!(images, vec!["data:image/png;base64,QUJD".to_string()]);
+        // The request after the call carries the picture on the result.
+        let seen = provider.seen.lock().unwrap();
+        let result = seen[1]
+            .messages
+            .iter()
+            .find(|message| message.role == Role::Tool)
+            .expect("the result rides the second request");
+        assert_eq!(result.content.as_deref(), Some("saved to /c/shot.png"));
+        assert_eq!(result.attachments, images);
     }
 
     #[test]

@@ -1614,6 +1614,7 @@ mod tests {
             context_window: Some(200_000),
             memory_writes: None,
             tool_guidance: None,
+            vision: None,
         });
         let mut seat = crate::config::AgentConfig {
             name: "council-anthropic".into(),
@@ -1645,6 +1646,7 @@ mod tests {
             api_key: None,
             context_window: Some(1_000_000),
             wire: Default::default(),
+            vision: true,
         };
 
         let (types, warnings) = agent_types(&config, &leader);

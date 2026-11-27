@@ -2127,10 +2127,12 @@ dependencies = [
 name = "gertie-tools"
 version = "1.3.0"
 dependencies = [
+ "base64 0.22.1",
  "futures-core",
  "gertie-core",
  "glob",
  "gpui-pre-reqwest",
+ "image",
  "landlock",
  "libc",
  "regex",

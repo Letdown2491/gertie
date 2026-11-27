@@ -5,10 +5,12 @@
 //! All paths are workspace-root-relative and may not escape the root,
 //! one sandbox rule, applied identically by every tool.
 
+pub mod images;
 pub mod mcp;
 pub mod memory;
 pub mod repo_map;
 pub mod sandbox;
+pub mod screenshot;
 pub mod shape;
 pub mod skills;
 pub mod templates;
@@ -542,12 +544,39 @@ pub fn builtin_tools_with(
         Arc::new(Glob { root: root.into() }),
         Arc::new(Grep { root: root.into() }),
         Arc::new(repo_map::RepoMapTool::new(root)),
+        Arc::new(screenshot::Screenshot::new(root)),
     ];
     let map: std::collections::BTreeMap<String, Arc<dyn Tool>> = tools
         .into_iter()
         .map(|tool| (tool.name().to_string(), tool))
         .collect();
     Arc::new(map)
+}
+
+/// An image file as the model sees it: the text names it and its
+/// size, the data URL is the picture, fitted for the wire.
+fn read_image(path: &Path, label: &str) -> Result<(String, String), String> {
+    let meta = std::fs::metadata(path).map_err(|error| format!("{label}: {error}"))?;
+    if !meta.is_file() {
+        return Err(format!("{label}: not a regular file"));
+    }
+    if meta.len() > images::MAX_IMAGE_BYTES {
+        return Err(format!(
+            "{label}: too large to show ({} MB, cap {} MB)",
+            meta.len() / (1024 * 1024),
+            images::MAX_IMAGE_BYTES / (1024 * 1024)
+        ));
+    }
+    let bytes = std::fs::read(path).map_err(|error| format!("{label}: {error}"))?;
+    let fitted = images::fit(&bytes).map_err(|error| format!("{label}: {error}"))?;
+    Ok((
+        format!(
+            "{label}: image, {} ({} KB).",
+            fitted.describe(),
+            meta.len() / 1024
+        ),
+        fitted.data_url,
+    ))
 }
 
 impl Tool for ReadFile {
@@ -557,7 +586,8 @@ impl Tool for ReadFile {
 
     fn description(&self) -> String {
         "Read a file from the workspace. Returns the content with 1-based \
-         line numbers. Use offset/limit for long files."
+         line numbers. Use offset/limit for long files. An image (png, jpg, \
+         gif, webp) comes back as the picture itself."
             .into()
     }
 
@@ -582,6 +612,15 @@ impl Tool for ReadFile {
         blocking(move || {
             let args: ReadArgs = parse(&arguments, "read_file")?;
             let path = resolve(&root, &args.path)?;
+            if images::is_image_path(&path) {
+                // Pictures go through run_with_images; a caller that
+                // only takes text learns what it is instead of reading
+                // a decode error.
+                return Ok(format!(
+                    "{} is an image; this caller can only take text",
+                    args.path
+                ));
+            }
             check_readable_size(&path, &args.path)?;
             let text = std::fs::read_to_string(&path)
                 .map_err(|error| format!("{}: {error}", args.path))?;
@@ -595,6 +634,41 @@ impl Tool for ReadFile {
                 .map(|(index, line)| format!("{:>6}  {line}", skip + index + 1))
                 .collect();
             Ok(limit(numbered.join("\n")))
+        })
+    }
+
+    /// An image opens as a picture (#50): fitted for the wire, with
+    /// the text saying what it is. Everything else reads as text.
+    fn run_with_images<'a>(
+        &'a self,
+        call: &'a gertie_core::ToolCall,
+        progress: &'a gertie_core::WorkerProgress,
+        turn_token: Option<gertie_core::TurnToken>,
+    ) -> Pin<Box<dyn Future<Output = (ToolResult, Vec<String>)> + Send + 'a>> {
+        let picture = serde_json::from_str::<ReadArgs>(&call.arguments)
+            .ok()
+            .and_then(|args| {
+                let path = resolve(&self.root, &args.path).ok()?;
+                images::is_image_path(&path).then_some((args.path, path))
+            });
+        let Some((label, path)) = picture else {
+            return Box::pin(async move {
+                (
+                    self.run_with_call(call, progress, turn_token).await,
+                    Vec::new(),
+                )
+            });
+        };
+        Box::pin(async move {
+            let (sender, receiver) = tokio::sync::oneshot::channel();
+            std::thread::spawn(move || {
+                let _ = sender.send(read_image(&path, &label));
+            });
+            match receiver.await {
+                Ok(Ok((text, image))) => (Ok(text), vec![image]),
+                Ok(Err(error)) => (Err(error), Vec::new()),
+                Err(_) => (Err("tool thread panicked".into()), Vec::new()),
+            }
         })
     }
 }
@@ -1156,6 +1230,46 @@ mod tests {
     }
 
     use gertie_core::testing::block_on as await_sync;
+
+    #[test]
+    fn read_file_opens_an_image_as_a_picture() {
+        let dir = workspace();
+        let image = image::RgbImage::from_pixel(40, 30, image::Rgb([200, 10, 10]));
+        image.save(dir.path().join("logo.png")).unwrap();
+        let tools = builtin_tools(dir.path());
+        let read = tools.get("read_file").unwrap();
+        let call = gertie_core::ToolCall {
+            id: "c1".into(),
+            name: "read_file".into(),
+            arguments: r#"{"path":"logo.png"}"#.into(),
+        };
+        let progress = gertie_core::WorkerProgress::default();
+        let (text, images) = await_sync(read.run_with_images(&call, &progress, None));
+        let text = text.unwrap();
+        assert!(text.starts_with("logo.png: image, 40x30"), "{text}");
+        assert_eq!(images.len(), 1);
+        assert!(images[0].starts_with("data:image/png;base64,"));
+
+        // Text still reads as text, with no images.
+        std::fs::write(dir.path().join("a.txt"), "hello").unwrap();
+        let call = gertie_core::ToolCall {
+            arguments: r#"{"path":"a.txt"}"#.into(),
+            ..call
+        };
+        let (text, images) = await_sync(read.run_with_images(&call, &progress, None));
+        assert!(text.unwrap().contains("hello"));
+        assert!(images.is_empty());
+
+        // A broken image is an error, not a picture.
+        std::fs::write(dir.path().join("broken.png"), "not a png").unwrap();
+        let call = gertie_core::ToolCall {
+            arguments: r#"{"path":"broken.png"}"#.into(),
+            ..call
+        };
+        let (refused, images) = await_sync(read.run_with_images(&call, &progress, None));
+        assert!(refused.unwrap_err().starts_with("broken.png:"));
+        assert!(images.is_empty());
+    }
 
     #[test]
     fn resolve_containment_math() {

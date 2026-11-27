@@ -1794,7 +1794,7 @@ impl ChatView {
                 if older_rows {
                     rows.remove(0);
                 }
-                let mut turns: Vec<Turn> = rows.iter().map(turn_from_row).collect();
+                let mut turns: Vec<Turn> = rows.iter().filter_map(turn_from_row).collect();
                 if older_rows {
                     turns.insert(0, Turn::LoadEarlier);
                 }
@@ -1919,7 +1919,7 @@ impl ChatView {
         self.list_state.pause_following_tail();
         let mut old = std::mem::take(&mut self.turns);
         old.remove(0); // the clicked row retires; a fresh one leads when more remain
-        let mut page: Vec<Turn> = rows.iter().map(turn_from_row).collect();
+        let mut page: Vec<Turn> = rows.iter().filter_map(turn_from_row).collect();
         if more {
             page.insert(0, Turn::LoadEarlier);
         }
@@ -7137,9 +7137,14 @@ const NO_ENDPOINT_NOTICE: &str = "No endpoint configured, none is built in. Add 
 /// A stored row as a transcript turn: tool rows render as finished
 /// cards, everything else as its role's bubble. The one mapping both
 /// the reload and the "load earlier" pagination share, a row must
-/// look the same however it reached the screen.
-fn turn_from_row(row: &gertie_core::Message) -> Turn {
-    match row.role {
+/// look the same however it reached the screen. An empty assistant
+/// row is none: it marks a round that only called tools, for the
+/// history's sake, and the live transcript never showed a bubble.
+fn turn_from_row(row: &gertie_core::Message) -> Option<Turn> {
+    if row.role == Role::Assistant && row.content.trim().is_empty() {
+        return None;
+    }
+    Some(match row.role {
         Role::Tool => Turn::Tool {
             call: ToolCall {
                 id: row.tool_call_id.clone().unwrap_or_default(),
@@ -7156,7 +7161,7 @@ fn turn_from_row(row: &gertie_core::Message) -> Turn {
             text: display_text(&row.content),
             db_id: Some(row.id),
         },
-    }
+    })
 }
 
 /// The footer's word for a mode, the enum's snake_case config

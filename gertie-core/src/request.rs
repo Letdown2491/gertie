@@ -35,11 +35,12 @@ pub struct WireMessage {
     pub tool_call_id: Option<String>,
     /// Tool-only: the tool's name.
     pub name: Option<String>,
-    /// User-only: attachments riding with the text, as data URLs
-    /// (`data:image/png;base64,…`). Images and PDFs, the provider
-    /// adapters pick the block shape per media type. Empty = text-only
-    ///, the common case, and the only shape the wires emit today for
-    /// other roles.
+    /// Attachments riding with the text, as data URLs
+    /// (`data:image/png;base64,…`). On a user message: images and
+    /// PDFs, the provider adapters pick the block shape per media
+    /// type. On a tool result: images the tool produced (#50), which
+    /// each wire carries its own way. Empty = text-only, the common
+    /// case.
     pub attachments: Vec<String>,
 }
 
@@ -76,6 +77,15 @@ impl WireMessage {
             tool_call_id: Some(call.id.clone()),
             name: Some(call.name.clone()),
             ..Self::default()
+        }
+    }
+
+    /// A tool result that carries images (#50): a screenshot, a
+    /// picture `read_file` opened.
+    pub fn tool_result_with_images(call: &ToolCall, result: &str, images: Vec<String>) -> Self {
+        Self {
+            attachments: images,
+            ..Self::tool_result(call, result)
         }
     }
 
@@ -186,6 +196,36 @@ pub fn file_to_data_url(path: &std::path::Path) -> Option<String> {
         "data:{media_type};base64,{}",
         base64::engine::general_purpose::STANDARD.encode(bytes)
     ))
+}
+
+/// Writes a data URL's bytes into `dir`, named by content hash, and
+/// returns the path: how a tool's image survives a reload (the stored
+/// row keeps the path, [`file_to_data_url`] reads it back). The same
+/// image twice lands on one file. None when the URL doesn't decode,
+/// its media type has no extension, or the write fails; the caller
+/// keeps the image for the live turn only.
+pub fn save_data_url(dir: &std::path::Path, data_url: &str) -> Option<std::path::PathBuf> {
+    use base64::Engine as _;
+    use std::hash::{Hash as _, Hasher as _};
+    let (media_type, payload) = data_url_parts(data_url)?;
+    let extension = match media_type {
+        "image/png" => "png",
+        "image/jpeg" => "jpg",
+        "image/gif" => "gif",
+        "image/webp" => "webp",
+        _ => return None,
+    };
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(payload)
+        .ok()?;
+    let mut hasher = std::hash::DefaultHasher::new();
+    bytes.hash(&mut hasher);
+    let path = dir.join(format!("tool-{:016x}.{extension}", hasher.finish()));
+    if !path.exists() {
+        std::fs::create_dir_all(dir).ok()?;
+        std::fs::write(&path, &bytes).ok()?;
+    }
+    Some(path)
 }
 
 /// One model request. The loop fills this; providers translate it.

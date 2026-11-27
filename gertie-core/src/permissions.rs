@@ -198,7 +198,9 @@ pub enum PermissionMode {
     /// Edits as in AcceptEdits, plus bash that runs inside the Landlock
     /// sandbox, contained, so contained work needs no chaperone. With
     /// the sandbox off, this mode asks like AcceptEdits; it never
-    /// pretends a kernel that isn't enforcing is enforcing.
+    /// pretends a kernel that isn't enforcing is enforcing. A tool's
+    /// own contained calls (`Tool::contained`: a screenshot of a
+    /// workspace page or a local dev server) run unasked here too.
     Auto,
     /// Nothing asks. The vet stays; the human is the only thing
     /// removed from the path.

@@ -253,7 +253,7 @@ directories beyond the optional `gertie.toml`.
 
 ## Tools
 
-Thirteen built-ins, each done well; MCP fills the rest:
+Fourteen built-ins, each done well; MCP fills the rest:
 
 `read_file` · `write_file` · `edit_file` (search/replace with occurrence validation) · `bash` ·
 `glob` · `grep` · `web_fetch` (reqwest + readability extraction) · `web_search` (pluggable
@@ -265,7 +265,40 @@ own trail) · `search_memory` (FTS5 over the derived sidecar, ranked pointers) �
 through the same delta ops extraction uses, so any model writes valid entries without
 learning the grammar) · `repo_map` (the workspace's code structure from tree-sitter: the
 directories, a directory's files and their top-level symbols, or a file's signatures with
-line numbers; Rust, Python, Go, JavaScript, TypeScript).
+line numbers; Rust, Python, Go, JavaScript, TypeScript) · `screenshot` (a URL rendered in
+headless Chromium, or a window, or the whole screen; below).
+
+**Tools can show the model pictures (#50).** A tool result carries images beside its text
+(`Tool::run_with_images`; the default adds none). `read_file` on a png, jpg, gif or webp
+returns the picture instead of a decode error. Every image passes `images::fit` first: the
+long edge at most 1568 px (the size the endpoints scale to anyway), under 3.5 MB encoded
+(Anthropic refuses an image over 5 MB), an image that already fits passes untouched. The
+wires differ: Anthropic takes image blocks inside the `tool_result`; an OpenAI tool message
+is text only, so the images ride in one user message after the run of tool results,
+labeled by call. A tool's images persist as files in the attachments dir, their paths in
+the row's own `images` column: never as markers in the text, since a tool's text is
+whatever a file or a page said, and a planted marker must not make a reload read a path of
+its choosing. A text-only model sets `vision = false` on its endpoint (a third per-model
+setting, beside `memory_writes` and `tool_guidance`); the provider then swaps every image,
+attached or tool-made, for a note saying it wasn't sent, and the tools name their files in
+the text, so the model still knows where they are.
+
+**`screenshot`** takes exactly one of `url`, `window` or `screen: true`. A URL (http(s), or
+a workspace file; a `file://` outside the workspace is refused like any read) renders in
+headless Chromium driven over the DevTools protocol on a pipe (`--remote-debugging-pipe`):
+`width` and `height` set the viewport, `color_scheme` sets `prefers-color-scheme`,
+`full_page` captures the page as viewport-sized tiles, up to six (one tall image would be
+scaled until its text is unreadable). No port opens, and the image comes back over the
+pipe, which is also what makes a Flatpak Chromium work; a file page gets its folder
+granted read-only to the Flatpak, nothing more. The browser is `$GERTIE_BROWSER`, a
+Chromium-family binary on PATH, or a Flatpak one. A window or the screen comes from the
+compositor's own tools: niri (`screenshot-window`, which also puts the capture on the
+clipboard and says so), Hyprland and Sway through `grim -g`, `grim` for the screen on
+wlroots, `gnome-screenshot`, `spectacle`, ImageMagick on X11. No backend: a refusal naming
+what to install. Captures land in `~/.cache/gertie/screenshots`. The tool asks before
+running in every mode short of full access, except one pass: `Tool::contained` lets the
+auto mode run a capture of a workspace page or a dev server on loopback unasked, the way it
+runs sandboxed bash; a window, the screen or a remote URL always asks.
 
 Beside them, two surfaces the UI answers rather than the world: `ask_user` (a question
 with clickable options, answered through the permission broker) and `status` (the model's
@@ -455,7 +488,8 @@ dropped below its no-adaptation baseline, no consolidation may ever regenerate t
    not score: the mean of every passing run per setting in the results file (same endpoint,
    model and memory setting), output tokens weighted x4, two runs per side before a verdict,
    kept only at 10% cheaper or better. Less coaching can buy cheaper requests and spend them on
-   more steps: on glm-5.3-flash terse passed 3/3 but cost within 5% of standard.
+   more steps: on glm-5.3-flash terse passed 3/3 but cost within 5% of standard. The third is
+   `vision` (default on): off, every image becomes a note saying it wasn't sent (#50).
    Every file write passes `MemoryStore::normalize_edit`, so a model's headings, bullets,
    rewritten counters or invented hashes never reach the store as malformed entries. The
    `remember` tool is the preferred write path: a schema instead of a grammar.
@@ -602,6 +636,12 @@ Each type earns existence via distinct toolset or safety posture, not just a dif
 - Sessions in SQLite. **Messages are an append-only tree** (`messages(id, parent_id, ...)`),
   never a flat list, forking, "retry from here," and subagent-transcripts-as-branches are
   trivial later and migrations impossible to avoid if we start flat.
+- **Every round that calls tools has an assistant row**, empty when the model said nothing
+  (`LoopEvent::ToolsCalled` marks the moment; the transcript shows no bubble for it). Its
+  results follow, each row off the one before. Without that row a silent round's results
+  had nothing to answer on reload and dropped out of the resumed history, and a round's
+  second and later results were dropped as orphans; the reload now takes the chained rows,
+  and rebuilds the empty assistant for a silent round stored before the fix.
 - Forks point at the matching checkpoint snapshot.
 
 ## UI scope

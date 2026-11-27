@@ -132,13 +132,40 @@ pub(crate) fn wire_messages(request: &Request) -> (Option<String>, serde_json::V
                 messages.push(serde_json::json!({ "role": "assistant", "content": content }));
             }
             gertie_core::Role::Tool => {
-                // Anthropic speaks results as user messages.
+                // Anthropic speaks results as user messages. A
+                // result with images (#50) becomes a block list: the
+                // text, then one image block per image, inside the
+                // tool_result itself.
+                let text = message.content.clone().unwrap_or_default();
+                let images: Vec<serde_json::Value> = message
+                    .attachments
+                    .iter()
+                    .filter_map(|attachment| gertie_core::data_url_parts(attachment))
+                    .filter(|(media_type, _)| media_type.starts_with("image/"))
+                    .map(|(media_type, data)| {
+                        serde_json::json!({
+                            "type": "image",
+                            "source": {
+                                "type": "base64",
+                                "media_type": media_type,
+                                "data": data,
+                            },
+                        })
+                    })
+                    .collect();
+                let content = if images.is_empty() {
+                    serde_json::json!(text)
+                } else {
+                    let mut blocks = vec![serde_json::json!({ "type": "text", "text": text })];
+                    blocks.extend(images);
+                    serde_json::Value::Array(blocks)
+                };
                 messages.push(serde_json::json!({
                     "role": "user",
                     "content": [{
                         "type": "tool_result",
                         "tool_use_id": message.tool_call_id.clone().unwrap_or_default(),
-                        "content": message.content.clone().unwrap_or_default(),
+                        "content": content,
                     }],
                 }));
             }
@@ -163,7 +190,8 @@ impl Anthropic {
         request: &Request,
         sender: &envelope::Sender,
     ) -> Outcome {
-        let (system, messages) = wire_messages(request);
+        let request = crate::readable_by(&scoped.endpoint, request);
+        let (system, messages) = wire_messages(&request);
         let mut body = serde_json::json!({
             "model": scoped.endpoint.model,
             "max_tokens": request
@@ -550,6 +578,37 @@ mod tests {
         assert_eq!(messages[2]["content"][0]["type"], "tool_result");
         assert_eq!(messages[2]["content"][0]["tool_use_id"], "toolu_9");
         assert_eq!(messages[2]["content"][0]["content"], "done");
+    }
+
+    #[test]
+    fn a_tools_images_ride_inside_its_tool_result() {
+        let call = ToolCall {
+            id: "toolu_1".into(),
+            name: "screenshot".into(),
+            arguments: "{}".into(),
+        };
+        let request = Request {
+            messages: vec![
+                WireMessage::assistant_with_tool_calls(None, vec![call.clone()]),
+                WireMessage::tool_result_with_images(
+                    &call,
+                    "Screenshot saved to /c/shot.png.",
+                    vec!["data:image/png;base64,QUJD".into()],
+                ),
+            ],
+            ..Request::default()
+        };
+        let (_, messages) = wire_messages(&request);
+        let result = &messages[1]["content"][0];
+        assert_eq!(result["type"], "tool_result");
+        assert_eq!(result["content"][0]["type"], "text");
+        assert_eq!(
+            result["content"][0]["text"],
+            "Screenshot saved to /c/shot.png."
+        );
+        assert_eq!(result["content"][1]["type"], "image");
+        assert_eq!(result["content"][1]["source"]["media_type"], "image/png");
+        assert_eq!(result["content"][1]["source"]["data"], "QUJD");
     }
 
     #[test]

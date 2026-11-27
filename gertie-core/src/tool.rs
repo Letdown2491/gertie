@@ -162,6 +162,15 @@ pub trait Tool: Send + Sync {
         Ok(())
     }
 
+    /// Whether this one call stays inside what the workspace already
+    /// shows, so the auto mode may run it unasked, as it does bash in
+    /// the sandbox. The default is no; a tool says yes only for calls
+    /// it can prove local (a screenshot of a workspace file or of a
+    /// dev server on this machine, never the screen).
+    fn contained(&self, _arguments: &str) -> bool {
+        false
+    }
+
     /// Whether the capability comes from outside gertie, an MCP server,
     /// whose path handling and side effects gertie cannot vouch for.
     /// Third-party tools face the prompt in every mode except the one
@@ -190,6 +199,27 @@ pub trait Tool: Send + Sync {
     ) -> Pin<Box<dyn Future<Output = ToolResult> + Send + 'a>> {
         let _ = (progress, turn_token);
         self.run(&call.arguments)
+    }
+
+    /// Runs the tool and returns images beside its text: data URLs the
+    /// model should see (a picture `read_file` opened, a screenshot).
+    /// The loop calls this; the default adds none, so only tools that
+    /// produce images override it. Images travel apart from the text
+    /// on purpose: text a tool returns is never scanned for image
+    /// markers, so a file that merely contains one can't make gertie
+    /// upload a path of its choosing.
+    fn run_with_images<'a>(
+        &'a self,
+        call: &'a ToolCall,
+        progress: &'a WorkerProgress,
+        turn_token: Option<crate::TurnToken>,
+    ) -> Pin<Box<dyn Future<Output = (ToolResult, Vec<String>)> + Send + 'a>> {
+        Box::pin(async move {
+            (
+                self.run_with_call(call, progress, turn_token).await,
+                Vec::new(),
+            )
+        })
     }
 }
 

@@ -423,6 +423,12 @@ pub struct EndpointConfig {
     /// suggests it; anything else reads as standard.
     #[serde(default)]
     pub tool_guidance: Option<String>,
+    /// Whether this endpoint's model reads images (#50): screenshots,
+    /// pictures `read_file` opens, attached images. Absent: yes. Set
+    /// `vision = false` for a text-only model, and gertie sends a note
+    /// in place of each image instead of pixels it can't use.
+    #[serde(default)]
+    pub vision: Option<bool>,
 }
 
 /// `~` or `~/…` at the start of an endpoint's base_url expands to the
@@ -471,6 +477,7 @@ impl EndpointConfig {
             model: self.model.clone(),
             api_key,
             context_window: self.context_window,
+            vision: self.vision.unwrap_or(true),
             wire: self
                 .wire
                 .as_deref()
@@ -1315,6 +1322,7 @@ mod tests {
             context_window: None,
             memory_writes: None,
             tool_guidance: None,
+            vision: None,
         }
     }
 
@@ -1910,6 +1918,7 @@ default_mode = "full_access"
             context_window: None,
             memory_writes: None,
             tool_guidance: None,
+            vision: None,
         });
         config.default_endpoint = Some("ppq".into());
         // No env mutation (unsafe under edition 2024), the variable is

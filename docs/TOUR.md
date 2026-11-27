@@ -49,6 +49,11 @@ Whichever model you pick, the harness does the parts weaker models skip:
 - **Fewer wasted tokens.** Long command output keeps its head, its failures and its
   tail; a file read twice keeps only the newer copy; and long sessions compact at 160k
   tokens even when the model claims a far bigger window, so replies stay quick.
+- **Eyes on the work.** `screenshot` renders a page (your dev server, or an HTML file in
+  the project) in headless Chromium, light or dark, viewport-sized or the full page, or
+  captures a window or the screen, and the agent looks at it. `read_file` on an image
+  shows the picture. A model that can't read images gets `vision = false` on its
+  endpoint and a note in place of each picture.
 
 `gertie eval memory` and `gertie eval nav` measure each configured model (memory use,
 and how much faster the map finds code) and suggest settings for it.

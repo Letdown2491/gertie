@@ -28,6 +28,10 @@ tree-sitter-typescript = "0.23"
 landlock = "0.4"
 # O_NOFOLLOW for the write tools (the raced-symlink guard).
 libc = "0.2"
+# Images a tool hands the model (#50): decode, scale, re-encode. The
+# version gpui already builds, so no second copy.
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
+base64 = "0.22"
 # Same reqwest fork the provider uses: one TLS stack in the binary.
 reqwest = { package = "gpui-pre-reqwest", version = "0.12.15", default-features = false, features = ["rustls-tls", "json", "blocking"] }
 

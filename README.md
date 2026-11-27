@@ -41,7 +41,9 @@ fronts, nothing shared over the network.
   project check runs before the turn can end; bash output is shaped and re-read files
   collapse, so tokens go to new information; compaction starts at 160k tokens whatever
   the window claims. `gertie eval memory` and `gertie eval nav` score each configured
-  model and suggest per-model settings (`memory_writes`, `tool_guidance`).
+  model and suggest per-model settings (`memory_writes`, `tool_guidance`). The agent
+  can look at its work: `screenshot` renders a page or captures a window, and
+  `read_file` on an image shows the picture.
 - **Parallel and worktree chats**: a running turn keeps going while you open another
   conversation from the sidebar, which marks it running or finished. New worktree chat
   starts a chat in its own `git worktree`, so two agents can edit the
@@ -137,7 +139,9 @@ version of this whole list.
   file; a literal key is allowed but flagged in the status line.
 - Tool calls: reads auto-approved; `web_fetch` shows a card with its URL before it
   dials; writes and bash prompt with a diff; bash can be Landlock-sandboxed at the
-  kernel level (opt-in).
+  kernel level (opt-in). `screenshot` asks before capturing; the auto mode runs a
+  capture of a project page or a localhost dev server unasked, never a window, the
+  screen, or a remote page.
 - MCP tools are third-party code: descriptions are sanitized untrusted input and every
   call prompts: the user is the capability system.
 - Long-term memory is advisory and auditable: plain markdown files you can read and

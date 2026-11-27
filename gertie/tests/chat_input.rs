@@ -1237,6 +1237,7 @@ fn accept_edits_runs_the_checkpointed_edit_without_asking() {
         api_key: None,
         context_window: None,
         wire: gertie_providers::Wire::Replay,
+        vision: true,
     };
     let provider = Arc::new(
         gertie_providers::AnyProvider::with_endpoints(vec![endpoint]).expect("replay provider"),
@@ -2445,6 +2446,7 @@ fn a_worker_ask_bubbles_into_the_transcript_and_the_answer_reaches_the_worker() 
         api_key: None,
         context_window: None,
         wire: gertie_providers::Wire::Replay,
+        vision: true,
     };
     let provider = Arc::new(
         gertie_providers::AnyProvider::with_endpoints(vec![endpoint]).expect("replay provider"),
@@ -2599,6 +2601,7 @@ fn the_quiet_gauge_holds_its_tongue_while_an_approval_waits() {
         api_key: None,
         context_window: None,
         wire: gertie_providers::Wire::Replay,
+        vision: true,
     };
     let provider = Arc::new(
         gertie_providers::AnyProvider::with_endpoints(vec![endpoint]).expect("replay provider"),
@@ -2739,6 +2742,7 @@ fn the_card_is_the_now_and_the_row_yields_to_it() {
         api_key: None,
         context_window: None,
         wire: gertie_providers::Wire::Replay,
+        vision: true,
     };
     let provider = Arc::new(
         gertie_providers::AnyProvider::with_endpoints(vec![endpoint]).expect("replay provider"),
@@ -3143,6 +3147,7 @@ fn a_rate_limited_turn_offers_resume_and_resuming_clears_it() {
         api_key: None,
         context_window: None,
         wire: gertie_providers::Wire::Replay,
+        vision: true,
     };
     let provider = Arc::new(
         gertie_providers::AnyProvider::with_endpoints(vec![endpoint]).expect("replay provider"),
@@ -3247,6 +3252,7 @@ fn snoozing_a_limited_session_resumes_it_when_the_timer_fires() {
         api_key: None,
         context_window: None,
         wire: gertie_providers::Wire::Replay,
+        vision: true,
     };
     let provider = Arc::new(
         gertie_providers::AnyProvider::with_endpoints(vec![endpoint]).expect("replay provider"),
@@ -3342,6 +3348,7 @@ fn canceling_the_snooze_leaves_the_session_limited_and_quiet() {
         api_key: None,
         context_window: None,
         wire: gertie_providers::Wire::Replay,
+        vision: true,
     };
     let provider = Arc::new(
         gertie_providers::AnyProvider::with_endpoints(vec![endpoint]).expect("replay provider"),
@@ -3603,6 +3610,7 @@ fn a_queued_followup_is_a_row_that_drafts_drains_and_survives() {
         api_key: None,
         context_window: None,
         wire: gertie_providers::Wire::Replay,
+        vision: true,
     };
     let provider = Arc::new(
         gertie_providers::AnyProvider::with_endpoints(vec![endpoint]).expect("replay provider"),
@@ -3995,6 +4003,7 @@ fn revert_files_too_restores_the_checkpointed_content() {
         api_key: None,
         context_window: None,
         wire: gertie_providers::Wire::Replay,
+        vision: true,
     };
     let provider = Arc::new(
         gertie_providers::AnyProvider::with_endpoints(vec![endpoint]).expect("replay provider"),
@@ -4073,6 +4082,7 @@ fn the_guard_refuses_a_file_restore_while_another_tab_streams() {
         api_key: None,
         context_window: None,
         wire: gertie_providers::Wire::Replay,
+        vision: true,
     };
     let provider = Arc::new(
         gertie_providers::AnyProvider::with_endpoints(vec![endpoint]).expect("replay provider"),
@@ -4191,6 +4201,7 @@ fn a_workspace_switch_moves_the_tools_and_the_ledger_restores_where_it_ran() {
         api_key: None,
         context_window: None,
         wire: gertie_providers::Wire::Replay,
+        vision: true,
     };
     let provider = Arc::new(
         gertie_providers::AnyProvider::with_endpoints(vec![endpoint]).expect("replay provider"),
@@ -4382,6 +4393,7 @@ fn a_pending_mutation_names_what_it_waits_on() {
         api_key: None,
         context_window: None,
         wire: gertie_providers::Wire::Replay,
+        vision: true,
     };
     let provider = Arc::new(
         gertie_providers::AnyProvider::with_endpoints(vec![endpoint]).expect("replay provider"),
@@ -4461,6 +4473,7 @@ fn narration_stays_out_of_the_status_line() {
         api_key: None,
         context_window: None,
         wire: gertie_providers::Wire::Replay,
+        vision: true,
     };
     let provider = Arc::new(
         gertie_providers::AnyProvider::with_endpoints(vec![endpoint]).expect("replay provider"),
@@ -4523,6 +4536,7 @@ fn the_ask_card_names_the_question_in_the_status() {
         api_key: None,
         context_window: None,
         wire: gertie_providers::Wire::Replay,
+        vision: true,
     };
     let provider = Arc::new(
         gertie_providers::AnyProvider::with_endpoints(vec![endpoint]).expect("replay provider"),
@@ -4603,6 +4617,7 @@ fn stop_ends_a_running_turn_and_closes_its_open_card() {
         api_key: None,
         context_window: None,
         wire: gertie_providers::Wire::Replay,
+        vision: true,
     };
     let provider = Arc::new(
         gertie_providers::AnyProvider::with_endpoints(vec![endpoint]).expect("replay provider"),
@@ -4704,6 +4719,7 @@ fn a_pending_card_breaks_the_run_until_it_settles() {
         api_key: None,
         context_window: None,
         wire: gertie_providers::Wire::Replay,
+        vision: true,
     };
     let provider = Arc::new(
         gertie_providers::AnyProvider::with_endpoints(vec![endpoint]).expect("replay provider"),
@@ -5311,6 +5327,7 @@ fn replay_provider(scenario: &str) -> (Arc<gertie_providers::AnyProvider>, tempf
         api_key: None,
         context_window: None,
         wire: gertie_providers::Wire::Replay,
+        vision: true,
     };
     let provider = Arc::new(
         gertie_providers::AnyProvider::with_endpoints(vec![endpoint]).expect("replay provider"),
@@ -6066,6 +6083,7 @@ fn an_image_sent_mid_turn_queues_and_rides_with_its_message() {
         api_key: None,
         context_window: None,
         wire: gertie_providers::Wire::Replay,
+        vision: true,
     };
     let provider = Arc::new(
         gertie_providers::AnyProvider::with_endpoints(vec![endpoint]).expect("replay provider"),
@@ -6205,6 +6223,7 @@ fn held_turn_fixture() -> Fixture {
         api_key: None,
         context_window: None,
         wire: gertie_providers::Wire::Replay,
+        vision: true,
     };
     let provider = Arc::new(
         gertie_providers::AnyProvider::with_endpoints(vec![endpoint]).expect("replay provider"),
@@ -6464,4 +6483,133 @@ fn a_switch_moves_the_check_and_the_memory_with_the_root() {
         store.is_some_and(|store| Arc::ptr_eq(&store, &memory)),
         "recall reads the new root's memory"
     );
+}
+
+/// #50's first promise: `read_file` on a PNG puts the picture in front
+/// of the model, and it survives a reload. The scripted turn opens an
+/// image in a round that says nothing, then makes two calls in a round
+/// that does: the reloaded history holds every round whole, the image
+/// back on its result, and no empty bubble in the transcript.
+#[test]
+fn an_image_read_file_opens_survives_a_reload() {
+    let scenarios = tempfile::tempdir().expect("scenario dir");
+    std::fs::write(
+        scenarios.path().join("look.toml"),
+        "[[steps]]\ntext = ''\n\n\
+         [[steps.tool_calls]]\nname = \"read_file\"\n\
+         arguments = '{\"path\": \"logo.png\"}'\n\n\
+         [[steps]]\ntext = 'checking the rest'\n\n\
+         [[steps.tool_calls]]\nname = \"glob\"\n\
+         arguments = '{\"pattern\": \"*.png\"}'\n\n\
+         [[steps.tool_calls]]\nname = \"glob\"\n\
+         arguments = '{\"pattern\": \"*.txt\"}'\n\n\
+         [[steps]]\ntext = 'a red square'\n",
+    )
+    .expect("scenario file");
+    let workspace = tempfile::tempdir().expect("workspace dir");
+    // The smallest valid PNG: one red pixel.
+    let png: &[u8] = &[
+        0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44,
+        0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x02, 0x00, 0x00, 0x00, 0x90,
+        0x77, 0x53, 0xde, 0x00, 0x00, 0x00, 0x0c, 0x49, 0x44, 0x41, 0x54, 0x08, 0xd7, 0x63, 0xf8,
+        0xcf, 0xc0, 0x00, 0x00, 0x03, 0x01, 0x01, 0x00, 0x18, 0xdd, 0x8d, 0xb0, 0x00, 0x00, 0x00,
+        0x00, 0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
+    ];
+    std::fs::write(workspace.path().join("logo.png"), png).expect("image");
+    let attachments = tempfile::tempdir().expect("attachments dir");
+    let endpoint = gertie_providers::Endpoint {
+        name: "replay".into(),
+        base_url: scenarios.path().to_string_lossy().into_owned(),
+        model: "look".into(),
+        api_key: None,
+        context_window: None,
+        wire: gertie_providers::Wire::Replay,
+        vision: true,
+    };
+    let provider = Arc::new(
+        gertie_providers::AnyProvider::with_endpoints(vec![endpoint]).expect("replay provider"),
+    );
+    let store = Arc::new(SessionStore::open(Path::new(":memory:")).expect("memory store"));
+    let mut fixture = fixture_built(
+        store,
+        None,
+        Some(workspace.path().to_path_buf()),
+        None,
+        Some(provider),
+        None,
+        Vec::new(),
+        None,
+        None,
+    );
+    fixture.cx.update(|cx| {
+        let view = fixture.view.upgrade().expect("view alive");
+        view.update(cx, |chat, _| {
+            chat.set_attachments_dir_for_test(attachments.path())
+        });
+    });
+    fixture.act(|window, cx| {
+        window.input("what is logo.png", cx);
+        window.press("enter", cx);
+    });
+    pump(&mut fixture, 60);
+    let live_turns = turn_count_of(&mut fixture);
+
+    let session = fixture.store.list_sessions().unwrap()[0].id;
+    let rows = fixture.store.load_messages(session).unwrap();
+    let row = rows
+        .iter()
+        .find(|row| row.tool_name.as_deref() == Some("read_file"))
+        .expect("the read ran");
+    assert!(
+        row.content.starts_with("logo.png: image, 1x1"),
+        "{}",
+        row.content
+    );
+    assert_eq!(row.images.len(), 1, "the row keeps the image's file");
+    let saved = Path::new(&row.images[0]);
+    assert!(saved.starts_with(attachments.path()), "{}", saved.display());
+    assert_eq!(std::fs::read(saved).unwrap(), png);
+
+    // The history a resume sends: every round whole, in order.
+    let wire = fixture.store.load_wire_history(session).unwrap();
+    let shape: Vec<(gertie_core::Role, Option<&str>, usize)> = wire
+        .iter()
+        .map(|message| {
+            (
+                message.role,
+                message.content.as_deref(),
+                message.tool_calls.len(),
+            )
+        })
+        .collect();
+    use gertie_core::Role::{Assistant, Tool, User};
+    assert_eq!(shape[0], (User, Some("what is logo.png"), 0));
+    assert_eq!(
+        shape[1],
+        (Assistant, None, 1),
+        "the silent round keeps its call"
+    );
+    assert_eq!(shape[2].0, Tool);
+    assert_eq!(shape[3], (Assistant, Some("checking the rest"), 2));
+    assert_eq!(shape[4].0, Tool);
+    assert_eq!(shape[5].0, Tool, "the second call's result survives too");
+    assert_eq!(shape[6], (Assistant, Some("a red square"), 0));
+    assert_eq!(wire.len(), 7);
+    assert_eq!(
+        wire[2].attachments.len(),
+        1,
+        "the image is back on its result"
+    );
+    assert!(wire[2].attachments[0].starts_with("data:image/png;base64,"));
+
+    // Reopening shows what the live turn showed: no empty bubble for
+    // the round that only called a tool.
+    fixture.act(|window, cx| window.click("new-chat", cx));
+    let view = fixture.view.upgrade().expect("view alive");
+    fixture.act(|window, cx| {
+        view.update(cx, |chat, cx| chat.switch_to_session(session, window, cx));
+    });
+    pump(&mut fixture, 10);
+    assert_eq!(turn_count_of(&mut fixture), live_turns);
+    fixture.hold = vec![scenarios, workspace, attachments];
 }

@@ -378,6 +378,7 @@ mod tests {
             tool_call_id: None,
             tool_name: None,
             tool_arguments: None,
+            images: Vec::new(),
         };
         let messages = vec![
             row(crate::Role::User, "the request"),
@@ -408,6 +409,7 @@ mod tests {
             tool_call_id: None,
             tool_name: None,
             tool_arguments: None,
+            images: Vec::new(),
         }
     }
 
@@ -423,6 +425,7 @@ mod tests {
             tool_call_id: Some("c".into()),
             tool_name: Some(tool.into()),
             tool_arguments: Some(arguments.into()),
+            images: Vec::new(),
         }
     }
 
@@ -540,6 +543,7 @@ mod tests {
             tool_call_id: Some("c".into()),
             tool_name: Some("read_file".into()),
             tool_arguments: Some(arguments.into()),
+            images: Vec::new(),
         }
     }
 

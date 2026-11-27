@@ -236,6 +236,7 @@ mod tests {
             model: model.into(),
             api_key: None,
             context_window: None,
+            vision: true,
             wire: Wire::Replay,
         }
     }

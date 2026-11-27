@@ -54,6 +54,12 @@ pub struct Endpoint {
     /// Model context window in tokens; None disables compaction.
     pub context_window: Option<u64>,
     pub wire: Wire,
+    /// Whether the model reads images (#50). Off: every image in the
+    /// request (an attachment, a screenshot) is replaced by a note
+    /// saying so, rather than pixels the endpoint rejects or the model
+    /// silently ignores. The tools that make images name their files
+    /// in the text, so the model still knows where they are.
+    pub vision: bool,
 }
 
 // Debug is hand-rolled for one reason: the key. A struct that carries
@@ -69,6 +75,7 @@ impl std::fmt::Debug for Endpoint {
             .field("api_key", &self.api_key.as_ref().map(|_| "…"))
             .field("context_window", &self.context_window)
             .field("wire", &self.wire)
+            .field("vision", &self.vision)
             .finish()
     }
 }
@@ -216,7 +223,7 @@ impl RequestScoped {
     async fn attempt_once(&self, request: &Request, sender: &envelope::Sender) -> Outcome {
         let mut body = serde_json::json!({
             "model": self.endpoint.model,
-            "messages": wire_messages(&request.messages),
+            "messages": wire_messages(&readable_by(&self.endpoint, request).messages),
             "stream": true,
             "stream_options": { "include_usage": true },
         });
@@ -402,6 +409,46 @@ fn flush_tool_calls(tool_calls: &[PartialToolCall], sender: &envelope::Sender) {
     }
 }
 
+/// The request as this endpoint can read it (#50): unchanged for a
+/// model with vision, and for one without, every image swapped for a
+/// note in the message's text. A request with no images borrows.
+pub(crate) fn readable_by<'a>(
+    endpoint: &Endpoint,
+    request: &'a Request,
+) -> std::borrow::Cow<'a, Request> {
+    let is_image = |attachment: &String| {
+        gertie_core::data_url_parts(attachment)
+            .is_some_and(|(media_type, _)| media_type.starts_with("image/"))
+    };
+    let carries_images = request
+        .messages
+        .iter()
+        .any(|message| message.attachments.iter().any(is_image));
+    if endpoint.vision || !carries_images {
+        return std::borrow::Cow::Borrowed(request);
+    }
+    let mut request = request.clone();
+    for message in &mut request.messages {
+        let before = message.attachments.len();
+        message
+            .attachments
+            .retain(|attachment| !is_image(attachment));
+        let dropped = before - message.attachments.len();
+        if dropped > 0 {
+            let note = format!(
+                "[{dropped} image{} not sent: this model can't read images]",
+                if dropped == 1 { "" } else { "s" }
+            );
+            let content = message.content.get_or_insert_with(String::new);
+            if !content.is_empty() {
+                content.push('\n');
+            }
+            content.push_str(&note);
+        }
+    }
+    std::borrow::Cow::Owned(request)
+}
+
 fn wire_role(role: gertie_core::Role) -> &'static str {
     match role {
         gertie_core::Role::System => "system",
@@ -415,9 +462,61 @@ fn wire_role(role: gertie_core::Role) -> &'static str {
 /// assistant-with-tool-calls (`tool_calls` array), tool results (keyed by
 /// `tool_call_id`), and the tool definitions themselves.
 fn wire_messages(messages: &[WireMessage]) -> Vec<serde_json::Value> {
-    messages
-        .iter()
-        .map(|message| {
+    // A tool message carries text only on this wire, so a tool's
+    // images (#50) ride in one user message after the run of tool
+    // results: the results must follow their assistant message
+    // unbroken, and a user message is where image parts are allowed.
+    let mut wire = Vec::new();
+    let mut pending: Vec<serde_json::Value> = Vec::new();
+    for message in messages {
+        if message.role != gertie_core::Role::Tool && !pending.is_empty() {
+            wire.push(tool_images_message(std::mem::take(&mut pending)));
+        }
+        if message.role == gertie_core::Role::Tool {
+            let images: Vec<&String> = message
+                .attachments
+                .iter()
+                .filter(|attachment| {
+                    gertie_core::data_url_parts(attachment)
+                        .is_some_and(|(media_type, _)| media_type.starts_with("image/"))
+                })
+                .collect();
+            if !images.is_empty() {
+                pending.push(serde_json::json!({
+                    "type": "text",
+                    "text": format!(
+                        "{} ({}):",
+                        message.name.clone().unwrap_or_else(|| "tool".into()),
+                        message.tool_call_id.clone().unwrap_or_default()
+                    ),
+                }));
+                pending.extend(images.into_iter().map(|image| {
+                    serde_json::json!({ "type": "image_url", "image_url": { "url": image } })
+                }));
+            }
+        }
+        wire.push(wire_message(message));
+    }
+    if !pending.is_empty() {
+        wire.push(tool_images_message(pending));
+    }
+    wire
+}
+
+/// The user message that carries the images a run of tool results
+/// returned, OpenAI's wire has no image part for a tool message.
+fn tool_images_message(parts: Vec<serde_json::Value>) -> serde_json::Value {
+    let mut content = vec![serde_json::json!({
+        "type": "text",
+        "text": "Images the tool calls above returned:",
+    })];
+    content.extend(parts);
+    serde_json::json!({ "role": "user", "content": content })
+}
+
+fn wire_message(message: &WireMessage) -> serde_json::Value {
+    {
+        {
             let mut entry = serde_json::Map::new();
             entry.insert("role".into(), serde_json::json!(wire_role(message.role)));
             match message.role {
@@ -502,8 +601,8 @@ fn wire_messages(messages: &[WireMessage]) -> Vec<serde_json::Value> {
                 }
             }
             serde_json::Value::Object(entry)
-        })
-        .collect()
+        }
+    }
 }
 
 fn endpoint_url(endpoint: &Endpoint) -> String {
@@ -603,6 +702,7 @@ pub(crate) mod test_support {
                 model: "fake-model".into(),
                 api_key: Some("fake-key".into()),
                 context_window: None,
+                vision: true,
                 wire,
             }
         }
@@ -632,6 +732,7 @@ mod tests {
             model: "model-x".into(),
             api_key: Some("sk-super-secret-value-12345".into()),
             context_window: None,
+            vision: true,
             wire: Wire::OpenAI,
         };
         let rendered = format!("{endpoint:?}");
@@ -666,6 +767,110 @@ mod tests {
         assert_eq!(wire[2]["tool_call_id"], "call_9");
         assert_eq!(wire[2]["name"], "edit_file");
         assert_eq!(wire[2]["content"], "done");
+    }
+
+    #[test]
+    fn a_tools_images_follow_the_run_of_results_in_a_user_message() {
+        let shot = ToolCall {
+            id: "call_1".into(),
+            name: "screenshot".into(),
+            arguments: "{}".into(),
+        };
+        let grep = ToolCall {
+            id: "call_2".into(),
+            name: "grep".into(),
+            arguments: "{}".into(),
+        };
+        let messages = vec![
+            WireMessage::assistant_with_tool_calls(None, vec![shot.clone(), grep.clone()]),
+            WireMessage::tool_result_with_images(
+                &shot,
+                "Screenshot saved to /c/shot.png.",
+                vec!["data:image/png;base64,QUJD".into()],
+            ),
+            WireMessage::tool_result(&grep, "no matches"),
+            WireMessage::assistant("the button is clipped"),
+        ];
+        let wire = wire_messages(&messages);
+
+        assert_eq!(wire.len(), 5, "{wire:#?}");
+        // The tool message stays text: the wire allows nothing else,
+        // and both results follow their assistant message unbroken.
+        assert_eq!(wire[1]["role"], "tool");
+        assert_eq!(wire[1]["content"], "Screenshot saved to /c/shot.png.");
+        assert_eq!(wire[2]["role"], "tool");
+        // Then one user message carries the image, labeled by call.
+        assert_eq!(wire[3]["role"], "user");
+        let parts = wire[3]["content"].as_array().unwrap();
+        assert_eq!(parts[1]["text"], "screenshot (call_1):");
+        assert_eq!(parts[2]["type"], "image_url");
+        assert_eq!(parts[2]["image_url"]["url"], "data:image/png;base64,QUJD");
+        assert_eq!(wire[4]["role"], "assistant");
+    }
+
+    #[test]
+    fn a_model_without_vision_gets_a_note_in_place_of_each_image() {
+        let call = ToolCall {
+            id: "call_1".into(),
+            name: "read_file".into(),
+            arguments: "{}".into(),
+        };
+        let mut attached = WireMessage::user("what's this");
+        attached.attachments = vec![
+            "data:image/png;base64,QUJD".into(),
+            "data:application/pdf;base64,JVBERi0".into(),
+        ];
+        let request = Request {
+            messages: vec![
+                attached,
+                WireMessage::assistant_with_tool_calls(None, vec![call.clone()]),
+                WireMessage::tool_result_with_images(
+                    &call,
+                    "logo.png: image, 40x30 (1 KB).",
+                    vec!["data:image/png;base64,QUJD".into()],
+                ),
+            ],
+            ..Request::default()
+        };
+        let mut endpoint = Endpoint {
+            name: "blind".into(),
+            base_url: "http://x".into(),
+            model: "text-only".into(),
+            api_key: None,
+            context_window: None,
+            wire: Wire::OpenAI,
+            vision: true,
+        };
+        assert!(
+            matches!(
+                readable_by(&endpoint, &request),
+                std::borrow::Cow::Borrowed(_)
+            ),
+            "a model with vision gets the request as it is"
+        );
+
+        endpoint.vision = false;
+        let readable = readable_by(&endpoint, &request);
+        let user = &readable.messages[0];
+        assert_eq!(
+            user.attachments,
+            vec!["data:application/pdf;base64,JVBERi0".to_string()],
+            "only images go, a PDF is not one"
+        );
+        assert_eq!(
+            user.content.as_deref(),
+            Some("what's this\n[1 image not sent: this model can't read images]")
+        );
+        let result = &readable.messages[2];
+        assert!(result.attachments.is_empty());
+        assert_eq!(
+            result.content.as_deref(),
+            Some(
+                "logo.png: image, 40x30 (1 KB).\n\
+                 [1 image not sent: this model can't read images]"
+            ),
+            "the tool's text still names the file"
+        );
     }
 
     #[test]
@@ -753,6 +958,7 @@ mod tests {
             model: "fake-model".into(),
             api_key: Some("fake-key".into()),
             context_window: None,
+            vision: true,
             wire: Wire::OpenAI,
         };
         let provider = OpenAICompatible::new(endpoint).unwrap();
