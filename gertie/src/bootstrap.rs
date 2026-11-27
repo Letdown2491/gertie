@@ -38,7 +38,7 @@ pub struct Bootstrap {
     pub config: crate::config::Config,
     /// The `--config` override, if any, reload reads the same file
     /// the original load did.
-    config_path: Option<PathBuf>,
+    pub(crate) config_path: Option<PathBuf>,
     /// Config load/parse failure, if any. The GUI reports it in the
     /// status label (a GUI user never sees stderr); headless treats it
     /// as fatal.
@@ -50,7 +50,7 @@ pub struct Bootstrap {
     pub store: Arc<gertie_core::SessionStore>,
     /// Live-reloadable state (provider, agent endpoint, label,
     /// settings), swapped after a settings save.
-    reloaded: std::sync::RwLock<Reloaded>,
+    pub(crate) reloaded: std::sync::RwLock<Reloaded>,
     pub tools: gertie_core::ToolRegistry,
     pub broker: Arc<gertie_core::PermissionBroker>,
     /// The front's current session, subagent dispatch reads it to link
@@ -66,7 +66,7 @@ pub struct Bootstrap {
     pub default_mode: gertie_core::PermissionMode,
     /// The repo's own overlay file, if one loads, re-resolved
     /// against the live config on every reload.
-    overlay: Option<crate::config::ProjectOverlay>,
+    pub(crate) overlay: Option<crate::config::ProjectOverlay>,
     /// The overlay's load/parse failure, if any, reported in the
     /// label and the doctor, never fatal.
     pub overlay_error: Option<String>,
@@ -87,15 +87,15 @@ pub struct Bootstrap {
     pub workspace_root: PathBuf,
     /// The label tail that doesn't change on an endpoint switch:
     /// skills, MCP connections, agent types, set up once at load.
-    capability_suffix: String,
-    skill_count: usize,
+    pub(crate) capability_suffix: String,
+    pub(crate) skill_count: usize,
     /// The global memory tier every root's store shares (the boot's
     /// override in evals, else the user's).
-    memory_global: PathBuf,
+    pub(crate) memory_global: PathBuf,
     /// Tool names that don't capture the workspace root (web, history,
     /// MCP, skills), a re-rooted registry carries these over as-is
     /// instead of rebuilding or reconnecting them.
-    root_independent: Vec<String>,
+    pub(crate) root_independent: Vec<String>,
     /// Discovered prompt templates, `/name` expansion in the
     /// composer. Load-time setup; reload carries the same set.
     pub templates: Vec<gertie_tools::templates::Template>,

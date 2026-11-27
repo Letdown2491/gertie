@@ -588,7 +588,7 @@ impl ChatView {
     pub(super) fn fold_status_tool(&mut self, name: &str, arguments: &str, result: &str) {
         let root = self.workspace_root.clone();
         self.status_facts.fold_tool(name, arguments, result, &root);
-        self.reverify_on_reread(name, arguments);
+        self.reverify_on_reread(name, arguments, result, &root);
         self.status_version += 1;
     }
 
@@ -599,33 +599,56 @@ impl ChatView {
     /// edit counts too: folding happens after the result, so the hash
     /// lands on the file's post-edit state. A stale fact should still
     /// supersede; this is for facts that survived the refactor.
-    fn reverify_on_reread(&mut self, name: &str, arguments: &str) {
-        if !matches!(name, "read_file" | "edit_file" | "write_file") {
+    fn reverify_on_reread(
+        &mut self,
+        name: &str,
+        arguments: &str,
+        result: &str,
+        root: &std::path::Path,
+    ) {
+        if !matches!(name, "read_file" | "edit_file" | "write_file" | "bash") {
             return;
         }
         let Some(store) = self.memory_store.clone() else {
             return;
         };
-        let root = self.workspace_root.clone();
-        let Ok(args) = serde_json::from_str::<serde_json::Value>(arguments) else {
-            return;
+        // The reread paths: the file tools name one file in their
+        // arguments; bash names any number across the whole command
+        // (sed, grep, cat, python reading a file), already extracted
+        // and gate-checked by the TOUCHED state machine.
+        let showns: Vec<String> = if name == "bash" {
+            let Ok(args) = serde_json::from_str::<serde_json::Value>(arguments) else {
+                return;
+            };
+            let Some(command) = args.get("command").and_then(|value| value.as_str()) else {
+                return;
+            };
+            bash_file_targets(command, root)
+                .into_iter()
+                .map(|(path, _)| path)
+                .collect()
+        } else {
+            let Ok(args) = serde_json::from_str::<serde_json::Value>(arguments) else {
+                return;
+            };
+            let Some(raw) = args.get("path").and_then(|value| value.as_str()) else {
+                return;
+            };
+            match normalize_path(root, raw) {
+                Some(shown) => vec![shown],
+                None => vec![],
+            }
         };
-        let Some(raw) = args.get("path").and_then(|value| value.as_str()) else {
-            return;
-        };
-        let Some(shown) = normalize_path(&root, raw) else {
-            return;
-        };
+        let _ = result;
         let entries = store.scan();
         for id in self.status_facts.consulted.clone() {
             let Some(entry) = entries.iter().find(|entry| entry.id == id) else {
                 continue;
             };
-            let cites = entry
-                .evidence
-                .iter()
-                .any(|cited| cited.path == shown && store.changed_evidence(entry).contains(&shown));
-            if cites {
+            let hits = entry.evidence.iter().any(|cited| {
+                showns.contains(&cited.path) && store.changed_evidence(entry).contains(&cited.path)
+            });
+            if hits {
                 let _ = store.reverify_evidence(&id);
             }
         }

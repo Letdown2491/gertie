@@ -6727,3 +6727,76 @@ fn a_reread_of_a_cited_file_reverifies_the_consulted_entry() {
         "the stored hash is the file's current state"
     );
 }
+
+/// The bash reread path: this session's actual reading shape is
+/// `sed -n`, `grep`, `python3 -c` through bash, not the file tool,
+/// and a cited file re-read that way is as verified as one read by
+/// read_file. The fold extracts the command's file targets (the
+/// TOUCHED state machine), matches them against the consulted
+/// entry's evidence, and the hash re-records.
+#[test]
+fn a_bash_reread_of_a_cited_file_also_reverifies() {
+    let (mut fixture, _keep) = fixture_with_memory();
+    let dir = tempfile::tempdir().expect("cited dir");
+    let root = dir.path().to_path_buf();
+    std::fs::create_dir_all(root.join("src")).expect("src");
+    std::fs::write(root.join("src/cited.rs"), "old\n").expect("cited");
+
+    // The entry cites src/cited.rs and this chat consulted it.
+    fixture.cx.update(|cx| {
+        let view = fixture.view.upgrade().expect("view alive");
+        view.update(cx, |chat, cx| {
+            let memory = chat.memory_store_for_test().expect("memory store");
+            let report = memory
+                .apply(
+                    &[gertie_core::memory::Op::Add {
+                        file: "gotchas.md".into(),
+                        text: "the cited file holds the constant".into(),
+                        source: None,
+                        evidence: vec!["src/cited.rs".into()],
+                    }],
+                    10_000,
+                )
+                .expect("add");
+            let added = report.applied.first().expect("one id").clone();
+            // The fold consults what the turn's tools surface: the
+            // scripted turn's search_memory result names the id, the
+            // same natural path a real consultation takes.
+            chat.fold_status_tool_for_test(
+                "search_memory",
+                r#"{"query":"constant"}"#,
+                &format!("[{added}] gotchas.md, added -\n   the cited file holds the constant\n"),
+            );
+        });
+    });
+
+    // The bash read, folded the way the live loop folds it (no turn
+    // needed: the fold is the unit under test).
+    fixture.cx.update(|cx| {
+        let view = fixture.view.upgrade().expect("view alive");
+        view.update(cx, |chat, _| {
+            chat.fold_status_tool_for_test(
+                "bash",
+                r#"{"command":"grep constant src/cited.rs"}"#,
+                "the constant",
+            );
+        });
+    });
+
+    // The flag never got to exist: the bash reread re-recorded the
+    // hash while the turn folded.
+    let stale = fixture.cx.update(|cx| {
+        let view = fixture.view.upgrade().expect("view alive");
+        let memory = view.read(cx).memory_store_for_test().expect("memory store");
+        let entry = memory
+            .scan()
+            .into_iter()
+            .find(|entry| entry.text.contains("the cited file"))
+            .expect("the entry");
+        memory.changed_evidence(&entry)
+    });
+    assert!(
+        !stale.contains(&"src/cited.rs".to_string()),
+        "the bash reread re-recorded the hash, got {stale:?}"
+    );
+}

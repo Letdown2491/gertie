@@ -16,7 +16,9 @@
 // The internals keep the old "tab" names: one TabState per open view.
 
 use crate::bootstrap::Bootstrap;
-use crate::chat::{ChatView, ChatViewConfig, ChatViewEvent, SessionMark, ShellRequest};
+use crate::chat::{
+    ChatView, ChatViewConfig, ChatViewEvent, SessionMark, ShellRequest, same_workspace,
+};
 use gpui_kit::component::ActiveTheme as _;
 use gpui_kit::component::v_flex;
 use gpui_kit::prelude::*;
@@ -175,23 +177,49 @@ impl WorkspaceView {
             armed_close: None,
         };
         let boot = this.boot.clone();
-        let first = this.make_view(
-            boot.tools.clone(),
-            boot.system_prompt.clone(),
-            boot.instructions.clone(),
-            boot.memory_index.clone(),
-            boot.memory_enabled(),
-            boot.memory.clone(),
-            boot.memory_extract_provider(),
-            boot.workspace_root.clone(),
-            boot.verify_command(),
-            // The first view shares the workspace: no worktree branch
-            // to name.
-            None,
-            true,
-            window,
-            cx,
-        );
+        // Launch resume, take two. The old rule resumed only this
+        // launch's workspace — but a desktop launcher launches from
+        // home, so "the newest chat of the workspace" was whatever was
+        // newest in ~, never the conversation you actually put down.
+        // So: a launcher launch (the workspace is home, an accident of
+        // the spawn) resumes the newest unsettled conversation anywhere
+        // and the tab opens in that conversation's own folder; a
+        // terminal launch (`cd kuma && gertie`) keeps the folder
+        // rule — you named a folder, open its chat.
+        let first_root = this.decide_first_root();
+        let first = match first_root {
+            Some(root)
+                if !same_workspace(root.to_string_lossy().as_ref(), &boot.workspace_root) =>
+            {
+                // A foreign folder's chat: build the view at that
+                // root, booting the folder's tools, memory and
+                // overlays through workspace_for_root. The view's own
+                // launch resume takes it from here: the root is by
+                // construction the newest unsettled session's folder,
+                // and that session is the exactly-one chat the filter
+                // matches. A refusal (gone folder, bad overlay) falls
+                // through to the plain boot-rooted view.
+                match boot.workspace_for_root(&root) {
+                    Ok(switched) => this.make_view(
+                        switched.tools,
+                        switched.system_prompt,
+                        switched.instructions,
+                        switched.memory_index,
+                        boot.memory_enabled(),
+                        switched.memory,
+                        switched.memory_extract_provider,
+                        switched.workspace_root,
+                        switched.verify,
+                        None,
+                        true,
+                        window,
+                        cx,
+                    ),
+                    Err(_) => this.make_boot_view(window, cx),
+                }
+            }
+            _ => this.make_boot_view(window, cx),
+        };
         this.push_view(first, window, cx);
         // The window-close gate: registered once, asked on every close
         // attempt (titlebar ✕, Alt+F4, WM gesture, there is no other
@@ -330,6 +358,49 @@ impl WorkspaceView {
                 .update(cx, |chat, cx| chat.apply_provider(update, cx));
         }
         cx.notify();
+    }
+
+    /// The folder the first tab opens in: None keeps the boot's own
+    /// root. A launcher launch roots the process at $HOME (the
+    /// .desktop file runs bare `gertie`), and nobody starts work by
+    /// opening a terminal in ~ — so home as the launch root means "no
+    /// folder was chosen": resume the newest unsettled conversation
+    /// anywhere, in its own folder. Any other root is a named folder
+    /// (`cd kuma && gertie`): keep the old rule, that folder's newest
+    /// chat.
+    fn decide_first_root(&self) -> Option<std::path::PathBuf> {
+        let home = std::env::var("HOME").ok().map(std::path::PathBuf::from)?;
+        if !same_workspace(self.boot.workspace_root.to_string_lossy().as_ref(), &home) {
+            return None;
+        }
+        self.boot
+            .store
+            .list_sessions()
+            .unwrap_or_default()
+            .into_iter()
+            .find(|summary| !summary.settled)
+            .and_then(|summary| summary.workspace_root)
+            .map(std::path::PathBuf::from)
+    }
+
+    /// The plain first view at the boot's own root.
+    fn make_boot_view(&self, window: &mut Window, cx: &mut Context<Self>) -> Entity<ChatView> {
+        let boot = &self.boot;
+        self.make_view(
+            boot.tools.clone(),
+            boot.system_prompt.clone(),
+            boot.instructions.clone(),
+            boot.memory_index.clone(),
+            boot.memory_enabled(),
+            boot.memory.clone(),
+            boot.memory_extract_provider(),
+            boot.workspace_root.clone(),
+            boot.verify_command(),
+            None,
+            true,
+            window,
+            cx,
+        )
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -764,6 +835,54 @@ impl Render for WorkspaceView {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::{Path, PathBuf};
+
+    #[test]
+    fn a_launcher_launch_resumes_the_newest_unsettled_conversation_anywhere() {
+        // A real store, an in-memory one: the decision reads sessions
+        // only, nothing is written.
+        let store = Arc::new(gertie_core::SessionStore::open(Path::new(":memory:")).unwrap());
+        // Two unsettled conversations in two folders; the older is
+        // this folder's own chat, the newer lives elsewhere. A
+        // launcher launch (root = $HOME, an accident of the spawn)
+        // must resume the newer one and open its folder.
+        let older = store.create_session("this folder's chat").unwrap();
+        store
+            .append_message(older, None, gertie_core::Role::User, "hello")
+            .unwrap();
+        store.set_session_workspace(older, Path::new("/tmp/launch-resume-here"));
+        let newer = store.create_session("the last conversation").unwrap();
+        store
+            .append_message(newer, None, gertie_core::Role::User, "hi")
+            .unwrap();
+        let elsewhere = Path::new("/tmp/launch-resume-there");
+        std::fs::create_dir_all(elsewhere).unwrap();
+        store.set_session_workspace(newer, elsewhere);
+
+        // The shell struct as the decision sees it: a boot whose
+        // store is ours and whose root is home (the launcher's
+        // accident).
+        let template = Bootstrap::load_at(None, true, PathBuf::from("."), None);
+        let shell = WorkspaceView {
+            boot: Arc::new(Bootstrap {
+                store: store.clone(),
+                workspace_root: PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| ".".into())),
+                ..template
+            }),
+            tabs: Vec::new(),
+            active: 0,
+            next_worktree: 0,
+            shown: None,
+            armed_close: None,
+        };
+        let root = shell
+            .decide_first_root()
+            .expect("a home launch with an unsettled chat decides a root");
+        assert!(
+            same_workspace(root.to_string_lossy().as_ref(), elsewhere),
+            "the newest unsettled conversation's folder wins, got {root:?}"
+        );
+    }
 
     #[test]
     fn the_attention_marks_follow_the_work() {

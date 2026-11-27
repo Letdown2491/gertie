@@ -7274,7 +7274,7 @@ fn queued_wire(stored: &str) -> (String, Vec<String>) {
 /// folder. Canonical compare when both resolve (symlinks, `..`
 /// segments, bind mounts); a folder that no longer exists falls back
 /// to the literal strings, the store recorded what the OS handed it.
-fn same_workspace(stored: &str, current: &std::path::Path) -> bool {
+pub(crate) fn same_workspace(stored: &str, current: &std::path::Path) -> bool {
     let stored = std::path::Path::new(stored);
     match (stored.canonicalize(), current.canonicalize()) {
         (Ok(stored), Ok(current)) => stored == current,
