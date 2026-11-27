@@ -4,9 +4,10 @@
 //!
 //! Sections, in column order, each rendered only when it has
 //! something to say: GOAL (the model's `status` goal, else the latest
-//! prompt) with the run clock, FILES (read/edited per file, from the
-//! session's tool calls, edited wins), NEXT (the model's `status` next
-//! step), GROUNDED IN (memory the work consulted, then entries whose
+//! prompt) with the run clock, NEXT (the model's `status` next step),
+//! MEMORY (the session's memory writes, newest last), TOUCHED
+//! (read/edited per file, from the session's tool calls, edited
+//! wins), GROUNDED IN (memory the work consulted, then entries whose
 //! evidence shares a file with the work), WAITING ON YOU (asks from
 //! the other open chats of this chat's project), CORRECTION CHAIN
 //! (the walk behind a flagged grounding entry).
@@ -876,6 +877,19 @@ impl ChatView {
             ));
         }
 
+        if let Some(next) = &facts.next {
+            sections.push(section(
+                label(None, "NEXT".into()),
+                vec![
+                    div()
+                        .text_size(px(12.5))
+                        .text_color(theme.muted_foreground)
+                        .child(SharedString::from(next.clone()))
+                        .into_any_element(),
+                ],
+            ));
+        }
+
         if !facts.memory_actions.is_empty() {
             let count = facts.memory_actions.len();
             // Each action is a chip row in the TOUCHED idiom: the
@@ -963,19 +977,6 @@ impl ChatView {
                     .child(v_flex().gap(px(3.)).children(body))
                     .into_any_element(),
             );
-        }
-
-        if let Some(next) = &facts.next {
-            sections.push(section(
-                label(None, "NEXT".into()),
-                vec![
-                    div()
-                        .text_size(px(12.5))
-                        .text_color(theme.muted_foreground)
-                        .child(SharedString::from(next.clone()))
-                        .into_any_element(),
-                ],
-            ));
         }
 
         if !ground.is_empty() {
