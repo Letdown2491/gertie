@@ -121,6 +121,9 @@ pub struct Switched {
     /// Whether bash sandboxes in the new root (the live config's
     /// answer, resolved against the *new* root's overlay).
     pub sandbox_bash: bool,
+    /// The project check (#40) for the new root: a check command is a
+    /// per-project answer, so it moves with the root.
+    pub verify: Option<String>,
     /// Overlay and discovery problems for the new root, the chat
     /// surfaces them as transcript notices, never silently.
     pub warnings: Vec<String>,
@@ -962,7 +965,9 @@ impl Bootstrap {
         let project = load_project_instructions(&root);
         let instructions = join_instructions(global.as_deref(), project.as_deref());
         let system_prompt = system_prompt_for(&root, &skill_index, project.as_deref());
+        let verify = config.resolve_verify(&root);
         Ok(Switched {
+            verify,
             tools,
             system_prompt,
             instructions,

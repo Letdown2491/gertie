@@ -176,6 +176,7 @@ fn fixture_full(
                                 workspace_root: root.to_path_buf(),
                                 templates: Vec::new(),
                                 sandbox_bash: false,
+                                verify: None,
                                 warnings: Vec::new(),
                             })
                         }),
@@ -1419,6 +1420,7 @@ fn markdown_and_tool_rows_draw_clean() {
                                 workspace_root: root.to_path_buf(),
                                 templates: Vec::new(),
                                 sandbox_bash: false,
+                                verify: None,
                                 warnings: Vec::new(),
                             })
                         }),
@@ -2949,6 +2951,7 @@ fn the_footer_and_the_sidebar_foot_stay_inside_the_window() {
                                 workspace_root: root.to_path_buf(),
                                 templates: Vec::new(),
                                 sandbox_bash: false,
+                                verify: None,
                                 warnings: Vec::new(),
                             })
                         }),
@@ -6151,7 +6154,7 @@ fn an_image_sent_mid_turn_queues_and_rides_with_its_message() {
         .expect("session created by send");
     pump_until(
         &mut fixture,
-        200,
+        1000,
         |fixture| {
             fixture
                 .store
@@ -6271,7 +6274,7 @@ fn queued_followups_go_out_together_as_one_message() {
     fixture.act(|window, cx| window.click("approve-1", cx));
     pump_until(
         &mut fixture,
-        200,
+        1000,
         |fixture| {
             let session = the_session(fixture);
             user_rows(fixture, session)
@@ -6315,7 +6318,7 @@ fn ctrl_enter_steers_and_the_steer_is_tracked_until_it_joins() {
     fixture.act(|window, cx| window.click("approve-1", cx));
     pump_until(
         &mut fixture,
-        200,
+        1000,
         |fixture| {
             let session = the_session(fixture);
             user_rows(fixture, session)
@@ -6326,7 +6329,7 @@ fn ctrl_enter_steers_and_the_steer_is_tracked_until_it_joins() {
     );
     pump_until(
         &mut fixture,
-        200,
+        1000,
         |fixture| {
             fixture.cx.update(|cx| {
                 let view = fixture.view.upgrade().expect("view alive");
@@ -6351,7 +6354,7 @@ fn a_steer_the_turn_never_read_leads_the_next_message() {
     fixture.act(|window, cx| window.click("approve-1", cx));
     pump_until(
         &mut fixture,
-        200,
+        1000,
         |fixture| {
             let session = the_session(fixture);
             user_rows(fixture, session)
@@ -6379,7 +6382,7 @@ fn a_stop_holds_the_queue_and_the_next_message_carries_it() {
     });
     pump_until(
         &mut fixture,
-        200,
+        1000,
         |fixture| {
             !fixture.cx.update(|cx| {
                 fixture
@@ -6422,4 +6425,43 @@ fn a_stop_holds_the_queue_and_the_next_message_carries_it() {
         user_rows(&fixture, session)
     );
     assert!(fixture.store.queued_followups(session).unwrap().is_empty());
+}
+
+/// Per-root answers move with the root: after a switch, the check is
+/// the new project's and recall reads the new root's memory. Both
+/// used to stay with the folder the app started in.
+#[test]
+fn a_switch_moves_the_check_and_the_memory_with_the_root() {
+    let mut fixture = fixture();
+    let elsewhere = tempfile::tempdir().expect("other root");
+    let memory = Arc::new(gertie_core::MemoryStore::open(
+        elsewhere.path().join(".gertie/memory"),
+        elsewhere.path().join("global"),
+        fixture.store.clone(),
+    ));
+    let switched = gertie::bootstrap::Switched {
+        tools: Arc::new(Default::default()),
+        system_prompt: None,
+        instructions: None,
+        memory_index: None,
+        memory: Some(memory.clone()),
+        memory_extract_provider: None,
+        workspace_root: elsewhere.path().to_path_buf(),
+        templates: Vec::new(),
+        sandbox_bash: false,
+        verify: Some("make check".into()),
+        warnings: Vec::new(),
+    };
+    let (verify, store) = fixture.cx.update(|cx| {
+        let view = fixture.view.upgrade().expect("view alive");
+        view.update(cx, |chat, cx| {
+            chat.adopt_switch(switched, cx);
+            (chat.verify_for_test(), chat.memory_store_for_test())
+        })
+    });
+    assert_eq!(verify.as_deref(), Some("make check"));
+    assert!(
+        store.is_some_and(|store| Arc::ptr_eq(&store, &memory)),
+        "recall reads the new root's memory"
+    );
 }

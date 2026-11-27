@@ -1318,6 +1318,16 @@ impl ChatView {
         self.turns.len()
     }
 
+    /// The project check in force, for tests.
+    pub fn verify_for_test(&self) -> Option<String> {
+        self.verify.clone()
+    }
+
+    /// The memory store recall reads, for tests.
+    pub fn memory_store_for_test(&self) -> Option<Arc<gertie_core::MemoryStore>> {
+        self.memory_store.clone()
+    }
+
     /// The current permission mode, for tests.
     pub fn mode_for_test(&self) -> PermissionMode {
         self.mode
@@ -3852,6 +3862,11 @@ impl ChatView {
         self.memory_index = switched.memory_index;
         self.templates = switched.templates;
         self.sandbox_bash = switched.sandbox_bash;
+        // Per-root answers move with the root: the check is the new
+        // project's, and recall on touch reads the new root's memory
+        // (the index above already does).
+        self.verify = switched.verify;
+        self.memory_store = switched.memory;
         for warning in switched.warnings {
             self.push_notice(warning, cx);
         }
