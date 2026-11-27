@@ -1738,7 +1738,11 @@ mod tests {
             "# Gotchas\n\n- [p1] helpful=0 harmful=0 the sprite theory [source: hand; added: 2026-11-25]\n- [p2] helpful=0 harmful=0 the assets layer was the fix [source: 44837af; added: 2026-11-25]\n",
             &root,
         );
-        assert_eq!(viewed.consulted, vec!["p1", "p2"], "a view saw the entries");
+        assert_eq!(
+            viewed.consulted,
+            vec!["p2", "p1"],
+            "a view saw the entries, newest first"
+        );
         // Mutating commands are actions, not consultations.
         let mut created = StatusFacts::default();
         created.fold_tool(
