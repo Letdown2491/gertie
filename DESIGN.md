@@ -602,6 +602,10 @@ Each type earns existence via distinct toolset or safety posture, not just a dif
   read-only rows, every state it showed already visible in the transcript's tool cards.)
 - **Not an IDE.** No file tree, no terminal pane, Zed exists. gertie is the harness.
 - Parallel sessions run against separate worktrees, visible simultaneously (M4).
+- **The status column** shipped after M7: the open session's WORKING ON / NEXT UP /
+  WAITING ON YOU / REMEMBERED / TOUCHED / DEPENDS ON / CORRECTIONS beside the
+  transcript, plus the riding card on the latest turn (see the window-shell note for
+  the full account).
 
 (The agents panel shipped post-M5 and was later removed: a read-only column listing the
 chat's persisted worker runs with live report status; every state it showed was already
@@ -819,6 +823,29 @@ right; its idle ghost text is "Message Gertie, or type / for commands". List mar
 sit by an item's first line, not the middle of a wrapped one. The settings panel is
 cards (Appearance, Endpoints, Sandbox, Memory, Turn budgets, MCP servers, Agents,
 Config file); endpoint rows read name over model, left-aligned.
+
+The status column is the open session's durable state beside the transcript
+(toggleable, collapsible to a rail), fed by folding the session's rows on open and
+then live tool events, so nothing is inferred twice and the model is never asked for
+what the record already shows; `status` is the only call the model makes, stating
+goal and next step when the plan changes. The sections read plain human: WORKING ON
+(the model's stated goal, else the prompt it is working from) with the run clock,
+NEXT UP (its stated next step), WAITING ON YOU (asks from the other open chats of
+this chat's project, placed above the ledgers because it is the one section that
+demands action and the only one that hides badly), REMEMBERED (the session's memory
+writes, runs of the same verb and file folded to one row counted ×N), TOUCHED (files
+read and edited, newest at top, edited's badge winning; build output is dropped,
+writes to `target/`, `node_modules` and logs are not file state, but reads stay,
+because a crash diagnosis is real work), DEPENDS ON (the memory entries the work
+consulted or whose cited files it touched), and CORRECTIONS (the walk behind a
+flagged dependency entry). Every ledger is newest-first, shown through a viewport
+sized to the space the column actually has (measured per render, not guessed pixels),
+the whole list still scrollable beneath the cap. On the latest assistant turn a
+riding card carries the same state inline when it has something to say: the goal and
+clock, the dependencies, or an ask, attached to the reply the work produced. The
+vocabulary was renamed once the labels met a reader: the spec's internal words
+(GOAL, GROUNDED IN, FILES) became the ones above, on the doctrine that a label
+promises its content.
 
 ## Onboarding
 

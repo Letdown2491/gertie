@@ -112,6 +112,18 @@ that rested on it, for you to keep or archive. Rules that must always apply belo
 `memory N` footer word opens the panel.
 [docs/memory.md](memory.md) has the details.
 
+## The status column
+
+To the right of the transcript (toggleable, collapsible to a rail) sits what the open
+session actually is, folded from its own record and live tool events: WORKING ON with
+the run clock, NEXT UP, WAITING ON YOU when another chat's ask needs you, REMEMBERED
+(memory it wrote), TOUCHED (the files in play), DEPENDS ON (the memory entries this
+work rests on) and CORRECTIONS (what changed under it). Each section is newest-first
+and only appears when it has something to say. On the latest reply, a small card
+repeats the same state inline when there is something worth carrying. The `status`
+tool is how the model states its goal and next step; everything else in the column is
+read from the record, never asked for.
+
 ## Settings
 
 Settings opens from the foot of the sidebar (or `/settings`): endpoints and keys, the

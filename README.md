@@ -43,6 +43,10 @@ fronts, nothing shared over the network.
   starts a chat in its own `git worktree`, so two agents can edit the
   same repo without colliding. Stop ends a running turn and cancels the model's
   request, so a stopped reply stops costing output tokens.
+- **A status column that reads like a sentence**: WORKING ON, NEXT UP, WAITING ON
+  YOU, REMEMBERED, TOUCHED, DEPENDS ON, CORRECTIONS, each newest-first and present
+  only when it has something to say, folded from the session's own record; a riding
+  card on the latest reply carries the same state inline.
 - **Any endpoint**: speaks the OpenAI-compatible wire (ppq.ai, OpenRouter, Ollama,
   vLLM, Gemini's compat endpoint) plus a native Anthropic adapter. Fallback chains: when
   an endpoint dies before producing content, the next one takes over invisibly.
