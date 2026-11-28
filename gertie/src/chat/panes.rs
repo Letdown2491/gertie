@@ -509,14 +509,15 @@ impl ChatView {
     /// The span of rows a turn covers: after the user message at or
     /// before `index`, up to the next user message.
     pub(crate) fn span_around(&self, index: usize) -> (usize, usize) {
-        let is_user = |turn: &Turn| {
-            matches!(
-                turn,
-                Turn::Message {
-                    role: Role::User,
-                    ..
-                }
-            )
+        // A steer is the human's words inside a running turn, not the
+        // start of a new one: the turn's work spans across it.
+        let is_user = |turn: &Turn| match turn {
+            Turn::Message {
+                role: Role::User,
+                db_id,
+                ..
+            } => !db_id.is_some_and(|id| self.steer_rows.contains(&id)),
+            _ => false,
         };
         let start = self.turns[..index.min(self.turns.len())]
             .iter()
@@ -1292,6 +1293,12 @@ impl ChatView {
     }
 
     /// The seam's verb, for tests: the face's caption.
+    pub fn work_items_for_test(&self) -> usize {
+        self.work_view()
+            .map(|view| view.shape.work().count())
+            .unwrap_or_default()
+    }
+
     pub fn seam_verb_for_test(&self) -> &'static str {
         self.seam_state().verb
     }

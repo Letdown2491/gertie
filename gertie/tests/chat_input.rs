@@ -4512,6 +4512,64 @@ fn turn_count_of(fixture: &mut Fixture) -> usize {
 /// in a narrow window (it opens over the words), the seam says it is
 /// waiting on you, and once approved the turn settles into state B:
 /// the work pane stays on what the turn left behind, numbered.
+/// Words sent into a running turn (a steer) land as a user row in the
+/// transcript, but they don't start a new turn: the work pane keeps the
+/// work done before them instead of emptying or folding.
+#[test]
+fn a_steer_keeps_the_turns_work_in_the_pane() {
+    let (provider, scenarios) = replay_provider(
+        "[[steps]]\ntext = 'Writing the file now.'\n\n\
+         [[steps.tool_calls]]\nname = \"write_file\"\n\
+         arguments = '{\"path\": \"out.txt\", \"content\": \"x\"}'\n\n\
+         [[steps]]\ntext = 'Done.'\n",
+    );
+    let workspace = tempfile::tempdir().expect("workspace dir");
+    let mut fixture = fixture_built(
+        Arc::new(memory_store()),
+        None,
+        Some(workspace.path().to_path_buf()),
+        None,
+        Some(provider),
+        None,
+        Vec::new(),
+        None,
+        None,
+    );
+    fixture.hold = vec![scenarios, workspace];
+    fixture.act(|window, cx| {
+        window.input("go", cx);
+        window.press("enter", cx);
+    });
+    pump(&mut fixture, 30);
+    fixture.act(|window, cx| window.click("approve-2", cx));
+    pump(&mut fixture, 40);
+    let items = |fixture: &mut Fixture| {
+        fixture.cx.update(|cx| {
+            fixture
+                .view
+                .upgrade()
+                .expect("view alive")
+                .read(cx)
+                .work_items_for_test()
+        })
+    };
+    assert_eq!(items(&mut fixture), 1, "the turn's edit is in the work");
+    fixture.cx.update(|cx| {
+        fixture
+            .view
+            .upgrade()
+            .expect("view alive")
+            .update(cx, |chat, cx| {
+                chat.steer_for_test("also check the docs", cx)
+            })
+    });
+    assert_eq!(
+        items(&mut fixture),
+        1,
+        "a steer does not start a new turn: the edit stays in the work"
+    );
+}
+
 #[test]
 fn a_mark_links_its_words_and_its_card_both_ways() {
     let scenarios = tempfile::tempdir().expect("scenario dir");

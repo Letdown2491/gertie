@@ -669,12 +669,21 @@ impl ChatView {
             }
             None => None,
         };
+        // A steer joins the running turn; it never starts one.
+        if let Some(id) = db_id {
+            self.steer_rows.insert(id);
+        }
         self.turns.push(Turn::Message {
             role: Role::User,
             text: text.to_string(),
             db_id,
         });
         self.sync_list(cx);
+    }
+
+    /// A steer landing in the running turn, for tests.
+    pub fn steer_for_test(&mut self, text: &str, cx: &mut Context<Self>) {
+        self.on_steered(text, cx);
     }
 
     /// Asks the running turn to stop; the turn's loop does the rest.

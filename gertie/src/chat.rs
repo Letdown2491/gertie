@@ -711,6 +711,10 @@ pub struct ChatView {
     memory_popover_closed: Option<std::time::Instant>,
     /// The model card over the composer: the model and its room.
     model_card: bool,
+    /// The user rows that were steers: words sent into a running turn.
+    /// They sit in the transcript as user messages but do not start a
+    /// turn, so the work pane keeps the whole turn's work across them.
+    steer_rows: std::collections::HashSet<MessageId>,
     /// When a click outside last closed the model card.
     model_card_closed: Option<std::time::Instant>,
     /// The composer has wrapped: the text on its own full-width row,
@@ -1208,6 +1212,7 @@ impl ChatView {
             memory_show_retired: false,
             memory_popover_closed: None,
             model_card: false,
+            steer_rows: Default::default(),
             model_card_closed: None,
             composer_stacked: false,
             composer_inline_width: px(0.),
