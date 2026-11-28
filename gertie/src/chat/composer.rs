@@ -85,9 +85,12 @@ impl ChatView {
         // The composer: one rounded box,
         // attach on the left, send on the
         // right, the reading width wide.
+        // The pill (#54): paper-raised, round send on the right.
+        let pal = crate::ink::palette(cx);
         div()
             .w_full()
-            .px_4()
+            .pl(px(48.))
+            .pr(px(56.))
             .pt_3()
             .pb_2()
             .flex()
@@ -99,11 +102,15 @@ impl ChatView {
                     .max_w(px(READING_WIDTH))
                     .items_end()
                     .gap_1()
-                    .p_1p5()
-                    .rounded(px(12.))
+                    .py_1p5()
+                    .pl_2()
+                    .pr_1p5()
+                    .rounded(px(24.))
                     .border_1()
-                    .border_color(cx.theme().input)
-                    .bg(cx.theme().secondary.opacity(0.5))
+                    .border_color(pal.control)
+                    .bg(pal.paper_raised)
+                    .font_family(crate::ink::SERIF)
+                    .text_size(px(16.))
                     // The steer/queue hint lives in the
                     // composer's placeholder now, the
                     // sync keeps it true while a turn

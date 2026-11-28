@@ -218,6 +218,9 @@ pub struct SessionSummary {
     /// inferred: a chat joins a project by being moved there or by
     /// starting from the project's +.
     pub project_id: Option<i64>,
+    /// Seconds since the chat's last activity (or its creation), as of
+    /// the listing: the rail popover's age column.
+    pub idle_secs: Option<u64>,
 }
 
 /// One full-text search hit: which session, what role, and a marked
@@ -439,7 +442,7 @@ impl SessionStore {
     ) -> Result<Vec<SessionSummary>, rusqlite::Error> {
         let connection = self.connection.lock().unwrap();
         let mut statement = connection
-            .prepare("SELECT s.id, s.title, s.input_tokens, s.output_tokens, s.cached_input_tokens, s.last_context_tokens, s.mode, s.limited_at IS NOT NULL, s.workspace_root FROM sessions s WHERE s.parent_id = ?1 ORDER BY s.id")?;
+            .prepare("SELECT s.id, s.title, s.input_tokens, s.output_tokens, s.cached_input_tokens, s.last_context_tokens, s.mode, s.limited_at IS NOT NULL, s.workspace_root, CAST((julianday('now') - julianday(COALESCE(s.last_activity_at, s.created_at))) * 86400 AS INTEGER) FROM sessions s WHERE s.parent_id = ?1 ORDER BY s.id")?;
         let rows = statement
             .query_map([parent.0 as i64], |row| {
                 Ok(SessionSummary {
@@ -462,6 +465,11 @@ impl SessionStore {
                         .unwrap_or_default(),
                     workspace_root: row.get::<_, Option<String>>(8).ok().flatten(),
                     project_id: None,
+                    idle_secs: row
+                        .get::<_, Option<i64>>(9)
+                        .ok()
+                        .flatten()
+                        .map(|secs| secs.max(0) as u64),
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -551,7 +559,8 @@ impl SessionStore {
             "SELECT s.id, s.title, s.input_tokens, s.output_tokens, s.cached_input_tokens,
                     s.last_context_tokens,
                     s.settled_at IS NOT NULL, s.limited_at IS NOT NULL, s.mode, s.workspace_root,
-                    s.project_id
+                    s.project_id,
+                    CAST((julianday('now') - julianday(COALESCE(s.last_activity_at, s.created_at))) * 86400 AS INTEGER)
              FROM sessions s
              LEFT JOIN messages m ON m.session_id = s.id
              WHERE s.kind = 'chat'
@@ -575,6 +584,11 @@ impl SessionStore {
                     .unwrap_or_default(),
                 workspace_root: row.get::<_, Option<String>>(9).ok().flatten(),
                 project_id: row.get::<_, Option<i64>>(10).ok().flatten(),
+                idle_secs: row
+                    .get::<_, Option<i64>>(11)
+                    .ok()
+                    .flatten()
+                    .map(|secs| secs.max(0) as u64),
             })
         })?;
         rows.collect()

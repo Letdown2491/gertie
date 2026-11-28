@@ -136,18 +136,41 @@ impl SettingsSummary {
     }
 }
 
-/// The theme choice, persisted separately from the user's config.toml.
+/// UI state (the theme, motion), persisted separately from the user's
+/// config.toml.
 fn ui_state_path() -> Option<PathBuf> {
     crate::config::Config::data_dir().map(|dir| dir.join("ui.json"))
 }
 
-fn load_theme_from(path: &std::path::Path) -> Option<ThemeMode> {
-    let raw = std::fs::read_to_string(path).ok()?;
-    match serde_json::from_str::<serde_json::Value>(&raw)
-        .ok()?
-        .get("theme")?
-        .as_str()?
+fn read_ui_state(path: &std::path::Path) -> serde_json::Map<String, serde_json::Value> {
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+        .and_then(|value| value.as_object().cloned())
+        .unwrap_or_default()
+}
+
+/// Sets one key of the UI state file, keeping the others.
+fn store_ui_key(path: &std::path::Path, key: &str, value: serde_json::Value) -> Result<(), String> {
+    if let Some(parent) = path.parent()
+        && let Err(error) = std::fs::create_dir_all(parent)
     {
+        return Err(error.to_string());
+    }
+    let mut state = read_ui_state(path);
+    state.insert(key.to_string(), value);
+    std::fs::write(
+        path,
+        format!(
+            "{}\n",
+            serde_json::to_string_pretty(&serde_json::Value::Object(state)).unwrap_or_default()
+        ),
+    )
+    .map_err(|error| error.to_string())
+}
+
+fn load_theme_from(path: &std::path::Path) -> Option<ThemeMode> {
+    match read_ui_state(path).get("theme")?.as_str()? {
         "light" => Some(ThemeMode::Light),
         "dark" => Some(ThemeMode::Dark),
         _ => None,
@@ -159,20 +182,30 @@ pub fn load_theme() -> Option<ThemeMode> {
 }
 
 fn store_theme_at(path: &std::path::Path, mode: ThemeMode) -> Result<(), String> {
-    if let Some(parent) = path.parent()
-        && let Err(error) = std::fs::create_dir_all(parent)
-    {
-        return Err(error.to_string());
+    store_ui_key(path, "theme", json!(mode.name()))
+}
+
+fn load_motion_from(path: &std::path::Path) -> bool {
+    read_ui_state(path)
+        .get("motion")
+        .and_then(|value| value.as_bool())
+        .unwrap_or(true)
+}
+
+/// Whether the small motions play (the breathing ring, the blinking
+/// running mark, the pulsing ring head): on unless turned off in Chat
+/// settings. gpui has no system reduced-motion query to read.
+pub fn load_motion() -> bool {
+    ui_state_path().is_none_or(|path| load_motion_from(&path))
+}
+
+pub fn store_motion(on: bool) {
+    let Some(path) = ui_state_path() else {
+        return;
+    };
+    if let Err(error) = store_ui_key(&path, "motion", json!(on)) {
+        eprintln!("warning: could not save the motion choice: {error}");
     }
-    let state = json!({ "theme": mode.name() });
-    std::fs::write(
-        path,
-        format!(
-            "{}\n",
-            serde_json::to_string_pretty(&state).unwrap_or_default()
-        ),
-    )
-    .map_err(|error| error.to_string())
 }
 
 pub fn store_theme(mode: ThemeMode) {
@@ -197,5 +230,22 @@ mod tests {
         assert_eq!(load_theme_from(&path), Some(ThemeMode::Light));
         store_theme_at(&path, ThemeMode::Dark).unwrap();
         assert_eq!(load_theme_from(&path), Some(ThemeMode::Dark));
+    }
+
+    #[test]
+    fn motion_and_theme_share_the_file_without_clobbering() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ui.json");
+        assert!(load_motion_from(&path), "motion is on by default");
+        store_theme_at(&path, ThemeMode::Light).unwrap();
+        store_ui_key(&path, "motion", json!(false)).unwrap();
+        assert!(!load_motion_from(&path));
+        assert_eq!(
+            load_theme_from(&path),
+            Some(ThemeMode::Light),
+            "the theme survives"
+        );
+        store_theme_at(&path, ThemeMode::Dark).unwrap();
+        assert!(!load_motion_from(&path), "and motion survives the theme");
     }
 }

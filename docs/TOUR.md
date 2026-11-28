@@ -71,10 +71,12 @@ Every rewind is itself recorded; nothing is ever silently undone.
 
 ## Parallel chats and worktree chats
 
-The sidebar is the only list of conversations; there is no tab bar. A running turn
-keeps going when you open another conversation or start a new one, and its sidebar row
-shows a green dot. A blue dot means a turn finished while you were elsewhere; a pause
-icon means the run is paused waiting on you. **New worktree chat**, under New chat, starts
+The rail down the window's left edge holds one circle per project; click one for its
+chats (title, state, age), or open the full sidebar from the rail's icon. There is no
+tab bar. A running turn keeps going when you open another conversation or start a new
+one: its project's circle breathes, a vermilion dot means a chat waits on you, and in
+the sidebar a green dot marks a running row, a blue dot a turn that finished while you
+were elsewhere. **New worktree chat** (the branch icon on the rail, or under New chat) starts
 a chat in its own git worktree: a real checkout in `<repo>/.gertie/worktrees/`,
 branched from HEAD, so two agents can edit the same repo at once without colliding.
 Each chat keeps its own memory tier and permission mode.
@@ -129,21 +131,34 @@ that rested on it, for you to keep or archive. Rules that must always apply belo
 `memory N` footer word opens the panel.
 [docs/memory.md](memory.md) has the details.
 
-## The status column
+## Two panes and Gertie's face
 
-To the right of the transcript (toggleable, collapsible to a rail) sits what the open
-session actually is, folded from its own record and live tool events: WORKING ON with
-the run clock, NEXT UP, WAITING ON YOU when another chat's ask needs you, REMEMBERED
-(memory it wrote), TOUCHED (the files in play), DEPENDS ON (the memory entries this
-work rests on) and CORRECTIONS (what changed under it). Each section is newest-first
-and only appears when it has something to say. On the latest reply, a small card
-repeats the same state inline when there is something worth carrying. The `status`
-tool is how the model states its goal and next step; everything else in the column is
-read from the record, never asked for.
+The chat is two panes. **Words** on the left, on paper: your messages, quiet; Gertie's
+reasoning in a serif; numbered marks (① ②) where a paragraph caused work; memory as
+seal notes. A note says which entry the work relied on and, when a file it cites has
+changed, asks **still true** or **revise**. What the settle proposes to remember comes
+as a "new" seal with **keep**, **edit** or **let it go**. **Work** on the right, in ink:
+a one-sentence summary ("2 files changed, the check passed.") over the files touched,
+then one card per numbered item. An edit card shows the file, the size of the change,
+where in the file it sits, and the diff on demand; a check card shows its command, its
+last lines and how many tests passed. Commit and Review the whole diff sit under them,
+and the checkpoint timeline at the foot returns the workspace to before any question.
+A turn that only talked folds the work side to a strip; under 1100px the work side
+opens over the words instead of beside them. A card waiting on your OK always shows.
+
+Between the panes sits Gertie's face, from the app icon, inside a thin ring that fills
+as the turn goes from understanding to changing to verifying. The face says the rest:
+curious while reading, focused while editing, waiting on you (the ring's head pulses),
+smiling when settled, sad when a check failed. Under it, the numbered marks hang on a
+thread. The header over the words says what this is and, in a sentence, what is
+happening now and what comes next; the `status` tool is how the model states its goal
+and next step, everything else is read from the record, never asked for. The small
+motions (the pulse, the breathing rail ring, the blinking live mark) can be turned off
+under Chat settings, Appearance.
 
 ## Settings
 
-Settings opens as a modal over the whole window, from the foot of the sidebar, `/settings`
+Settings opens as a modal over the whole window, from the gear on the rail, `/settings`
 in the composer, or the palette (`ctrl-k`, `>settings`): four sections in a left nav
 (Chat, Endpoints, Memory, Tools & agents), and every open lands on Chat. Every change
 saves the moment you make it, into your `config.toml` with its comments kept; MCP servers'

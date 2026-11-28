@@ -907,6 +907,10 @@ sit by an item's first line, not the middle of a wrapped one. The settings panel
 cards (Appearance, Endpoints, Sandbox, Memory, Turn budgets, MCP servers, Agents,
 Config file); endpoint rows read name over model, left-aligned.
 
+(Superseded by the two-panes redesign, issue #54: the column and the riding card are
+gone; their fact folding now feeds the header sentence, Gertie's face on the seam, the
+touched chips and the seal notes. The rest of this note is the history.)
+
 The status column is the open session's durable state beside the transcript
 (toggleable, collapsible to a rail), fed by folding the session's rows on open and
 then live tool events, so nothing is inferred twice and the model is never asked for

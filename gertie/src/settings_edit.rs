@@ -1332,6 +1332,19 @@ impl Render for SettingsPanelView {
                                 )
                             })),
                     )
+                    .child(
+                        Switch::new("motion-switch")
+                            .label("Motion")
+                            .small()
+                            .checked(!cx.reduce_motion())
+                            .tooltip("The breathing ring, the blinking running mark, the pulsing ring head. Off keeps them still.")
+                            .on_click(|checked, window, cx| {
+                                cx.set_reduce_motion(!*checked);
+                                crate::settings::store_motion(*checked);
+                                window.refresh();
+                                cx.refresh_windows();
+                            }),
+                    )
                     .into_any_element(),
             );
             // New sessions' permission mode: the composer's chip

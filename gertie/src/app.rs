@@ -37,7 +37,7 @@ pub fn run_with(config_path: Option<std::path::PathBuf>) {
         // The persisted theme choice (dark unless the user said
         // otherwise; UI state, not config-file material).
         let theme = crate::settings::load_theme().unwrap_or(gpui_kit::component::ThemeMode::Dark);
-        gpui_kit::component::Theme::change(theme, None, cx);
+        crate::ink::install(theme, cx);
         open_chat_window(boot.clone(), cx);
         cx.activate(true);
     });

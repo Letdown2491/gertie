@@ -40,8 +40,19 @@ struct Fixture {
     hold: Vec<tempfile::TempDir>,
 }
 
+/// A fresh in-memory store with the full sidebar opened: the rail is
+/// the window's default edge (#54), and these tests drive the sidebar's
+/// rows, so they start where a user who opened it would.
+fn memory_store() -> SessionStore {
+    let store = SessionStore::open(Path::new(":memory:")).expect("memory store");
+    store
+        .set_store_flag("sidebar_expanded", true)
+        .expect("sidebar flag");
+    store
+}
+
 fn fixture() -> Fixture {
-    let store = Arc::new(SessionStore::open(Path::new(":memory:")).expect("memory store"));
+    let store = Arc::new(memory_store());
     fixture_with_store(store)
 }
 
@@ -52,7 +63,7 @@ fn fixture_with_store(store: Arc<SessionStore>) -> Fixture {
 /// A fixture whose view carries a real checkpoint ledger over a real
 /// (empty) workspace, the turn-diff path end to end.
 fn fixture_with_snapshots() -> Fixture {
-    let store = Arc::new(SessionStore::open(Path::new(":memory:")).expect("memory store"));
+    let store = Arc::new(memory_store());
     let snapshots_dir = tempfile::tempdir().expect("snapshots dir");
     let snapshots =
         Arc::new(gertie_core::SnapshotStore::open(snapshots_dir.path()).expect("snapshot store"));
@@ -477,7 +488,7 @@ fn the_empty_state_says_ready_and_first_run_gets_the_tour() {
 /// the held tempdir.
 fn fixture_with_memory() -> (Fixture, tempfile::TempDir) {
     let dir = tempfile::tempdir().expect("memory dir");
-    let store = Arc::new(SessionStore::open(Path::new(":memory:")).expect("session store"));
+    let store = Arc::new(memory_store());
     let memory = Arc::new(gertie_core::MemoryStore::open(
         dir.path().join("project"),
         dir.path().join("global"),
@@ -495,6 +506,81 @@ fn fixture_with_memory() -> (Fixture, tempfile::TempDir) {
         None,
     );
     (fixture, dir)
+}
+
+/// The settle's proposal is a seal in the words (#54): keep writes
+/// the entry, let it go writes nothing, and either way the seal stays
+/// as a record of the answer, its buttons gone.
+#[test]
+fn a_memory_proposal_is_a_seal_kept_or_let_go() {
+    let (mut fixture, _dir) = fixture_with_memory();
+    let propose = |fixture: &mut Fixture, text: &str| {
+        let text = text.to_string();
+        fixture.cx.update(|cx| {
+            let view = fixture.view.upgrade().expect("view alive");
+            view.update(cx, |chat, cx| {
+                chat.propose_memory_for_test(
+                    vec![gertie_core::Op::Add {
+                        file: "gotchas.md".into(),
+                        text,
+                        evidence: Vec::new(),
+                        source: None,
+                    }],
+                    cx,
+                )
+            });
+        });
+        pump(fixture, 5);
+    };
+    let entries = |fixture: &mut Fixture| {
+        fixture.cx.update(|cx| {
+            let view = fixture.view.upgrade().expect("view alive");
+            view.read(cx)
+                .memory_store_for_test()
+                .map(|store| {
+                    store
+                        .scan()
+                        .into_iter()
+                        .map(|entry| entry.text)
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default()
+        })
+    };
+
+    propose(&mut fixture, "build in the container, never on the host");
+    assert_eq!(
+        shown(
+            &mut fixture,
+            &["proposal-0", "keep-0", "let-go-0", "approve-0"]
+        ),
+        vec![true, true, true, false],
+        "a seal with its three answers, not a permission card"
+    );
+    fixture.act(|window, cx| window.click("keep-0", cx));
+    pump(&mut fixture, 5);
+    assert!(
+        entries(&mut fixture)
+            .iter()
+            .any(|text| text.contains("build in the container")),
+        "keep writes the entry"
+    );
+    assert_eq!(
+        shown(&mut fixture, &["proposal-0", "keep-0"]),
+        vec![true, false],
+        "the seal stays, its buttons go"
+    );
+
+    // Keep's notice took row 1; the next proposal is row 2.
+    propose(&mut fixture, "the sky is made of cheese");
+    fixture.act(|window, cx| window.click("let-go-2", cx));
+    pump(&mut fixture, 5);
+    assert!(
+        !entries(&mut fixture)
+            .iter()
+            .any(|text| text.contains("cheese")),
+        "let it go writes nothing"
+    );
 }
 
 #[test]
@@ -636,7 +722,7 @@ fn mention_matches_lists_workspace_files_and_erases_the_token_on_accept() {
     // End to end: typing a token in the composer, Enter accepts the
     // top row, the token leaves the composer and the file attaches.
     let mut fixture = fixture_full(
-        Arc::new(SessionStore::open(Path::new(":memory:")).expect("store")),
+        Arc::new(memory_store()),
         None,
         Some(workspace.path().to_path_buf()),
         None,
@@ -685,7 +771,7 @@ fn the_arrows_walk_the_mention_popup_and_enter_takes_the_walked_row() {
     std::fs::write(workspace.path().join("a.txt"), "first").expect("a");
     std::fs::write(workspace.path().join("b.txt"), "second").expect("b");
     let mut fixture = fixture_full(
-        Arc::new(SessionStore::open(Path::new(":memory:")).expect("store")),
+        Arc::new(memory_store()),
         None,
         Some(workspace.path().to_path_buf()),
         None,
@@ -759,7 +845,7 @@ fn a_new_query_resets_the_popup_walk() {
     std::fs::write(workspace.path().join("a.txt"), "first").expect("a");
     std::fs::write(workspace.path().join("ab.txt"), "second").expect("b");
     let mut fixture = fixture_full(
-        Arc::new(SessionStore::open(Path::new(":memory:")).expect("store")),
+        Arc::new(memory_store()),
         None,
         Some(workspace.path().to_path_buf()),
         None,
@@ -1243,7 +1329,7 @@ fn accept_edits_runs_the_checkpointed_edit_without_asking() {
     let provider = Arc::new(
         gertie_providers::AnyProvider::with_endpoints(vec![endpoint]).expect("replay provider"),
     );
-    let store = Arc::new(SessionStore::open(Path::new(":memory:")).expect("memory store"));
+    let store = Arc::new(memory_store());
     let workspace_path = workspace.path().to_path_buf();
     let snapshots_path = snapshots_dir.path().to_path_buf();
     let mut fixture = fixture_built(
@@ -1321,7 +1407,7 @@ fn enter_on_an_empty_input_does_nothing() {
 /// char-boundary panics reaching a user.
 #[test]
 fn markdown_and_tool_rows_draw_clean() {
-    let store = Arc::new(SessionStore::open(Path::new(":memory:")).expect("memory store"));
+    let store = Arc::new(memory_store());
     let session_id = store
         .create_session("markdown transcript")
         .expect("session");
@@ -1459,7 +1545,7 @@ fn markdown_and_tool_rows_draw_clean() {
 #[test]
 fn a_reloaded_write_card_diffs_against_its_checkpoint() {
     // The session's record: a write to a file that held one line.
-    let store = Arc::new(SessionStore::open(Path::new(":memory:")).expect("memory store"));
+    let store = Arc::new(memory_store());
     let session_id = store.create_session("wrote a file").expect("session");
     let parent = store
         .append_message(session_id, None, gertie_core::Role::User, "write it")
@@ -1528,7 +1614,7 @@ fn a_reloaded_write_card_diffs_against_its_checkpoint() {
 /// transcript, plus a newer session (so that's the one a fresh window
 /// resumes) without the needle.
 fn seeded_store() -> Arc<SessionStore> {
-    let store = Arc::new(SessionStore::open(Path::new(":memory:")).expect("memory store"));
+    let store = Arc::new(memory_store());
     let needle = store
         .create_session("the flaky widget hunt")
         .expect("needle");
@@ -1635,7 +1721,7 @@ fn the_palette_jumps_to_a_hit_in_another_session() {
 /// a different directory's fresh window.
 #[test]
 fn launch_resume_matches_the_workspace() {
-    let store = Arc::new(SessionStore::open(Path::new(":memory:")).expect("memory store"));
+    let store = Arc::new(memory_store());
     let session = store.create_session("somewhere else").expect("session");
     store
         .append_message(session, None, gertie_core::Role::User, "hello")
@@ -1697,7 +1783,7 @@ fn launch_resume_matches_the_workspace() {
 /// is a match, not a ban.
 #[test]
 fn launch_resume_still_takes_this_workspaces_chat() {
-    let store = Arc::new(SessionStore::open(Path::new(":memory:")).expect("memory store"));
+    let store = Arc::new(memory_store());
     let session = store.create_session("this folder's chat").expect("session");
     store
         .append_message(session, None, gertie_core::Role::User, "hello")
@@ -1726,7 +1812,7 @@ fn launch_resume_still_takes_this_workspaces_chat() {
 /// in.
 #[test]
 fn a_send_after_a_workspace_switch_re_roots_the_session() {
-    let store = Arc::new(SessionStore::open(Path::new(":memory:")).expect("memory store"));
+    let store = Arc::new(memory_store());
     let session = store.create_session("the traveling chat").expect("session");
     store
         .append_message(session, None, gertie_core::Role::User, "hello")
@@ -1832,7 +1918,7 @@ fn a_sent_message_mints_a_turn_window_and_the_panel_opens() {
 /// Seeds a session deeper than the transcript's load window: 810 rows,
 /// so paging lands 400 at a time and the last page is short.
 fn archive_store() -> Arc<SessionStore> {
-    let store = Arc::new(SessionStore::open(Path::new(":memory:")).expect("memory store"));
+    let store = Arc::new(memory_store());
     let session = store.create_session("the archive").expect("session");
     let mut parent = None;
     for i in 0..810 {
@@ -1937,7 +2023,7 @@ impl Fixture {
 
 /// Two stored sessions; the fixture resumes the newest (id 2).
 fn two_session_store() -> Arc<SessionStore> {
-    let store = Arc::new(SessionStore::open(Path::new(":memory:")).expect("memory store"));
+    let store = Arc::new(memory_store());
     let first = store.create_session("the older chore").expect("session");
     store
         .append_message(first, None, gertie_core::Role::User, "old work")
@@ -2138,7 +2224,7 @@ fn a_chat_keeps_its_repo_map_across_a_switch() {
 /// under the project when the first message creates it.
 #[test]
 fn a_projects_plus_starts_a_chat_filed_there() {
-    let store = Arc::new(SessionStore::open(Path::new(":memory:")).expect("memory store"));
+    let store = Arc::new(memory_store());
     let project = store
         .add_project("Research")
         .expect("store")
@@ -2176,7 +2262,7 @@ fn a_projects_plus_starts_a_chat_filed_there() {
 /// project, Enter on an empty field makes nothing.
 #[test]
 fn the_add_button_names_a_new_project() {
-    let store = Arc::new(SessionStore::open(Path::new(":memory:")).expect("memory store"));
+    let store = Arc::new(memory_store());
     let mut fixture = fixture_with_store(store.clone());
     fixture.act(|window, cx| window.click("add-project", cx));
     fixture.act(|window, cx| window.press("enter", cx));
@@ -2195,6 +2281,56 @@ fn the_add_button_names_a_new_project() {
     assert_eq!(
         shown(&mut fixture, &[&format!("project-{}", projects[0].id)]),
         vec![true]
+    );
+}
+
+/// The rail (#54) is the default edge: a project's circle opens its
+/// popover of chats, a row opens that chat and closes the popover, and
+/// the popover's own button opens the full sidebar.
+#[test]
+fn the_rail_opens_a_projects_chats_and_one_click_opens_a_chat() {
+    let (store, id) = project_store();
+    store
+        .set_store_flag("sidebar_expanded", false)
+        .expect("rail");
+    let mut fixture = fixture_with_store(store.clone());
+    assert_eq!(
+        shown(&mut fixture, &["sidebar-rail", "session-1", "rail-popover"]),
+        vec![true, false, false],
+        "the rail is the default, no popover yet"
+    );
+    fixture.act(|window, cx| window.click(format!("rail-project-{id}"), cx));
+    assert_eq!(
+        shown(
+            &mut fixture,
+            &["rail-popover", "rail-chat-1", "rail-chat-2"]
+        ),
+        vec![true, true, false],
+        "the popover lists the project's chats, only its own"
+    );
+    fixture.act(|window, cx| window.click("rail-chat-1", cx));
+    pump(&mut fixture, 10);
+    let open = fixture.cx.update(|cx| {
+        fixture
+            .view
+            .upgrade()
+            .expect("view alive")
+            .read(cx)
+            .session_id()
+    });
+    assert_eq!(
+        open,
+        Some(gertie_core::SessionId(1)),
+        "the row opens its chat"
+    );
+    assert_eq!(shown(&mut fixture, &["rail-popover"]), vec![false]);
+
+    fixture.act(|window, cx| window.click(format!("rail-project-{id}"), cx));
+    fixture.act(|window, cx| window.click("rail-popover-sidebar", cx));
+    assert_eq!(
+        shown(&mut fixture, &["sidebar-rail", "session-1", "rail-popover"]),
+        vec![false, true, false],
+        "the popover hands over to the full sidebar"
     );
 }
 
@@ -2284,7 +2420,7 @@ fn the_folds_restore_button_unsettles_without_opening() {
 /// transcript reports the outcome.
 #[test]
 fn settling_runs_the_reclaim_command_in_the_recorded_workspace() {
-    let store = Arc::new(SessionStore::open(Path::new(":memory:")).expect("memory store"));
+    let store = Arc::new(memory_store());
     let workspace = tempfile::tempdir().expect("workspace dir");
     let marker = workspace.path().join("reclaimed.marker");
     let command = format!("touch '{}'", marker.display());
@@ -2456,7 +2592,7 @@ fn a_worker_ask_bubbles_into_the_transcript_and_the_answer_reaches_the_worker() 
     let broker = Arc::new(gertie_core::PermissionBroker::new());
     // Read-only on purpose: the leader's own gate auto-runs the tool,
     // so the worker's ask is the only pending card in the transcript.
-    let store = Arc::new(SessionStore::open(Path::new(":memory:")).expect("memory store"));
+    let store = Arc::new(memory_store());
     let mut fixture = fixture_built(
         store.clone(),
         None,
@@ -2608,7 +2744,7 @@ fn the_quiet_gauge_holds_its_tongue_while_an_approval_waits() {
         gertie_providers::AnyProvider::with_endpoints(vec![endpoint]).expect("replay provider"),
     );
     let broker = Arc::new(gertie_core::PermissionBroker::new());
-    let store = Arc::new(SessionStore::open(Path::new(":memory:")).expect("memory store"));
+    let store = Arc::new(memory_store());
     let mut fixture = fixture_built(
         store,
         None,
@@ -2694,142 +2830,6 @@ fn the_quiet_gauge_holds_its_tongue_while_an_approval_waits() {
     );
 }
 
-/// The card is the now, and the row is the now when the card is not
-/// on screen. While a plain tool runs and the user is pinned to the
-/// bottom, the row would only echo the card's own label, twin
-/// spinners saying one sentence twice: it yields, and the run total
-/// rides the card's clock line. Scrolled up, the card is off-screen
-/// and the row speaks again, full label and both clocks. When the
-/// run ends, the row retires with the turn.
-#[test]
-fn the_card_is_the_now_and_the_row_yields_to_it() {
-    // A transcript tall enough to overflow the 900x640 window: the
-    // scroll-up below needs a real "not at the bottom" to hold
-    // against, the kit re-engages following whenever the viewport
-    // still sits on the tail.
-    let store = Arc::new(SessionStore::open(Path::new(":memory:")).expect("memory store"));
-    let seeded = store.create_session("the park").expect("session");
-    let filler = "a measured paragraph of transcript filler. ".repeat(12);
-    let mut parent = Some(
-        store
-            .append_message(seeded, None, gertie_core::Role::User, "seed the run")
-            .expect("user row"),
-    );
-    for _ in 0..7 {
-        parent = Some(
-            store
-                .append_message(seeded, parent, gertie_core::Role::Assistant, &filler)
-                .expect("assistant row"),
-        );
-        parent = Some(
-            store
-                .append_message(seeded, parent, gertie_core::Role::User, "go on")
-                .expect("user row"),
-        );
-    }
-
-    let scenarios = tempfile::tempdir().expect("scenario dir");
-    std::fs::write(
-        scenarios.path().join("park.toml"),
-        "[[steps]]\ntext = ''\n\
-         [[steps.tool_calls]]\nname = 'park'\narguments = '{}'\n\
-         [[steps]]\ntext = ''\n",
-    )
-    .expect("scenario file");
-    let endpoint = gertie_providers::Endpoint {
-        name: "replay".into(),
-        base_url: scenarios.path().to_string_lossy().into_owned(),
-        model: "park".into(),
-        api_key: None,
-        context_window: None,
-        wire: gertie_providers::Wire::Replay,
-        vision: true,
-    };
-    let provider = Arc::new(
-        gertie_providers::AnyProvider::with_endpoints(vec![endpoint]).expect("replay provider"),
-    );
-    let (release, park) = tokio::sync::oneshot::channel::<()>();
-    let mut fixture = fixture_built(
-        store,
-        None,
-        None,
-        None,
-        Some(provider),
-        None,
-        vec![Arc::new(ParkTool {
-            park: std::sync::Mutex::new(Some(park)),
-        })],
-        None,
-        None,
-    );
-    fixture.hold = vec![scenarios];
-
-    fixture.act(|window, cx| {
-        window.input("go", cx);
-        window.press("enter", cx);
-    });
-    pump(&mut fixture, 30);
-
-    let view = fixture.view.clone();
-    let read = |fixture: &mut Fixture| {
-        let view = view.clone();
-        fixture.cx.update(move |cx| {
-            let view = view.upgrade().expect("view alive").read(cx);
-            (
-                view.show_activity_row_for_test(),
-                view.running_words_for_test(),
-                view.activity_line_for_test(),
-            )
-        })
-    };
-
-    // Parked mid-run, pinned to the bottom: the row yields to the
-    // card, the card's clock line carries the run total.
-    let (row, words, line) = read(&mut fixture);
-    assert!(!row, "the row yields to the running card at the bottom");
-    let words = words.expect("a running card");
-    assert!(
-        words.contains("running · "),
-        "the card's own clock: {words}"
-    );
-    assert!(
-        words.contains(" · run "),
-        "the run total rides the card: {words}"
-    );
-    assert!(
-        line.contains(" · run "),
-        "the row's line still carries the total for when it speaks: {line}"
-    );
-
-    // Scrolled up, the card is off-screen: the row is the now again,
-    // and the total moves to it. The seeded transcript overflows the
-    // window, so the scroll to row 0 is a real "not at the bottom"
-    // and the kit's pause sticks through the paint.
-    fixture.act(|_window, cx| {
-        let view = view.upgrade().expect("view alive");
-        view.update(cx, |view, _| view.scroll_to_item_for_test(0));
-    });
-    pump(&mut fixture, 10);
-    let (row, _words, line) = read(&mut fixture);
-    assert!(row, "scrolled up, the row is the now");
-    assert!(
-        line.contains(" · run "),
-        "the run total rides the row when the row speaks: {line}"
-    );
-
-    // Released, the run ends, the row retires with the turn.
-    drop(release);
-    pump(&mut fixture, 30);
-    let (row, _, _) = read(&mut fixture);
-    assert!(!row, "the row retires when the run is over");
-}
-
-/// A read-only tool that parks until the test releases it: the rig
-/// for "a tool is executing right now" with no pending ask.
-struct ParkTool {
-    park: std::sync::Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
-}
-
 /// The label builder's truncation contract: one line, one cap, one
 /// ellipsis. A command that arrives wearing its own trailing dots
 /// must not grow a second set next to ours (the screenshot bug:
@@ -2880,7 +2880,7 @@ impl gpui_kit::Render for TabbedShell {
 /// footer read as "completely gone", with nothing removed at all.
 #[test]
 fn the_footer_and_the_sidebar_foot_stay_inside_the_window() {
-    let store = Arc::new(SessionStore::open(Path::new(":memory:")).expect("memory store"));
+    let store = Arc::new(memory_store());
     for i in 0..40 {
         let id = store
             .create_session(&format!("probe session {i}"))
@@ -2994,34 +2994,6 @@ fn the_footer_and_the_sidebar_foot_stay_inside_the_window() {
         "the sidebar's Settings stays inside the window: bottom {} of {height}",
         settings.bottom()
     );
-}
-
-impl gertie_core::Tool for ParkTool {
-    fn name(&self) -> &'static str {
-        "park"
-    }
-
-    fn description(&self) -> String {
-        "test double: parks until the test releases it".into()
-    }
-
-    fn parameters(&self) -> serde_json::Value {
-        serde_json::json!({"type": "object", "properties": {}})
-    }
-
-    fn run<'a>(
-        &'a self,
-        _arguments: &'a str,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = gertie_core::ToolResult> + Send + 'a>>
-    {
-        let park = self.park.lock().expect("park").take();
-        Box::pin(async move {
-            if let Some(park) = park {
-                let _ = park.await;
-            }
-            Ok("released".into())
-        })
-    }
 }
 
 /// The §2.4 pin: ✕ deletes without a "sure?" step, the row leaves
@@ -3153,7 +3125,7 @@ fn a_rate_limited_turn_offers_resume_and_resuming_clears_it() {
     let provider = Arc::new(
         gertie_providers::AnyProvider::with_endpoints(vec![endpoint]).expect("replay provider"),
     );
-    let store = Arc::new(SessionStore::open(Path::new(":memory:")).expect("memory store"));
+    let store = Arc::new(memory_store());
     let mut fixture = fixture_built(
         store.clone(),
         None,
@@ -3258,7 +3230,7 @@ fn snoozing_a_limited_session_resumes_it_when_the_timer_fires() {
     let provider = Arc::new(
         gertie_providers::AnyProvider::with_endpoints(vec![endpoint]).expect("replay provider"),
     );
-    let store = Arc::new(SessionStore::open(Path::new(":memory:")).expect("memory store"));
+    let store = Arc::new(memory_store());
     let mut fixture = fixture_built(
         store.clone(),
         None,
@@ -3354,7 +3326,7 @@ fn canceling_the_snooze_leaves_the_session_limited_and_quiet() {
     let provider = Arc::new(
         gertie_providers::AnyProvider::with_endpoints(vec![endpoint]).expect("replay provider"),
     );
-    let store = Arc::new(SessionStore::open(Path::new(":memory:")).expect("memory store"));
+    let store = Arc::new(memory_store());
     let mut fixture = fixture_built(
         store.clone(),
         None,
@@ -3411,7 +3383,7 @@ fn canceling_the_snooze_leaves_the_session_limited_and_quiet() {
 /// text (returns false, the textarea does its thing).
 #[test]
 fn a_big_paste_files_itself_into_the_workspace_and_the_message_cites_it() {
-    let store = Arc::new(SessionStore::open(Path::new(":memory:")).expect("memory store"));
+    let store = Arc::new(memory_store());
     let snapshots_dir = tempfile::tempdir().expect("snapshots dir");
     let snapshots =
         Arc::new(gertie_core::SnapshotStore::open(snapshots_dir.path()).expect("snapshot store"));
@@ -3505,7 +3477,7 @@ fn a_big_paste_files_itself_into_the_workspace_and_the_message_cites_it() {
 /// the exact words the user is talking about, with typing room under.
 #[test]
 fn quoting_an_assistant_turn_lands_a_blockquote_in_the_composer() {
-    let store = Arc::new(SessionStore::open(Path::new(":memory:")).expect("memory store"));
+    let store = Arc::new(memory_store());
     let session = store.create_session("quote test").expect("session");
     store
         .append_message(
@@ -3552,7 +3524,7 @@ fn quoting_an_assistant_turn_lands_a_blockquote_in_the_composer() {
 /// the whole answer forced back into the prompt.
 #[test]
 fn a_long_assistant_turn_quotes_truncated() {
-    let store = Arc::new(SessionStore::open(Path::new(":memory:")).expect("memory store"));
+    let store = Arc::new(memory_store());
     let session = store.create_session("long answer").expect("session");
     store
         .append_message(
@@ -3616,7 +3588,7 @@ fn a_queued_followup_is_a_row_that_drafts_drains_and_survives() {
     let provider = Arc::new(
         gertie_providers::AnyProvider::with_endpoints(vec![endpoint]).expect("replay provider"),
     );
-    let store = Arc::new(SessionStore::open(Path::new(":memory:")).expect("memory store"));
+    let store = Arc::new(memory_store());
     let mut fixture = fixture_built(
         store,
         None,
@@ -3692,7 +3664,7 @@ fn a_queued_followup_is_a_row_that_drafts_drains_and_survives() {
 /// back, "✕" removes it for real.
 #[test]
 fn queued_drafts_render_from_rows_and_every_action_is_real() {
-    let store = Arc::new(SessionStore::open(Path::new(":memory:")).expect("memory store"));
+    let store = Arc::new(memory_store());
     let session = store.create_session("parked").expect("session");
     store
         .append_message(session, None, gertie_core::Role::User, "earlier ask")
@@ -3832,7 +3804,7 @@ fn composer_text(fixture: &mut Fixture) -> String {
 
 /// A session with two sent prompts and the answer between them.
 fn seeded_two_turn_session() -> Arc<SessionStore> {
-    let store = Arc::new(SessionStore::open(Path::new(":memory:")).expect("memory store"));
+    let store = Arc::new(memory_store());
     let session = store.create_session("recalled").expect("session");
     let parent = store
         .append_message(session, None, gertie_core::Role::User, "first ask")
@@ -3915,7 +3887,7 @@ fn arrow_up_with_no_history_leaves_the_composer_alone() {
 /// dropping off every read.
 #[test]
 fn edit_from_here_keeps_changes_and_parents_the_next_send_to_the_keep_point() {
-    let store = Arc::new(SessionStore::open(Path::new(":memory:")).expect("memory store"));
+    let store = Arc::new(memory_store());
     let session = store.create_session("rewound").expect("session");
     let q1 = store
         .append_message(session, None, gertie_core::Role::User, "first ask")
@@ -4009,7 +3981,7 @@ fn revert_files_too_restores_the_checkpointed_content() {
     let provider = Arc::new(
         gertie_providers::AnyProvider::with_endpoints(vec![endpoint]).expect("replay provider"),
     );
-    let store = Arc::new(SessionStore::open(Path::new(":memory:")).expect("memory store"));
+    let store = Arc::new(memory_store());
     let workspace_path = workspace.path().to_path_buf();
     let mut fixture = fixture_built(
         store,
@@ -4088,7 +4060,7 @@ fn the_guard_refuses_a_file_restore_while_another_tab_streams() {
     let provider = Arc::new(
         gertie_providers::AnyProvider::with_endpoints(vec![endpoint]).expect("replay provider"),
     );
-    let store = Arc::new(SessionStore::open(Path::new(":memory:")).expect("memory store"));
+    let store = Arc::new(memory_store());
     let workspace_path = workspace.path().to_path_buf();
     let busy: gertie::chat::LiveElsewhere =
         Arc::new(|_, _, _| Err("another chat is streaming in this checkout".to_string()));
@@ -4207,7 +4179,7 @@ fn a_workspace_switch_moves_the_tools_and_the_ledger_restores_where_it_ran() {
     let provider = Arc::new(
         gertie_providers::AnyProvider::with_endpoints(vec![endpoint]).expect("replay provider"),
     );
-    let store = Arc::new(SessionStore::open(Path::new(":memory:")).expect("memory store"));
+    let store = Arc::new(memory_store());
     let first_path = first.path().to_path_buf();
     let second_path = second.path().to_path_buf();
     let mut fixture = fixture_built(
@@ -4305,66 +4277,108 @@ fn turn_count_of(fixture: &mut Fixture) -> usize {
             .turn_count_for_test()
     })
 }
-
-/// Consecutive finished tool cards collapse into one summary row; the
-/// reader expands it to the full cards and collapses it back.
+/// The two panes (#54): a pending write is the work side's card even
+/// in a narrow window (it opens over the words), the seam says it is
+/// waiting on you, and once approved the turn settles into state B:
+/// the work pane stays on what the turn left behind, numbered.
 #[test]
-fn finished_tool_runs_collapse_into_one_summary() {
-    let store = Arc::new(SessionStore::open(Path::new(":memory:")).expect("memory store"));
-    let session = store.create_session("run of tools").expect("session");
-    let parent = store
-        .append_message(session, None, gertie_core::Role::User, "run the checks")
-        .expect("row");
-    let parent = store
-        .append_tool_result(
-            session,
-            Some(parent),
-            "c1",
-            "read_file",
-            "{}",
-            "read one\nline two",
-        )
-        .expect("row");
-    let parent = store
-        .append_tool_result(
-            session,
-            Some(parent),
-            "c2",
-            "read_file",
-            "{}",
-            "read two\nline two",
-        )
-        .expect("row");
-    store
-        .append_tool_result(
-            session,
-            Some(parent),
-            "c3",
-            "bash",
-            "{}",
-            "error: nope\nline two",
-        )
-        .expect("row");
-    let mut fixture = fixture_with_store(store);
-
-    // Collapsed: one summary, no member cards in sight.
-    fixture.act(|window, _cx| {
-        assert!(window.try_find("tool-run-1").is_some(), "the summary shows");
+fn a_pending_write_lives_on_the_work_side_and_the_turn_settles_there() {
+    let scenarios = tempfile::tempdir().expect("scenario dir");
+    std::fs::write(
+        scenarios.path().join("edits.toml"),
+        "[[steps]]\ntext = 'Writing the file now.'\n\n\
+         [[steps.tool_calls]]\nname = \"write_file\"\n\
+         arguments = '{\"path\": \"out.txt\", \"content\": \"x\"}'\n\n\
+         [[steps]]\ntext = 'Done.'\n",
+    )
+    .expect("scenario file");
+    let workspace = tempfile::tempdir().expect("workspace dir");
+    let endpoint = gertie_providers::Endpoint {
+        name: "replay".into(),
+        base_url: scenarios.path().to_string_lossy().into_owned(),
+        model: "edits".into(),
+        api_key: None,
+        context_window: None,
+        wire: gertie_providers::Wire::Replay,
+        vision: true,
+    };
+    let provider = Arc::new(
+        gertie_providers::AnyProvider::with_endpoints(vec![endpoint]).expect("replay provider"),
+    );
+    let store = Arc::new(memory_store());
+    let mut fixture = fixture_built(
+        store,
+        None,
+        Some(workspace.path().to_path_buf()),
+        None,
+        Some(provider),
+        None,
+        Vec::new(),
+        None,
+        None,
+    );
+    fixture.hold = vec![scenarios, workspace];
+    let verb = |fixture: &mut Fixture| {
+        fixture.cx.update(|cx| {
+            fixture
+                .view
+                .upgrade()
+                .expect("view alive")
+                .read(cx)
+                .seam_verb_for_test()
+        })
+    };
+    fixture.act(|window, _| {
         assert!(
-            window.try_find("tool-toggle-2").is_none(),
-            "member cards hide inside the run"
+            window.try_find("work-pane").is_none(),
+            "no work yet, no pane"
+        );
+        assert!(
+            window.try_find("work-strip").is_some(),
+            "the strip holds the edge"
         );
     });
-    // Expanded: every card is back, failures included.
-    fixture.act(|window, cx| window.click("tool-run-1", cx));
-    fixture.act(|window, _cx| {
-        assert!(window.try_find("tool-toggle-2").is_some(), "expanded");
-        assert!(window.try_find("tool-toggle-3").is_some(), "expanded");
+
+    fixture.act(|window, cx| {
+        window.input("go", cx);
+        window.press("enter", cx);
     });
-    // Collapsed again.
-    fixture.act(|window, cx| window.click("tool-run-1", cx));
-    fixture.act(|window, _cx| {
-        assert!(window.try_find("tool-toggle-2").is_none(), "hidden again");
+    pump(&mut fixture, 30);
+    assert_eq!(verb(&mut fixture), "waiting on you");
+    fixture.act(|window, _| {
+        assert!(
+            window.try_find("work-pane").is_some(),
+            "a pending write opens the work side, even narrow"
+        );
+        assert!(
+            window.try_find("approve-2").is_some(),
+            "its buttons are there"
+        );
+    });
+
+    fixture.act(|window, cx| window.click("approve-2", cx));
+    pump(&mut fixture, 40);
+    assert_eq!(verb(&mut fixture), "settled");
+    // Narrow, the settled work folds to the strip; its button opens
+    // the turn's work over the words.
+    fixture.act(|window, _| {
+        assert!(window.try_find("work-pane").is_none(), "narrow: folded");
+    });
+    fixture.act(|window, cx| window.click("work-open", cx));
+    fixture.act(|window, _| {
+        assert!(
+            window.try_find("work-pane").is_some(),
+            "the strip opens what the turn left behind"
+        );
+        assert!(
+            window.try_find("edit-card-2").is_some(),
+            "the write is an edit card"
+        );
+        assert!(
+            window.try_find("edit-overview-2").is_some(),
+            "with a strip of where in the file it changed"
+        );
+        assert!(window.try_find("approve-2").is_none(), "nothing waits now");
     });
 }
 
@@ -4399,7 +4413,7 @@ fn a_pending_mutation_names_what_it_waits_on() {
     let provider = Arc::new(
         gertie_providers::AnyProvider::with_endpoints(vec![endpoint]).expect("replay provider"),
     );
-    let store = Arc::new(SessionStore::open(Path::new(":memory:")).expect("memory store"));
+    let store = Arc::new(memory_store());
     let mut fixture = fixture_built(
         store,
         None,
@@ -4479,7 +4493,7 @@ fn narration_stays_out_of_the_status_line() {
     let provider = Arc::new(
         gertie_providers::AnyProvider::with_endpoints(vec![endpoint]).expect("replay provider"),
     );
-    let store = Arc::new(SessionStore::open(Path::new(":memory:")).expect("memory store"));
+    let store = Arc::new(memory_store());
     let mut fixture = fixture_built(
         store,
         None,
@@ -4542,7 +4556,7 @@ fn the_ask_card_names_the_question_in_the_status() {
     let provider = Arc::new(
         gertie_providers::AnyProvider::with_endpoints(vec![endpoint]).expect("replay provider"),
     );
-    let store = Arc::new(SessionStore::open(Path::new(":memory:")).expect("memory store"));
+    let store = Arc::new(memory_store());
     let mut fixture = fixture_built(
         store,
         None,
@@ -4623,7 +4637,7 @@ fn stop_ends_a_running_turn_and_closes_its_open_card() {
     let provider = Arc::new(
         gertie_providers::AnyProvider::with_endpoints(vec![endpoint]).expect("replay provider"),
     );
-    let store = Arc::new(SessionStore::open(Path::new(":memory:")).expect("memory store"));
+    let store = Arc::new(memory_store());
     let mut fixture = fixture_built(
         store,
         None,
@@ -4690,81 +4704,6 @@ fn stop_ends_a_running_turn_and_closes_its_open_card() {
             .map(|row| row.content.clone())
             .collect::<Vec<_>>()
     );
-}
-
-/// A pending card breaks a run: finished reads before it stay
-/// stand-alone (an approval hiding inside a collapsed summary would be
-/// a trap); approving it lets the run close over both.
-#[test]
-fn a_pending_card_breaks_the_run_until_it_settles() {
-    let scenarios = tempfile::tempdir().expect("scenario dir");
-    std::fs::write(
-        scenarios.path().join("edits.toml"),
-        "[[steps]]\ntext = ''\n\n\
-         [[steps.tool_calls]]\nname = \"read_file\"\n\
-         arguments = '{\"path\": \"scratch.txt\"}'\n\n\
-         [[steps]]\ntext = ''\n\n\
-         [[steps.tool_calls]]\nname = \"write_file\"\n\
-         arguments = '{\"path\": \"out.txt\", \"content\": \"x\"}'\n\n\
-         [[steps]]\ntext = ''\n",
-    )
-    .expect("scenario file");
-    let workspace = tempfile::tempdir().expect("workspace dir");
-    let snapshots_dir = tempfile::tempdir().expect("snapshots dir");
-    let snapshots =
-        Arc::new(gertie_core::SnapshotStore::open(snapshots_dir.path()).expect("snapshot store"));
-    let endpoint = gertie_providers::Endpoint {
-        name: "replay".into(),
-        base_url: scenarios.path().to_string_lossy().into_owned(),
-        model: "edits".into(),
-        api_key: None,
-        context_window: None,
-        wire: gertie_providers::Wire::Replay,
-        vision: true,
-    };
-    let provider = Arc::new(
-        gertie_providers::AnyProvider::with_endpoints(vec![endpoint]).expect("replay provider"),
-    );
-    let store = Arc::new(SessionStore::open(Path::new(":memory:")).expect("memory store"));
-    let mut fixture = fixture_built(
-        store,
-        Some(snapshots),
-        Some(workspace.path().to_path_buf()),
-        None,
-        Some(provider),
-        None,
-        Vec::new(),
-        None,
-        None,
-    );
-    fixture.hold = vec![scenarios, workspace, snapshots_dir];
-
-    fixture.act(|window, cx| {
-        window.input("go", cx);
-        window.press("enter", cx);
-    });
-    pump(&mut fixture, 30);
-    fixture.act(|window, _cx| {
-        assert!(
-            window.try_find("tool-run-1").is_none(),
-            "the pending write breaks the run, no summary over a live ask"
-        );
-        assert!(
-            window.try_find("approve-2").is_some(),
-            "the pending card stands alone, its approval in view"
-        );
-    });
-
-    // Approve: the write settles, the run of finished cards closes
-    // over both.
-    fixture.act(|window, cx| window.click("approve-2", cx));
-    pump(&mut fixture, 40);
-    fixture.act(|window, _cx| {
-        assert!(
-            window.try_find("tool-run-1").is_some(),
-            "both finished, the run collapses"
-        );
-    });
 }
 
 /// `>` switches the palette to commands: the term matches names and
@@ -4891,7 +4830,7 @@ fn focused_area(fixture: &mut Fixture) -> String {
 /// text, so the keystroke path isn't testable.
 #[test]
 fn a_picked_session_ranks_first_when_the_query_returns() {
-    let store = Arc::new(SessionStore::open(Path::new(":memory:")).expect("memory store"));
+    let store = Arc::new(memory_store());
     // Two flaky rows with different match densities, so the FTS rank,
     // and therefore the unpicked order, is deterministic: alpha's
     // denser row outranks beta's.
@@ -5000,7 +4939,7 @@ fn a_worktree_tabs_first_message_names_its_branch() {
         root: root.clone(),
         prefix: "gertie/".into(),
     };
-    let store = Arc::new(SessionStore::open(Path::new(":memory:")).expect("memory store"));
+    let store = Arc::new(memory_store());
     let mut fixture = fixture_full(
         store,
         None,
@@ -5264,6 +5203,9 @@ fn a_real_sidebar_click_loads_a_same_root_session() {
         false,
     ));
 
+    boot.store
+        .set_store_flag("sidebar_expanded", true)
+        .expect("sidebar flag");
     // One session, rooted at the boot's own workspace: the click is
     // rule 1, load here. This is the click every single-project user
     // makes on every session they own.
@@ -5340,308 +5282,6 @@ fn replay_provider(scenario: &str) -> (Arc<gertie_providers::AnyProvider>, tempf
     (provider, scenarios)
 }
 
-/// The status column (issue #33): a scripted turn reads a file, states
-/// its goal and next step, and consults memory. The column shows the
-/// goal, the touched file, the next step, and the consulted entry with
-/// its moved evidence; the riding line names the entry and, the
-/// evidence having moved, carries the flag. Folding the column leaves
-/// the rail and the header chip, and the fold is stored per
-/// conversation.
-#[test]
-fn the_status_column_shows_the_session_state_and_folds_to_a_rail() {
-    let dir = tempfile::tempdir().expect("workspace");
-    std::fs::write(dir.path().join("teardown.rs"), "fn teardown() {}\n").expect("cited file");
-    std::fs::create_dir_all(dir.path().join("project")).expect("tier root");
-    std::fs::write(
-        dir.path().join("project").join("gotchas.md"),
-        "- [p12] helpful=0 harmful=0 cite the flake before blaming the test \
-         [evidence: teardown.rs@000000000000]\n",
-    )
-    .expect("topic file");
-    let store = Arc::new(SessionStore::open(Path::new(":memory:")).expect("session store"));
-    let memory = Arc::new(gertie_core::MemoryStore::open(
-        dir.path().join("project"),
-        dir.path().join("global"),
-        store.clone(),
-    ));
-    memory.sync().expect("sidecar sync");
-    let (provider, scenarios) = replay_provider(
-        "[[steps]]\ntext = ''\n\n\
-         [[steps.tool_calls]]\nname = \"status\"\n\
-         arguments = '{\"goal\": \"Fix the teardown race\", \"next\": \"re-run the suite\"}'\n\n\
-         [[steps.tool_calls]]\nname = \"search_memory\"\n\
-         arguments = '{\"query\": \"flake\"}'\n\n\
-         [[steps.tool_calls]]\nname = \"read_file\"\n\
-         arguments = '{\"path\": \"teardown.rs\"}'\n\n\
-         [[steps]]\ntext = 'done'\n",
-    );
-    let mut fixture = fixture_built(
-        store.clone(),
-        None,
-        Some(dir.path().to_path_buf()),
-        None,
-        Some(provider),
-        None,
-        vec![
-            Arc::new(gertie_tools::Status),
-            Arc::new(gertie_tools::memory::SearchMemory::new(memory.clone())),
-        ],
-        Some(memory.clone()),
-        None,
-    );
-    fixture.hold = vec![scenarios, dir];
-
-    fixture.act(|window, _| {
-        assert!(
-            window.try_find("status-column").is_none(),
-            "a fresh chat has nothing to show"
-        );
-    });
-    fixture.act(|window, cx| {
-        window.input("The widget_test keeps flaking", cx);
-        window.press("enter", cx);
-    });
-    pump_until(
-        &mut fixture,
-        200,
-        |fixture| {
-            fixture.cx.update(|cx| {
-                !fixture
-                    .view
-                    .upgrade()
-                    .expect("view alive")
-                    .read(cx)
-                    .is_streaming()
-            })
-        },
-        "the scripted turn",
-    );
-    let (goal, next, touched, ground) = fixture.cx.update(|cx| {
-        fixture
-            .view
-            .upgrade()
-            .expect("view alive")
-            .read(cx)
-            .status_for_test()
-    });
-    assert_eq!(goal.as_deref(), Some("Fix the teardown race"));
-    assert_eq!(next.as_deref(), Some("re-run the suite"));
-    assert_eq!(touched, vec![("teardown.rs".to_string(), "read")]);
-    assert_eq!(ground, vec!["p12".to_string()]);
-    let riding = fixture.cx.update(|cx| {
-        fixture
-            .view
-            .upgrade()
-            .expect("view alive")
-            .read(cx)
-            .riding_for_test()
-    });
-    let (id, flag) = riding.expect("the riding line names the consulted entry");
-    assert_eq!(id, "p12");
-    // The reread of the cited file IS the re-check: the fold re-recorded
-    // the hash at that moment, so the flag cleared itself (no click, no
-    // tool call) and the riding line carries no correction.
-    assert!(flag.is_none(), "the reread re-verified the entry: {flag:?}");
-    let entry = memory
-        .scan()
-        .into_iter()
-        .find(|entry| entry.id == "p12")
-        .expect("the entry");
-    assert!(
-        memory.changed_evidence(&entry).is_empty(),
-        "the stored hash is the file's current state"
-    );
-    // The sizing spike, kept as a guard: a permanent right column in
-    // the flex row must take its width and stay inside the window, the
-    // transcript yielding, not overflowing (the memory panel's
-    // zero-extent lesson came from this same row).
-    fixture.act(|window, _| {
-        let column = window
-            .try_find("status-column")
-            .map(|found| found.bounds())
-            .expect("the column is laid out");
-        eprintln!("status column bounds: {column:?}");
-        assert!(
-            column.size.width > px(299.) && column.size.width < px(301.),
-            "the column keeps its width: {column:?}"
-        );
-        assert!(
-            column.right() <= px(900.5),
-            "the column stays inside the window: {column:?}"
-        );
-        assert!(
-            column.size.height > px(100.),
-            "the column has height: {column:?}"
-        );
-    });
-    fixture.act(|window, _| {
-        assert!(
-            window.try_find("status-column").is_some(),
-            "the column shows"
-        );
-        assert!(
-            window.try_find("status-ground-p12").is_some(),
-            "DEPENDS ON lists the entry"
-        );
-    });
-
-    // Fold: the rail and the header chip replace the column, stored.
-    fixture.act(|window, cx| window.click("status-collapse", cx));
-    fixture.act(|window, _| {
-        assert!(window.try_find("status-column").is_none(), "folded");
-        assert!(window.try_find("status-rail").is_some(), "the rail stays");
-        assert!(
-            window.try_find("status-rail-state").is_some(),
-            "the rail's state icon"
-        );
-        assert!(window.try_find("status-chip").is_some(), "the header chip");
-    });
-    let session = fixture
-        .cx
-        .update(|cx| {
-            fixture
-                .view
-                .upgrade()
-                .expect("view alive")
-                .read(cx)
-                .session_id()
-        })
-        .expect("session");
-    assert!(
-        store.store_flag(&format!("status_collapsed:{}", session.0)),
-        "the fold is stored for this conversation"
-    );
-    fixture.act(|window, cx| window.click("status-chip", cx));
-    fixture.act(|window, _| {
-        assert!(window.try_find("status-column").is_some(), "unfolded");
-    });
-    assert!(!store.store_flag(&format!("status_collapsed:{}", session.0)));
-}
-
-/// The GROUNDED IN viewport shows three whole rows at their real
-/// heights: rows free-wrap, so the viewport's max is measured from the
-/// rows themselves (three measured heights plus their gaps), not a
-/// constant. Everything past the third row scrolls.
-#[test]
-fn the_grounded_in_viewport_shows_three_whole_rows() {
-    let dir = tempfile::tempdir().expect("workspace");
-    std::fs::create_dir_all(dir.path().join("project")).expect("tier root");
-    // Six entries sharing the query word, each long enough to wrap
-    // well past one line in the 300px column: with every row tall, the
-    // assertions cannot depend on which entry ranks first in the FTS
-    // result. No [evidence:] clauses: the cluster is then just the
-    // entry, so three of them (3 x 149 + gaps = 453px) fit the space
-    // this window's column has, and the size assertions exercise the
-    // three-row rule rather than the crowded-column bound.
-    let mut entries = String::new();
-    for n in 12..=17 {
-        entries.push_str(&format!(
-            "- [p{n}] helpful=0 harmful=0 the flake test keeps failing when the \
-             teardown timer races the widget between retries and the retry \
-             budget is spent before the fixture settles\n"
-        ));
-    }
-    std::fs::write(dir.path().join("project").join("gotchas.md"), entries).expect("topic file");
-    let store = Arc::new(SessionStore::open(Path::new(":memory:")).expect("session store"));
-    let memory = Arc::new(gertie_core::MemoryStore::open(
-        dir.path().join("project"),
-        dir.path().join("global"),
-        store.clone(),
-    ));
-    memory.sync().expect("sidecar sync");
-    let (provider, scenarios) = replay_provider(
-        "[[steps]]\ntext = ''\n\n\
-         [[steps.tool_calls]]\nname = \"search_memory\"\n\
-         arguments = '{\"query\": \"flake\"}'\n\n\
-         [[steps]]\ntext = 'done'\n",
-    );
-    let mut fixture = fixture_built(
-        store.clone(),
-        None,
-        Some(dir.path().to_path_buf()),
-        None,
-        Some(provider),
-        None,
-        vec![Arc::new(gertie_tools::memory::SearchMemory::new(
-            memory.clone(),
-        ))],
-        Some(memory),
-        None,
-    );
-    fixture.hold = vec![scenarios, dir];
-    fixture.act(|window, cx| {
-        window.input("The widget_test keeps flaking", cx);
-        window.press("enter", cx);
-    });
-    pump_until(
-        &mut fixture,
-        200,
-        |fixture| {
-            fixture.cx.update(|cx| {
-                !fixture
-                    .view
-                    .upgrade()
-                    .expect("view alive")
-                    .read(cx)
-                    .is_streaming()
-            })
-        },
-        "the scripted turn",
-    );
-    // The rows in render order, so the third and fourth can be named
-    // without depending on the search's rank order.
-    let ground = fixture.cx.update(|cx| {
-        fixture
-            .view
-            .upgrade()
-            .expect("view alive")
-            .read(cx)
-            .status_for_test()
-            .3
-    });
-    assert!(
-        ground.len() >= 4,
-        "the scenario seeds at least four rows to size against: {ground:?}"
-    );
-    // The settle after the turn already drew the corrective frame the
-    // measurement defers: read the settled bounds.
-    fixture.act(|window, _| {
-        let viewport = window
-            .try_find("grounded-scroll")
-            .map(|found| found.bounds())
-            .expect("the grounded viewport is laid out");
-        let column = window
-            .try_find("status-column")
-            .map(|found| found.bounds())
-            .expect("the column is laid out");
-        eprintln!("viewport: {viewport:?} column: {column:?}");
-        // The outer bound holds: the viewport stays inside the
-        // column's visible bottom (the window edge), whatever the
-        // three-row math wanted.
-        assert!(
-            viewport.bottom() <= column.bottom() + px(1.),
-            "the viewport never exceeds the column: {viewport:?} vs {column:?}"
-        );
-        let row = |id: &str| {
-            window
-                .try_find(format!("status-ground-{id}"))
-                .map(|found| found.bounds())
-                .unwrap_or_else(|| panic!("{id} is laid out"))
-        };
-        let third = row(&ground[2]);
-        let fourth = row(&ground[3]);
-        eprintln!("viewport: {viewport:?} third: {third:?} fourth: {fourth:?}");
-        assert!(
-            third.bottom() <= viewport.bottom() + px(1.),
-            "the third row shows whole: {third:?} vs {viewport:?}"
-        );
-        assert!(
-            fourth.top() >= viewport.bottom() - px(1.),
-            "the fourth row starts below the fold: {fourth:?} vs {viewport:?}"
-        );
-    });
-}
-
 /// An ask answered from another chat's status column lands on the
 /// owning card through the card's own path: the tool result is the
 /// option, the turn completes, and the card says where the answer came
@@ -5655,7 +5295,7 @@ fn a_question_answered_from_the_column_lands_on_its_own_card() {
                       [\"postgres\", \"sqlite\"], \"allow_custom\": false}'\n\n\
          [[steps]]\ntext = ''\n",
     );
-    let store = Arc::new(SessionStore::open(Path::new(":memory:")).expect("memory store"));
+    let store = Arc::new(memory_store());
     let mut fixture = fixture_built(
         store.clone(),
         None,
@@ -5849,7 +5489,7 @@ fn reading_a_cited_file_recalls_its_memory_without_a_search() {
         ),
     )
     .expect("topic file");
-    let store = Arc::new(SessionStore::open(Path::new(":memory:")).expect("session store"));
+    let store = Arc::new(memory_store());
     let memory = Arc::new(gertie_core::MemoryStore::open(
         root.join(".gertie/memory"),
         root.join("global"),
@@ -5917,122 +5557,6 @@ fn reading_a_cited_file_recalls_its_memory_without_a_search() {
         "the recall rides the read's result: {}",
         read.content
     );
-}
-
-/// The riding card (#33 decision 1, #34): one line, verb + why, on
-/// the transcript's latest row while the run lives. The why is the
-/// memory entry the work consulted; its moved evidence puts the full
-/// form (the flag line) in play; and being news no running card
-/// carries, it keeps the card on screen past the card-is-the-now
-/// yield. Goal and next stay the column's. The run's end takes the
-/// card away, so it never stacks on older turns.
-#[test]
-fn the_riding_card_is_verb_and_why_and_leaves_with_the_run() {
-    let dir = tempfile::tempdir().expect("workspace");
-    std::fs::write(dir.path().join("teardown.rs"), "fn teardown() {}\n").expect("cited file");
-    std::fs::create_dir_all(dir.path().join("project")).expect("tier root");
-    std::fs::write(
-        dir.path().join("project").join("gotchas.md"),
-        "- [p12] helpful=0 harmful=0 cite the flake before blaming the test \
-         [evidence: teardown.rs@000000000000]\n",
-    )
-    .expect("topic file");
-    let store = Arc::new(SessionStore::open(Path::new(":memory:")).expect("session store"));
-    let memory = Arc::new(gertie_core::MemoryStore::open(
-        dir.path().join("project"),
-        dir.path().join("global"),
-        store.clone(),
-    ));
-    memory.sync().expect("sidecar sync");
-    let (provider, scenarios) = replay_provider(
-        "[[steps]]\ntext = ''\n\n\
-         [[steps.tool_calls]]\nname = \"status\"\n\
-         arguments = '{\"goal\": \"Fix the teardown race\", \"next\": \"re-run the suite\"}'\n\n\
-         [[steps.tool_calls]]\nname = \"search_memory\"\n\
-         arguments = '{\"query\": \"flake\"}'\n\n\
-         [[steps.tool_calls]]\nname = \"park\"\narguments = '{}'\n\n\
-         [[steps]]\ntext = 'done'\n",
-    );
-    let (release, park) = tokio::sync::oneshot::channel::<()>();
-    let mut fixture = fixture_built(
-        store,
-        None,
-        Some(dir.path().to_path_buf()),
-        None,
-        Some(provider),
-        None,
-        vec![
-            Arc::new(gertie_tools::Status),
-            Arc::new(gertie_tools::memory::SearchMemory::new(memory.clone())),
-            Arc::new(ParkTool {
-                park: std::sync::Mutex::new(Some(park)),
-            }),
-        ],
-        Some(memory),
-        None,
-    );
-    fixture.hold = vec![scenarios, dir];
-
-    fixture.act(|window, cx| {
-        window.input("The widget_test keeps flaking", cx);
-        window.press("enter", cx);
-    });
-    let view = fixture.view.clone();
-    pump_until(
-        &mut fixture,
-        200,
-        |fixture| {
-            fixture.cx.update(|cx| {
-                view.upgrade()
-                    .expect("view alive")
-                    .read(cx)
-                    .riding_for_test()
-                    .is_some()
-            })
-        },
-        "the consultation folds",
-    );
-    pump(&mut fixture, 10);
-
-    // Parked mid-run on a running card, pinned to the bottom: without
-    // a grounding the row would yield; the why keeps the card.
-    let (shown, riding) = fixture.cx.update(|cx| {
-        let view = view.upgrade().expect("view alive").read(cx);
-        (view.show_activity_row_for_test(), view.riding_for_test())
-    });
-    assert!(shown, "a grounded run keeps its riding card");
-    let (id, flag) = riding.expect("the why names the consulted entry");
-    assert_eq!(id, "p12");
-    let flag = flag.expect("moved evidence puts the full form in play");
-    assert!(
-        flag.contains("not re-read this session"),
-        "the work never read the moved file: {flag}"
-    );
-    fixture.act(|window, _| {
-        assert!(window.try_find("riding-card").is_some(), "the card rides");
-        assert!(
-            window.try_find("riding-flag").is_some(),
-            "the flag line, the full form"
-        );
-    });
-
-    let _ = release.send(());
-    pump_until(
-        &mut fixture,
-        200,
-        |fixture| {
-            fixture
-                .cx
-                .update(|cx| !view.upgrade().expect("view alive").read(cx).is_streaming())
-        },
-        "the run ends",
-    );
-    fixture.act(|window, _| {
-        assert!(
-            window.try_find("riding-card").is_none(),
-            "the card leaves with the run: no stacking on older turns"
-        );
-    });
 }
 
 /// The composer belongs to its conversation: words typed (and chips
@@ -6106,7 +5630,7 @@ fn an_image_sent_mid_turn_queues_and_rides_with_its_message() {
         gertie_providers::AnyProvider::with_endpoints(vec![endpoint]).expect("replay provider"),
     );
     let broker = Arc::new(gertie_core::PermissionBroker::new());
-    let store = Arc::new(SessionStore::open(Path::new(":memory:")).expect("memory store"));
+    let store = Arc::new(memory_store());
     let mut fixture = fixture_built(
         store.clone(),
         None,
@@ -6245,7 +5769,7 @@ fn held_turn_fixture() -> Fixture {
     let provider = Arc::new(
         gertie_providers::AnyProvider::with_endpoints(vec![endpoint]).expect("replay provider"),
     );
-    let store = Arc::new(SessionStore::open(Path::new(":memory:")).expect("memory store"));
+    let store = Arc::new(memory_store());
     let mut fixture = fixture_built(
         store,
         None,
@@ -6546,7 +6070,7 @@ fn an_image_read_file_opens_survives_a_reload() {
     let provider = Arc::new(
         gertie_providers::AnyProvider::with_endpoints(vec![endpoint]).expect("replay provider"),
     );
-    let store = Arc::new(SessionStore::open(Path::new(":memory:")).expect("memory store"));
+    let store = Arc::new(memory_store());
     let mut fixture = fixture_built(
         store,
         None,
@@ -6657,7 +6181,7 @@ fn a_reread_of_a_cited_file_reverifies_the_consulted_entry() {
         "fn teardown() -> bool { true }\n",
     )
     .expect("the cited file moves");
-    let store = Arc::new(SessionStore::open(Path::new(":memory:")).expect("session store"));
+    let store = Arc::new(memory_store());
     let memory = Arc::new(gertie_core::MemoryStore::open(
         dir.path().join("project"),
         dir.path().join("global"),
@@ -6811,7 +6335,7 @@ fn a_bash_reread_of_a_cited_file_also_reverifies() {
 /// covering the middle column's composer and footer while it's open.
 #[test]
 fn the_settings_page_groups_four_sections_and_covers_the_middle_column() {
-    let store = Arc::new(SessionStore::open(Path::new(":memory:")).expect("session store"));
+    let store = Arc::new(memory_store());
     let mut fixture = fixture_with_store(store);
     // Open settings via the palette: ctrl-k, a pump (the palette's
     // input mounts on the draw), then type the query and confirm.
@@ -6974,7 +6498,7 @@ fn the_settings_page_groups_four_sections_and_covers_the_middle_column() {
 #[test]
 fn settings_modal_covers_and_centers_at_a_wide_window() {
     let dir = tempfile::tempdir().expect("workspace");
-    let store = Arc::new(SessionStore::open(Path::new(":memory:")).expect("session store"));
+    let store = Arc::new(memory_store());
     let (provider, scenarios) = replay_provider(
         "[[steps]]\ntext = ''\n\n\
          [[steps.tool_calls]]\nname = \"status\"\n\
@@ -7117,16 +6641,13 @@ fn settings_modal_covers_and_centers_at_a_wide_window() {
     for _ in 0..100 {
         pump(&mut fixture, 2);
         draw(&mut fixture, wide, &|window, _| {
-            column_up.set(window.try_find("status-column").is_some());
+            column_up.set(window.try_find("gertie-face").is_some());
         });
         if column_up.get() {
             break;
         }
     }
-    assert!(
-        column_up.get(),
-        "the resumed session shows the status column"
-    );
+    assert!(column_up.get(), "the resumed session paints its seam");
     // Open settings via the palette.
     draw(&mut fixture, wide, &|window, cx| window.press("ctrl-k", cx));
     draw(&mut fixture, wide, &|window, cx| {
@@ -7163,12 +6684,12 @@ fn settings_modal_covers_and_centers_at_a_wide_window() {
             "the dialog is its body's height: {panel:?}"
         );
     });
-    // Esc closes, and the column comes back.
+    // Esc closes, and the modal is gone.
     draw(&mut fixture, wide, &|window, cx| window.press("escape", cx));
     draw(&mut fixture, wide, &|window, _| {
         assert!(
-            window.try_find("status-column").is_some(),
-            "the column returns when the modal closes"
+            window.try_find("settings-panel").is_none(),
+            "the modal closes on escape"
         );
     });
     fixture

@@ -47,14 +47,16 @@ fronts, nothing shared over the network.
   can look at its work: `screenshot` renders a page or captures a window, and
   `read_file` on an image shows the picture.
 - **Parallel and worktree chats**: a running turn keeps going while you open another
-  conversation from the sidebar, which marks it running or finished. New worktree chat
+  conversation from the rail or the sidebar, which mark it running or finished. New worktree chat
   starts a chat in its own `git worktree`, so two agents can edit the
   same repo without colliding. Stop ends a running turn and cancels the model's
   request, so a stopped reply stops costing output tokens.
-- **A status column that reads like a sentence**: WORKING ON, NEXT UP, WAITING ON
-  YOU, REMEMBERED, TOUCHED, DEPENDS ON, CORRECTIONS, each newest-first and present
-  only when it has something to say, folded from the session's own record; a riding
-  card on the latest reply carries the same state inline.
+- **Two panes, one face**: paper for words, ink for work. Gertie's reasoning reads in
+  a serif on the left, numbered where it caused work; the work it caused (edit cards
+  with their diffs, checks with their counts, the checkpoints) sits on the right under
+  a one-sentence summary. Gertie's face sits on the seam and shows where the turn is:
+  curious, focused, checking, waiting on you, settled, stuck. Memory it relied on
+  shows as a seal note, and what it wants to remember is a seal you keep or let go.
 - **Any endpoint**: speaks the OpenAI-compatible wire (ppq.ai, OpenRouter, Ollama,
   vLLM, Gemini's compat endpoint) plus a native Anthropic adapter. Fallback chains: when
   an endpoint dies before producing content, the next one takes over invisibly.
