@@ -124,12 +124,18 @@ Keys resolve from the environment first (`MY_API_KEY` above); a local server nee
 no key at all.
 
 **Memory and instructions**: Gertie remembers across sessions. Facts it proposes at
-session end land as review cards you approve or deny; rules that must always apply go
+session end land as a seal in the conversation you keep, edit or let go, and the
+memory panel shows everything it remembers, where each entry came from, and what needs
+a look; rules that must always apply go
 in `AGENTS.md` at the repo root (or `~/.config/gertie/AGENTS.md` for global ones). An
 `AGENTS.md` in a subdirectory scopes its rules to that part of the tree: Gertie loads it
 the first time it reads or edits a file under it. All are plain markdown you can edit by
 hand. [docs/memory.md](docs/memory.md)
 explains the whole system, including the weekly cleanup pass ("dreaming").
+
+<p align="center">
+  <img src="assets/gertie-memory.png" alt="Gertie's memory panel beside the work: entries needing a look, each with where it came from and still true, wrong, edit and forget" width="960">
+</p>
 
 `config.example.toml` documents everything else: wire selection (`openai` |
 `anthropic`), fallback endpoints, MCP servers, custom agents, search backends,
@@ -158,9 +164,9 @@ version of this whole list.
 
 ## Status
 
-**1.4.1**, with the two-panes redesign (#54) coming in the next release: words and
-work side by side, Gertie's face on the seam, the composer carrying its own controls,
-and memory you can read and correct from the chat. Earlier releases brought the memory
+**2.0.0**: the two-panes window (#54). Words and work side by side, Gertie's face on
+the seam, the composer carrying its own controls, and memory you can read and correct
+from the chat. Earlier releases brought the memory
 trust arc (superseded entries point at their replacement, recall fires on touch,
 corrections flag what rested on them), the repo map, the project check before a turn
 ends, and screenshots the agent can look at. Feature-complete against

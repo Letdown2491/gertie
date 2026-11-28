@@ -8,7 +8,7 @@
   <description>
     <p>
       A coding agent with a GPU-rendered UI and a headless core:
-      long-term memory with a review inbox, worktree tabs, subagents,
+      long-term memory you can read and correct, worktree chats, subagents,
       skills, MCP, and permission modes that keep every mutating action
       behind a card you approve.
     </p>
@@ -25,9 +25,17 @@
   <launchable type="desktop-id">io.github.Letdown2491.gertie.desktop</launchable>
   <url type="homepage">https://github.com/Letdown2491/gertie</url>
   <releases>
+    <release version="2.0.0" date="2026-11-28">
+      <description>
+        <p>A new window: your conversation on the left, the work it caused on the right, and Gertie's face on the seam between them, saying whether it is reading, working, checking, waiting on you, or done.</p>
+        <p>Each step is numbered beside the words that announced it; click a number to jump to its card in the work, and back. The work shows edits with their diffs, checks with their counts, and checkpoints you can return to.</p>
+        <p>The composer carries the permission level, this chat's memory and the model, with the room left to think drawn as a ring. Memory is a list you can read and correct: where each entry came from, and buttons to keep, edit or forget it.</p>
+        <p>A question waiting in another chat can be answered from the project's list, without switching chats. Night and day palettes, with a switch to turn motion off.</p>
+      </description>
+    </release>
     <release version="1.3.0" date="2026-11-27">
       <description>
-        <p>The status column: the open session's state lives beside the transcript — what the agent is working on, its next step, the memory it remembered, the files it touched, the memory entries its work depends on, questions from other sessions, and pending corrections. Collapses to a rail; every section renders only when it has something to say.</p>
+        <p>The status column: the open session's state lives beside the transcript: what the agent is working on, its next step, the memory it remembered, the files it touched, the memory entries its work depends on, questions from other sessions, and pending corrections. Collapses to a rail; every section renders only when it has something to say.</p>
         <p>A grounded run shows a riding line on the latest turn: what the work rests on, cited by entry id.</p>
         <p>Memory you can trust: a superseded entry rides search results pointing at its replacement, writing through the tool shapes the store exactly like writing through the ops path, recall fires when the agent reads a memory file, and a repo map gives navigation a ranked view of the workspace.</p>
       </description>

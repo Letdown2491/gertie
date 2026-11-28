@@ -23,9 +23,12 @@ homepage = "https://github.com/Letdown2491/gertie"
 # fails to render. Absolute URL: the store fetches it over HTTP, it cannot
 # read the publisher's disk.
 icon = "https://raw.githubusercontent.com/Letdown2491/gertie/main/assets/gertie-512.png"
-# Full-window capture, 1920x1200: the client's filmstrip fetches these
+# Window captures, 1888x1138: the client's filmstrip fetches these
 # over HTTP and caches them without extensions, so PNG only.
-screenshots = ["https://raw.githubusercontent.com/Letdown2491/gertie/main/assets/gertie-shot.png"]
+screenshots = [
+  "https://raw.githubusercontent.com/Letdown2491/gertie/main/assets/gertie-shot.png",
+  "https://raw.githubusercontent.com/Letdown2491/gertie/main/assets/gertie-memory.png",
+]
 
 [release]
 # Placeholder. The workflow sets ORCHARD_PUBLISH_VERSION from the tag.
