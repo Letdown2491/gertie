@@ -26,7 +26,7 @@ icon = "https://raw.githubusercontent.com/Letdown2491/gertie/main/assets/gertie-
 # Window captures, 1888x1138: the client's filmstrip fetches these
 # over HTTP and caches them without extensions, so PNG only.
 screenshots = [
-  "https://raw.githubusercontent.com/Letdown2491/gertie/main/assets/gertie-shot.png",
+  "https://raw.githubusercontent.com/Letdown2491/gertie/main/assets/gertie-chat.png",
   "https://raw.githubusercontent.com/Letdown2491/gertie/main/assets/gertie-memory.png",
 ]
 

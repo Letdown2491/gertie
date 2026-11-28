@@ -4,7 +4,7 @@ A fast, native coding-agent harness. GPU-rendered UI, a headless core that is a 
 library, and everything local: sessions in SQLite, zero telemetry, no accounts.
 
 <p align="center">
-  <img src="assets/gertie-shot.png" alt="Gertie: two panes, the conversation on the left and the work it caused on the right, with Gertie's face on the seam between them" width="960">
+  <img src="assets/gertie-chat.png" alt="Gertie: two panes, the conversation on the left and the work it caused on the right, with Gertie's face on the seam between them" width="960">
 </p>
 
 ```
