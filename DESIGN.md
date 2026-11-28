@@ -314,8 +314,8 @@ runs sandboxed bash; a window, the screen or a remote URL always asks.
 
 Beside them, two surfaces the UI answers rather than the world: `ask_user` (a question
 with clickable options, answered through the permission broker) and `status` (the model's
-stated goal and next step, shown in the status column; read-only, no card to approve, set
-when the plan changes rather than every turn).
+stated goal and next step, shown as the Now and Then lines in the header over the words;
+read-only, no card to approve, set when the plan changes rather than every turn).
 
 Explicitly out of v1: LSP, notebooks, native web browsing beyond fetch/search.
 
@@ -372,7 +372,8 @@ the last asking for a report instead. The command comes from the user's `[verify
 (global, or per workspace path) or is inferred (`cargo check --message-format=short`, `go
 build ./...`) only when the program is on PATH. The repo's overlay may not name it: the
 settle_command rule, a cloned repo does not get to choose a command gertie runs. The check
-is a per-root answer, resolved for the folder a chat runs in: a footer workspace switch, a
+is a per-root answer, resolved for the folder a chat runs in: a workspace switch (the
+header's folder word), a
 worktree tab, and a conversation opened in another folder each get their own folder's
 check (and recall on touch reads that folder's memory), never the startup folder's. A
 worker that edits and runs bash runs the same check before it reports.
@@ -558,9 +559,14 @@ call that touches a path under its directory, so the cached prefix never changes
 block lets the next touch load it again (`gertie-core/src/directory_instructions.rs`).
 Every instruction file, global, root or nested, is sanitized and capped at 2048
 characters on its own.
-Wrong entries are corrected by the human in an editor, because the store is files. The
-memory surface (M7): a footer word and a right-column panel make the store visible and give
-the counters their writer, because a shipped feature with no surface is invisible.
+Wrong entries are corrected by the human, in the app or in an editor, because the store
+is files. The memory surface (M7, redone in #54): the composer's memory button opens what
+this chat used and learned (keep, edit, forget), and its "see all" opens the panel beside
+the work: every current entry by topic file, those needing a look first, each with where
+it came from (the chat's title, or a correction), its marks, its links in the other
+entries' words, and buttons that say what they do (still true and wrong are the
+helpful/harmful counters' only writers; edit is an update op; forget archives). A
+shipped feature with no surface is invisible.
 
 **Not built, on the evidence**: embeddings as the primary index (BM25 is mechanically stronger
 on identifier-dense text; sqlite-vec is the later add-on if paraphrase recall demonstrably
@@ -669,10 +675,9 @@ Each type earns existence via distinct toolset or safety posture, not just a dif
   read-only rows, every state it showed already visible in the transcript's tool cards.)
 - **Not an IDE.** No file tree, no terminal pane, Zed exists. gertie is the harness.
 - Parallel sessions run against separate worktrees, visible simultaneously (M4).
-- **The status column** shipped after M7: the open session's WORKING ON / NEXT UP /
-  WAITING ON YOU / REMEMBERED / TOUCHED / DEPENDS ON / CORRECTIONS beside the
-  transcript, plus the riding card on the latest turn (see the window-shell note for
-  the full account).
+- **The two-panes window** (#54) replaced the status column (shipped after M7) and the
+  riding card: words on the left, the work they caused on the right, Gertie's face on
+  the seam. The current account is "The two-panes window" at the end of this section.
 
 (The agents panel shipped post-M5 and was later removed: a read-only column listing the
 chat's persisted worker runs with live report status; every state it showed was already
@@ -694,8 +699,8 @@ Lucide catalog through `gpui_kit::assets::AllAssets`, about 1 MB of binary, so e
 `IconName` renders), paste intercepts images and copied files, PDFs
 ride the wire as typed document/file blocks, and text files inline into the message, the
 extension table refuses (with a reason) what no endpoint can read. The permission mode
-lives on the footer line under the composer, a quiet clickable word that cycles the ring,
-same click, none of the composer row's width. A paste at or above
+lives inside the composer on its left (#54), a dot and its word that open the mode menu,
+none of the field's width. A paste at or above
 32 KiB never becomes message text: it files into the workspace (`.gertie/pastes/`, kept
 out of git by the local exclude) and the message cites the path for the agent's
 `read_file`, the context carries the pointer, not the document. An assistant turn worth
@@ -729,14 +734,14 @@ every folder, but the newest unsettled session resumes only when its recorded ro
 otherwise a new folder's first tab starts blank, because one conversation's file
 paths must not open in another folder's window. Opening a conversation rooted
 elsewhere (sidebar click) says so in the transcript instead of letting the paths
-surprise anyone. A footer workspace switch re-roots the session at its next send,
+surprise anyone. A workspace switch re-roots the session at its next send,
 the conversation follows the tab, so resume and the settle hook land where it now
 runs, not where it was born.
 Queued messages are **rows in the session store**, rendered as dashed drafts that can
 be sent now, pulled back into the composer, or dropped; they survive stops, crashes,
 and restarts because they were never UI state, and the drain reads the rows, not the
-shadow. The footer's identity
-line leads with the working folder, and the folder word is the workspace switch:
+shadow. The header's breadcrumb
+names the working folder, and the folder word is the workspace switch:
 clicking it opens a folder picker and the chat re-roots mid-session (tool registry,
 skills, templates, and the overlay's answers rebuilt for the new root; MCP connections
 and web backends carry over, they never captured the root). Mode-chip doctrine
@@ -907,9 +912,11 @@ sit by an item's first line, not the middle of a wrapped one. The settings panel
 cards (Appearance, Endpoints, Sandbox, Memory, Turn budgets, MCP servers, Agents,
 Config file); endpoint rows read name over model, left-aligned.
 
-(Superseded by the two-panes redesign, issue #54: the column and the riding card are
-gone; their fact folding now feeds the header sentence, Gertie's face on the seam, the
-touched chips and the seal notes. The rest of this note is the history.)
+(Superseded by the two-panes redesign, issue #54, as is the paragraph above where it
+speaks of the footer, the conversation header, the reading width and the composer's ghost
+text: see "The two-panes window" below. The column and the riding card are gone; their
+fact folding now feeds the header sentence, Gertie's face on the seam, the touched chips
+and the seal notes. The rest of this note is the history.)
 
 The status column is the open session's durable state beside the transcript
 (toggleable, collapsible to a rail), fed by folding the session's rows on open and
@@ -933,6 +940,75 @@ clock, the dependencies, or an ask, attached to the reply the work produced. The
 vocabulary was renamed once the labels met a reader: the spec's internal words
 (GOAL, GROUNDED IN, FILES) became the ones above, on the doctrine that a label
 promises its content.
+
+### The two-panes window (#54)
+
+The window is paper for words and ink for work, split in half at the seam: the rail (or
+the full sidebar) and the words take the left half, the work the right, so opening the
+sidebar narrows the words, never the work. When half the window would leave the words
+under a readable width (420 px), the work opens over the words instead, beside a strip.
+A turn that only talked folds the work to that strip; a card waiting on the human always
+shows, first.
+
+**The rail** is the default edge (the full sidebar is one click, and the choice is
+kept): the logo, a circle per project (click for its chats: title, state, age, the
+newest twelve, the rest through Ctrl+K), New chat, New worktree chat, search, settings.
+A project's circle breathes while one of its chats runs; a vermilion dot means one waits
+on you. In the popover, a chat waiting on a question shows it under its row with the
+answers as buttons (#33, once the status column's WAITING ON YOU): the click goes to the
+window, which applies it on the owning chat's own card, so the record is the one a click
+there makes, and the card says it was answered from another chat. Approvals only say
+what they want; they are given in their own chat.
+
+**The words** (left, paper): a header with the breadcrumb (project, then the folder,
+which is the workspace switch), the title (click to rename), and two lines, Now and Then
+(the model's `status` goal and next step, else what the turn is doing; "Done." or
+"Done, but the check failed." once it ends). Under it the conversation: user messages
+quiet, Gertie's prose in a serif, asks and permission questions inline. Each step's
+number hangs in the left margin beside the paragraph that announced it, and links both
+ways: click it in the words and the work opens on its card, which lights for a moment;
+click it on a card and the words scroll back to its paragraph. Memory appears as seals:
+a note naming the entry the work relied on (still true, or revise when its cited files
+changed), and a settle's proposal (keep, edit, let it go).
+
+**The work** (right, ink): one sentence for what the turn left behind ("2 files changed,
+the check passed."), the touched files as one line of chips (changed first, "and N
+more" with the rest on hover), and "N learned" when a proposal was kept. Then one card
+per step, newest first, pending before all: an edit card per file (several edits to one
+file share its number), with the change's size, where in the file it sits, and the diff
+on demand; a check card with its command, its last lines and its counts; other steps as
+plain cards. Commit and Review the whole diff under them, the checkpoint timeline at
+the foot. A check's verdict is one rule for every surface: Gertie's own check when it
+ran one, else the checks since the last edit, passing if any passed, and a check whose
+output counts failures failed whatever its exit code said.
+
+**The seam** carries Gertie's face from the app icon, inside a ring that fills by stage,
+and a label under it, sized to its words. The states: ready (empty chat), thinking,
+answering (writing, no tools), reading (looking), working (editing, running), checking
+(verifying), waiting on you (vermilion, the ring's head pulsing fast), done, check failed
+and stopped (an error). The label adds the clock while a turn runs and the step count
+once it ends.
+
+**The composer** is one pill that carries its own controls: attach and the permission
+level (a dot and its word, the mode menu on click) on the left; the memory button (a
+count of what this chat used and learned) and the model on the right. It is one slim
+row while the text fits; once the text wraps (or holds a newline) the text takes a
+full-width row and the controls drop under it, returning to the slim row only when the
+text would fit there again, so it never flickers at the edge. The text grows to eight
+rows, then scrolls. The model reads by name alone (the provider is in its card), with
+the room to think as a small ring beside it: the share of the context used, drawn from
+the top. Once a quarter or less is left, where compaction begins, the ring turns
+vermilion and the name gives way to "N% left". A click opens the model card: the model,
+its provider and window; the room as a bar with a mark where compaction starts; and
+what this chat has read from cache, read fresh and written, as one split bar with its
+figures. Nothing sits under the pill. Its idle text is "Talk it through. / for
+commands, @ for files".
+
+**Look**: night (the default) and day palettes over the kit's theme, embedded subset
+fonts (Inter, Shippori Mincho, IBM Plex Mono, all OFL), lowercase serif labels, no
+uppercase in the chat window. The pulse, the breathing ring and the blinking live mark
+follow gpui's reduce-motion setting, which the Motion switch (Settings, Chat,
+Appearance) sets and ui.json keeps.
 
 ## Onboarding
 

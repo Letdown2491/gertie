@@ -79,6 +79,7 @@ impl ChatView {
         // A new turn: no verdict yet, and the work side follows it.
         self.turn_checked = None;
         self.work_open = false;
+        self.work_focus = None;
         // Turn start: fresh narration is not yet available (the model
         // has not spoken this round), so the plain label until its
         // first words stream or a tool runs.

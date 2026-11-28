@@ -767,12 +767,18 @@ impl ChatView {
         }
     }
 
+    /// The shell's push: every other open chat's pending asks, for the
+    /// rail popover to show and answer in place.
+    pub fn set_open_asks(&mut self, asks: Vec<ProjectAsk>) {
+        self.open_asks = asks;
+    }
+
     /// The shell's push: the project's pending asks, every frame.
     pub fn set_project_asks(&mut self, asks: Vec<ProjectAsk>) {
         self.project_asks = asks;
     }
 
-    /// An answer clicked in another chat's column, applied here, to
+    /// An answer clicked in another chat's rail popover, applied here, to
     /// the owning card: the same `decide_tool` path a click on the
     /// card takes, so the tool result (the record) is identical. The
     /// card says where the answer came from. Questions only: a

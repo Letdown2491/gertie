@@ -32,10 +32,13 @@ turn shows them faintly; earlier messages in the turn show them on hover.
 The header above the conversation names it (click the title to rename) and the folder
 its tools run in (click to move the agent to another folder).
 
-The status line above the composer names the current action in plain words: the tool
-being run, the file being read, the question being asked. The footer counts what the
-work costs (tokens in/out, the cache share, the live context gauge) and, while a run
-is live, how long it has taken.
+The composer carries its own controls: the permission level on its left, this chat's
+memory and the model on its right. It's one slim line for a short message; once what
+you type wraps, the text gets the full width and the controls move under it. The ring
+beside the model is the room left to think; it turns vermilion and says how much is
+left once it runs tight. Click the model for what the work costs, drawn: how full the
+context is and where compaction starts, and how much this chat has read from cache,
+read fresh and written.
 
 ## Help for any model
 
@@ -64,15 +67,19 @@ and how much faster the map finds code) and suggest settings for it.
 
 ## Checkpoints and rewind
 
-Before any file-mutating tool runs, the workspace is snapshotted. Open **turn diff**
-on any finished tool card to see exactly what that turn changed, and **rewind** to
-restore the workspace to any earlier turn: keep your files, or restore theirs too.
+Before any file-mutating tool runs, the workspace is snapshotted. **Review the whole
+diff** under a turn's work shows exactly what that turn changed, and **rewind** (on your
+message, or a dot on the checkpoint timeline at the foot of the work) restores the
+workspace to any earlier turn: keep your files, or restore theirs too.
 Every rewind is itself recorded; nothing is ever silently undone.
 
 ## Parallel chats and worktree chats
 
 The rail down the window's left edge holds one circle per project; click one for its
-chats (title, state, age), or open the full sidebar from the rail's icon. There is no
+chats (title, state, age), or open the full sidebar from the rail's icon. A chat
+waiting on a question shows it under its row, with the answers as buttons: answer it
+right there, without leaving the chat you're in (an approval only says what it wants;
+you give it in its own chat). There is no
 tab bar. A running turn keeps going when you open another conversation or start a new
 one: its project's circle breathes, a vermilion dot means a chat waits on you, and in
 the sidebar a green dot marks a running row, a blue dot a turn that finished while you
@@ -123,12 +130,13 @@ for your team's conventions.
 ## Memory
 
 The agent remembers across sessions, and you control every entry. Facts it proposes
-at session end arrive as review cards; approve or deny, and vote ▲/▼ on what it
-recalls so the useful stuff survives the weekly cleanup. Entries cite the files they
+arrive as a seal in the words; keep, edit, or let them go. Entries cite the files they
 came from and are flagged when those files change; correcting an entry flags the ones
 that rested on it, for you to keep or archive. Rules that must always apply belong in
 `AGENTS.md` instead (one in a subdirectory applies when the agent works under it); the
-`memory N` footer word opens the panel.
+memory button in the composer lists what this chat used and learned, each with keep,
+edit and forget, and "see all" opens everything it remembers, by topic: each entry says
+where it came from, and you can mark it still true or wrong, edit it, or forget it.
 [docs/memory.md](memory.md) has the details.
 
 ## Two panes and Gertie's face
@@ -139,18 +147,22 @@ seal notes. A note says which entry the work relied on and, when a file it cites
 changed, asks **still true** or **revise**. What the settle proposes to remember comes
 as a "new" seal with **keep**, **edit** or **let it go**. **Work** on the right, in ink:
 a one-sentence summary ("2 files changed, the check passed.") over the files touched,
-then one card per numbered item. An edit card shows the file, the size of the change,
+then one card per numbered item, newest first. An edit card shows the file, the size of the change,
 where in the file it sits, and the diff on demand; a check card shows its command, its
 last lines and how many tests passed. Commit and Review the whole diff sit under them,
 and the checkpoint timeline at the foot returns the workspace to before any question.
-A turn that only talked folds the work side to a strip; under 1100px the work side
-opens over the words instead of beside them. A card waiting on your OK always shows.
+The window splits in half at the seam: the sidebar and the words on the left, the work
+on the right, so opening the sidebar narrows the words, never the work. A turn that only
+talked folds the work side to a strip; when half the window would leave the words too
+narrow to read, the work side opens over them instead. A card waiting on your OK always shows.
 
 Between the panes sits Gertie's face, from the app icon, inside a thin ring that fills
-as the turn goes from understanding to changing to verifying. The face says the rest:
-curious while reading, focused while editing, waiting on you (the ring's head pulses),
-smiling when settled, sad when a check failed. Under it, the numbered marks hang on a
-thread. The header over the words says what this is and, in a sentence, what is
+as the turn goes from reading to working to checking. The face says the rest:
+curious while reading, focused while working, waiting on you (the ring's head pulses),
+smiling when done, sad when a check failed or the turn stopped. A label under the face
+says the same in a word, with the clock while it runs. Each step's number sits in the
+margin beside the paragraph that announced it; click it to see that step's card, or
+click a card's number to get back to its paragraph. The header over the words says what this is and, in a sentence, what is
 happening now and what comes next; the `status` tool is how the model states its goal
 and next step, everything else is read from the record, never asked for. The small
 motions (the pulse, the breathing rail ring, the blinking live mark) can be turned off

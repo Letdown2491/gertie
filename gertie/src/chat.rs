@@ -3,7 +3,9 @@
 
 pub mod aux;
 pub mod composer;
+pub mod memory_panel;
 pub mod panes;
+pub mod pill;
 pub mod shape;
 pub mod sidebar;
 pub mod status;
@@ -447,7 +449,7 @@ pub struct ChatView {
     /// topic file, and the footer renders every frame (every token of
     /// a streaming turn). Keyed by the store's fingerprint, so a write
     /// from anywhere (panel, agent, editor) shows on the next frame.
-    memory_word: std::cell::RefCell<Option<(u64, Option<String>)>>,
+
     /// The @-mention popup's last answer, keyed by the query and the
     /// root: the composer's popup asks every frame while it is open.
     mention_cache: std::cell::RefCell<Option<(String, std::path::PathBuf, Vec<MentionMatch>)>>,
@@ -701,6 +703,23 @@ pub struct ChatView {
     moving: Option<SessionId>,
     /// The right column: the settings view.
     panel: Panel,
+    /// The memory popover over the composer: this chat's memory.
+    memory_popover: bool,
+    /// The memory panel's retired section, unfolded.
+    memory_show_retired: bool,
+    /// When a click outside last closed the popover.
+    memory_popover_closed: Option<std::time::Instant>,
+    /// The model card over the composer: the model and its room.
+    model_card: bool,
+    /// When a click outside last closed the model card.
+    model_card_closed: Option<std::time::Instant>,
+    /// The composer has wrapped: the text on its own full-width row,
+    /// the controls under it, until the text fits the slim row again.
+    composer_stacked: bool,
+    /// The text's width in the slim row, the measure for going back.
+    composer_inline_width: gpui_kit::Pixels,
+    /// A memory being edited in the popover, and its field.
+    memory_edit: Option<(String, Entity<InputState>)>,
     /// The settings editor (summary + form), its Saved event bubbles
     /// to the workspace, which reloads the bootstrap and applies here.
     settings_panel: Entity<SettingsPanelView>,
@@ -795,6 +814,13 @@ pub struct ChatView {
     /// The rail's open popover: which project (None: Other) and the
     /// height it opened at.
     rail_popover: Option<(Option<i64>, f32)>,
+    /// A mark clicked in an earlier turn: the work side shows that
+    /// turn (a row index inside it) until the next turn starts.
+    work_focus: Option<usize>,
+    /// The card a words mark asked for, scrolled to on the next render.
+    pending_card_scroll: Option<usize>,
+    /// What a clicked mark lit, and when.
+    flash: Option<(crate::chat::panes::Flash, std::time::Instant)>,
     /// The folded work side, opened by hand from its strip.
     work_open: bool,
     /// Where each edit sits in its file, memoized by row (#54).
@@ -814,6 +840,8 @@ pub struct ChatView {
     /// Pending asks in the other open chats of this chat's project,
     /// pushed by the shell every frame.
     project_asks: Vec<status::ProjectAsk>,
+    /// Every other open chat's pending asks (the rail popover's).
+    open_asks: Vec<status::ProjectAsk>,
     /// Ask cards answered from another chat's status column, by wire
     /// call id: the card says where its answer came from.
     answered_from_column: std::collections::HashSet<String>,
@@ -936,7 +964,7 @@ impl ChatView {
         let input = cx.new(|cx| {
             TextareaState::new(window, cx)
                 .placeholder(IDLE_PLACEHOLDER)
-                .auto_grow(1, 6)
+                .auto_grow(1, 8)
         });
         cx.subscribe_in(&input, window, |this, _, event: &InputEvent, window, cx| {
             if let InputEvent::PressEnter {
@@ -1103,7 +1131,6 @@ impl ChatView {
             memory_index,
             memory_enabled,
             memory_store,
-            memory_word: Default::default(),
             mention_cache: Default::default(),
             mention_listing: Default::default(),
             memory_extract_provider,
@@ -1177,6 +1204,14 @@ impl ChatView {
             pending_project: None,
             moving: None,
             panel: Panel::None,
+            memory_popover: false,
+            memory_show_retired: false,
+            memory_popover_closed: None,
+            model_card: false,
+            model_card_closed: None,
+            composer_stacked: false,
+            composer_inline_width: px(0.),
+            memory_edit: None,
             settings_panel,
             // Tail: follow new content while pinned to the bottom, stop
             // when the user scrolls up, resume when they return.
@@ -1215,6 +1250,9 @@ impl ChatView {
             status_collapsed: false,
             call_kinds: Default::default(),
             work_open: false,
+            work_focus: None,
+            pending_card_scroll: None,
+            flash: None,
             rail_popover: None,
             work_scroll: gpui_kit::ScrollHandle::new(),
             change_spans: Default::default(),
@@ -1223,6 +1261,7 @@ impl ChatView {
             first_frame_done: false,
             sidebar_collapsed,
             project_asks: Vec::new(),
+            open_asks: Vec::new(),
             answered_from_column: Default::default(),
         };
         view.reload_session(cx);
@@ -1734,6 +1773,11 @@ impl ChatView {
             .collect()
     }
 
+    /// This chat's session id as memory provenance writes it (tests).
+    pub fn session_id_for_test(&self) -> u64 {
+        self.session_id.map(|id| id.0).unwrap_or_default()
+    }
+
     /// Which right-column panel is open, for tests.
     pub fn panel_for_test(&self) -> &'static str {
         match self.panel {
@@ -1851,6 +1895,8 @@ impl ChatView {
         self.markdown_cache.borrow_mut().clear();
         self.tool_face.borrow_mut().clear();
         self.change_spans.borrow_mut().clear();
+        self.work_focus = None;
+        self.flash = None;
         self.tool_starts.clear();
         // Pending writes' before-content (whole files) belongs to the
         // transcript being replaced.
@@ -1980,6 +2026,8 @@ impl ChatView {
         self.markdown_cache.borrow_mut().clear();
         self.tool_face.borrow_mut().clear();
         self.change_spans.borrow_mut().clear();
+        self.work_focus = None;
+        self.flash = None;
         cx.notify();
     }
 
@@ -2967,6 +3015,13 @@ impl ChatView {
     /// postures, the current one marked). Picking applies from the
     /// next turn on; a running turn keeps the posture it was built
     /// with, and the notice says so when it matters.
+    /// Opens the full memory panel (the popover's "see all").
+    fn open_memory_panel(&mut self, cx: &mut Context<Self>) {
+        self.panel = Panel::Memory;
+        self.refresh_memory_rows();
+        cx.notify();
+    }
+
     fn toggle_memory(&mut self, cx: &mut Context<Self>) {
         self.panel = if self.panel == Panel::Memory {
             Panel::None
@@ -2981,7 +3036,6 @@ impl ChatView {
     /// (a directory read per tier) and always current, so the panel
     /// never shows a stale count after a vote or a dream.
     fn refresh_memory_rows(&mut self) {
-        self.memory_word.replace(None);
         self.memory_rows = self
             .memory_store
             .as_ref()
@@ -3042,230 +3096,6 @@ impl ChatView {
             }
             Err(error) => self.push_notice(format!("memory vote failed: {error}"), cx),
         }
-    }
-
-    /// The memory panel: both tiers, entries as rows with their votes.
-    /// Read-and-vote, not editing: the files stay the editor's surface.
-    /// The header says where the files live, so "what does it remember"
-    /// and "how do I fix it" are both one glance apart.
-    fn render_memory_panel(&self, cx: &Context<Self>) -> AnyElement {
-        let rows: Vec<AnyElement> = match self.memory_rows.is_empty() {
-            true => vec![
-                div()
-                    .text_size(px(12.))
-                    .text_color(cx.theme().muted_foreground)
-                    .child("Nothing remembered yet. Memory fills on settle (a proposal card) or when you ask the model to remember something.")
-                    .into_any_element(),
-            ],
-            false => self
-                .memory_rows
-                .iter()
-                .map(|entry| {
-                    let id = entry.id.clone();
-                    let vote_up = format!("memory-vote-up-{id}");
-                    let vote_down = format!("memory-vote-down-{id}");
-                    let provenance = match (&entry.source_session, &entry.added_at) {
-                        (Some(source), Some(added)) => format!("{source}, {added}"),
-                        (Some(source), None) => source.clone(),
-                        (None, Some(added)) => format!("added {added}"),
-                        (None, None) => String::new(),
-                    };
-                    // The structure line: the replacement chain for a
-                    // superseded entry, then its links, by id.
-                    let mut structure = Vec::new();
-                    let chain = memory_chain(&self.memory_rows, &entry.id);
-                    if !chain.is_empty() {
-                        structure.push(format!("replaced by {}", chain.join(" → ")));
-                    }
-                    for link in &entry.links {
-                        structure.push(format!("{} {}", link.relation.replace('_', " "), link.to));
-                    }
-                    let structure = structure.join(" · ");
-                    let drift = self
-                        .memory_drift
-                        .get(&entry.id)
-                        .map(|changed| format!("evidence changed: {}", changed.join(", ")));
-                    h_flex()
-                        .id(SharedString::from(format!("memory-row-{id}")))
-                        .gap_2()
-                        .px_1()
-                        .py_0p5()
-                        .rounded_sm()
-                        .hover(|style| style.bg(cx.theme().secondary))
-                        .child(
-                            div()
-                                .text_size(px(11.))
-                                .text_color(cx.theme().muted_foreground)
-                                .min_w_10()
-                                .child(entry.id.clone()),
-                        )
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_w_0()
-                                .text_size(px(12.))
-                                .truncate()
-                                .child(entry.text.clone()),
-                        )
-                        .child(
-                            h_flex()
-                                .gap_2()
-                                .child(
-                                    div()
-                                        .id(SharedString::from(vote_up.clone()))
-                                        .cursor_pointer()
-                                        .text_size(px(11.))
-                                        .text_color(cx.theme().muted_foreground)
-                                        .hover(|style| style.text_color(cx.theme().foreground))
-                                        .on_click(cx.listener({
-                                            let id = id.clone();
-                                            move |this, _, _, cx| this.vote_memory(id.clone(), true, cx)
-                                        }))
-                                        .child(format!("▲ {}", entry.helpful))
-                                        .test_support(),
-                                )
-                                .child(
-                                    div()
-                                        .id(SharedString::from(vote_down.clone()))
-                                        .cursor_pointer()
-                                        .text_size(px(11.))
-                                        .text_color(cx.theme().muted_foreground)
-                                        .hover(|style| style.text_color(cx.theme().foreground))
-                                        .on_click(cx.listener({
-                                            let id = id.clone();
-                                            move |this, _, _, cx| this.vote_memory(id.clone(), false, cx)
-                                        }))
-                                        .child(format!("▼ {}", entry.harmful))
-                                        .test_support(),
-                                ),
-                        )
-                        .when(!provenance.is_empty(), |row| {
-                            row.child(
-                                div()
-                                    .text_size(px(10.5))
-                                    .text_color(cx.theme().muted_foreground)
-                                    .child(provenance),
-                            )
-                        })
-                        .when(!entry.recheck.is_empty() && entry.valid_until.is_none(), |row| {
-                            let keep = format!("memory-keep-{id}");
-                            let archive = format!("memory-archive-{id}");
-                            // The walk behind the flag on its own line
-                            // (it can run long), keep and archive under it.
-                            row.child(
-                                v_flex()
-                                    .gap_0p5()
-                                    .text_size(px(10.5))
-                                    .child(
-                                        // The walk behind the flag (#27):
-                                        // which correction, through which
-                                        // edge, so a wrong model-proposed
-                                        // link is auditable.
-                                        div()
-                                            .text_color(cx.theme().warning)
-                                            .child(
-                                                gertie_core::correction_walk(&self.memory_rows, &entry.id)
-                                                    .iter()
-                                                    .map(|step| step.sentence())
-                                                    .collect::<Vec<_>>()
-                                                    .join(" · "),
-                                            ),
-                                    )
-                                    .child(
-                                        h_flex()
-                                            .gap_2()
-                                            .child(
-                                                div()
-                                                    .id(SharedString::from(keep))
-                                                    .cursor_pointer()
-                                                    .text_color(cx.theme().muted_foreground)
-                                                    .hover(|style| style.text_color(cx.theme().foreground))
-                                                    .tooltip(|window, cx| {
-                                                        Tooltip::new("Still holds: clear the flag").build(window, cx)
-                                                    })
-                                                    .on_click(cx.listener({
-                                                        let id = id.clone();
-                                                        move |this, _, _, cx| this.settle_recheck(id.clone(), true, cx)
-                                                    }))
-                                                    .child("keep")
-                                                    .test_support(),
-                                            )
-                                            .child(
-                                                div()
-                                                    .id(SharedString::from(archive))
-                                                    .cursor_pointer()
-                                                    .text_color(cx.theme().muted_foreground)
-                                                    .hover(|style| style.text_color(cx.theme().foreground))
-                                                    .tooltip(|window, cx| {
-                                                        Tooltip::new("No longer holds: archive it").build(window, cx)
-                                                    })
-                                                    .on_click(cx.listener({
-                                                        let id = id.clone();
-                                                        move |this, _, _, cx| this.settle_recheck(id.clone(), false, cx)
-                                                    }))
-                                                    .child("archive")
-                                                    .test_support(),
-                                            ),
-                                    ),
-                            )
-                        })
-                        .when_some(drift, |row, drift| {
-                            row.child(
-                                div()
-                                    .id(SharedString::from(format!("memory-drift-{id}")))
-                                    .text_size(px(10.5))
-                                    .text_color(cx.theme().warning)
-                                    .child(drift)
-                                    .test_support(),
-                            )
-                        })
-                        .when(!structure.is_empty(), |row| {
-                            row.child(
-                                div()
-                                    .id(SharedString::from(format!("memory-structure-{id}")))
-                                    .text_size(px(10.5))
-                                    .text_color(cx.theme().muted_foreground)
-                                    .child(structure)
-                                    .test_support(),
-                            )
-                        })
-                        .into_any_element()
-                })
-                .collect(),
-        };
-        let count = self.memory_rows.len();
-        let project = self
-            .memory_store
-            .as_ref()
-            .map(|store| store.root(gertie_core::Tier::Project).display().to_string());
-        // The settings panel's sizing exactly: the right column's
-        // sibling slot gives flex children nothing unless they size
-        // themselves; without the width the panel mounts invisible
-        // (the vote-row test proved it).
-        div()
-            .id("memory-panel")
-            .w(px(300.))
-            .h_full()
-            .flex_shrink_0()
-            .border_l_1()
-            .border_color(cx.theme().border)
-            .pt_3()
-            .px_3()
-            .pb_3()
-            .gap_1()
-            .overflow_y_scroll()
-            .child(
-                div()
-                    .text_size(px(12.))
-                    .text_color(cx.theme().muted_foreground)
-                    .pb_2()
-                    .child(format!(
-                        "memory ({count}) · {} · editing is the files' job",
-                        project.as_deref().unwrap_or("no memory store")
-                    )),
-            )
-            .children(rows)
-            .into_any_element()
     }
 
     /// Puts a sidebar row into rename mode, prefilled with its title.
@@ -5655,7 +5485,7 @@ impl ChatView {
     /// file count: an existing store with a blank word reads as
     /// "memory does not exist", and the word is the door to the panel
     /// either way. Truly empty stores show nothing (a memoryless
-    /// session pays zero attention). Cached, see `memory_word`.
+    /// session pays zero attention). Cached.
     /// The @-mention matches for the composer's text, memoized on the
     /// text and the root (see `mention_cache`), filtered from a listing
     /// at most [`MENTION_LISTING_FRESH`] old, so a file created while
@@ -5693,144 +5523,6 @@ impl ChatView {
             matches.clone(),
         )));
         matches
-    }
-
-    fn memory_word(&self) -> Option<String> {
-        let store = self.memory_store.as_ref()?;
-        let fingerprint = store.fingerprint();
-        if let Some((seen, word)) = self.memory_word.borrow().as_ref()
-            && *seen == fingerprint
-        {
-            return word.clone();
-        }
-        let entries = store.scan().len();
-        let files = store.topic_file_count();
-        let word = if entries > 0 {
-            Some(format!("memory {entries}"))
-        } else if files > 0 {
-            Some(format!(
-                "memory ({} file{})",
-                files,
-                if files == 1 { "" } else { "s" }
-            ))
-        } else {
-            None
-        };
-        self.memory_word.replace(Some((fingerprint, word.clone())));
-        word
-    }
-
-    fn render_token_footer(&self, cx: &Context<Self>) -> AnyElement {
-        let pal = crate::ink::palette(cx);
-        // The posture (#54): four dots, the current one filled, and
-        // its meaning in words. Click opens the mode menu; full access
-        // keeps its confirm card and reads in vermilion.
-        let mode_text = mode_tooltip(self.mode);
-        let position = match self.mode {
-            PermissionMode::Supervised => 0,
-            PermissionMode::AcceptEdits => 1,
-            PermissionMode::Auto => 2,
-            PermissionMode::FullAccess => 3,
-        };
-        let full = self.mode == PermissionMode::FullAccess;
-        let mode = h_flex()
-            .id("mode-chip")
-            .relative()
-            .gap_1()
-            .items_center()
-            .cursor_pointer()
-            .text_size(px(12.))
-            .text_color(if full { pal.vermilion } else { pal.text_muted })
-            .hover(|style| style.text_color(pal.text))
-            .tooltip(move |window, cx| Tooltip::new(mode_text).build(window, cx))
-            .on_click(cx.listener(|this, _, _, cx| this.cycle_mode(cx)))
-            .children((0..4).map(|dot| {
-                let filled = dot == position;
-                div()
-                    .size(px(8.))
-                    .rounded_full()
-                    .when(filled, |dot| {
-                        dot.bg(if full { pal.vermilion } else { pal.text })
-                    })
-                    .when(!filled, |dot| dot.border_1().border_color(pal.text_muted))
-            }))
-            .child(div().ml_1().child(posture_words(self.mode)))
-            // Observed so the test harness can click the word; a
-            // no-op outside test-support builds.
-            .test_support()
-            .children(self.mode_menu.then(|| self.render_mode_menu(cx)));
-        // The memory word: how much this workspace remembers, the door
-        // to the panel. Empty stores show nothing.
-        let memory = self.memory_word().map(|label| {
-            let tooltip =
-                "memory: what gertie recalls in this repo and for you; click to read and vote.";
-            div()
-                .id("memory-chip")
-                .cursor_pointer()
-                .text_size(px(12.))
-                .text_color(pal.text_muted)
-                .hover(|style| style.text_color(pal.text))
-                .tooltip(move |window, cx| Tooltip::new(tooltip).build(window, cx))
-                .on_click(cx.listener(|this, _, _, cx| this.toggle_memory(cx)))
-                .child(label)
-                .test_support()
-        });
-        // Room to think: the context left before compaction, as a bar.
-        // Low room reads in vermilion. The exact numbers are the
-        // tooltip's.
-        let room = self
-            .context_window
-            .filter(|_| self.context_used > 0)
-            .map(|window| {
-                let used = self.context_used.min(window) * 100 / window.max(1);
-                let left = 100 - used;
-                let tight = used >= 75;
-                let detail = self.footer_parts().join("  ·  ");
-                h_flex()
-                    .id("room-to-think")
-                    .gap_2()
-                    .items_center()
-                    .text_size(px(12.))
-                    .text_color(if tight { pal.vermilion } else { pal.text_muted })
-                    .tooltip(move |window, cx| Tooltip::new(detail.clone()).build(window, cx))
-                    .child("room to think")
-                    .child(
-                        div()
-                            .w(px(72.))
-                            .h(px(3.))
-                            .rounded_full()
-                            .bg(pal.line)
-                            .child(
-                                div()
-                                    .h_full()
-                                    .rounded_full()
-                                    .w(relative(left as f32 / 100.))
-                                    .bg(if tight { pal.vermilion } else { pal.text }),
-                            ),
-                    )
-                    .child(format!("{left}%"))
-            });
-        let ident = div()
-            .text_size(px(12.))
-            .truncate()
-            .text_color(pal.text_muted)
-            .child(self.endpoint_label.clone());
-        reading_column(
-            h_flex()
-                .w_full()
-                .gap_4()
-                .items_center()
-                .pl(px(48. + 22.))
-                .pr(px(56.))
-                .pb_3()
-                .font_family(crate::ink::SANS)
-                .child(mode)
-                .children(memory)
-                .children(room)
-                .child(div().flex_1())
-                .child(ident)
-                .into_any_element(),
-        )
     }
 
     /// The palette, floating over the whole chat: a backdrop that
@@ -7043,7 +6735,7 @@ impl Render for ChatView {
                                         )
                                     })
                                     .child(self.render_composer_area(cx))
-                                    .child(self.render_token_footer(cx)),
+
                             ),
                     )
                     // The work side (#54), the pane or its strip, and

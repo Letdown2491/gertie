@@ -806,14 +806,13 @@ impl Render for WorkspaceView {
             })
             .collect();
         let view = self.tabs[self.active].view.clone();
-        // The status column's WAITING ON YOU: pending asks in the other
-        // open chats of the shown chat's project (issue #33). The shown
-        // view's list answers which project each chat is in, its
-        // sidebar is where moves happen. No project, no reach: an
-        // unfiled chat shows only its own asks, in its transcript.
-        let asks = {
+        // Pending asks in the other open chats (issue #33): all of
+        // them for the rail popover, where a question is answered in
+        // place; those of the shown chat's project for its rail mark.
+        // The shown view's list answers which project each chat is in.
+        let (asks, open_asks) = {
             let shown = view.read(cx);
-            let others = self
+            let others: Vec<(Option<i64>, Vec<crate::chat::status::ProjectAsk>)> = self
                 .tabs
                 .iter()
                 .filter(|tab| tab.view != view)
@@ -821,13 +820,19 @@ impl Render for WorkspaceView {
                     let other = tab.view.read(cx);
                     let id = other.session_id()?;
                     Some((shown.project_of(id), other.pending_asks()))
-                });
-            crate::chat::status::project_asks_for(shown.project_id(), others)
+                })
+                .collect();
+            let open: Vec<_> = others.iter().flat_map(|(_, asks)| asks.clone()).collect();
+            (
+                crate::chat::status::project_asks_for(shown.project_id(), others),
+                open,
+            )
         };
         let switched = self.shown != Some(view.entity_id());
         self.shown = Some(view.entity_id());
         view.update(cx, |chat, cx| {
             chat.set_project_asks(asks);
+            chat.set_open_asks(open_asks);
             chat.set_session_marks(marks);
             if switched {
                 chat.refresh_sessions(cx);

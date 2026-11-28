@@ -141,9 +141,9 @@ api_key_env = "MY_API_KEY"
 # in this repo, plus a global tier in the data dir); the tools
 # (memory, search_memory) are always available. Extraction turns
 # settled or compacted sessions into proposed entries, shown as a
-# review card you approve or deny. On by default (the read path
-# costs nothing until the store has entries); the token footer's
-# cached-% is the scoreboard.
+# seal in the conversation you keep or let go. On by default (the read
+# path costs nothing until the store has entries); the cached share in
+# the model's card (click the model in the composer) is the scoreboard.
 #[memory]
 #enabled = true
 ## The frozen index's token budget (roughly, chars/4).

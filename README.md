@@ -4,7 +4,7 @@ A fast, native coding-agent harness. GPU-rendered UI, a headless core that is a 
 library, and everything local: sessions in SQLite, zero telemetry, no accounts.
 
 <p align="center">
-  <img src="assets/gertie-shot.png" alt="Gertie: a chat with the status column showing the session's working state, memory actions, and touched files" width="960">
+  <img src="assets/gertie-shot.png" alt="Gertie: two panes, the conversation on the left and the work it caused on the right, with Gertie's face on the seam between them" width="960">
 </p>
 
 ```
@@ -51,12 +51,16 @@ fronts, nothing shared over the network.
   starts a chat in its own `git worktree`, so two agents can edit the
   same repo without colliding. Stop ends a running turn and cancels the model's
   request, so a stopped reply stops costing output tokens.
-- **Two panes, one face**: paper for words, ink for work. Gertie's reasoning reads in
-  a serif on the left, numbered where it caused work; the work it caused (edit cards
-  with their diffs, checks with their counts, the checkpoints) sits on the right under
-  a one-sentence summary. Gertie's face sits on the seam and shows where the turn is:
-  curious, focused, checking, waiting on you, settled, stuck. Memory it relied on
-  shows as a seal note, and what it wants to remember is a seal you keep or let go.
+- **Two panes, one face**: paper for words, ink for work, each half the window.
+  Gertie's reasoning reads in a serif on the left, numbered where it caused work (click
+  a number to jump to its card, and back); the work it caused (edit cards with their
+  diffs, checks with their counts, the checkpoints) sits on the right, newest first,
+  under a one-sentence summary. Gertie's face sits on the seam and says where the turn
+  is: reading, working, checking, waiting on you, done, check failed. Memory it relied
+  on shows as a seal note, and what it wants to remember is a seal you keep or let go.
+  The composer holds the permission level, this chat's memory and the model, with the
+  room left to think as a ring beside the model; it stays one slim line until your
+  prompt wraps, then gives the text the full width.
 - **Any endpoint**: speaks the OpenAI-compatible wire (ppq.ai, OpenRouter, Ollama,
   vLLM, Gemini's compat endpoint) plus a native Anthropic adapter. Fallback chains: when
   an endpoint dies before producing content, the next one takes over invisibly.
@@ -154,13 +158,14 @@ version of this whole list.
 
 ## Status
 
-**1.3.0**: the status column — the open session's working state beside the transcript
-(WORKING ON, NEXT UP, REMEMBERED, TOUCHED, DEPENDS ON, asks, corrections) with a riding
-grounding line on the latest turn — plus the memory trust arc: superseded entries ride
-search results pointing at their replacement, the tool path shapes the store exactly like
-the ops path, recall fires on touch, and the repo map gives navigation a ranked view of
-the workspace. Feature-complete against [DESIGN.md](DESIGN.md) (see "The original 'Deferred'
-row" for every decision and its rationale). New to the tool? [The tour](docs/TOUR.md)
+**1.4.1**, with the two-panes redesign (#54) coming in the next release: words and
+work side by side, Gertie's face on the seam, the composer carrying its own controls,
+and memory you can read and correct from the chat. Earlier releases brought the memory
+trust arc (superseded entries point at their replacement, recall fires on touch,
+corrections flag what rested on them), the repo map, the project check before a turn
+ends, and screenshots the agent can look at. Feature-complete against
+[DESIGN.md](DESIGN.md) (see "The original 'Deferred' row" for every decision and its
+rationale). New to the tool? [The tour](docs/TOUR.md)
 walks the whole surface in ten minutes.
 
 ## License

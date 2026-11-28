@@ -4,6 +4,7 @@
 //! whole (issue #16 step 3), the methods it calls stay on ChatView.
 
 use super::*;
+use crate::chat::status::ProjectAsk;
 
 impl ChatView {
     /// Folds the sidebar to its rail (or back), persisted as one
@@ -47,7 +48,12 @@ impl ChatView {
             };
             let current = current_project == project;
             let running = mark_of(SessionMark::Running) || (current && self.streaming);
+            let asking = self
+                .open_asks
+                .iter()
+                .any(|ask| sessions.iter().any(|summary| summary.id == ask.session));
             let needs_you = mark_of(SessionMark::Limited)
+                || asking
                 || (current && (self.waiting_on_human() || !self.project_asks.is_empty()));
             let unseen = mark_of(SessionMark::Unseen);
             let letters: String = name
@@ -241,65 +247,84 @@ impl ChatView {
             .collect();
         const SHOWN: usize = 12;
         let more = chats.len().saturating_sub(SHOWN);
-        let rows = chats.iter().take(SHOWN).map(|summary| {
-            let session_id = summary.id;
-            let stored_root = summary.workspace_root.clone();
-            let mark = self.session_marks.get(&session_id).copied();
-            let active = self.session_id == Some(session_id);
-            let running = mark == Some(SessionMark::Running) || (active && self.streaming);
-            let needs_you =
-                mark == Some(SessionMark::Limited) || (active && self.waiting_on_human());
-            let unseen = mark == Some(SessionMark::Unseen);
-            let state = div()
-                .size(px(8.))
-                .flex_shrink_0()
-                .rounded_full()
-                .map(|dot| {
-                    if needs_you {
-                        dot.bg(pal.vermilion)
-                    } else if running {
-                        dot.border_1().border_color(pal.text)
-                    } else if unseen {
-                        dot.bg(pal.text_muted)
-                    } else {
-                        dot
-                    }
-                });
-            h_flex()
-                .id(SharedString::from(format!("rail-chat-{}", session_id.0)))
-                .test_support()
-                .gap_2()
-                .items_center()
-                .px_2()
-                .py_1p5()
-                .rounded(px(8.))
-                .cursor_pointer()
-                .when(active, |row| row.bg(pal.paper_raised))
-                .hover(|row| row.bg(pal.paper_raised))
-                .child(state)
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .truncate()
-                        .font_family(crate::ink::SERIF)
-                        .text_size(px(14.))
-                        .text_color(pal.text)
-                        .child(summary.title.clone()),
-                )
-                .children(summary.idle_secs.map(|secs| {
-                    div()
-                        .flex_shrink_0()
-                        .font_family(crate::ink::SANS)
-                        .text_size(px(11.5))
-                        .text_color(pal.text_muted)
-                        .child(age_words(secs))
-                }))
-                .on_click(cx.listener(move |this, _, window, cx| {
-                    this.rail_popover = None;
-                    this.open_chat(session_id, stored_root.clone(), window, cx);
-                }))
-        });
+        let rows = chats
+            .iter()
+            .take(SHOWN)
+            .map(|summary| {
+                let session_id = summary.id;
+                let stored_root = summary.workspace_root.clone();
+                let mark = self.session_marks.get(&session_id).copied();
+                let active = self.session_id == Some(session_id);
+                let running = mark == Some(SessionMark::Running) || (active && self.streaming);
+                let asks: Vec<&ProjectAsk> = self
+                    .open_asks
+                    .iter()
+                    .filter(|ask| ask.session == session_id)
+                    .collect();
+                let needs_you = mark == Some(SessionMark::Limited)
+                    || !asks.is_empty()
+                    || (active && self.waiting_on_human());
+                let unseen = mark == Some(SessionMark::Unseen);
+                let state = div()
+                    .size(px(8.))
+                    .flex_shrink_0()
+                    .rounded_full()
+                    .map(|dot| {
+                        if needs_you {
+                            dot.bg(pal.vermilion)
+                        } else if running {
+                            dot.border_1().border_color(pal.text)
+                        } else if unseen {
+                            dot.bg(pal.text_muted)
+                        } else {
+                            dot
+                        }
+                    });
+                let row = h_flex()
+                    .id(SharedString::from(format!("rail-chat-{}", session_id.0)))
+                    .test_support()
+                    .gap_2()
+                    .items_center()
+                    .px_2()
+                    .py_1p5()
+                    .rounded(px(8.))
+                    .cursor_pointer()
+                    .when(active, |row| row.bg(pal.paper_raised))
+                    .hover(|row| row.bg(pal.paper_raised))
+                    .child(state)
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .font_family(crate::ink::SERIF)
+                            .text_size(px(14.))
+                            .text_color(pal.text)
+                            .child(summary.title.clone()),
+                    )
+                    .children(summary.idle_secs.map(|secs| {
+                        div()
+                            .flex_shrink_0()
+                            .font_family(crate::ink::SANS)
+                            .text_size(px(11.5))
+                            .text_color(pal.text_muted)
+                            .child(age_words(secs))
+                    }))
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.rail_popover = None;
+                        this.open_chat(session_id, stored_root.clone(), window, cx);
+                    }));
+                // A waiting chat's asks under its row: a question answers
+                // in place, through the owning chat's own card (the record
+                // is the one a click there makes); an approval only says
+                // what it wants, it is given in its own chat.
+                let asks: Vec<AnyElement> = asks
+                    .into_iter()
+                    .map(|ask| self.render_rail_ask(ask, cx))
+                    .collect();
+                v_flex().child(row).children(asks)
+            })
+            .collect::<Vec<_>>();
         let top = (y - 28.).max(8.);
         let panel = v_flex()
             .id("rail-popover")
@@ -410,6 +435,94 @@ impl ChatView {
             .with_priority(2)
             .into_any_element(),
         )
+    }
+
+    /// One waiting ask under its chat's row in the rail popover.
+    fn render_rail_ask(&self, ask: &ProjectAsk, cx: &mut Context<Self>) -> AnyElement {
+        let pal = crate::ink::palette(cx);
+        let who = if ask.worker { "a worker asks" } else { "asks" };
+        let words = v_flex()
+            .gap_0p5()
+            .child(
+                div()
+                    .font_family(crate::ink::SANS)
+                    .text_size(px(11.))
+                    .text_color(pal.vermilion)
+                    .child(if ask.is_question() {
+                        who
+                    } else {
+                        "wants your OK"
+                    }),
+            )
+            .child(
+                div()
+                    .font_family(crate::ink::SERIF)
+                    .text_size(px(13.5))
+                    .line_height(gpui_kit::relative(1.4))
+                    .text_color(pal.text)
+                    .child(ask.question.clone()),
+            );
+        let body = if ask.is_question() {
+            let options = ask.options.iter().enumerate().map(|(index, option)| {
+                let (session, id, answer) = (ask.session, ask.ask, option.clone());
+                div()
+                    .id(SharedString::from(format!(
+                        "rail-answer-{}-{index}",
+                        ask.ask
+                    )))
+                    .test_support()
+                    .px_2p5()
+                    .py(px(3.))
+                    .rounded_full()
+                    .border_1()
+                    .border_color(pal.control)
+                    .cursor_pointer()
+                    .font_family(crate::ink::SANS)
+                    .text_size(px(12.))
+                    .text_color(pal.text)
+                    .hover(|style| style.bg(pal.paper_raised))
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        cx.stop_propagation();
+                        if let Some(shell) = this.shell_ask.clone() {
+                            shell(
+                                ShellRequest::AnswerAsk {
+                                    session,
+                                    ask: id,
+                                    answer: answer.clone(),
+                                },
+                                window,
+                                cx,
+                            );
+                        }
+                        cx.notify();
+                    }))
+                    .child(option.clone())
+            });
+            words
+                .child(h_flex().pt_1().gap_1p5().flex_wrap().children(options))
+                .into_any_element()
+        } else {
+            words
+                .child(
+                    div()
+                        .font_family(crate::ink::SANS)
+                        .text_size(px(11.5))
+                        .text_color(pal.text_muted)
+                        .child("open the chat to approve or deny"),
+                )
+                .into_any_element()
+        };
+        div()
+            .id(SharedString::from(format!("rail-ask-{}", ask.ask)))
+            .test_support()
+            .ml(px(26.))
+            .mr_2()
+            .mb_1p5()
+            .pl_2p5()
+            .border_l_2()
+            .border_color(pal.vermilion)
+            .child(body)
+            .into_any_element()
     }
 
     /// The sidebar column, whole: sessions scroll, the utility

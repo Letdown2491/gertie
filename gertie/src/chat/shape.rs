@@ -61,9 +61,9 @@ impl Stage {
     pub fn verb(self) -> &'static str {
         match self {
             Stage::None => "thinking",
-            Stage::Understand => "understanding",
-            Stage::Change => "changing",
-            Stage::Verify => "verifying",
+            Stage::Understand => "reading",
+            Stage::Change => "working",
+            Stage::Verify => "checking",
         }
     }
 

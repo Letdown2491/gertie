@@ -121,31 +121,47 @@ impl ChatView {
             }
         };
         // The thread marks (#54): an assistant paragraph carries the
-        // numbers of the work it announced, matching the work side.
+        // numbers of the work it announced, links to the work side's
+        // cards; a card's mark lights the paragraph for a moment.
         let inner = match &self.turns[index] {
             Turn::Message {
                 role: Role::Assistant,
                 ..
             } => {
                 let marks = self.marks_after(index);
-                if marks.is_empty() {
+                let flashing = self.paragraph_flashing(index);
+                if marks.is_empty() && !flashing {
                     inner
                 } else {
                     let pal = crate::ink::palette(cx);
-                    v_flex()
+                    let (start, end) = self.span_around(index);
+                    let shape = self.shape_of(start, end);
+                    let links: Vec<AnyElement> = marks
+                        .into_iter()
+                        .filter_map(|(number, live)| {
+                            let call = shape.group(number).first()?.index;
+                            Some(self.mark_link(number, live, false, call, "words", cx))
+                        })
+                        .collect();
+                    // The marks hang in the left margin beside the
+                    // paragraph's first line: no line of their own.
+                    div()
                         .w_full()
+                        .relative()
+                        .when(flashing, |paragraph| {
+                            paragraph.pl_3().border_l_2().border_color(pal.vermilion)
+                        })
                         .child(inner)
-                        .child(h_flex().gap_1p5().pb_2().children(marks.into_iter().map(
-                            |(number, live)| {
-                                super::panes::live_mark(
-                                    number,
-                                    live,
-                                    false,
-                                    pal,
-                                    &format!("words-{index}"),
-                                )
-                            },
-                        )))
+                        .when(!links.is_empty(), |paragraph| {
+                            paragraph.child(
+                                v_flex()
+                                    .absolute()
+                                    .top(px(6.))
+                                    .left(px(if flashing { -46. } else { -34. }))
+                                    .gap_1()
+                                    .children(links),
+                            )
+                        })
                         .into_any_element()
                 }
             }
@@ -502,14 +518,14 @@ impl ChatView {
                             }),
                     )
                 })
-                // Provenance: the answer came from another chat's
-                // status column (issue #33), not a click here.
+                // Provenance: the answer came from another chat
+                // (issue #33), not a click here.
                 .when(self.answered_from_column.contains(&call.id), |row| {
                     row.child(
                         div()
                             .text_size(px(11.))
                             .text_color(cx.theme().muted_foreground)
-                            .child("answered from the status column"),
+                            .child("answered from another chat"),
                     )
                 }),
         );

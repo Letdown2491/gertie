@@ -5,33 +5,38 @@ you open a new chat.
 
 ## What you'll see
 
-- A **`memory N`** word in the footer when Gertie holds facts about this project. Click
-  it (or run "memory" from the palette) to see everything it remembers and vote on each
-  entry: ▲ when a memory helped, ▼ when it misled. Your votes decide what gets kept.
-- A **proposal card** when you settle a session (✓): the same approve/deny card tool
-  calls get, listing the facts worth keeping from that conversation. Approve to keep
-  them, deny to skip them; either way it never asks about that session again. Short
-  sessions and hello-world chats don't produce cards.
+- A **memory** button in the composer, with a count of what this chat used and learned.
+  Click it for those entries, each with **keep** (it's still true), **edit** and
+  **forget**. **See all** at its foot (or "memory" from the palette) opens everything
+  Gertie remembers here, grouped by topic: each entry says where it came from and what
+  you've marked, and offers **still true**, **wrong**, **edit** and **forget**. Your marks
+  decide what gets kept.
+- A **seal** in the conversation when you settle a session (✓), listing the facts worth
+  keeping from it: **keep** them, **edit** (keeps them and opens the panel to change
+  them), or **let it go**. Either way it never asks about that session again. Short
+  sessions and hello-world chats don't produce one.
+- A **seal note** when the work relied on a memory, naming it; when a file it cites has
+  changed, the note asks **still true** or **revise**.
 - A **weekly cleanup**: the first launch of each week merges duplicate memories and
-  archives ones you voted down. It writes a changelog you can read, and since memory
+  archives ones you marked wrong. It writes a changelog you can read, and since memory
   is plain markdown tracked by git, a bad cleanup is one `git checkout` away from
   undone.
 
 That's the whole interaction. Nothing enters memory without your approval, and turning
-it off is one switch in the settings panel.
+it off is one switch in Settings.
 
 ## The two knobs
 
-The settings panel has a Memory card: a switch for memory itself and a switch for
+Settings has a Memory section: a switch for memory itself and a switch for
 the weekly cleanup. Like every setting there, a switch saves the moment you flip it.
 One thing stays in `config.toml` on purpose: `extract_endpoint` (which model makes
-the proposals). Proposals only ever apply through the review inbox: nothing is
+the proposals). Proposals only ever apply through your answer on the seal: nothing is
 remembered without asking. Documented in `config.example.toml`.
 
 ## If something's remembered wrong
 
-Open the memory panel, vote it down, done; entries the human keeps voting harmful get
-archived automatically. Or edit the files directly, they're plain markdown at
+Open the memory panel and mark it **wrong**, or **forget** it outright; entries marked
+wrong often enough get archived by the weekly cleanup. Or edit the files directly, they're plain markdown at
 `.gertie/memory/` (facts about this repo, committable) and
 `~/.local/share/gertie/memory/` (facts about you, all projects). Every entry traces
 back to the session that produced it, so a wrong memory shows its receipt.
@@ -70,8 +75,8 @@ An entry is one line, with its markers in brackets at the end:
   entry retired with nothing to replace it says only `[valid until: ...]`.
 
 Because these live in the file, they travel with the repo and survive a rebuilt
-database. The memory panel shows each superseded entry's chain ("replaced by p31 →
-p40") and each entry's links. Edit them by hand like anything else in the file.
+database. The memory panel shows what replaced an entry and what each entry links to, in the
+other entries' own words; replaced and forgotten entries fold into a section at its end. Edit them by hand like anything else in the file.
 
 ## When the agent touches a file
 
@@ -97,22 +102,22 @@ is superseded (the old entry retired, a new one replacing it) instead of rewritt
 Gertie writes the entry's line itself, so any model produces valid entries. If you
 deny an action and say why ("no, we use tabs here"), that correction becomes a
 memory proposal at session end, even in a short session, labeled as a correction on
-the review card.
+the seal.
 
 ## When the code moves out from under a memory
 
 If a file an entry cites has changed since the entry was written, or is gone, the
 entry is marked **evidence changed**: in the memory panel, in the index the model
 sees, and in its search results, where the model is told to re-check before relying
-on it. Nothing else happens on its own. The entry keeps its place and its votes; you
-decide whether it still holds (vote, edit, or supersede it). Put the file back and
+on it. Nothing else happens on its own. The entry keeps its place and its marks, listed under **Needs a look** in the panel; you
+decide whether it still holds (mark it still true, edit, or forget it). Put the file back and
 the mark goes away.
 
 ## When a memory is corrected
 
 Superseding an entry also flags the entries that rested on it: ones linked to it with
 `builds_on` or `solves`, and ones from the same session. They gain `[recheck: p12]`
-and show "p12 was corrected" in the memory panel, with two buttons: **keep** (it still
-holds; the flag goes) and **archive** (it doesn't). For anything else, edit the line.
+and show under **Needs a look** in the memory panel, saying what was corrected, with two
+buttons: **still holds** (the flag goes) and **forget it** (it doesn't). For anything else, edit the line.
 Nothing changes on its own, and the model sees the flag too. The walk goes one step
 back only: correcting a flagged entry flags its own dependents, not the whole chain.

@@ -894,53 +894,65 @@ fn a_new_query_resets_the_popup_walk() {
 }
 
 #[test]
-fn the_memory_footer_word_shows_the_count_and_opens_the_panel() {
+fn the_memory_button_shows_this_chats_memory_and_forgets_on_request() {
     let (mut fixture, dir) = fixture_with_memory();
-
-    // An empty store: the word hides, memoryless sessions pay zero
-    // attention (the zero-cost design, visible).
     fixture.act(|window, cx| {
         window.input("hello", cx);
         window.press("enter", cx);
     });
-    let mut found = false;
+    // Nothing remembered yet: the button is there, its popover says so.
+    fixture.act(|window, cx| window.click("memory-chip", cx));
     fixture.act(|window, _| {
-        found = window.try_find("memory-chip").is_some();
+        assert!(
+            window.try_find("memory-popover").is_some(),
+            "the popover opens"
+        );
+        assert!(window.try_find("memory-pop-p1").is_none(), "with no rows");
     });
-    assert!(!found, "empty store hides the word");
+    fixture.act(|window, cx| window.click("memory-chip", cx));
 
-    // One remembered entry: the word appears with the count, and a
-    // click opens the memory panel.
+    // An entry this chat learned (its provenance is this session) is
+    // listed, with keep, edit and forget.
     std::fs::create_dir_all(dir.path().join("project")).expect("tier root");
+    let session = fixture.cx.update(|cx| {
+        fixture
+            .view
+            .upgrade()
+            .expect("view alive")
+            .read(cx)
+            .session_id_for_test()
+    });
     std::fs::write(
         dir.path().join("project").join("gotchas.md"),
-        "# Gotchas\n\n- [p1] helpful=0 harmful=0 the flake hides in teardown [source: 9; added: 2026-10-31]\n",
+        format!(
+            "# Gotchas\n\n- [p1] helpful=0 harmful=0 the flake hides in teardown \
+             [source: {session}; added: 2026-10-31]\n"
+        ),
     )
     .expect("topic file");
+    // A turn reindexes the store, as it does in use.
     fixture.act(|window, cx| {
         window.input("second turn", cx);
         window.press("enter", cx);
     });
-    assert_eq!(
-        fixture.cx.update(|cx| {
-            fixture
-                .view
-                .upgrade()
-                .expect("view alive")
-                .read(cx)
-                .memory_count_for_test()
-        }),
-        1,
-        "the scan sees the entry"
-    );
-    let mut found = false;
+    fixture.act(|window, cx| window.click("memory-chip", cx));
     fixture.act(|window, _| {
-        found = window.try_find("memory-chip").is_some();
+        assert!(
+            window.try_find("memory-pop-p1").is_some(),
+            "learned here, listed"
+        );
+        assert!(window.try_find("memory-keep-p1").is_some(), "keep");
+        assert!(window.try_find("memory-edit-p1").is_some(), "edit");
     });
-    assert!(found, "one entry shows the word");
-    fixture.act(|window, cx| {
-        window.click("memory-chip", cx);
+    fixture.act(|window, cx| window.click("memory-forget-p1", cx));
+    fixture.act(|window, _| {
+        assert!(
+            window.try_find("memory-pop-p1").is_none(),
+            "forgotten, gone"
+        );
     });
+    // See all opens the full panel.
+    fixture.act(|window, cx| window.click("memory-all", cx));
     assert_eq!(
         fixture.cx.update(|cx| fixture
             .view
@@ -949,7 +961,7 @@ fn the_memory_footer_word_shows_the_count_and_opens_the_panel() {
             .read(cx)
             .panel_for_test()),
         "memory",
-        "the click opened the memory panel"
+        "see all opened the memory panel"
     );
 }
 
@@ -969,6 +981,9 @@ fn a_down_vote_alone_lands() {
     });
     fixture.act(|window, cx| {
         window.click("memory-chip", cx);
+    });
+    fixture.act(|window, cx| {
+        window.click("memory-all", cx);
     });
     fixture.act(|window, cx| {
         window.click("memory-vote-down-p1", cx);
@@ -1000,6 +1015,13 @@ fn the_panel_shows_the_replacement_chain_and_links() {
     });
     fixture.act(|window, cx| {
         window.click("memory-chip", cx);
+    });
+    fixture.act(|window, cx| {
+        window.click("memory-all", cx);
+    });
+    // The replaced entry sits in the folded section at the end.
+    fixture.act(|window, cx| {
+        window.click("memory-retired-toggle", cx);
     });
     let mut shown = (false, false, false);
     fixture.act(|window, _| {
@@ -1037,6 +1059,9 @@ fn the_panel_flags_an_entry_whose_evidence_changed() {
     fixture.act(|window, cx| {
         window.click("memory-chip", cx);
     });
+    fixture.act(|window, cx| {
+        window.click("memory-all", cx);
+    });
     let mut shown = (false, false, false);
     fixture.act(|window, _| {
         shown = (
@@ -1071,6 +1096,9 @@ fn the_panel_settles_a_recheck_flag() {
     });
     fixture.act(|window, cx| {
         window.click("memory-chip", cx);
+    });
+    fixture.act(|window, cx| {
+        window.click("memory-all", cx);
     });
     let mut shown = (false, false);
     fixture.act(|window, _| {
@@ -1114,6 +1142,9 @@ fn voting_through_the_panel_writes_the_counters() {
     });
     fixture.act(|window, cx| {
         window.click("memory-chip", cx);
+    });
+    fixture.act(|window, cx| {
+        window.click("memory-all", cx);
     });
 
     let mut vote_btn = false;
@@ -1165,7 +1196,13 @@ fn voting_through_the_panel_writes_the_counters() {
         window.click("memory-chip", cx);
     });
     fixture.act(|window, cx| {
+        window.click("memory-all", cx);
+    });
+    fixture.act(|window, cx| {
         window.click("memory-chip", cx);
+    });
+    fixture.act(|window, cx| {
+        window.click("memory-all", cx);
     });
     fixture.act(|window, cx| {
         window.click("memory-vote-down-p1", cx);
@@ -2331,6 +2368,200 @@ fn the_rail_opens_a_projects_chats_and_one_click_opens_a_chat() {
         shown(&mut fixture, &["sidebar-rail", "session-1", "rail-popover"]),
         vec![false, true, false],
         "the popover hands over to the full sidebar"
+    );
+}
+
+/// A question waiting in another open chat shows under its row in the
+/// rail popover and is answered there: the answer goes to the window,
+/// which applies it on the owning chat's own card. An approval only
+/// says what it wants; it is given in its own chat.
+#[test]
+fn a_waiting_question_is_answered_from_the_rail() {
+    let (store, id) = project_store();
+    store
+        .set_store_flag("sidebar_expanded", false)
+        .expect("rail");
+    let mut fixture = fixture_with_store(store.clone());
+    let sent: Arc<std::sync::Mutex<Vec<(u64, u64, String)>>> = Default::default();
+    let seen = sent.clone();
+    fixture.cx.update(|cx| {
+        fixture
+            .view
+            .upgrade()
+            .expect("view alive")
+            .update(cx, |chat, _| {
+                chat.set_shell_ask(Arc::new(move |request, _, _| {
+                    if let gertie::chat::ShellRequest::AnswerAsk {
+                        session,
+                        ask,
+                        answer,
+                    } = request
+                    {
+                        seen.lock().unwrap().push((session.0, ask, answer));
+                    }
+                }));
+                chat.set_open_asks(vec![
+                    gertie::chat::status::ProjectAsk {
+                        session: gertie_core::SessionId(1),
+                        session_title: "one".into(),
+                        ask: 7,
+                        question: "Which database?".into(),
+                        options: vec!["postgres".into(), "sqlite".into()],
+                        worker: false,
+                    },
+                    gertie::chat::status::ProjectAsk {
+                        session: gertie_core::SessionId(1),
+                        session_title: "one".into(),
+                        ask: 8,
+                        question: "write out.txt".into(),
+                        options: Vec::new(),
+                        worker: false,
+                    },
+                ]);
+            })
+    });
+    fixture.act(|window, cx| window.click(format!("rail-project-{id}"), cx));
+    assert_eq!(
+        shown(
+            &mut fixture,
+            &[
+                "rail-ask-7",
+                "rail-answer-7-0",
+                "rail-answer-7-1",
+                "rail-ask-8",
+                "rail-answer-8-0"
+            ]
+        ),
+        vec![true, true, true, true, false],
+        "the question offers its answers; the approval offers none"
+    );
+    fixture.act(|window, cx| window.click("rail-answer-7-1", cx));
+    assert_eq!(
+        *sent.lock().unwrap(),
+        vec![(1, 7, "sqlite".to_string())],
+        "the click sends the answer for the owning chat"
+    );
+}
+
+/// The composer is one slim row until its text wraps: then the text
+/// takes a row of its own and the controls drop under it, and it goes
+/// back once the text is cleared.
+#[test]
+fn the_composer_stacks_once_its_text_wraps() {
+    let mut fixture = fixture();
+    let stacked = |fixture: &mut Fixture| {
+        fixture.cx.update(|cx| {
+            fixture
+                .view
+                .upgrade()
+                .expect("view alive")
+                .read(cx)
+                .composer_stacked_for_test()
+        })
+    };
+    // (The headless window's stand-in font leaves the slim row almost
+    // no room, so a few words wrap here; the slim case is the empty one.)
+    assert!(
+        !stacked(&mut fixture),
+        "empty, the composer is one slim row"
+    );
+    assert_eq!(shown(&mut fixture, &["composer-controls"]), vec![false]);
+    fixture.act(|window, cx| window.input("run the tests", cx));
+    fixture.act(|window, cx| window.press("shift-enter", cx));
+    fixture.act(|window, cx| window.input("and then the docs", cx));
+    fixture.act(|_, _| {});
+    fixture.act(|_, _| {});
+    assert!(stacked(&mut fixture), "a second line stacks the composer");
+    assert_eq!(
+        shown(
+            &mut fixture,
+            &["composer-controls", "send-message", "pill-model"]
+        ),
+        vec![true, true, true],
+        "the controls sit on their own row under the text"
+    );
+    fixture.act(|window, cx| window.press("ctrl-a", cx));
+    fixture.act(|window, cx| window.press("backspace", cx));
+    fixture.act(|_, _| {});
+    assert!(!stacked(&mut fixture), "cleared, it is slim again");
+    // A long line with no newline wraps on its own and stacks too.
+    fixture.act(|window, cx| {
+        window.input(
+            "can you look at why the release smoke job never ran on the last tag and \
+             check the tags filter too, then tell me what you changed before you push",
+            cx,
+        )
+    });
+    fixture.act(|_, _| {});
+    fixture.act(|_, _| {});
+    assert!(stacked(&mut fixture), "a wrapped line stacks the composer");
+}
+
+/// The model reads by name alone, with the room to think as a ring; a
+/// click opens the card that draws the figures, and the room reads in
+/// words once it runs tight.
+#[test]
+fn the_model_card_draws_the_room_and_the_spend() {
+    let mut fixture = fixture();
+    fixture.cx.update(|cx| {
+        fixture
+            .view
+            .upgrade()
+            .expect("view alive")
+            .update(cx, |chat, cx| {
+                chat.set_endpoint_label_for_test("ppq · glm-5.3-flash", cx);
+                chat.set_context_for_test(Some(128_000), 54_000, cx);
+            })
+    });
+    assert_eq!(
+        shown(&mut fixture, &["pill-model", "model-card"]),
+        vec![true, false]
+    );
+    fixture.act(|window, cx| window.click("pill-model", cx));
+    assert_eq!(
+        shown(&mut fixture, &["model-card", "model-card-room"]),
+        vec![true, true],
+        "the card opens with the room drawn"
+    );
+    fixture.act(|window, cx| window.click("pill-model", cx));
+    fixture.cx.update(|cx| {
+        fixture
+            .view
+            .upgrade()
+            .expect("view alive")
+            .update(cx, |chat, cx| {
+                chat.set_context_for_test(Some(128_000), 110_000, cx)
+            })
+    });
+    let tight = fixture.cx.update(|cx| {
+        fixture
+            .view
+            .upgrade()
+            .expect("view alive")
+            .read(cx)
+            .model_words_for_test()
+    });
+    assert_eq!(tight, "15% left", "tight, the words say what is left");
+    fixture.cx.update(|cx| {
+        fixture
+            .view
+            .upgrade()
+            .expect("view alive")
+            .update(cx, |chat, cx| {
+                chat.set_context_for_test(Some(128_000), 54_000, cx)
+            })
+    });
+    let name = fixture.cx.update(|cx| {
+        fixture
+            .view
+            .upgrade()
+            .expect("view alive")
+            .read(cx)
+            .model_words_for_test()
+    });
+    assert_eq!(
+        name, "glm-5.3-flash",
+        "the model by name, the provider in the card"
     );
 }
 
@@ -4282,6 +4513,81 @@ fn turn_count_of(fixture: &mut Fixture) -> usize {
 /// waiting on you, and once approved the turn settles into state B:
 /// the work pane stays on what the turn left behind, numbered.
 #[test]
+fn a_mark_links_its_words_and_its_card_both_ways() {
+    let scenarios = tempfile::tempdir().expect("scenario dir");
+    std::fs::write(
+        scenarios.path().join("edits.toml"),
+        "[[steps]]\ntext = 'Writing the file now.'\n\n\
+         [[steps.tool_calls]]\nname = \"write_file\"\n\
+         arguments = '{\"path\": \"out.txt\", \"content\": \"x\"}'\n\n\
+         [[steps]]\ntext = 'Done.'\n",
+    )
+    .expect("scenario file");
+    let workspace = tempfile::tempdir().expect("workspace dir");
+    let endpoint = gertie_providers::Endpoint {
+        name: "replay".into(),
+        base_url: scenarios.path().to_string_lossy().into_owned(),
+        model: "edits".into(),
+        api_key: None,
+        context_window: None,
+        wire: gertie_providers::Wire::Replay,
+        vision: true,
+    };
+    let provider = Arc::new(
+        gertie_providers::AnyProvider::with_endpoints(vec![endpoint]).expect("replay provider"),
+    );
+    let mut fixture = fixture_built(
+        Arc::new(memory_store()),
+        None,
+        Some(workspace.path().to_path_buf()),
+        None,
+        Some(provider),
+        None,
+        Vec::new(),
+        None,
+        None,
+    );
+    fixture.hold = vec![scenarios, workspace];
+    fixture.act(|window, cx| {
+        window.input("go", cx);
+        window.press("enter", cx);
+    });
+    pump(&mut fixture, 30);
+    fixture.act(|window, cx| window.click("approve-2", cx));
+    pump(&mut fixture, 40);
+    fixture.act(|window, _| {
+        assert!(
+            window.try_find("work-pane").is_none(),
+            "narrow and settled: folded"
+        );
+        assert!(
+            window.try_find("mark-words-2-1").is_some(),
+            "the paragraph that announced the write carries its mark"
+        );
+    });
+    // Words to work: the mark opens the work side on its card.
+    fixture.act(|window, cx| window.click("mark-words-2-1", cx));
+    fixture.act(|window, _| {
+        assert!(
+            window.try_find("work-pane").is_some(),
+            "the mark opens the work"
+        );
+        assert!(window.try_find("edit-card-2").is_some(), "on its card");
+    });
+    // Work to words: the card's mark lights the paragraph it came from.
+    fixture.act(|window, cx| window.click("mark-edit-2-1", cx));
+    let lit = fixture.cx.update(|cx| {
+        fixture
+            .view
+            .upgrade()
+            .expect("view alive")
+            .read(cx)
+            .flashing_paragraph_for_test()
+    });
+    assert_eq!(lit, Some(1), "the card leads back to its paragraph");
+}
+
+#[test]
 fn a_pending_write_lives_on_the_work_side_and_the_turn_settles_there() {
     let scenarios = tempfile::tempdir().expect("scenario dir");
     std::fs::write(
@@ -4358,7 +4664,7 @@ fn a_pending_write_lives_on_the_work_side_and_the_turn_settles_there() {
 
     fixture.act(|window, cx| window.click("approve-2", cx));
     pump(&mut fixture, 40);
-    assert_eq!(verb(&mut fixture), "settled");
+    assert_eq!(verb(&mut fixture), "done");
     // Narrow, the settled work folds to the strip; its button opens
     // the turn's work over the words.
     fixture.act(|window, _| {
@@ -5282,7 +5588,7 @@ fn replay_provider(scenario: &str) -> (Arc<gertie_providers::AnyProvider>, tempf
     (provider, scenarios)
 }
 
-/// An ask answered from another chat's status column lands on the
+/// An ask answered from another chat (the rail popover) lands on the
 /// owning card through the card's own path: the tool result is the
 /// option, the turn completes, and the card says where the answer came
 /// from. A permission ask cannot be answered that way.

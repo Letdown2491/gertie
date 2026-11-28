@@ -15,17 +15,29 @@ use gpui_kit::{
 
 /// The header band both panes share; the face sits centered on it.
 pub(crate) const HEADER_HEIGHT: f32 = 150.;
-/// The face's disc on the seam.
-const FACE_DISC: f32 = 132.;
+/// The face's disc on the seam: the face and its ring, no words (the
+/// label under it carries those).
+const FACE_DISC: f32 = 96.;
 /// The face's disc when the work side is folded to its strip.
-const FACE_DISC_SMALL: f32 = 100.;
+const FACE_DISC_SMALL: f32 = 80.;
+/// How long a mark's target stays highlighted after a click.
+const FLASH: std::time::Duration = std::time::Duration::from_millis(1600);
 /// The folded work side.
 pub(crate) const STRIP_WIDTH: f32 = 64.;
-/// The words pane at full width, and the least it yields to.
-const WORDS_WIDTH: f32 = 620.;
-const WORDS_MIN: f32 = 480.;
-/// Under this window width the work side folds to its strip.
-const FOLD_BELOW: f32 = 1100.;
+/// The work overlay's widest, in a narrow window.
+const OVERLAY_MAX: f32 = 620.;
+/// The least the words pane keeps beside the work: below it the work
+/// side opens over the words instead.
+const WORDS_MIN: f32 = 420.;
+
+/// The split: the window halves at the seam, the sidebar and the
+/// words on the left, the work on the right. The words' width, or
+/// `None` when that would leave them under a readable width (the work
+/// side then opens over the words).
+pub(crate) fn words_share(viewport: f32, sidebar: f32) -> Option<f32> {
+    let words = viewport / 2. - sidebar;
+    (words >= WORDS_MIN).then_some(words)
+}
 
 /// Gertie's expression on the seam: the face says what the turn is
 /// doing, the way GERTY's screen does.
@@ -59,6 +71,14 @@ pub struct SeamState {
     pub live: bool,
     pub verb: &'static str,
     pub detail: String,
+}
+
+/// What a clicked mark lights for a moment: a card on the work side,
+/// or a paragraph in the words.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Flash {
+    Card { start: usize, number: usize },
+    Paragraph(usize),
 }
 
 /// A memory proposal seal's three answers.
@@ -240,7 +260,7 @@ fn pill(center_x: f32, center_y: f32, width: f32, height: f32) -> Vec<gpui_kit::
     points
 }
 
-fn round_stroke(width: f32) -> PathBuilder {
+pub(super) fn round_stroke(width: f32) -> PathBuilder {
     PathBuilder::stroke(px(width)).with_style(PathStyle::Stroke(StrokeOptions {
         line_width: width,
         line_cap: LineCap::Round,
@@ -279,26 +299,6 @@ where
             |element, delta| element.opacity(delta),
         )
         .into_any_element()
-}
-
-/// A thread mark that blinks while live (#54).
-pub(crate) fn live_mark(
-    number: usize,
-    live: bool,
-    on_ink: bool,
-    pal: Palette,
-    scope: &str,
-) -> AnyElement {
-    let base = mark(number, live, on_ink, pal);
-    if live {
-        pulsing(
-            base,
-            SharedString::from(format!("mark-{scope}-{number}")),
-            1100,
-        )
-    } else {
-        base.into_any_element()
-    }
 }
 
 /// The face plate's colors, the launcher icon's own.
@@ -374,11 +374,11 @@ fn face(size: f32, seam: &SeamState, pal: Palette) -> impl IntoElement {
                     window.paint_path(path, pal.disc);
                 }
             }
-            // The face plate: the icon's dark screen, a little above
-            // center so the caption fits under it.
-            let plate_w = size * 0.5;
-            let plate_h = size * 0.32;
-            let plate_center = (center.0, center.1 - size * 0.12);
+            // The face plate: the icon's dark screen, centered; the
+            // words live in the label under the disc.
+            let plate_w = size * 0.56;
+            let plate_h = size * 0.4;
+            let plate_center = center;
             let mut plate = PathBuilder::fill();
             plate.add_polygon(
                 &rounded_rect(plate_center.0, plate_center.1, plate_w, plate_h, size * 0.1),
@@ -559,22 +559,128 @@ impl ChatView {
         Shape { items }
     }
 
-    /// The thread marks an assistant paragraph carries: the numbered
-    /// calls between it and the next message, each with whether it is
-    /// still live (running, or waiting on the human).
+    /// The paragraph a call's mark sits on: the last assistant paragraph
+    /// with words before it in its turn, else (the turn went straight
+    /// to tools) the first one after it. Empty replies never carry
+    /// marks, they render nothing.
+    pub(crate) fn mark_anchor(&self, call: usize) -> Option<usize> {
+        let (start, end) = self.span_around(call);
+        let has_words = |index: &usize| {
+            matches!(
+                &self.turns[*index],
+                Turn::Message { role: Role::Assistant, text, .. } if !text.trim().is_empty()
+            )
+        };
+        (start..call)
+            .rev()
+            .find(has_words)
+            .or_else(|| (call + 1..end).find(has_words))
+    }
+
+    /// The marks an assistant paragraph carries: every numbered call in
+    /// its turn anchored to it, each with whether it is still live.
     pub(crate) fn marks_after(&self, index: usize) -> Vec<(usize, bool)> {
         let (start, end) = self.span_around(index);
-        let next_message = self.turns[index + 1..end.max(index + 1)]
-            .iter()
-            .position(|turn| matches!(turn, Turn::Message { .. }))
-            .map(|at| index + 1 + at)
-            .unwrap_or(end);
         let shape = self.shape_of(start, end);
         self.merge_marks(
-            shape
-                .items
-                .iter()
-                .filter(|item| (index + 1..next_message).contains(&item.index)),
+            shape.items.iter().filter(|item| {
+                item.number.is_some() && self.mark_anchor(item.index) == Some(index)
+            }),
+        )
+    }
+
+    /// A clickable mark: in the words it opens the work side on its
+    /// card; on a card it scrolls the words to its paragraph (#54).
+    pub(crate) fn mark_link(
+        &self,
+        number: usize,
+        live: bool,
+        on_ink: bool,
+        call: usize,
+        scope: &str,
+        cx: &Context<Self>,
+    ) -> AnyElement {
+        let pal = ink::palette(cx);
+        let target = if on_ink {
+            "Show the words that led here"
+        } else {
+            "Show this step's work"
+        };
+        let base = mark(number, live, on_ink, pal)
+            .id(SharedString::from(format!("mark-{scope}-{call}-{number}")))
+            .test_support()
+            .cursor_pointer()
+            .hover(|style| style.opacity(0.75))
+            .tooltip(move |window, cx| Tooltip::new(target).build(window, cx))
+            .on_click(cx.listener(move |this, _, _, cx| {
+                cx.stop_propagation();
+                if on_ink {
+                    this.reveal_paragraph(call, cx);
+                } else {
+                    this.reveal_card(call, number, cx);
+                }
+            }));
+        if live {
+            pulsing(
+                base,
+                SharedString::from(format!("blink-{scope}-{call}-{number}")),
+                1100,
+            )
+        } else {
+            base.into_any_element()
+        }
+    }
+
+    /// A words mark was clicked: the work side shows that turn, opens if
+    /// it was folded, scrolls to the card and lights it briefly.
+    pub(crate) fn reveal_card(&mut self, call: usize, number: usize, cx: &mut Context<Self>) {
+        let (start, _) = self.span_around(call);
+        self.work_focus = Some(call);
+        self.work_open = true;
+        self.pending_card_scroll = Some(number);
+        self.flash = Some((Flash::Card { start, number }, std::time::Instant::now()));
+        self.schedule_flash_end(cx);
+        cx.notify();
+    }
+
+    /// A card's mark was clicked: the words scroll to the paragraph
+    /// that announced it, which lights briefly.
+    pub(crate) fn reveal_paragraph(&mut self, call: usize, cx: &mut Context<Self>) {
+        if let Some(anchor) = self.mark_anchor(call) {
+            self.list_state.scroll_to_reveal_item(anchor);
+            self.flash = Some((Flash::Paragraph(anchor), std::time::Instant::now()));
+            self.schedule_flash_end(cx);
+            cx.notify();
+        }
+    }
+
+    fn schedule_flash_end(&self, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(FLASH).await;
+            let _ = this.update(cx, |this, cx| {
+                if this
+                    .flash
+                    .as_ref()
+                    .is_some_and(|(_, at)| at.elapsed() >= FLASH)
+                {
+                    this.flash = None;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// Whether a paragraph is lit by a card's mark.
+    pub(crate) fn paragraph_flashing(&self, index: usize) -> bool {
+        matches!(self.flash, Some((Flash::Paragraph(at), _)) if at == index)
+    }
+
+    /// Whether a card is lit by a words mark.
+    fn card_flashing(&self, start: usize, number: usize) -> bool {
+        matches!(
+            self.flash,
+            Some((Flash::Card { start: at, number: lit }, _)) if at == start && lit == number
         )
     }
 
@@ -618,7 +724,7 @@ impl ChatView {
             .items_center()
             .children(
                 self.mark_of(index)
-                    .map(|number| live_mark(number, true, false, pal, "pointer")),
+                    .map(|number| self.mark_link(number, true, false, index, "pointer", cx)),
             )
             .child(
                 div()
@@ -945,6 +1051,21 @@ impl ChatView {
     /// turn; else the latest turn when it did work; else, opened by
     /// hand from the strip, the most recent turn that did.
     pub(crate) fn work_view(&self) -> Option<WorkView> {
+        // A mark clicked in an earlier turn shows that turn's work.
+        if let Some(focus) = self.work_focus.filter(|_| !self.streaming)
+            && focus < self.turns.len()
+        {
+            let (start, end) = self.span_around(focus);
+            let shape = self.shape_of(start, end);
+            if !shape.chat_only() {
+                return Some(WorkView {
+                    start,
+                    end,
+                    running: false,
+                    shape,
+                });
+            }
+        }
         let (start, end) = self.latest_span();
         let shape = self.shape_of(start, end);
         if self.streaming || !shape.chat_only() {
@@ -978,39 +1099,40 @@ impl ChatView {
         None
     }
 
-    /// How wide the words pane is, given the window: the full 620 on a
-    /// wide window, yielding toward 480 as it narrows; `None` when the
-    /// work side is folded and the words take the room.
+    /// The sidebar's width, the rail or the full list.
+    fn sidebar_width(&self) -> f32 {
+        if self.sidebar_collapsed {
+            super::sidebar::RAIL_WIDTH
+        } else {
+            240.
+        }
+    }
+
+    /// How wide the words pane is: the window splits in half at the
+    /// seam, the sidebar and the words on the left, the work on the
+    /// right, so the words yield what the sidebar takes. `None` when
+    /// the work side is folded (or over the words) and the words take
+    /// the room.
     pub(crate) fn words_width(&self, window: &Window, work_shown: bool) -> Option<f32> {
         if !work_shown {
             return None;
         }
         let viewport: f32 = window.viewport_size().width.into();
-        let sidebar = if self.sidebar_collapsed {
-            super::sidebar::RAIL_WIDTH
-        } else {
-            240.
-        };
-        let avail = viewport - sidebar;
-        Some((avail * 0.46).clamp(WORDS_MIN, WORDS_WIDTH))
+        Some(words_share(viewport, self.sidebar_width()).unwrap_or(WORDS_MIN))
     }
 
     /// The work overlay's width in a narrow window: most of the room
     /// beside the strip, never wider than a full words pane.
     pub(crate) fn overlay_width(&self, window: &Window) -> f32 {
         let viewport: f32 = window.viewport_size().width.into();
-        let sidebar = if self.sidebar_collapsed {
-            super::sidebar::RAIL_WIDTH
-        } else {
-            240.
-        };
-        (viewport - sidebar - STRIP_WIDTH - 24.).clamp(320., WORDS_WIDTH)
+        (viewport - self.sidebar_width() - STRIP_WIDTH - 24.).clamp(320., OVERLAY_MAX)
     }
 
-    /// Whether the window is too narrow for both panes.
+    /// Whether the window is too narrow for both panes: half of it,
+    /// less the sidebar, would leave the words under a readable width.
     pub(crate) fn narrow(&self, window: &Window) -> bool {
         let viewport: f32 = window.viewport_size().width.into();
-        viewport < FOLD_BELOW
+        words_share(viewport, self.sidebar_width()).is_none()
     }
 
     /// The seam's face, ring and caption, from the latest turn.
@@ -1030,14 +1152,16 @@ impl ChatView {
             } else {
                 clock
             };
-            match (clock.is_empty(), steps) {
-                (true, 0) => String::new(),
-                (true, steps) => format!("{steps} step{}", if steps == 1 { "" } else { "s" }),
-                (false, 0) => clock,
-                (false, steps) => format!(
-                    "{clock} · {steps} step{}",
-                    if steps == 1 { "" } else { "s" }
-                ),
+            // Running: the clock. Settled: how many steps it took.
+            let steps_words = match steps {
+                0 => String::new(),
+                1 => "1 step".to_string(),
+                steps => format!("{steps} steps"),
+            };
+            match (self.streaming, clock.is_empty()) {
+                (true, false) => clock,
+                (true, true) => String::new(),
+                (false, _) => steps_words,
             }
         };
         if self.turns.is_empty() {
@@ -1103,29 +1227,67 @@ impl ChatView {
                 detail: clock_words,
             };
         }
-        // Settled: happy, unless the turn ended on a failed check or
-        // an error.
-        let failed_check = shape
-            .items
-            .iter()
-            .rev()
-            .find(|item| item.kind == Kind::Check)
-            .is_some_and(|item| {
-                matches!(
-                    &self.turns[item.index],
-                    Turn::Tool { status: ToolStatus::Done(result), .. } if result_failed(result)
-                )
-            });
+        // Done: happy, unless the turn's checks failed or it errored.
+        // The same verdict the work header states, so they agree.
+        let failed_check = self.check_verdict(&shape) == Some(false);
         let errored = self.turns[start..end].iter().rev().any(|turn| {
             matches!(turn, Turn::Message { role: Role::Assistant, text, .. } if text.contains("[error]"))
         });
-        let sad = failed_check || errored || self.turn_checked == Some(false);
+        let sad = failed_check || errored;
         SeamState {
             mood: if sad { Mood::Sad } else { Mood::Happy },
             fill: 1.,
             live: false,
-            verb: if sad { "stuck" } else { "settled" },
+            verb: if errored {
+                "stopped"
+            } else if failed_check {
+                "check failed"
+            } else {
+                "done"
+            },
             detail: clock_words,
+        }
+    }
+
+    /// Whether a turn's checks passed: Gertie's own check when it ran
+    /// one; else the checks since the last edit, passing if any of them
+    /// passed (a model often tries a variant that cannot work here,
+    /// then the right one); `None` when nothing was checked.
+    pub(crate) fn check_verdict(&self, shape: &shape::Shape) -> Option<bool> {
+        if let Some(passed) = self.turn_checked {
+            return Some(passed);
+        }
+        let last_edit = shape
+            .items
+            .iter()
+            .filter(|item| item.kind == Kind::Edit)
+            .map(|item| item.index)
+            .max()
+            .unwrap_or(0);
+        let mut verdict = None;
+        for item in shape
+            .items
+            .iter()
+            .filter(|item| item.kind == Kind::Check && item.index > last_edit)
+        {
+            if let Some(Turn::Tool {
+                status: ToolStatus::Done(result),
+                ..
+            }) = self.turns.get(item.index)
+            {
+                let failed = result_failed(result)
+                    || test_counts(result).is_some_and(|(_, failed)| failed > 0);
+                verdict = Some(verdict.unwrap_or(false) || !failed);
+            }
+        }
+        verdict
+    }
+
+    /// The paragraph a card's mark lit, if one is lit (tests).
+    pub fn flashing_paragraph_for_test(&self) -> Option<usize> {
+        match self.flash {
+            Some((Flash::Paragraph(index), _)) => Some(index),
+            _ => None,
         }
     }
 
@@ -1134,13 +1296,13 @@ impl ChatView {
         self.seam_state().verb
     }
 
-    /// The face on the seam, with its caption under the plate.
-    fn render_face(&self, size: f32, pal: Palette) -> AnyElement {
-        let seam = self.seam_state();
-        let verb_color = if seam.mood == Mood::Concerned {
-            pal.vermilion
+    /// The face on the seam: the disc, the ring, the face. No words
+    /// inside, they never fit; the label under the disc has them.
+    fn render_face(&self, size: f32, seam: &SeamState, pal: Palette) -> AnyElement {
+        let tip = if seam.detail.is_empty() {
+            seam.verb.to_string()
         } else {
-            pal.text
+            format!("{} · {}", seam.verb, seam.detail)
         };
         div()
             .id("gertie-face")
@@ -1152,13 +1314,14 @@ impl ChatView {
             .border_4()
             .border_color(pal.ink)
             .shadow_lg()
+            .tooltip(move |window, cx| Tooltip::new(tip.clone()).build(window, cx))
             .child(
                 div()
                     .absolute()
                     .top(px(-4.))
                     .left(px(-4.))
                     .size(px(size))
-                    .child(face(size, &seam, pal))
+                    .child(face(size, seam, pal))
                     .when(seam.live && seam.fill > 0.005, |layer| {
                         let (x, y) = ring_head(size, seam.fill);
                         let dot = div()
@@ -1177,116 +1340,78 @@ impl ChatView {
                         layer.child(pulsing(dot, "ring-head", period))
                     }),
             )
+            .into_any_element()
+    }
+
+    /// The label under the disc: the verb, and the clock while a turn
+    /// runs or the step count once it settled. Sized to its words, so
+    /// it may be wider than the disc; it hangs over the header's edge.
+    fn render_seam_label(&self, seam: &SeamState, pal: Palette) -> AnyElement {
+        let asking = seam.mood == Mood::Concerned;
+        h_flex()
+            .id("seam-label")
+            .test_support()
+            .flex_shrink_0()
+            .gap_1p5()
+            .items_baseline()
+            .px_3()
+            .py(px(3.))
+            .rounded_full()
+            .bg(pal.disc)
+            .border_1()
+            .border_color(if asking { pal.vermilion } else { pal.line })
             .child(
-                v_flex()
-                    .absolute()
-                    .left_0()
-                    .right_0()
-                    .top(px(size * 0.56 - 4.))
-                    .items_center()
-                    .child(
-                        div()
-                            .font_family(ink::SERIF)
-                            .text_size(px(if size > 110. { 13.5 } else { 11.5 }))
-                            .text_color(verb_color)
-                            .child(seam.verb),
-                    )
-                    .when(!seam.detail.is_empty() && size > 110., |caption| {
-                        caption.child(
-                            div()
-                                .font_family(ink::SANS)
-                                .text_size(px(9.5))
-                                .text_color(pal.text_muted)
-                                .child(seam.detail.clone()),
-                        )
-                    }),
+                div()
+                    .font_family(ink::SERIF)
+                    .text_size(px(13.5))
+                    .text_color(if asking { pal.vermilion } else { pal.text })
+                    .child(seam.verb),
             )
+            .when(!seam.detail.is_empty(), |label| {
+                label.child(
+                    div()
+                        .font_family(ink::SANS)
+                        .text_size(px(11.))
+                        .text_color(pal.text_muted)
+                        .child(seam.detail.clone()),
+                )
+            })
             .into_any_element()
     }
 
     /// The seam overlay: the face centered on the panes' boundary in
-    /// the header band, and under it the thread of the turn's marks.
-    /// `at_left` is the boundary's offset from the panes' left edge;
-    /// `None` means the work side is folded and the face rides the
-    /// strip's edge instead.
+    /// the header band, its label hanging under it. `at_left` is the
+    /// boundary's offset from the panes' left edge; `None` means the
+    /// work side is folded and the face rides the strip's edge.
     pub(crate) fn render_seam(&self, at_left: Option<f32>, cx: &Context<Self>) -> AnyElement {
         let pal = ink::palette(cx);
+        let seam = self.seam_state();
         let size = if at_left.is_some() {
             FACE_DISC
         } else {
             FACE_DISC_SMALL
         };
-        let top = HEADER_HEIGHT / 2. - size / 2.;
-        let face = div().absolute().top(px(top));
-        let face = match at_left {
-            Some(left) => face.left(px(left - size / 2.)),
-            None => face.right(px(STRIP_WIDTH - size / 2.)),
-        }
-        .child(self.render_face(size, pal));
-        let thread = at_left.zip(self.work_view()).and_then(|(left, view)| {
-            let marks = self.merge_marks(view.shape.work());
-            if marks.is_empty() {
-                return None;
-            }
-            let color = if view.running {
-                pal.vermilion
-            } else {
-                pal.text_past
-            };
-            let height = 36. + marks.len() as f32 * 32. + if view.running { 28. } else { 0. };
-            Some(
-                div()
-                    .absolute()
-                    .left(px(left - 11.))
-                    .top(px(HEADER_HEIGHT + 4.))
-                    .w(px(22.))
-                    .h(px(height))
-                    .child(
-                        div()
-                            .absolute()
-                            .left(px(10.))
-                            .top_0()
-                            .w(px(2.))
-                            .h_full()
-                            .bg(color.opacity(0.5)),
-                    )
-                    .child(
-                        v_flex()
-                            .absolute()
-                            .top(px(22.))
-                            .left_0()
-                            .w(px(22.))
-                            .items_center()
-                            .gap(px(12.))
-                            .children(marks.into_iter().map(|(number, live)| {
-                                if live {
-                                    live_mark(number, true, false, pal, "seam")
-                                } else {
-                                    mark(number, false, false, pal)
-                                        .bg(pal.paper)
-                                        .into_any_element()
-                                }
-                            }))
-                            .when(view.running, |thread| {
-                                thread.child(
-                                    div()
-                                        .size(px(12.))
-                                        .rounded_full()
-                                        .border_1()
-                                        .border_dashed()
-                                        .border_color(pal.text_past)
-                                        .bg(pal.paper),
-                                )
-                            }),
-                    ),
-            )
-        });
-        div()
+        // The disc and its label centered together in the header band,
+        // so the label keeps clear of the divider under it.
+        const LABEL: f32 = 26.;
+        const GAP: f32 = 6.;
+        let top = (HEADER_HEIGHT - (size + GAP + LABEL)) / 2.;
+        // One column, centered on the seam: the disc, then the label.
+        // The column is wide so the label can outgrow the disc.
+        const COLUMN: f32 = 320.;
+        let column = v_flex()
             .absolute()
-            .inset_0()
-            .children(thread)
-            .child(face)
-            .into_any_element()
+            .top(px(top))
+            .w(px(COLUMN))
+            .items_center()
+            .gap(px(GAP))
+            .child(self.render_face(size, &seam, pal))
+            .child(self.render_seam_label(&seam, pal));
+        let column = match at_left {
+            Some(left) => column.left(px(left - COLUMN / 2.)),
+            None => column.right(px(STRIP_WIDTH - COLUMN / 2.)),
+        };
+        div().absolute().inset_0().child(column).into_any_element()
     }
 
     /// The words pane's header: where this is, what it is called, and
@@ -1358,27 +1483,26 @@ impl ChatView {
         // Now and next: the model's own words when it gave them (the
         // status tool), else what the turn is doing.
         let (now, then) = self.now_and_next();
-        let now = now.unwrap_or_default();
-        let bright = 0..now.len();
-        let joined = match then {
-            Some(then) if !now.is_empty() => format!("{now} {then}"),
-            Some(then) => then,
-            None => now,
+        // Now on its line, then on the next: each one line, clipped.
+        let line = |text: String, color| {
+            div()
+                .w_full()
+                .min_w_0()
+                .font_family(ink::SERIF)
+                .text_size(px(15.))
+                .line_height(relative(1.45))
+                .text_color(color)
+                .truncate()
+                .child(text)
         };
-        let sentence = div()
+        let sentence = v_flex()
             .w_full()
-            .font_family(ink::SERIF)
-            .text_size(px(15.))
-            .line_height(relative(1.5))
-            .text_color(pal.text_muted)
-            .line_clamp(2)
-            .child(gpui_kit::StyledText::new(joined).with_highlights([(
-                bright,
-                gpui_kit::HighlightStyle {
-                    color: Some(pal.text),
-                    ..Default::default()
-                },
-            )]));
+            .min_w_0()
+            .children(
+                now.filter(|now| !now.is_empty())
+                    .map(|now| line(now, pal.text)),
+            )
+            .children(then.map(|then| line(then, pal.text_muted)));
         v_flex()
             .w_full()
             .flex_shrink_0()
@@ -1423,10 +1547,10 @@ impl ChatView {
             };
             (Some(now), then)
         } else {
-            let done = if self.seam_state().mood == Mood::Sad {
-                "Stopped short."
-            } else {
-                "Done."
+            let done = match self.seam_state().verb {
+                "stopped" => "Stopped short.",
+                "check failed" => "Done, but the check failed.",
+                _ => "Done.",
             };
             (
                 Some(done.to_string()),
@@ -1465,19 +1589,7 @@ impl ChatView {
             .filter(|(_, touch)| *touch == status::Touch::Edited)
             .count();
         let read = facts.touched.len() - changed;
-        let check = view
-            .shape
-            .items
-            .iter()
-            .rev()
-            .find(|item| item.kind == Kind::Check)
-            .and_then(|item| match &self.turns[item.index] {
-                Turn::Tool {
-                    status: ToolStatus::Done(result),
-                    ..
-                } => Some(!result_failed(result)),
-                _ => None,
-            });
+        let check = self.check_verdict(&view.shape);
         let plural = |count: usize, one: &str, many: &str| {
             if count == 1 {
                 format!("1 {one}")
@@ -1533,47 +1645,64 @@ impl ChatView {
         };
         let counts = format!("{} changed · {} read", changed, read);
         let learned = self.learned_line(view.start, view.end, pal, cx);
+        // One line of chips, changed files first, the rest counted:
+        // the header has a fixed height and never clips its sentence.
+        const CHIPS: usize = 4;
+        let mut touched: Vec<_> = facts
+            .touched
+            .iter()
+            .filter(|(path, _)| path.chars().any(char::is_alphanumeric))
+            .collect();
+        touched.sort_by_key(|(_, touch)| *touch != status::Touch::Edited);
+        let hidden = touched.len().saturating_sub(CHIPS);
+        let hidden_list = touched
+            .iter()
+            .skip(CHIPS)
+            .map(|(path, _)| path.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
         let chips = h_flex()
-            .flex_wrap()
+            .w_full()
+            .min_w_0()
+            .overflow_hidden()
             .gap_2()
-            .children(
-                facts
-                    .touched
-                    .iter()
-                    .filter(|(path, _)| path.chars().any(char::is_alphanumeric))
-                    .take(10)
-                    .map(|(path, touch)| {
-                        let edited = *touch == status::Touch::Edited;
-                        let short = path.rsplit('/').take(2).collect::<Vec<_>>();
-                        let short = short.into_iter().rev().collect::<Vec<_>>().join("/");
-                        h_flex()
-                            .gap_1()
-                            .px_2p5()
-                            .py(px(4.))
-                            .rounded_full()
-                            .font_family(ink::MONO)
-                            .text_size(px(11.5))
-                            .when(edited, |chip| {
-                                chip.bg(pal.ink_raised).text_color(pal.ink_text)
-                            })
-                            .when(!edited, |chip| {
-                                chip.border_1()
-                                    .border_color(pal.ink_line)
-                                    .text_color(pal.ink_muted)
-                            })
-                            .child(short)
-                            .when(edited, |chip| {
-                                chip.child(div().text_color(pal.added).child("changed"))
-                            })
-                    }),
-            )
-            .when(facts.touched.len() > 10, |chips| {
+            .children(touched.into_iter().take(CHIPS).map(|(path, touch)| {
+                let edited = *touch == status::Touch::Edited;
+                let short = path.rsplit('/').take(2).collect::<Vec<_>>();
+                let short = short.into_iter().rev().collect::<Vec<_>>().join("/");
+                h_flex()
+                    .flex_shrink_0()
+                    .gap_1()
+                    .px_2p5()
+                    .py(px(4.))
+                    .rounded_full()
+                    .font_family(ink::MONO)
+                    .text_size(px(11.5))
+                    .when(edited, |chip| {
+                        chip.bg(pal.ink_raised).text_color(pal.ink_text)
+                    })
+                    .when(!edited, |chip| {
+                        chip.border_1()
+                            .border_color(pal.ink_line)
+                            .text_color(pal.ink_muted)
+                    })
+                    .child(short)
+                    .when(edited, |chip| {
+                        chip.child(div().text_color(pal.added).child("changed"))
+                    })
+            }))
+            .when(hidden > 0, |chips| {
                 chips.child(
                     div()
+                        .id("chips-more")
+                        .flex_shrink_0()
                         .font_family(ink::SANS)
                         .text_size(px(11.5))
                         .text_color(pal.ink_muted)
-                        .child(format!("and {} more", facts.touched.len() - 10)),
+                        .tooltip(move |window, cx| {
+                            Tooltip::new(hidden_list.clone()).build(window, cx)
+                        })
+                        .child(format!("and {hidden} more")),
                 )
             });
         let header = v_flex()
@@ -1603,23 +1732,26 @@ impl ChatView {
             )
             .child(chips);
 
-        // The cards, in order. Looking (reads, searches) lives in the
+        // The cards, newest first: what is happening now sits at the
+        // top, under the header. Looking (reads, searches) lives in the
         // chips above; asks live in the words.
         let mut cards: Vec<AnyElement> = Vec::new();
         let last_numbered = view.shape.work().last().map(|item| item.index);
-        // What waits on the human comes first: the decision is never
-        // below the scroll.
+        // What waits on the human comes before everything: the decision
+        // is never below the scroll.
         let mut ordered = view.shape.items.clone();
         ordered.sort_by_key(|item| {
-            !matches!(
+            let pending = matches!(
                 self.turns.get(item.index),
                 Some(Turn::Tool {
                     status: ToolStatus::Pending(_),
                     ..
                 })
-            )
+            );
+            (!pending, std::cmp::Reverse(item.index))
         });
         let mut carded: Vec<usize> = Vec::new();
+        let mut card_numbers: Vec<usize> = Vec::new();
         for item in ordered {
             let Some(number) = item.number else { continue };
             let pending_item = matches!(
@@ -1674,7 +1806,9 @@ impl ChatView {
                             h_flex()
                                 .gap_2()
                                 .items_center()
-                                .child(live_mark(number, true, true, pal, "pending"))
+                                .child(
+                                    self.mark_link(number, true, true, item.index, "pending", cx),
+                                )
                                 .child(
                                     div()
                                         .font_family(ink::SANS)
@@ -1707,11 +1841,30 @@ impl ChatView {
                     self.render_edit_card(&group, number, open, pal, cx)
                 }
                 (_, Kind::Check | Kind::Run) => {
-                    self.render_run_card(item.index, number, item.kind, &call, status, pal)
+                    self.render_run_card(item.index, number, item.kind, &call, status, pal, cx)
                 }
-                _ => self.render_step_card(number, &call, status, pal),
+                _ => self.render_step_card(item.index, number, &call, status, pal, cx),
             };
+            // A words mark lit this card: ring it for a moment.
+            let card = if self.card_flashing(view.start, number) {
+                div()
+                    .flex_shrink_0()
+                    .rounded(px(17.))
+                    .border_2()
+                    .border_color(pal.vermilion)
+                    .child(card)
+                    .into_any_element()
+            } else {
+                card
+            };
+            card_numbers.push(number);
             cards.push(card);
+        }
+        // A words mark asked for this card: scroll it into view.
+        if let Some(number) = self.pending_card_scroll.take()
+            && let Some(position) = card_numbers.iter().position(|seen| *seen == number)
+        {
+            self.work_scroll.scroll_to_item(position);
         }
         let actions = (!view.running).then(|| {
             let review_index = view.shape.work().last().map(|item| item.index);
@@ -1841,7 +1994,7 @@ impl ChatView {
         let head = h_flex()
             .gap_3()
             .items_center()
-            .child(live_mark(number, live, true, pal, "edit"))
+            .child(self.mark_link(number, live, true, first, "edit", cx))
             .child(
                 div()
                     .min_w_0()
@@ -2077,6 +2230,7 @@ impl ChatView {
 
     /// A shell card: the command, its clock, the last lines of its
     /// output, and for a check, whether it passed.
+    #[allow(clippy::too_many_arguments)]
     fn render_run_card(
         &self,
         index: usize,
@@ -2085,6 +2239,7 @@ impl ChatView {
         call: &ToolCall,
         status: &ToolStatus,
         pal: Palette,
+        cx: &Context<Self>,
     ) -> AnyElement {
         let command = shape::command_of(&call.arguments).unwrap_or_default();
         let first_line = strip_cd(
@@ -2094,7 +2249,11 @@ impl ChatView {
         let running = matches!(status, ToolStatus::Running);
         let (verdict, tail): (Option<(bool, String)>, Vec<String>) = match status {
             ToolStatus::Done(result) => {
-                let failed = result_failed(result);
+                // A check whose output counts failures failed, even when
+                // a pipe (`| tail`) swallowed its exit code.
+                let failed = result_failed(result)
+                    || (kind == Kind::Check
+                        && test_counts(result).is_some_and(|(_, failed)| failed > 0));
                 let lines: Vec<String> = result
                     .lines()
                     .filter(|line| !line.trim().is_empty())
@@ -2132,7 +2291,7 @@ impl ChatView {
                 h_flex()
                     .gap_3()
                     .items_center()
-                    .child(live_mark(number, running, true, pal, "run"))
+                    .child(self.mark_link(number, running, true, index, "run", cx))
                     .child(
                         div()
                             .flex_1()
@@ -2206,10 +2365,12 @@ impl ChatView {
     /// Any other numbered step (a worker run): its label and outcome.
     fn render_step_card(
         &self,
+        index: usize,
         number: usize,
         call: &ToolCall,
         status: &ToolStatus,
         pal: Palette,
+        cx: &Context<Self>,
     ) -> AnyElement {
         let running = matches!(status, ToolStatus::Running);
         let label =
@@ -2231,7 +2392,7 @@ impl ChatView {
                 h_flex()
                     .gap_3()
                     .items_center()
-                    .child(live_mark(number, running, true, pal, "step"))
+                    .child(self.mark_link(number, running, true, index, "step", cx))
                     .child(div().font_family(ink::SANS).text_size(px(13.)).child(label)),
             )
             .children(outcome.map(|outcome| {
@@ -2500,6 +2661,16 @@ mod tests {
         assert_eq!(strip_cd("cd /w && cargo test", "/w"), "cargo test");
         assert_eq!(strip_cd("cd /other && ls", "/w"), "cd /other && ls");
         assert_eq!(strip_cd("  ls  ", "/w"), "ls");
+    }
+
+    #[test]
+    fn the_window_halves_at_the_seam_whatever_the_sidebar() {
+        // 1920 wide: the seam at 960 with the rail or the full list.
+        assert_eq!(words_share(1920., 72.), Some(888.));
+        assert_eq!(words_share(1920., 240.), Some(720.));
+        // Too little left for the words: the work opens over them.
+        assert_eq!(words_share(1100., 240.), None);
+        assert_eq!(words_share(1100., 72.), Some(478.));
     }
 
     #[test]
