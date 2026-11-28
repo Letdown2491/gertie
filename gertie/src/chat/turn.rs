@@ -76,6 +76,10 @@ impl ChatView {
         });
         self.streaming = true;
         self.streaming_assistant = None;
+        // A new turn: no verdict yet, and the work side follows it.
+        self.turn_checked = None;
+        self.work_open = false;
+        self.work_focus = None;
         // Turn start: fresh narration is not yet available (the model
         // has not spoken this round), so the plain label until its
         // first words stream or a tool runs.
@@ -210,7 +214,12 @@ impl ChatView {
                     LoopEvent::Pruned { .. } => {}
                     // The check's bash card and result are already in
                     // the transcript; the verdict needs no extra row.
-                    LoopEvent::Checked { .. } => {}
+                    LoopEvent::Checked { passed } => {
+                        let _ = this.update(cx, |this, cx| {
+                            this.turn_checked = Some(passed);
+                            cx.notify();
+                        });
+                    }
                     LoopEvent::Steered { text } => {
                         let _ = this.update(cx, |this, cx| this.on_steered(&text, cx));
                     }

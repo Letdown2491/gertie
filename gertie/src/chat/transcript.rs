@@ -32,16 +32,28 @@ impl ChatView {
                 )
                 .into_any_element();
         }
-        // Runs of finished tool calls collapse into one honest summary
-        // (the counts are the cards', failures stay counted); a hidden
-        // member renders nothing, the list's index space is the
-        // turns'.
-        let run = self.tool_run_at(index);
-        if run == 0 {
-            return div().w_full().into_any_element();
-        }
-        if run > 1 {
-            return self.render_tool_run(index, run, window, cx);
+        // The words pane holds words (#54): a call's work lives on the
+        // work side, numbered; here a consulted memory becomes a seal
+        // note, an approval a pointer to its card, and an ask stays a
+        // card (it is a question in the conversation). Everything else
+        // renders nothing, the list's index space is the turns'.
+        if let Turn::Tool { call, status, .. } = &self.turns[index] {
+            match self.kind_of_call(call) {
+                super::shape::Kind::Ask => {}
+                super::shape::Kind::Memory if call.name == "memory_proposal" => {
+                    return words_row(self.render_proposal_seal(index, cx));
+                }
+                super::shape::Kind::Memory => {
+                    return match self.render_memory_seals(index, cx) {
+                        Some(seals) => words_row(seals),
+                        None => div().w_full().into_any_element(),
+                    };
+                }
+                _ if matches!(status, ToolStatus::Pending(_)) => {
+                    return words_row(self.render_waiting_pointer(index, cx));
+                }
+                _ => return div().w_full().into_any_element(),
+            }
         }
         // The reply input for a pending permission card must exist
         // before the turn is borrowed below: creating it takes &mut
@@ -61,6 +73,18 @@ impl ChatView {
             if wants_reply {
                 self.approval_reply_for(index, window, cx);
             }
+        }
+        // An empty assistant row (a reasoning-only reply, a turn that
+        // went straight to tools) holds no words: no row, no margin.
+        if let Turn::Message {
+            role: Role::Assistant,
+            text,
+            ..
+        } = &self.turns[index]
+            && text.trim().is_empty()
+            && self.streaming_assistant != Some(index)
+        {
+            return div().w_full().into_any_element();
         }
         let inner = match &self.turns[index] {
             Turn::Message { role, text, .. } => {
@@ -95,6 +119,53 @@ impl ChatView {
                     )
                     .into_any_element()
             }
+        };
+        // The thread marks (#54): an assistant paragraph carries the
+        // numbers of the work it announced, links to the work side's
+        // cards; a card's mark lights the paragraph for a moment.
+        let inner = match &self.turns[index] {
+            Turn::Message {
+                role: Role::Assistant,
+                ..
+            } => {
+                let marks = self.marks_after(index);
+                let flashing = self.paragraph_flashing(index);
+                if marks.is_empty() && !flashing {
+                    inner
+                } else {
+                    let pal = crate::ink::palette(cx);
+                    let (start, end) = self.span_around(index);
+                    let shape = self.shape_of(start, end);
+                    let links: Vec<AnyElement> = marks
+                        .into_iter()
+                        .filter_map(|(number, live)| {
+                            let call = shape.group(number).first()?.index;
+                            Some(self.mark_link(number, live, false, call, "words", cx))
+                        })
+                        .collect();
+                    // The marks hang in the left margin beside the
+                    // paragraph's first line: no line of their own.
+                    div()
+                        .w_full()
+                        .relative()
+                        .when(flashing, |paragraph| {
+                            paragraph.pl_3().border_l_2().border_color(pal.vermilion)
+                        })
+                        .child(inner)
+                        .when(!links.is_empty(), |paragraph| {
+                            paragraph.child(
+                                v_flex()
+                                    .absolute()
+                                    .top(px(6.))
+                                    .left(px(if flashing { -46. } else { -34. }))
+                                    .gap_1()
+                                    .children(links),
+                            )
+                        })
+                        .into_any_element()
+                }
+            }
+            _ => inner,
         };
         // Fork affordance: persisted user turns only, "branch from this
         // question" is the mental model that survives contact with use.
@@ -230,10 +301,10 @@ impl ChatView {
                 .id(format!("turn-{index}"))
                 .test_support()
                 .group(format!("turn-{index}"))
+                .relative()
                 .flex()
                 .flex_col()
-                .when(user_turn, |col| col.items_end())
-                .when(!user_turn, |col| col.items_start())
+                .items_start()
                 .child(inner)
                 .child(
                     // Assistant rows: the reply that ends a turn keeps
@@ -244,8 +315,14 @@ impl ChatView {
                     // not visibility: the row stays present and
                     // clickable (the harness's synthetic hover can't
                     // drive gpui's group-hover state).
+                    // Earlier narration's row floats in the right margin
+                    // (#54): consecutive paragraphs keep their rhythm,
+                    // no hole where hidden icons would sit.
                     h_flex()
                         .gap_1()
+                        .when(!user_turn && !last_reply, |row| {
+                            row.absolute().top_0().right(px(-52.)).flex_col()
+                        })
                         .when(!user_turn, |row| {
                             row.opacity(if last_reply { 0.35 } else { 0. })
                         })
@@ -289,35 +366,37 @@ impl ChatView {
         // reads as one continuous column (the screenshot showed the
         // inversion). Markdown paragraphs carry mt_2; a turn carries
         // the turn's own bottom padding plus this margin.
-        div()
-            .w_full()
-            .px_4()
-            .mt_2()
-            .flex()
-            .justify_center()
-            .child(div().w_full().max_w(px(READING_WIDTH)).child(inner))
-            .into_any_element()
+        words_row(inner)
     }
 
     pub(crate) fn render_message(&self, role: &Role, text: &str, key: u64, cx: &App) -> AnyElement {
         match role {
-            Role::User => h_flex()
-                .w_full()
-                .justify_end()
-                .pb_2()
-                .child(
-                    div()
-                        .max_w_3_4()
-                        .rounded_lg()
-                        .px_3()
-                        .py_2()
-                        .bg(cx.theme().secondary)
-                        .border_1()
-                        .border_color(cx.theme().border)
-                        .text_color(cx.theme().foreground)
-                        .child(display_text(text)),
-                )
-                .into_any_element(),
+            // The human's words, quiet: the question is context for
+            // what follows, the reply is what the eye should land on.
+            Role::User => {
+                let pal = crate::ink::palette(cx);
+                div()
+                    .w_full()
+                    .pb_1()
+                    .font_family(crate::ink::SANS)
+                    .text_size(px(14.5))
+                    .line_height(gpui_kit::relative(1.6))
+                    .text_color(pal.text_past)
+                    .child(
+                        h_flex()
+                            .flex_wrap()
+                            .items_baseline()
+                            .gap_x_1()
+                            .child(
+                                div()
+                                    .font_weight(gpui_kit::FontWeight::SEMIBOLD)
+                                    .text_color(pal.text_muted)
+                                    .child("you ·"),
+                            )
+                            .child(display_text(text)),
+                    )
+                    .into_any_element()
+            }
             Role::System => {
                 // Loop notices (compaction): quiet, left on the same
                 // margin as everything else, not a chat message from
@@ -338,10 +417,13 @@ impl ChatView {
                 // didn't survive contact with the workbench (the
                 // article measure cramped wide windows); a prior
                 // "reverted" claim was never actually shipped.
+                // The prose face: serif, large, unhurried (#54).
                 div()
                     .w_full()
-                    .pr_8()
                     .pb_2()
+                    .font_family(crate::ink::SERIF)
+                    .text_size(px(17.5))
+                    .line_height(gpui_kit::relative(1.7))
                     .text_color(if is_error {
                         cx.theme().danger
                     } else {
@@ -381,38 +463,8 @@ impl ChatView {
         let running = matches!(status, ToolStatus::Running);
         // Label and diff data parse once per card (see ToolFace); the
         // elements rebuild per frame from the memoized data.
-        let (label, diff) = {
-            let mut cache = self.tool_face.borrow_mut();
-            let face = cache.entry(index).or_insert_with(|| {
-                // The write's before-content, three sources in honesty
-                // order: the pre-run capture when this session saw the
-                // request land, the checkpoint the loop recorded when
-                // the call was approved (a reloaded card's exact
-                // source), else the file as it sits now.
-                let before = if call.name == "write_file" {
-                    self.before_contents
-                        .get(&call.id)
-                        .cloned()
-                        .or_else(|| self.checkpointed_before(call))
-                        .or_else(|| self.current_file_content(call))
-                } else {
-                    None
-                };
-                ToolFace {
-                    label_running: crate::tools_ui::action_label(&call.name, &call.arguments, true),
-                    label_done: crate::tools_ui::action_label(&call.name, &call.arguments, false),
-                    diff: diff_data(call, before.as_deref()),
-                }
-            });
-            (
-                if running {
-                    face.label_running.clone()
-                } else {
-                    face.label_done.clone()
-                },
-                face.diff.clone(),
-            )
-        };
+        let (label_running, label_done, diff) = self.tool_face_for(index, call);
+        let label = if running { label_running } else { label_done };
 
         let mut inner = v_flex().gap_2().child(
             h_flex()
@@ -466,14 +518,14 @@ impl ChatView {
                             }),
                     )
                 })
-                // Provenance: the answer came from another chat's
-                // status column (issue #33), not a click here.
+                // Provenance: the answer came from another chat
+                // (issue #33), not a click here.
                 .when(self.answered_from_column.contains(&call.id), |row| {
                     row.child(
                         div()
                             .text_size(px(11.))
                             .text_color(cx.theme().muted_foreground)
-                            .child("answered from the status column"),
+                            .child("answered from another chat"),
                     )
                 }),
         );
@@ -739,6 +791,18 @@ impl ChatView {
     }
 }
 
+/// A row of the words pane: its margins (#54), the reading width.
+pub(crate) fn words_row(inner: AnyElement) -> AnyElement {
+    div()
+        .w_full()
+        .pl(px(48.))
+        .pr(px(56.))
+        .mt_3()
+        .flex()
+        .child(div().w_full().max_w(px(READING_WIDTH)).child(inner))
+        .into_any_element()
+}
+
 /// The waiting-on-you group's face: a left accent edge, not a box.
 /// An approval is the transcript's landmark while it waits, and the
 /// mark should say "this needs you", not "here is a panel". The
@@ -769,6 +833,42 @@ pub(crate) fn resolve_tool_path(
 }
 
 impl ChatView {
+    /// A card's label and diff data, parsed once per card and memoized
+    /// by row (see ToolFace); the elements rebuild per frame from it.
+    pub(crate) fn tool_face_for(
+        &self,
+        index: usize,
+        call: &ToolCall,
+    ) -> (String, String, Option<crate::diff::Patch>) {
+        let mut cache = self.tool_face.borrow_mut();
+        let face = cache.entry(index).or_insert_with(|| {
+            // The write's before-content, three sources in honesty
+            // order: the pre-run capture when this session saw the
+            // request land, the checkpoint the loop recorded when the
+            // call was approved (a reloaded card's exact source), else
+            // the file as it sits now.
+            let before = if call.name == "write_file" {
+                self.before_contents
+                    .get(&call.id)
+                    .cloned()
+                    .or_else(|| self.checkpointed_before(call))
+                    .or_else(|| self.current_file_content(call))
+            } else {
+                None
+            };
+            ToolFace {
+                label_running: crate::tools_ui::action_label(&call.name, &call.arguments, true),
+                label_done: crate::tools_ui::action_label(&call.name, &call.arguments, false),
+                diff: diff_data(call, before.as_deref()),
+            }
+        });
+        (
+            face.label_running.clone(),
+            face.label_done.clone(),
+            face.diff.clone(),
+        )
+    }
+
     /// What the workspace file holds right now, for a write card's
     /// before-content. The exact sources are the pre-run capture taken
     /// when the call arrived (`before_contents`) and, for a reloaded

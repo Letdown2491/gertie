@@ -59,7 +59,7 @@ pub const COMMANDS: &[(&str, &str, PaletteCommand)] = &[
     ),
     (
         "memory",
-        "open the memory panel (read and vote on what gertie recalls)",
+        "open the memory panel: everything gertie remembers here, to mark, edit or forget",
         PaletteCommand::Memory,
     ),
     (

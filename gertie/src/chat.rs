@@ -3,6 +3,10 @@
 
 pub mod aux;
 pub mod composer;
+pub mod memory_panel;
+pub mod panes;
+pub mod pill;
+pub mod shape;
 pub mod sidebar;
 pub mod status;
 pub mod transcript;
@@ -36,7 +40,7 @@ use gpui_kit::{
     Action, AnyElement, AnyWindowHandle, App, AppContext as _, Context, Entity, EventEmitter,
     Focusable, IntoElement, ListAlignment, ListState, ParentElement, Render, SharedString,
     StatefulInteractiveElement as _, Styled, TestSupportExt as _, Window, actions, div, list,
-    prelude::*, px,
+    prelude::*, px, relative,
 };
 use sha2::Digest;
 use std::sync::Arc;
@@ -123,7 +127,7 @@ const QUIET_AFTER: std::time::Duration = std::time::Duration::from_secs(20);
 const SPINNER_FRAMES: [&str; 4] = ["◐", "◓", "◑", "◒"];
 
 /// The composer's ghost text at rest.
-const IDLE_PLACEHOLDER: &str = "Message Gertie, or type / for commands, @ for files";
+const IDLE_PLACEHOLDER: &str = "Talk it through. / for commands, @ for files";
 
 /// The conversation's reading width: past this, lines get too long to
 /// follow. The transcript and the composer share it, centered.
@@ -445,7 +449,7 @@ pub struct ChatView {
     /// topic file, and the footer renders every frame (every token of
     /// a streaming turn). Keyed by the store's fingerprint, so a write
     /// from anywhere (panel, agent, editor) shows on the next frame.
-    memory_word: std::cell::RefCell<Option<(u64, Option<String>)>>,
+
     /// The @-mention popup's last answer, keyed by the query and the
     /// root: the composer's popup asks every frame while it is open.
     mention_cache: std::cell::RefCell<Option<(String, std::path::PathBuf, Vec<MentionMatch>)>>,
@@ -699,6 +703,23 @@ pub struct ChatView {
     moving: Option<SessionId>,
     /// The right column: the settings view.
     panel: Panel,
+    /// The memory popover over the composer: this chat's memory.
+    memory_popover: bool,
+    /// The memory panel's retired section, unfolded.
+    memory_show_retired: bool,
+    /// When a click outside last closed the popover.
+    memory_popover_closed: Option<std::time::Instant>,
+    /// The model card over the composer: the model and its room.
+    model_card: bool,
+    /// When a click outside last closed the model card.
+    model_card_closed: Option<std::time::Instant>,
+    /// The composer has wrapped: the text on its own full-width row,
+    /// the controls under it, until the text fits the slim row again.
+    composer_stacked: bool,
+    /// The text's width in the slim row, the measure for going back.
+    composer_inline_width: gpui_kit::Pixels,
+    /// A memory being edited in the popover, and its field.
+    memory_edit: Option<(String, Entity<InputState>)>,
     /// The settings editor (summary + form), its Saved event bubbles
     /// to the workspace, which reloads the bootstrap and applies here.
     settings_panel: Entity<SettingsPanelView>,
@@ -785,17 +806,29 @@ pub struct ChatView {
     status_version: u64,
     /// DEPENDS ON, cached (the evidence check hashes files).
     status_ground: std::cell::RefCell<Option<status::GroundCache>>,
-    /// Each DEPENDS ON row's measured height, in render order: rows
-    /// free-wrap, so no constant says how tall they are. Filled by the
-    /// rows' paint probes, read when sizing the viewport.
-    grounded_heights: std::cell::RefCell<Vec<f32>>,
-    /// The DEPENDS ON viewport's max height: three measured rows plus
-    /// their gaps, so whole rows show whatever the text wrapped to.
-    /// Starts at the old constant until the first measurement lands.
-    grounded_cap: std::cell::Cell<f32>,
     /// Whether the column is folded to its rail, persisted per
     /// conversation as a store flag.
     status_collapsed: bool,
+    /// Each call's kind for the panes (#54), memoized by call id.
+    call_kinds: std::cell::RefCell<std::collections::HashMap<String, shape::Kind>>,
+    /// The rail's open popover: which project (None: Other) and the
+    /// height it opened at.
+    rail_popover: Option<(Option<i64>, f32)>,
+    /// A mark clicked in an earlier turn: the work side shows that
+    /// turn (a row index inside it) until the next turn starts.
+    work_focus: Option<usize>,
+    /// The card a words mark asked for, scrolled to on the next render.
+    pending_card_scroll: Option<usize>,
+    /// What a clicked mark lit, and when.
+    flash: Option<(crate::chat::panes::Flash, std::time::Instant)>,
+    /// The folded work side, opened by hand from its strip.
+    work_open: bool,
+    /// Where each edit sits in its file, memoized by row (#54).
+    change_spans: std::cell::RefCell<std::collections::HashMap<usize, Vec<(f32, f32)>>>,
+    /// The work pane's own scroll.
+    work_scroll: gpui_kit::ScrollHandle,
+    /// The project check's verdict this turn (#40's Checked event).
+    turn_checked: Option<bool>,
     /// Boot profiling: the view's clock, and whether the first
     /// render has stamped itself (GERTIE_BOOT_TRACE).
     started: std::time::Instant,
@@ -807,6 +840,8 @@ pub struct ChatView {
     /// Pending asks in the other open chats of this chat's project,
     /// pushed by the shell every frame.
     project_asks: Vec<status::ProjectAsk>,
+    /// Every other open chat's pending asks (the rail popover's).
+    open_asks: Vec<status::ProjectAsk>,
     /// Ask cards answered from another chat's status column, by wire
     /// call id: the card says where its answer came from.
     answered_from_column: std::collections::HashSet<String>,
@@ -921,7 +956,7 @@ impl ChatView {
         // empty box made the attach button look lost beside it.
         // The palette is a component entity like the input: created
         // once, parked until Ctrl+K puts it on screen.
-        let sidebar_collapsed = store.store_flag(crate::chat::status::SIDEBAR_COLLAPSED_FLAG);
+        let sidebar_collapsed = !store.store_flag(crate::chat::status::SIDEBAR_EXPANDED_FLAG);
         let palette = cx.new(|cx| CommandState::new(window, cx));
         let turn_diff_list = ListState::new(0, ListAlignment::Top, px(256.));
         let find_input =
@@ -929,7 +964,7 @@ impl ChatView {
         let input = cx.new(|cx| {
             TextareaState::new(window, cx)
                 .placeholder(IDLE_PLACEHOLDER)
-                .auto_grow(1, 6)
+                .auto_grow(1, 8)
         });
         cx.subscribe_in(&input, window, |this, _, event: &InputEvent, window, cx| {
             if let InputEvent::PressEnter {
@@ -1096,7 +1131,6 @@ impl ChatView {
             memory_index,
             memory_enabled,
             memory_store,
-            memory_word: Default::default(),
             mention_cache: Default::default(),
             mention_listing: Default::default(),
             memory_extract_provider,
@@ -1170,6 +1204,14 @@ impl ChatView {
             pending_project: None,
             moving: None,
             panel: Panel::None,
+            memory_popover: false,
+            memory_show_retired: false,
+            memory_popover_closed: None,
+            model_card: false,
+            model_card_closed: None,
+            composer_stacked: false,
+            composer_inline_width: px(0.),
+            memory_edit: None,
             settings_panel,
             // Tail: follow new content while pinned to the bottom, stop
             // when the user scrolls up, resume when they return.
@@ -1205,13 +1247,21 @@ impl ChatView {
             status_facts: Default::default(),
             status_version: 0,
             status_ground: Default::default(),
-            grounded_heights: Default::default(),
-            grounded_cap: std::cell::Cell::new(132.0),
             status_collapsed: false,
+            call_kinds: Default::default(),
+            work_open: false,
+            work_focus: None,
+            pending_card_scroll: None,
+            flash: None,
+            rail_popover: None,
+            work_scroll: gpui_kit::ScrollHandle::new(),
+            change_spans: Default::default(),
+            turn_checked: None,
             started: std::time::Instant::now(),
             first_frame_done: false,
             sidebar_collapsed,
             project_asks: Vec::new(),
+            open_asks: Vec::new(),
             answered_from_column: Default::default(),
         };
         view.reload_session(cx);
@@ -1640,11 +1690,27 @@ impl ChatView {
     /// the face computed for the card at turn `index`. What a reloaded
     /// write card's diff is *of* is only visible here.
     pub fn card_diff_counts_for_test(&self, index: usize) -> Option<(usize, usize)> {
-        self.tool_face
-            .borrow()
-            .get(&index)
-            .and_then(|face| face.diff.as_ref())
+        let Some(Turn::Tool { call, .. }) = self.turns.get(index) else {
+            return None;
+        };
+        self.tool_face_for(index, call)
+            .2
             .map(|patch| (patch.adds, patch.removes))
+    }
+
+    /// Puts a memory proposal up for review, the settle's own card
+    /// path, for tests: the extraction model is not in the loop.
+    pub fn propose_memory_for_test(&mut self, ops: Vec<gertie_core::Op>, cx: &mut Context<Self>) {
+        let Some(store) = self.memory_store.clone() else {
+            return;
+        };
+        let proposal = gertie_core::memory_extract::Proposal {
+            ops,
+            flagged: false,
+            digest_hash: format!("test-{}", self.turns.len()),
+        };
+        let session = self.session_id.unwrap_or(SessionId(0));
+        self.memory_card(proposal, store, session, cx);
     }
 
     /// Ages the status clocks, for tests, quiet's threshold is real
@@ -1705,6 +1771,11 @@ impl ChatView {
             .iter()
             .map(|(name, _, _)| *name)
             .collect()
+    }
+
+    /// This chat's session id as memory provenance writes it (tests).
+    pub fn session_id_for_test(&self) -> u64 {
+        self.session_id.map(|id| id.0).unwrap_or_default()
     }
 
     /// Which right-column panel is open, for tests.
@@ -1823,6 +1894,9 @@ impl ChatView {
         // with them: a reloaded transcript has no live cards.
         self.markdown_cache.borrow_mut().clear();
         self.tool_face.borrow_mut().clear();
+        self.change_spans.borrow_mut().clear();
+        self.work_focus = None;
+        self.flash = None;
         self.tool_starts.clear();
         // Pending writes' before-content (whole files) belongs to the
         // transcript being replaced.
@@ -1951,6 +2025,9 @@ impl ChatView {
         self.approval_replies.clear();
         self.markdown_cache.borrow_mut().clear();
         self.tool_face.borrow_mut().clear();
+        self.change_spans.borrow_mut().clear();
+        self.work_focus = None;
+        self.flash = None;
         cx.notify();
     }
 
@@ -2026,11 +2103,9 @@ impl ChatView {
     /// riding card's why is news the running card does not carry, so
     /// the card stays while the work is grounded.
     fn show_activity_row(&self) -> bool {
-        self.streaming
-            && !self.waiting_on_human()
-            && !(self.activity_echoes_card
-                && self.tail_following
-                && self.status_facts.consulted.is_empty())
+        // The face on the seam carries the now (#54); the riding row
+        // it replaced never shows.
+        false
     }
 
     /// Opens the mode menu: the four postures, the current one
@@ -2940,6 +3015,13 @@ impl ChatView {
     /// postures, the current one marked). Picking applies from the
     /// next turn on; a running turn keeps the posture it was built
     /// with, and the notice says so when it matters.
+    /// Opens the full memory panel (the popover's "see all").
+    fn open_memory_panel(&mut self, cx: &mut Context<Self>) {
+        self.panel = Panel::Memory;
+        self.refresh_memory_rows();
+        cx.notify();
+    }
+
     fn toggle_memory(&mut self, cx: &mut Context<Self>) {
         self.panel = if self.panel == Panel::Memory {
             Panel::None
@@ -2954,7 +3036,6 @@ impl ChatView {
     /// (a directory read per tier) and always current, so the panel
     /// never shows a stale count after a vote or a dream.
     fn refresh_memory_rows(&mut self) {
-        self.memory_word.replace(None);
         self.memory_rows = self
             .memory_store
             .as_ref()
@@ -3015,230 +3096,6 @@ impl ChatView {
             }
             Err(error) => self.push_notice(format!("memory vote failed: {error}"), cx),
         }
-    }
-
-    /// The memory panel: both tiers, entries as rows with their votes.
-    /// Read-and-vote, not editing: the files stay the editor's surface.
-    /// The header says where the files live, so "what does it remember"
-    /// and "how do I fix it" are both one glance apart.
-    fn render_memory_panel(&self, cx: &Context<Self>) -> AnyElement {
-        let rows: Vec<AnyElement> = match self.memory_rows.is_empty() {
-            true => vec![
-                div()
-                    .text_size(px(12.))
-                    .text_color(cx.theme().muted_foreground)
-                    .child("Nothing remembered yet. Memory fills on settle (a proposal card) or when you ask the model to remember something.")
-                    .into_any_element(),
-            ],
-            false => self
-                .memory_rows
-                .iter()
-                .map(|entry| {
-                    let id = entry.id.clone();
-                    let vote_up = format!("memory-vote-up-{id}");
-                    let vote_down = format!("memory-vote-down-{id}");
-                    let provenance = match (&entry.source_session, &entry.added_at) {
-                        (Some(source), Some(added)) => format!("{source}, {added}"),
-                        (Some(source), None) => source.clone(),
-                        (None, Some(added)) => format!("added {added}"),
-                        (None, None) => String::new(),
-                    };
-                    // The structure line: the replacement chain for a
-                    // superseded entry, then its links, by id.
-                    let mut structure = Vec::new();
-                    let chain = memory_chain(&self.memory_rows, &entry.id);
-                    if !chain.is_empty() {
-                        structure.push(format!("replaced by {}", chain.join(" → ")));
-                    }
-                    for link in &entry.links {
-                        structure.push(format!("{} {}", link.relation.replace('_', " "), link.to));
-                    }
-                    let structure = structure.join(" · ");
-                    let drift = self
-                        .memory_drift
-                        .get(&entry.id)
-                        .map(|changed| format!("evidence changed: {}", changed.join(", ")));
-                    h_flex()
-                        .id(SharedString::from(format!("memory-row-{id}")))
-                        .gap_2()
-                        .px_1()
-                        .py_0p5()
-                        .rounded_sm()
-                        .hover(|style| style.bg(cx.theme().secondary))
-                        .child(
-                            div()
-                                .text_size(px(11.))
-                                .text_color(cx.theme().muted_foreground)
-                                .min_w_10()
-                                .child(entry.id.clone()),
-                        )
-                        .child(
-                            div()
-                                .flex_1()
-                                .min_w_0()
-                                .text_size(px(12.))
-                                .truncate()
-                                .child(entry.text.clone()),
-                        )
-                        .child(
-                            h_flex()
-                                .gap_2()
-                                .child(
-                                    div()
-                                        .id(SharedString::from(vote_up.clone()))
-                                        .cursor_pointer()
-                                        .text_size(px(11.))
-                                        .text_color(cx.theme().muted_foreground)
-                                        .hover(|style| style.text_color(cx.theme().foreground))
-                                        .on_click(cx.listener({
-                                            let id = id.clone();
-                                            move |this, _, _, cx| this.vote_memory(id.clone(), true, cx)
-                                        }))
-                                        .child(format!("▲ {}", entry.helpful))
-                                        .test_support(),
-                                )
-                                .child(
-                                    div()
-                                        .id(SharedString::from(vote_down.clone()))
-                                        .cursor_pointer()
-                                        .text_size(px(11.))
-                                        .text_color(cx.theme().muted_foreground)
-                                        .hover(|style| style.text_color(cx.theme().foreground))
-                                        .on_click(cx.listener({
-                                            let id = id.clone();
-                                            move |this, _, _, cx| this.vote_memory(id.clone(), false, cx)
-                                        }))
-                                        .child(format!("▼ {}", entry.harmful))
-                                        .test_support(),
-                                ),
-                        )
-                        .when(!provenance.is_empty(), |row| {
-                            row.child(
-                                div()
-                                    .text_size(px(10.5))
-                                    .text_color(cx.theme().muted_foreground)
-                                    .child(provenance),
-                            )
-                        })
-                        .when(!entry.recheck.is_empty() && entry.valid_until.is_none(), |row| {
-                            let keep = format!("memory-keep-{id}");
-                            let archive = format!("memory-archive-{id}");
-                            // The walk behind the flag on its own line
-                            // (it can run long), keep and archive under it.
-                            row.child(
-                                v_flex()
-                                    .gap_0p5()
-                                    .text_size(px(10.5))
-                                    .child(
-                                        // The walk behind the flag (#27):
-                                        // which correction, through which
-                                        // edge, so a wrong model-proposed
-                                        // link is auditable.
-                                        div()
-                                            .text_color(cx.theme().warning)
-                                            .child(
-                                                gertie_core::correction_walk(&self.memory_rows, &entry.id)
-                                                    .iter()
-                                                    .map(|step| step.sentence())
-                                                    .collect::<Vec<_>>()
-                                                    .join(" · "),
-                                            ),
-                                    )
-                                    .child(
-                                        h_flex()
-                                            .gap_2()
-                                            .child(
-                                                div()
-                                                    .id(SharedString::from(keep))
-                                                    .cursor_pointer()
-                                                    .text_color(cx.theme().muted_foreground)
-                                                    .hover(|style| style.text_color(cx.theme().foreground))
-                                                    .tooltip(|window, cx| {
-                                                        Tooltip::new("Still holds: clear the flag").build(window, cx)
-                                                    })
-                                                    .on_click(cx.listener({
-                                                        let id = id.clone();
-                                                        move |this, _, _, cx| this.settle_recheck(id.clone(), true, cx)
-                                                    }))
-                                                    .child("keep")
-                                                    .test_support(),
-                                            )
-                                            .child(
-                                                div()
-                                                    .id(SharedString::from(archive))
-                                                    .cursor_pointer()
-                                                    .text_color(cx.theme().muted_foreground)
-                                                    .hover(|style| style.text_color(cx.theme().foreground))
-                                                    .tooltip(|window, cx| {
-                                                        Tooltip::new("No longer holds: archive it").build(window, cx)
-                                                    })
-                                                    .on_click(cx.listener({
-                                                        let id = id.clone();
-                                                        move |this, _, _, cx| this.settle_recheck(id.clone(), false, cx)
-                                                    }))
-                                                    .child("archive")
-                                                    .test_support(),
-                                            ),
-                                    ),
-                            )
-                        })
-                        .when_some(drift, |row, drift| {
-                            row.child(
-                                div()
-                                    .id(SharedString::from(format!("memory-drift-{id}")))
-                                    .text_size(px(10.5))
-                                    .text_color(cx.theme().warning)
-                                    .child(drift)
-                                    .test_support(),
-                            )
-                        })
-                        .when(!structure.is_empty(), |row| {
-                            row.child(
-                                div()
-                                    .id(SharedString::from(format!("memory-structure-{id}")))
-                                    .text_size(px(10.5))
-                                    .text_color(cx.theme().muted_foreground)
-                                    .child(structure)
-                                    .test_support(),
-                            )
-                        })
-                        .into_any_element()
-                })
-                .collect(),
-        };
-        let count = self.memory_rows.len();
-        let project = self
-            .memory_store
-            .as_ref()
-            .map(|store| store.root(gertie_core::Tier::Project).display().to_string());
-        // The settings panel's sizing exactly: the right column's
-        // sibling slot gives flex children nothing unless they size
-        // themselves; without the width the panel mounts invisible
-        // (the vote-row test proved it).
-        div()
-            .id("memory-panel")
-            .w(px(300.))
-            .h_full()
-            .flex_shrink_0()
-            .border_l_1()
-            .border_color(cx.theme().border)
-            .pt_3()
-            .px_3()
-            .pb_3()
-            .gap_1()
-            .overflow_y_scroll()
-            .child(
-                div()
-                    .text_size(px(12.))
-                    .text_color(cx.theme().muted_foreground)
-                    .pb_2()
-                    .child(format!(
-                        "memory ({count}) · {} · editing is the files' job",
-                        project.as_deref().unwrap_or("no memory store")
-                    )),
-            )
-            .children(rows)
-            .into_any_element()
     }
 
     /// Puts a sidebar row into rename mode, prefilled with its title.
@@ -4903,6 +4760,14 @@ impl ChatView {
         cx.notify();
     }
 
+    /// A decided memory proposal's row says which way it went: the
+    /// seal and the work header read it (#54).
+    fn settle_proposal_row(&mut self, index: usize, outcome: &str) {
+        if let Some(Turn::Tool { status, .. }) = self.turns.get_mut(index) {
+            *status = ToolStatus::Done(outcome.to_string());
+        }
+    }
+
     /// Answers a pending permission card through the broker. A dropped
     /// request (UI closed) counts as a deny in the loop; here the human
     /// did answer.
@@ -4965,13 +4830,19 @@ impl ChatView {
                                     });
                                 self.push_notice(applied, cx);
                                 self.refresh_memory_index(cx);
+                                self.settle_proposal_row(index, crate::chat::panes::PROPOSAL_KEPT);
                             }
                             PermissionDecision::Deny { .. } => {
                                 let _ =
                                     store.mark_extracted(&digest_hash, Some(session_id.0 as i64));
                                 self.push_notice("memory: proposal denied", cx);
+                                self.settle_proposal_row(
+                                    index,
+                                    crate::chat::panes::PROPOSAL_LET_GO,
+                                );
                             }
                         }
+                        cx.notify();
                         return;
                     }
                     // The approved call starts executing now, its
@@ -5069,114 +4940,6 @@ impl ChatView {
     /// "the same checkout".
     pub fn workspace_root(&self) -> &std::path::Path {
         &self.workspace_root
-    }
-
-    /// Whether a turn joins a collapsible run: a finished tool card.
-    /// Anything alive, pending, running, stands alone: an approval
-    /// hiding inside a summary is a trap.
-    fn joins_run(turn: &Turn) -> bool {
-        matches!(
-            turn,
-            Turn::Tool {
-                status: ToolStatus::Done(_),
-                ..
-            }
-        )
-    }
-
-    /// The collapsible run at `index`: 0 = this card hides inside a
-    /// run that started earlier; 1 = no collapse (stand-alone card or
-    /// not a tool at all); n ≥ 2 = a run starts here.
-    fn tool_run_at(&self, index: usize) -> usize {
-        let turn = &self.turns[index];
-        if !Self::joins_run(turn) {
-            return 1;
-        }
-        if index > 0 && Self::joins_run(&self.turns[index - 1]) {
-            // A run began earlier, this card hides inside it, unless
-            // the reader expanded the run to see its cards.
-            let mut first = index;
-            while first > 0 && Self::joins_run(&self.turns[first - 1]) {
-                first -= 1;
-            }
-            if !self.expanded_runs.contains(&first) {
-                return 0;
-            }
-        }
-        let mut count = 1;
-        while index + count < self.turns.len() && Self::joins_run(&self.turns[index + count]) {
-            count += 1;
-        }
-        count
-    }
-
-    /// The collapsed face of a run of finished tool calls: one button
-    /// stating what happened in the cards' own counts, failures on
-    /// the line, never rounded away. Clicking expands to the full
-    /// cards.
-    fn render_tool_run(
-        &self,
-        index: usize,
-        count: usize,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let mut names = Vec::with_capacity(count);
-        let mut failed = 0;
-        for turn in &self.turns[index..index + count] {
-            if let Turn::Tool {
-                call,
-                status: ToolStatus::Done(result),
-                ..
-            } = turn
-            {
-                names.push(call.name.as_str());
-                if crate::tools_ui::result_failed(result) {
-                    failed += 1;
-                }
-            }
-        }
-        let expanded = self.expanded_runs.contains(&index);
-        let mut col = v_flex().gap_2().items_start().child(
-            Button::new(SharedString::from(format!("tool-run-{index}")))
-                .label(crate::tools_ui::tool_run_summary(&names, failed))
-                .xsmall()
-                .ghost()
-                .tooltip(if expanded {
-                    "Hide the calls"
-                } else {
-                    "Show every call in full"
-                })
-                .on_click(cx.listener(move |this, _, _, cx| {
-                    if !this.expanded_runs.remove(&index) {
-                        this.expanded_runs.insert(index);
-                    }
-                    cx.notify();
-                })),
-        );
-        if expanded {
-            for at in index..index + count {
-                if let Turn::Tool {
-                    call,
-                    status,
-                    auto_approved,
-                    worker,
-                    ..
-                } = &self.turns[at]
-                {
-                    col = col.child(self.render_tool(
-                        at,
-                        call,
-                        status,
-                        *auto_approved,
-                        *worker,
-                        window,
-                        cx,
-                    ));
-                }
-            }
-        }
-        div().w_full().px_4().child(col).into_any_element()
     }
 
     /// "Edit from here" on a sent user turn: the transcript rewinds to
@@ -5716,106 +5479,13 @@ impl ChatView {
         self.render_riding_card(cx)
     }
 
-    /// The footer line under the composer. Left: this session's spend
-    /// and the live context gauge, `12.3k (23%)`, so the distance to
-    /// the compaction threshold is visible before it happens. Right:
-    /// what you're talking to, `gertie · ppq · glm-5.3-flash`. At
-    /// rest, the identity line leads with the folder the agent's
-    /// tools run in. Quiet until there is something to say; the run's
-    /// clocks (step and total) live in the conversation's activity
-    /// row, the ledger's slow counts live here.
-    /// The conversation header: which conversation this is and where
-    /// its tools run, the orientation the tab bar used to give. The
-    /// title renames on click (the sidebar row turns into the field);
-    /// the folder switches the workspace on click, as the footer word
-    /// did. A worktree chat's folder is its checkout, fixed, and says
-    /// so with the branch icon.
-    fn render_conversation_header(&self, cx: &Context<Self>) -> AnyElement {
-        let theme = cx.theme();
-        let title = match self.session_id {
-            Some(_) => self.tab_title(),
-            None => SharedString::from("New chat"),
-        };
-        let title = div()
-            .id("conversation-title")
-            .min_w_0()
-            .truncate()
-            .text_size(px(13.))
-            .font_weight(gpui_kit::FontWeight::MEDIUM)
-            .child(title)
-            .when_some(self.session_id, |title, session_id| {
-                title
-                    .cursor_pointer()
-                    .tooltip(|window, cx| {
-                        Tooltip::new("Rename this conversation").build(window, cx)
-                    })
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        this.start_rename(session_id, window, cx)
-                    }))
-            });
-        let worktree = self.branch_naming.is_some();
-        let folder: AnyElement = if worktree {
-            h_flex()
-                .gap_1()
-                .child(Icon::new(IconName::GitBranch).with_size(px(12.)))
-                .child(tildify(&self.workspace_root))
-                .into_any_element()
-        } else {
-            // The folder icon leads, so a bare `~` still reads as a
-            // place; the hover is a background, since the text is
-            // already at full strength.
-            h_flex()
-                .id("workspace-word")
-                .gap_1()
-                .px_1()
-                .rounded_sm()
-                .cursor_pointer()
-                .hover(|style| style.bg(cx.theme().secondary_hover))
-                .tooltip(|window, cx| {
-                    Tooltip::new("Workspace, click to move the agent to another folder")
-                        .build(window, cx)
-                })
-                .on_click(cx.listener(|this, _, _, cx| this.switch_workspace(cx)))
-                .child(Icon::new(IconName::Folder).with_size(px(12.)))
-                .child(tildify(&self.workspace_root))
-                .test_support()
-                .into_any_element()
-        };
-        div()
-            .w_full()
-            .flex_shrink_0()
-            .border_b_1()
-            .border_color(theme.border.opacity(0.6))
-            .child(reading_column(
-                h_flex()
-                    .w_full()
-                    .h(px(40.))
-                    .px_4()
-                    .gap_4()
-                    .justify_between()
-                    .child(title)
-                    .children(self.render_status_chip(cx))
-                    .child(
-                        div()
-                            .flex_shrink_0()
-                            .max_w(px(360.))
-                            .truncate()
-                            .text_size(px(11.5))
-                            .text_color(theme.foreground)
-                            .child(folder),
-                    )
-                    .into_any_element(),
-            ))
-            .into_any_element()
-    }
-
     /// How much this workspace remembers, for the footer. Shown when
     /// the store holds *entries*; when it only holds files (prose
     /// notes, not yet indexed entries) the word still shows, with the
     /// file count: an existing store with a blank word reads as
     /// "memory does not exist", and the word is the door to the panel
     /// either way. Truly empty stores show nothing (a memoryless
-    /// session pays zero attention). Cached, see `memory_word`.
+    /// session pays zero attention). Cached.
     /// The @-mention matches for the composer's text, memoized on the
     /// text and the root (see `mention_cache`), filtered from a listing
     /// at most [`MENTION_LISTING_FRESH`] old, so a file created while
@@ -5853,156 +5523,6 @@ impl ChatView {
             matches.clone(),
         )));
         matches
-    }
-
-    fn memory_word(&self) -> Option<String> {
-        let store = self.memory_store.as_ref()?;
-        let fingerprint = store.fingerprint();
-        if let Some((seen, word)) = self.memory_word.borrow().as_ref()
-            && *seen == fingerprint
-        {
-            return word.clone();
-        }
-        let entries = store.scan().len();
-        let files = store.topic_file_count();
-        let word = if entries > 0 {
-            Some(format!("memory {entries}"))
-        } else if files > 0 {
-            Some(format!(
-                "memory ({} file{})",
-                files,
-                if files == 1 { "" } else { "s" }
-            ))
-        } else {
-            None
-        };
-        self.memory_word.replace(Some((fingerprint, word.clone())));
-        word
-    }
-
-    fn render_token_footer(&self, cx: &Context<Self>) -> AnyElement {
-        let parts = self.footer_parts();
-        let near_compaction = self
-            .context_window
-            .is_some_and(|window| self.context_used * 100 >= window.max(1) * 75);
-        // The permission posture leads the quiet line: a word, not a
-        // chip, click-to-cycle with one asymmetry: the ring is
-        // de-escalation-only, full access costs a palette command
-        // plus a confirm card (M7 PR 1). The tooltip names the
-        // current mode's meaning, read before the div builds.
-        let mode_text = mode_tooltip(self.mode);
-        // The posture's color is its weight: quiet gray for the modes
-        // where gertie asks, warning for the mode that removes every
-        // guardrail. The loudest state must not render like the rest.
-        let mode_color = match self.mode {
-            PermissionMode::FullAccess => cx.theme().warning,
-            _ => cx.theme().muted_foreground,
-        };
-        let mode = div()
-            .id("mode-chip")
-            .relative()
-            .cursor_pointer()
-            .text_size(px(11.))
-            .text_color(mode_color)
-            .hover(|style| style.text_color(cx.theme().foreground))
-            .tooltip(move |window, cx| Tooltip::new(mode_text).build(window, cx))
-            .on_click(cx.listener(|this, _, _, cx| this.cycle_mode(cx)))
-            .child(mode_label(self.mode))
-            // Observed so the test harness can click the word; a
-            // no-op outside test-support builds.
-            .test_support()
-            .children(self.mode_menu.then(|| self.render_mode_menu(cx)));
-        // The memory word: how much this workspace remembers. Shown
-        // when the store holds *entries*; when it only holds files
-        // (prose notes, not yet indexed entries) the chip still shows,
-        // with the file count: an existing store with a blank chip
-        // reads as "memory does not exist", and the chip is the door
-        // to the panel either way. Truly empty stores hide it (a
-        // memoryless session pays zero attention).
-        let memory = self.memory_word();
-        let memory = memory.map(|label| {
-            let tooltip =
-                "memory: what gertie recalls in this repo and for you; click to read and vote.";
-            div()
-                .id("memory-chip")
-                .cursor_pointer()
-                .text_size(px(11.))
-                .text_color(cx.theme().muted_foreground)
-                .hover(|style| style.text_color(cx.theme().foreground))
-                .tooltip(move |window, cx| Tooltip::new(tooltip).build(window, cx))
-                .on_click(cx.listener(|this, _, _, cx| this.toggle_memory(cx)))
-                .child(label)
-                .test_support()
-        });
-        let mut ledger = h_flex().gap_2().child(mode);
-        if let Some(memory) = memory {
-            ledger = ledger.child(memory);
-        }
-        if !parts.is_empty() {
-            // The ledger line in two groups with a real gap: what the
-            // work costs (spend, cache share) reads separately from
-            // where the context stands (the gauge). One joined string
-            // made three kinds of information read as one.
-            let gauge = parts.into_iter();
-            // Split at the gauge without consuming it (take_while would
-            // swallow the "ctx" part it stops on).
-            let parts: Vec<String> = gauge.collect();
-            let split = parts
-                .iter()
-                .position(|part| part.starts_with("ctx "))
-                .unwrap_or(parts.len());
-            let (spend, gauge) = parts.split_at(split);
-            if !spend.is_empty() {
-                ledger = ledger.child(
-                    div()
-                        .text_size(px(11.))
-                        .text_color(cx.theme().muted_foreground)
-                        .child(spend.join("  ·  ")),
-                );
-            }
-            // The divider only between two groups, never trailing.
-            if !spend.is_empty() && !gauge.is_empty() {
-                ledger = ledger.child(
-                    div()
-                        .text_size(px(11.))
-                        .text_color(cx.theme().muted_foreground)
-                        .opacity(0.6)
-                        .child("│"),
-                );
-            }
-            if !gauge.is_empty() {
-                ledger = ledger.child(
-                    div()
-                        .text_size(px(11.))
-                        .text_color(if near_compaction {
-                            cx.theme().warning
-                        } else {
-                            cx.theme().muted_foreground
-                        })
-                        .child(gauge.join("  ·  ")),
-                );
-            }
-        }
-        let ident = div()
-            .text_size(px(11.))
-            .truncate()
-            .text_color(cx.theme().muted_foreground)
-            // The workspace moved to the conversation header; the
-            // footer names the endpoint the turn talks to.
-            .child(self.endpoint_label.clone());
-        // The footer sits under the composer, the same width, so the
-        // ledger and the identity line read as the composer's own.
-        reading_column(
-            h_flex()
-                .w_full()
-                .justify_between()
-                .gap_4()
-                .px_4()
-                .pb_2()
-                .child(ledger)
-                .child(ident)
-                .into_any_element(),
-        )
     }
 
     /// The palette, floating over the whole chat: a backdrop that
@@ -6166,6 +5686,31 @@ impl ChatView {
 
     /// One sidebar row, active or settled; the settled variant renders
     /// muted with the restore glyph. The one shape both lists share.
+    /// Opens a chat from a list (the sidebar's rows, the rail's
+    /// popover). The shell decides, but never touches this view: the
+    /// click holds its lease, so this view's share of the work comes
+    /// back as an instruction.
+    pub(crate) fn open_chat(
+        &mut self,
+        session_id: SessionId,
+        stored_root: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match &self.session_router {
+            Some(router) => {
+                let origin = ClickOrigin {
+                    root: self.workspace_root.clone(),
+                    session: self.session_id,
+                    streaming: self.streaming,
+                };
+                let routing = router(session_id, stored_root, origin, window, cx);
+                self.apply_routing(session_id, routing, window, cx);
+            }
+            None => self.switch_to_session(session_id, window, cx),
+        }
+    }
+
     fn session_row(
         &self,
         summary: &gertie_core::SessionSummary,
@@ -6229,23 +5774,9 @@ impl ChatView {
                 let title = title.clone();
                 move |window, cx| Tooltip::new(title.clone()).build(window, cx)
             })
-            .on_click(
-                cx.listener(move |this, _, window, cx| match &this.session_router {
-                    Some(router) => {
-                        // The shell decides, but never touches this view:
-                        // the click holds its lease, so this view's share
-                        // of the work comes back as an instruction.
-                        let origin = ClickOrigin {
-                            root: this.workspace_root.clone(),
-                            session: this.session_id,
-                            streaming: this.streaming,
-                        };
-                        let routing = router(session_id, stored_root.clone(), origin, window, cx);
-                        this.apply_routing(session_id, routing, window, cx);
-                    }
-                    None => this.switch_to_session(session_id, window, cx),
-                }),
-            )
+            .on_click(cx.listener(move |this, _, window, cx| {
+                this.open_chat(session_id, stored_root.clone(), window, cx)
+            }))
             .children(
                 self.session_marks
                     .get(&session_id)
@@ -6416,10 +5947,48 @@ impl ChatView {
 }
 
 impl Render for ChatView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // Owned copy: the overlay below reads it after the mutable
         // cx borrows begin.
         let theme = cx.theme().clone();
+        // The two panes (#54): the work side shows the running turn,
+        // or the latest turn that did work; a chat-only turn (or a
+        // narrow window) folds it to its strip unless opened by hand.
+        let work = self.work_view();
+        // A card waiting on the human always shows: its diff and its
+        // buttons are the decision, a narrow window never hides them.
+        let pending = self.turns.iter().any(|turn| {
+            matches!(turn, Turn::Tool { call, status: ToolStatus::Pending(_), .. }
+                if call.name != "ask_user")
+        });
+        let work_shown = work.is_some() && (!self.narrow(window) || self.work_open || pending);
+        // Under the fold width the work side never splits the window:
+        // it opens over the words, beside its strip (#54).
+        let overlay = work_shown && self.narrow(window);
+        let words_width = self.words_width(window, work_shown && !overlay);
+        let (work_side, work_overlay) = match work.filter(|_| work_shown) {
+            Some(view) if overlay => {
+                let width = self.overlay_width(window);
+                let pane = self.render_work_pane(view, window, cx);
+                (
+                    self.render_work_strip(cx),
+                    Some(
+                        div()
+                            .absolute()
+                            .top_0()
+                            .bottom_0()
+                            .right(px(crate::chat::panes::STRIP_WIDTH))
+                            .w(px(width))
+                            .shadow_lg()
+                            .flex()
+                            .child(pane),
+                    ),
+                )
+            }
+            Some(view) => (self.render_work_pane(view, window, cx), None),
+            None => (self.render_work_strip(cx), None),
+        };
+        let seam = self.render_seam(words_width, cx);
         if std::env::var_os("GERTIE_BOOT_TRACE").is_some() && !self.first_frame_done {
             self.first_frame_done = true;
             eprintln!(
@@ -6526,11 +6095,16 @@ impl Render for ChatView {
                         // paints items at the container edge and would
                         // ignore px_* here. The pt/pb DO apply.
                         v_flex()
-                            .flex_1()
+                            .id("words-pane")
+                            .when_some(words_width, |pane, width| {
+                                pane.w(px(width)).flex_shrink_0()
+                            })
+                            .when(words_width.is_none(), |pane| pane.flex_1())
                             .min_h_0()
                             .min_w_0()
                             .relative()
-                            .child(self.render_conversation_header(cx))
+                            .bg(crate::ink::palette(cx).paper)
+                            .child(self.render_words_header(cx))
                             .child(
                                 // The transcript area's container wraps
                                 // exactly the list, not the composer
@@ -7161,17 +6735,17 @@ impl Render for ChatView {
                                         )
                                     })
                                     .child(self.render_composer_area(cx))
-                                    .child(self.render_token_footer(cx)),
+
                             ),
                     )
-                    // The status column (issue #33): only while no
-                    // other side panel holds the right edge, and only
-                    // when the session has state to show. Settings is
-                    // a modal over everything now, so it no longer
-                    // asks the column to stand down.
-                    .when(self.status_column_shown(), |row| {
-                        row.child(self.render_status_column(cx))
-                    })
+                    // The work side (#54), the pane or its strip, and
+                    // the seam over both: Gertie's face on the boundary,
+                    // the turn's thread under it. The status column and
+                    // the riding card it replaced are gone.
+                    .relative()
+                    .child(work_side)
+                    .children(work_overlay)
+                    .child(seam)
                     .when(self.panel == Panel::Memory, |row| {
                         row.child(self.render_memory_panel(cx))
                     }),
@@ -7276,6 +6850,16 @@ fn mode_label(mode: PermissionMode) -> &'static str {
         PermissionMode::Supervised => "supervised",
         PermissionMode::AcceptEdits => "accept edits",
         PermissionMode::Auto => "auto",
+        PermissionMode::FullAccess => "full access",
+    }
+}
+
+/// The posture in words, for the footer beside its dots.
+fn posture_words(mode: PermissionMode) -> &'static str {
+    match mode {
+        PermissionMode::Supervised => "asks before writing",
+        PermissionMode::AcceptEdits => "edits freely, asks for commands",
+        PermissionMode::Auto => "works on its own, sandboxed",
         PermissionMode::FullAccess => "full access",
     }
 }

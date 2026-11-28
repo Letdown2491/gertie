@@ -698,12 +698,14 @@ fn render_block(block: &Block, cx: &App) -> AnyElement {
     match block {
         Block::Paragraph(text) => inline_element(text, cx),
         Block::Heading { level, text } => {
+            // Above the serif body (17.5 in the words pane, #54), so a
+            // heading never reads smaller than the prose under it.
             let size = match level {
-                1 => 20.,
-                2 => 18.,
-                3 => 16.,
-                4 => 15.,
-                _ => 14.5,
+                1 => 24.,
+                2 => 21.,
+                3 => 19.,
+                4 => 18.,
+                _ => 17.5,
             };
             div()
                 .w_full()

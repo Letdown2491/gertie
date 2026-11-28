@@ -130,7 +130,7 @@ data loss, or the agent believing the hostile content).
       the session. Want: the session resumes honestly: pending asks are gone or
       re-asked, the record says what actually ran, nothing is half-committed.
 - [ ] **6.5** Resize the window to 400px wide, then to 4K, mid-run. Want: no
-      panic, the layout degrades, the footer's groups still read.
+      panic, the layout degrades, the composer's controls still read.
 
 ## Scoring
 
